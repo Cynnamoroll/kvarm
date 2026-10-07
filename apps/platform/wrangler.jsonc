@@ -24,14 +24,12 @@
       "migrations_dir": "migrations"
     }
   ],
-    // TODO(M4): restore once R2 is activated on the account (dash -> R2 ->
-  // Manage R2), then `wrangler r2 bucket create forge-snapshots` and redeploy.
-  // "r2_buckets": [
-  //   {
-  //     "binding": "SNAPSHOTS",
-  //     "bucket_name": "forge-snapshots"
-  //   }
-  // ],
+    "r2_buckets": [
+    {
+      "binding": "SNAPSHOTS",
+      "bucket_name": "forge-snapshots"
+    }
+  ],
   "queues": {
     "producers": [
       {
