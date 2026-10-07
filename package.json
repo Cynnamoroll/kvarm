@@ -13,11 +13,13 @@
     "dev": "npm run dev --workspace apps/platform",
     "deploy": "npm run deploy --workspace apps/platform",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/platform/tsconfig.json --noEmit",
+    "lint": "oxlint .",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "oxlint": "1.87.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
   }

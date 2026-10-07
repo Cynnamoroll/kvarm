@@ -15,12 +15,13 @@
     "@forge/diffcore": "*",
     "@forge/gitops": "*",
     "@forge/ui": "*",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@workos/authkit-session": "^0.7.1",
     "hono": "^4.6.0",
     "markdown-it": "^15.0.2"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
     "@cloudflare/workers-types": "^5.20261007.0",
     "@types/markdown-it": "^14.2.0",
     "vitest": "^4.1.0",

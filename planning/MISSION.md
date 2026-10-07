@@ -93,6 +93,17 @@ Principles locked in by the prototype:
 
 ## 5. Execution plan with acceptance gates
 
+> **Scope update (2026-10-07): implementation first, UI deferred.** The
+> autonomous mission builds engines, APIs, workflows, and the MCP surface
+> only. All new UI (compare page, virtualized diff client, workspace /
+> candidate-compare views, merge-queue and attribution display, visual
+> polish) is **out of mission scope**. When the mission reaches the UI, it
+> **stops** so the user and Droid can design it together on paper first.
+> Reference material: `planning/aesthetic/INSPIRATION.md`. UI-flavored gates
+> below (60fps scroll, "through the UI") are re-stated as API/JSON gates for
+> the mission and re-applied during the UI pass. The submission video comes
+> after the UI pass.
+
 Each milestone has a measurable gate. **Two consecutive gate failures trigger
 the documented pivot** (section 6). Budgets from PLAN.md still apply.
 

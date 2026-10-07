@@ -88,7 +88,7 @@ function refAndRest(c: Context<App>, marker: string): { ref: string; rest: strin
   }
 }
 
-function notFound(c: Context<App>): Response {
+function notFound(_c: Context<App>): Response {
   return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
 }
 

@@ -9,3 +9,7 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+
+# Third-party reference media (not MIT-licensed; kept locally only)
+planning/aesthetic/*.jpg
+planning/aesthetic/*.mp4
