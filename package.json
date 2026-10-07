@@ -1,0 +1,24 @@
+{
+  "name": "forge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The fastest git platform on Cloudflare Artifacts",
+  "type": "module",
+  "license": "MIT",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace apps/platform",
+    "deploy": "npm run deploy --workspace apps/platform",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/platform/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

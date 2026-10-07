@@ -1,0 +1,41 @@
+/* Forge stylesheet — one hand-written, zero-runtime CSS file.
+   Served as a static asset with immutable far-future caching; critical
+   styles for first paint will be inlined into the HTML shell in M2. */
+
+:root {
+  --bg: #0d1117;
+  --bg-raised: #161b22;
+  --bg-inset: #010409;
+  --border: #30363d;
+  --fg: #e6edf3;
+  --fg-muted: #9198a1;
+  --accent: #3fb950;
+  --accent-fg: #055d20;
+  --danger: #f85149;
+  --link: #58a6ff;
+  --radius: 6px;
+  --mono: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre { font-family: var(--mono); font-size: 12px; }
+
+pre {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  overflow: auto;
+}
