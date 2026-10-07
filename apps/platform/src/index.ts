@@ -22,6 +22,16 @@ app.use('*', async (c, next) => {
   return next();
 });
 
+app.get('/healthz', (c) => c.text('ok'));
+
+// Static assets are served ahead of web routes (web's /:owner/:repo
+// catch-all would otherwise swallow /assets/*).
+app.use('/assets/*', async (c, next) => {
+  const res = await c.env.ASSETS.fetch(c.req.raw);
+  if (res.status !== 404) return res;
+  return next();
+});
+
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/', web);

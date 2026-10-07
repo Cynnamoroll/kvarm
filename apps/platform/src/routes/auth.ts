@@ -1,7 +1,7 @@
 /** WorkOS AuthKit routes: /auth/sign-in, /auth/callback, /auth/sign-out. */
 
-import { Hono } from 'hono';
-import { authService, getSessionInfo, requireConfigured } from '../auth/workos';
+import { Hono, type Context } from 'hono';
+import { authService, authConfigured, getSessionInfo, requireConfigured } from '../auth/workos';
 
 export const authRoutes = new Hono<{ Bindings: Env }>();
 
@@ -16,8 +16,21 @@ function applyHeaderBag(res: Response, headers: Record<string, string | string[]
   }
 }
 
+/** 503 with setup guidance when WorkOS secrets are absent. */
+function unconfigured(c: Context<{ Bindings: Env }>): Response | null {
+  if (!authConfigured(c.env)) {
+    return c.text(
+      'auth is not configured: set WORKOS_CLIENT_ID, WORKOS_API_KEY and WORKOS_COOKIE_PASSWORD ' +
+        '(see apps/platform/.dev.vars.example)',
+      503,
+    );
+  }
+  return null;
+}
+
 authRoutes.get('/sign-in', async (c) => {
-  requireConfigured(c.env);
+  const bail = unconfigured(c);
+  if (bail) return bail;
   const { url, headers } = await authService.createSignIn(new Response(), {
     returnPathname: c.req.query('returnTo') ?? '/',
   });
@@ -28,6 +41,8 @@ authRoutes.get('/sign-in', async (c) => {
 });
 
 authRoutes.get('/callback', async (c) => {
+  const bail = unconfigured(c);
+  if (bail) return bail;
   requireConfigured(c.env);
   const code = c.req.query('code');
   const state = c.req.query('state');
@@ -48,6 +63,8 @@ authRoutes.get('/callback', async (c) => {
 });
 
 authRoutes.get('/sign-out', async (c) => {
+  const bail = unconfigured(c);
+  if (bail) return bail;
   requireConfigured(c.env);
   const info = await getSessionInfo(c.req.raw, c.env);
   if (!info) return c.redirect('/');
