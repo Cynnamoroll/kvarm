@@ -13,6 +13,8 @@
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+export * from './treediff';
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -218,6 +220,35 @@ export function treeContent(entries: TreeEntry[]): Uint8Array {
 
 export async function buildTree(entries: TreeEntry[]): Promise<GitObject> {
   return buildObject('tree', treeContent(entries));
+}
+
+/**
+ * Parse a git tree object back into entries. Accepts either the bare tree
+ * content or a full loose object (the `tree <size>\0` header is detected and
+ * skipped — a tree's own content always starts with an octal mode, never the
+ * word "tree").
+ */
+export function parseTree(raw: Uint8Array): TreeEntry[] {
+  let start = 0;
+  if (raw[0] === 0x74 && raw[1] === 0x72 && raw[2] === 0x65 && raw[3] === 0x65 && raw[4] === 0x20) {
+    // starts with "tree " → skip the object header
+    start = raw.indexOf(0) + 1;
+  }
+  const entries: TreeEntry[] = [];
+  let i = start;
+  while (i < raw.length) {
+    const space = raw.indexOf(0x20, i);
+    if (space === -1) break;
+    const nul = raw.indexOf(0, space + 1);
+    if (nul === -1 || nul + 21 > raw.length) break;
+    entries.push({
+      mode: decode(raw.slice(i, space)),
+      name: decode(raw.slice(space + 1, nul)),
+      hash: hex(raw.slice(nul + 1, nul + 21)),
+    });
+    i = nul + 21;
+  }
+  return entries;
 }
 
 export interface CommitSpec {
