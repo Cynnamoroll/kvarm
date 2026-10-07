@@ -1,5 +1,8 @@
 import { Hono } from 'hono';
 import { GIT_PATH_RE, handleGitRequest } from './routes/git';
+import { authRoutes } from './routes/auth';
+import { api } from './routes/api';
+import { web } from './routes/web';
 
 export { TokenCache, RateLimiter, RealtimeHub, MergeLock } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
@@ -19,12 +22,16 @@ app.use('*', async (c, next) => {
   return next();
 });
 
-app.get('/healthz', (c) => c.text('ok'));
+app.route('/auth', authRoutes);
+app.route('/api/v1', api);
+app.route('/', web);
 
-// Everything else falls through to static assets (public/). Web SSR routes
-// get mounted here in M2.
+// Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {
   const res = await c.env.ASSETS.fetch(c.req.raw);
+  if (res.status === 404) {
+    return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+  }
   return res;
 });
 
