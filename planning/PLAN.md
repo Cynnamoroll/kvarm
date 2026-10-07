@@ -1,5 +1,13 @@
 # The fastest git platform on Cloudflare Artifacts
 
+> **Status (2026-10-07): prototype VALIDATED — mission-ready.** Live at
+> `forge-platform.cynnamoroll.workers.dev`: git push + byte-identical clone
+> through the platform, SSR repo pages with edge-cache HITs confirmed, remote
+> D1 + queues provisioned, 27/27 tests green. M0-M3a committed (through
+> `28cdadb`). Execution plan, acceptance gates, and pivot triggers live in
+> **MISSION.md** — that file drives mission mode; this one stays the
+> architecture reference.
+
 Working name: **TBD** (name deferred; the codebase uses a single `SITE_NAME` config constant so renaming is trivial). A git platform for the agentic era, built for the Cloudflare "next Git platform" competition. Deadline: **October 14, 2026** (one week). Submission: 5-10 min video, permissively licensed source, run instructions.
 
 Mission: take the proven learnings from GitHub, Cursor Continuity, and Namespace, apply them on top of Cloudflare Artifacts, and ship the fastest, most agent-native git forge possible.
