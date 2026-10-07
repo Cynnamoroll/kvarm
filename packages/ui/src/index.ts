@@ -5,6 +5,12 @@
  * `raw()` to emit trusted markup. Everything is plain strings, so responses
  * stream immediately and there is no client or server runtime cost — the
  * lesson from GitHub's move off CSS-in-JS, applied from day one.
+ *
+ * Convention: interpolate user data bare (escaped exactly once); pass
+ * composed fragments and pre-encoded URLs through `raw()`. Never pre-escape
+ * a value with `escapeHtml()` before handing it to `html` — that double-
+ * escapes. Values pre-encoded with `encodeURIComponent()` must also be
+ * wrapped in `raw()`, or the `%` signs would be escaped.
  */
 
 export class Raw {

@@ -1,16 +1,15 @@
 /**
- * M1 web surface: just enough to sign in, create/import a repo, mint a PAT,
- * and see the clone URL. M2 replaces the repo page with the real SSR tree
- * browser; these pages are intentionally plain (the CSS system lands with it).
+ * Generic web surface: landing/dashboard, repo creation + import, PAT
+ * settings. Repository pages (tree, blob, raw, commits, branches, settings)
+ * live in repoPages.ts and mount after these routes at /:owner/:repo.
  */
 
 import { Hono, type Context } from 'hono';
-import { escapeHtml, html, timeAgo } from '@forge/ui';
-import { getRepo, listReposForOwner } from '../db/repos';
+import { escapeHtml, html, raw, timeAgo } from '@forge/ui';
+import { listReposForOwner } from '../db/repos';
 import { findOrCreateUser, type UserRow } from '../db/users';
 import { getSessionInfo, type SessionInfo } from '../auth/workos';
 import { layout } from '../web/render';
-import { apiActor } from './api';
 import * as svc from '../repos/service';
 
 type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
@@ -53,7 +52,7 @@ function page(c: Context<App>, ctx: PageCtx, title: string, body: string, status
   );
 }
 
-function requireSessionPage(c: Context<App>): Promise<AuthedPageCtx | Response> | never;
+function requireSessionPage(c: Context<App>): Promise<AuthedPageCtx> | never;
 async function requireSessionPage(c: Context<App>): Promise<AuthedPageCtx | Response> {
   const ctx = await pageCtx(c);
   if (!ctx.session || !ctx.user) {
@@ -72,7 +71,7 @@ web.get('/', async (c) => {
   if (!ctx.user) {
     body = html`
       <div class="card">
-        <h1>${escapeHtml(c.env.SITE_NAME || 'Forge')}</h1>
+        <h1>${c.env.SITE_NAME || 'Forge'}</h1>
         <p class="muted">A git platform for the agentic era, on Cloudflare Artifacts.</p>
         <p><a class="btn primary" href="/auth/sign-in">Sign in to get started</a></p>
       </div>
@@ -121,7 +120,7 @@ web.get('/', async (c) => {
       </div>
       <div class="card">
         <h2>Your repositories</h2>
-        ${rows || '<p class="muted">none yet</p>'}
+        ${raw(rows || '<p class="muted">none yet</p>')}
       </div>
     `;
   }
@@ -192,7 +191,7 @@ web.get('/settings/tokens', async (c) => {
           <div>
             <strong>${t.name}</strong>
             <code>${t.prefix}…</code>
-            <div class="muted">${escapeHtml(t.scopes)}</div>
+            <div class="muted">${t.scopes}</div>
           </div>
           <div>
             <span class="muted">${t.last_used_at ? timeAgo(t.last_used_at) : 'never used'}</span>
@@ -220,7 +219,7 @@ web.get('/settings/tokens', async (c) => {
           <input id="tname" name="name" type="text" required placeholder="laptop, ci-bot…" />
           <p><button class="btn primary" type="submit">Generate token</button></p>
         </form>
-        ${rows || '<p class="muted">no tokens yet</p>'}
+        ${raw(rows || '<p class="muted">no tokens yet</p>')}
       </div>
     `,
   );
@@ -256,40 +255,4 @@ web.post('/settings/tokens/:id/delete', async (c) => {
   const { revokePAT } = await import('../auth/pat');
   await revokePAT(c.env, c.req.param('id'), ctx.user.id);
   return c.redirect('/settings/tokens');
-});
-
-// ---------------------------------------------------------------------------
-// Minimal repo page (M2 replaces with the real tree browser)
-// ---------------------------------------------------------------------------
-
-web.get('/:owner/:repo', async (c) => {
-  const actor = await apiActor(c);
-  const repo = await getRepo(c.env.DB, c.req.param('owner'), c.req.param('repo'));
-  if (!repo) return c.notFound();
-  const canSee =
-    repo.visibility === 'public' || (actor && (actor.user.login === repo.owner_login || actor.user.is_admin));
-  if (!canSee) return c.notFound();
-
-  const ctx = await pageCtx(c);
-  const cloneUrl = `${new URL(c.req.url).origin}/${repo.owner_login}/${repo.name}.git`;
-  return page(
-    c,
-    ctx,
-    `${repo.owner_login}/${repo.name}`,
-    html`
-      <div class="card">
-        <h2>
-          ${repo.owner_login} / ${repo.name}
-          <span class="badge">${repo.visibility}</span>
-        </h2>
-        <p class="muted">${repo.description ?? ''}</p>
-        <p>Clone URL:</p>
-        <pre><code>${cloneUrl}</code></pre>
-        <p class="muted">
-          Authenticate git with a personal access token from
-          <a href="/settings/tokens">your token settings</a>.
-        </p>
-      </div>
-    `,
-  );
 });

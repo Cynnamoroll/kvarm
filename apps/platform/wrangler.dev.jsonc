@@ -1,0 +1,80 @@
+{
+  // Local, unauthenticated dev variant of wrangler.jsonc.
+  //
+  // The ARTIFACTS binding is remote-only, so plain `wrangler dev` opens a
+  // remote proxy session that requires CLOUDFLARE_API_TOKEN. This variant
+  // drops the binding for offline frontend work: repo pages that read repo
+  // content will 500, but routing, auth, D1-backed pages and assets all run
+  // locally. For full-fidelity dev, use `wrangler dev -c wrangler.jsonc`
+  // with a token in the environment.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "forge-platform",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "forge",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "SNAPSHOTS",
+      "bucket_name": "forge-snapshots"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "EVENTS",
+        "queue": "forge-events"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "forge-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "forge-events-dlq"
+      }
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "TOKENS", "class_name": "TokenCache" },
+      { "name": "RATE_LIMIT", "class_name": "RateLimiter" },
+      { "name": "REALTIME", "class_name": "RealtimeHub" },
+      { "name": "MERGE_LOCK", "class_name": "MergeLock" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TokenCache", "RateLimiter", "RealtimeHub", "MergeLock"]
+    }
+  ],
+  "workflows": [
+    { "name": "snapshot-builder", "binding": "SNAPSHOT_BUILDER", "class_name": "SnapshotBuilder" },
+    { "name": "ci-pipeline", "binding": "CI_PIPELINE", "class_name": "CiPipeline" },
+    { "name": "merge", "binding": "MERGE_WORKFLOW", "class_name": "MergeWorkflow" },
+    { "name": "repo-import", "binding": "REPO_IMPORT", "class_name": "RepoImport" }
+  ],
+  "vars": {
+    "SITE_NAME": "Forge",
+    "APP_ORIGIN": "http://localhost:8787",
+    "ARTIFACTS_NAMESPACE": "default",
+    "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -3,6 +3,7 @@ import { GIT_PATH_RE, handleGitRequest } from './routes/git';
 import { authRoutes } from './routes/auth';
 import { api } from './routes/api';
 import { web } from './routes/web';
+import { repoPages } from './routes/repoPages';
 
 export { TokenCache, RateLimiter, RealtimeHub, MergeLock } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
@@ -35,6 +36,9 @@ app.use('/assets/*', async (c, next) => {
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/', web);
+// Repo pages mount after the generic web routes: /new-repo, /import-repo and
+// /settings/tokens are two-segment paths that must win over /:owner/:repo.
+app.route('/:owner/:repo', repoPages);
 
 // Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {

@@ -1,6 +1,6 @@
 /* Forge stylesheet — one hand-written, zero-runtime CSS file.
    Served as a static asset with immutable far-future caching; critical
-   styles for first paint will be inlined into the HTML shell in M2. */
+   styles for first paint are inlined into the HTML shell (web/render.ts). */
 
 :root {
   --bg: #0d1117;
@@ -39,3 +39,123 @@ pre {
   padding: 12px;
   overflow: auto;
 }
+
+/* ── Repository pages ─────────────────────────────────────────────────── */
+
+.repo-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.repo-head h1 { margin: 0; font-size: 20px; }
+
+.clone-box {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.tab { padding: 8px 14px; color: var(--fg-muted); border-radius: var(--radius) var(--radius) 0 0; }
+.tab:hover { color: var(--fg); background: var(--bg-raised); text-decoration: none; }
+.tab.active { color: var(--fg); font-weight: 600; border-bottom: 2px solid #f78166; margin-bottom: -1px; }
+
+.branch-picker { position: relative; margin: 4px 0; }
+.branch-picker summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  list-style: none;
+}
+.branch-picker ul {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin: 4px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 180px;
+  max-height: 300px;
+  overflow: auto;
+  z-index: 10;
+}
+.branch-picker li a { display: block; padding: 6px 14px; white-space: nowrap; }
+
+.crumbs { font-family: var(--mono); font-size: 12px; margin: 10px 0; }
+
+.tree-list { padding: 4px 0; }
+.tree-row { display: flex; justify-content: space-between; padding: 5px 8px; }
+.tree-row:hover { background: var(--bg-raised); }
+.tree-row a { color: var(--fg); }
+.tree-row a:hover { color: var(--link); text-decoration: none; }
+.tree-row a.dir { font-weight: 600; }
+
+.card-title {
+  font-size: 13px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+.card-title .muted { margin-left: 8px; }
+
+.codeview { font-family: var(--mono); font-size: 12px; line-height: 1.45; overflow-x: auto; }
+.code-row { display: flex; white-space: pre; }
+.code-row:hover { background: var(--bg-raised); }
+.code-row .ln {
+  flex: 0 0 52px;
+  text-align: right;
+  padding-right: 12px;
+  color: var(--fg-muted);
+  user-select: none;
+}
+.code-row .cl { flex: 1; }
+
+.pager { display: flex; gap: 8px; align-items: center; padding: 8px 0; flex-wrap: wrap; }
+
+.commit-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.commit-row:last-child { border-bottom: 0; }
+
+/* Markdown (READMEs, rendered comments) */
+.md h1, .md h2, .md h3, .md h4 { border-bottom: 1px solid var(--border); padding-bottom: 0.3em; margin-top: 24px; }
+.md h1 { font-size: 1.6em; margin: 16px 0 10px; }
+.md h2 { font-size: 1.3em; }
+.md ul, .md ol { padding-left: 24px; }
+.md li + li { margin-top: 0.25em; }
+.md blockquote {
+  border-left: 3px solid var(--border);
+  margin: 8px 0;
+  padding: 4px 14px;
+  color: var(--fg-muted);
+}
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--border); padding: 4px 10px; }
+.md img { max-width: 100%; }
+.md code { background: var(--bg-inset); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.md pre code { border: 0; padding: 0; background: none; }
+.md hr { border: 0; border-top: 1px solid var(--border); }
