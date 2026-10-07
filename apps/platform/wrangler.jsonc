@@ -20,7 +20,7 @@
     {
       "binding": "DB",
       "database_name": "forge",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "cfbbc1cf-f4a7-4927-b810-f71160bc1de8",
       "migrations_dir": "migrations"
     }
   ],
