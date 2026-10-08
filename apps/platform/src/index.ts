@@ -6,6 +6,8 @@ import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
 import { branchRulesApi } from './routes/api/branchRules';
 import { compareApi } from './routes/api/compare';
+import { eventsApi } from './routes/api/events';
+import { handleEventBatch } from './services/events';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
@@ -47,6 +49,7 @@ app.route('/api/v1', tenancyApi);
 app.route('/api/v1', agentsApi);
 app.route('/api/v1', branchRulesApi);
 app.route('/api/v1', compareApi);
+app.route('/api/v1', eventsApi);
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
@@ -69,10 +72,7 @@ export default {
       const res = await app.fetch(req, e, cx);
       return presentsCredential(req) ? withPrivateCacheControl(res) : res;
     }),
-  async queue(batch: MessageBatch<unknown>, _env: Env, _ctx: ExecutionContext) {
-    // Artifacts event subscription delivers here (wired in M4).
-    for (const message of batch.messages) {
-      message.ack();
-    }
-  },
+  // Artifacts push events, through the account-level event subscription
+  // (services/events.ts).
+  queue: (batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) => handleEventBatch(batch, env),
 } satisfies ExportedHandler<Env>;

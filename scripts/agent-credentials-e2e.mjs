@@ -114,10 +114,6 @@ function git(args, token, { allowFail = false } = {}) {
       GIT_ASKPASS: askpass,
       GIT_TERMINAL_PROMPT: '0',
       E2E_GIT_TOKEN: token ?? '',
-      GIT_AUTHOR_NAME: 'e2e',
-      GIT_AUTHOR_EMAIL: 'e2e@forge.invalid',
-      GIT_COMMITTER_NAME: 'e2e',
-      GIT_COMMITTER_EMAIL: 'e2e@forge.invalid',
     },
     encoding: 'utf8',
   });
