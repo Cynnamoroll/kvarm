@@ -17,7 +17,8 @@
  *             The unflushed tail and the walk cursor are the step's
  *             (streamed) output, so a retried or replayed step resumes
  *             from exactly the same input.
- *   finish    marks the tree and every commit waiting on it ready.
+ *   finish    marks the tree and every commit waiting on it ready. If the
+ *             repo was deleted during the build, it removes the tarball.
  *
  * Every build attempt belongs to one instance id. Terminal writes to a
  * commit row (failed, commit not found) only apply while that instance is
@@ -115,6 +116,8 @@ type Excluded = { d1: number; rr: number; rw: number };
 
 interface StepNote {
   excluded?: Excluded;
+  /** R2 key of a finished tarball removed because its repo was deleted during the build. */
+  discarded?: string;
 }
 
 function errorMessage(err: unknown): string {
@@ -669,7 +672,7 @@ async function finishStep(
     // Until the measured total is stored below, the ready rows carry the
     // cost of the steps before this one.
     const before = JSON.stringify(cost);
-    await db.batch([
+    const [treeReady] = await db.batch([
       db
         .prepare(
           `UPDATE snapshot_trees SET state = 'ready', size = ?4, files = ?5, built_at = ?6, build_cost = ?7, error = NULL
@@ -687,6 +690,18 @@ async function finishStep(
         )
         .bind(p.repoId, target.tree, p.instanceId, now, p.sha, before),
     ]);
+    // No tree row moved: a successor took the tree over, an earlier run of
+    // this step already finished it, or the repo was deleted mid-build. Only
+    // the last leaves the object this build just completed unreferenced (the
+    // repo delete ran before the object existed), so it is removed here.
+    let repoGone = false;
+    if ((treeReady?.meta?.changes ?? 0) === 0) {
+      repoGone = !(await db.prepare('SELECT 1 AS ok FROM repos WHERE id = ?').bind(p.repoId).first());
+      if (repoGone) {
+        await env.SNAPSHOTS.delete(target.key);
+        note.discarded = target.key;
+      }
+    }
     const final: BuildCost = {
       ...cost,
       steps: cost.steps + 1,
@@ -698,6 +713,7 @@ async function finishStep(
       r2b: cost.r2b + meter.r2b,
       sub: cost.sub + meter.sub,
     };
+    if (repoGone) return final;
     const measured = JSON.stringify(final);
     note.excluded = await measureD1(meter, () =>
       db.batch([

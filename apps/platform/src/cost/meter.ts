@@ -177,8 +177,10 @@ type AnyFn = (...args: unknown[]) => unknown;
 /**
  * Proxies `target` so each method call runs `onCall(name)` first. Property
  * reads use the real target as receiver (native bindings reject foreign
- * receivers). `then` and symbols pass through so RPC stubs never become
- * thenables and disposal stays uncounted.
+ * receivers). `then` and symbols pass through uncounted so RPC stubs never
+ * become thenables and disposal stays uncounted; symbol-keyed methods are
+ * bound to the real target, because `stub[Symbol.dispose]()` called with
+ * the proxy as receiver throws and leaves the stub undisposed.
  */
 function countCalls<T extends object>(
   target: T,
@@ -188,7 +190,8 @@ function countCalls<T extends object>(
   return new Proxy(target, {
     get(t, prop) {
       const value: unknown = Reflect.get(t, prop);
-      if (typeof prop === 'symbol' || prop === 'then' || typeof value !== 'function') return value;
+      if (typeof prop === 'symbol') return typeof value === 'function' ? (value as AnyFn).bind(t) : value;
+      if (prop === 'then' || typeof value !== 'function') return value;
       const fn = value as AnyFn;
       return (...args: unknown[]) => {
         onCall(prop);

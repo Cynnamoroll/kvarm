@@ -251,6 +251,8 @@ interface StepLog {
   error?: string;
   /** Counters of the statement that stores buildCost, which buildCost cannot include. */
   excluded?: Partial<Record<'d1' | 'rr' | 'rw', number>>;
+  /** R2 key of a finished tarball removed because its repo was deleted mid-build. */
+  discarded?: string;
 }
 
 /** Runs `fn` and returns the builder's step-attempt log lines for `instance`. */
@@ -604,6 +606,89 @@ describe('SnapshotBuilder', () => {
     expect(ready.status).toBe(200);
     expect(ready.json).toMatchObject({ state: 'ready', sha: c.sha, tree: c.tree });
     checkTar(readTar(await tarball(id, c.tree)), { 'a.txt': 'takeover a\n', 'b.txt': 'takeover b\n' });
+  });
+
+  it('a repo deleted during its build leaves no completed tarball behind', async () => {
+    const { id, repo } = await seedRepo('vanish');
+    const c = await commit(repo, SMALL);
+    let releaseBatch!: () => void;
+    let releaseFinish!: () => void;
+    const runner = new Runner();
+    runner.gates.set('batch-1', new Promise<void>((r) => (releaseBatch = r)));
+    runner.gates.set('finish', new Promise<void>((r) => (releaseFinish = r)));
+    const seen: { del?: number; keysAfterDelete?: number; keysBeforeFinish?: number; outcome?: string } = {};
+    const logs = await builderLogs('snap-vanish', async () => {
+      const build = buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-vanish' }, runner);
+      await new Promise((r) => setTimeout(r, 50));
+      // The repo goes while the build holds its tree claim and no object exists yet.
+      seen.del = (await call(`/api/v1/repos/${OWNER}/vanish`, { method: 'DELETE', token: tok.owner })).status;
+      seen.keysAfterDelete = (await objectKeys(id)).length;
+      releaseBatch();
+      await vi.waitFor(async () => expect(await objectKeys(id)).toHaveLength(1), { timeout: 2000 });
+      seen.keysBeforeFinish = (await objectKeys(id)).length;
+      releaseFinish();
+      seen.outcome = (await build).outcome;
+    });
+    expect(seen).toEqual({ del: 200, keysAfterDelete: 0, keysBeforeFinish: 1, outcome: 'built' });
+    expect(await objectKeys(id)).toHaveLength(0);
+    expect(await commitRow(id, c.sha)).toBeNull();
+    const finish = logs.find((l) => l.step === 'finish');
+    // The ready batch and one repo-existence check; the cost-store batch is skipped.
+    expect(finish).toMatchObject({ outcome: 'ok', cost: { d1: 2 }, discarded: snapshotKey(id, c.tree) });
+    expect(finish?.excluded).toBeUndefined();
+  });
+
+  it('an attempt superseded while its repo is alive deletes nothing when it finishes late', async () => {
+    const { id, repo } = await seedRepo('late');
+    const files: Files = { 'late.txt': 'late finisher\n' };
+    const c = await commit(repo, files);
+    let releaseOld!: () => void;
+    const oldRunner = new Runner();
+    oldRunner.gates.set('finish', new Promise<void>((r) => (releaseOld = r)));
+    const oldBuild = buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-late' }, oldRunner);
+    await vi.waitFor(async () => expect(await objectKeys(id)).toHaveLength(1), { timeout: 2000 });
+
+    // The old attempt looks dead; its successor takes the tree and the commit over and finishes first.
+    await env.DB.batch([
+      env.DB.prepare('UPDATE snapshot_commits SET instance_id = ? WHERE repo_id = ?').bind('snap-late-r1', id),
+      env.DB.prepare('UPDATE snapshot_trees SET created_at = created_at - ? WHERE repo_id = ?').bind(STALE_BUILD_MS + 1000, id),
+    ]);
+    const successor = await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-late-r1', trigger: 'demand' }, new Runner());
+    expect(successor.outcome).toBe('built');
+
+    let oldOutcome: string | undefined;
+    const logs = await builderLogs('snap-late', async () => {
+      releaseOld();
+      oldOutcome = (await oldBuild).outcome;
+    });
+    expect(oldOutcome).toBe('built');
+    const finish = logs.find((l) => l.step === 'finish');
+    expect(finish).toMatchObject({ outcome: 'ok' });
+    expect(finish).not.toHaveProperty('discarded');
+    expect(await objectKeys(id)).toEqual([snapshotKey(id, c.tree)]);
+    checkTar(readTar(await tarball(id, c.tree)), files);
+    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'ready', instance_id: 'snap-late-r1' });
+  });
+
+  it('a replayed finish with the repo alive deletes nothing', async () => {
+    const { id, repo } = await seedRepo('refinish');
+    const c = await commit(repo, SMALL);
+    const runner = new Runner();
+    const run = runner.do.bind(runner);
+    // The finish body runs twice, as when a completed step's result is lost and the step reruns.
+    runner.do = (async (name: string, fn: (ctx?: { attempt: number }) => Promise<unknown>) => {
+      if (name === 'finish') await fn({ attempt: 1 });
+      return run(name, fn);
+    }) as StepRunner['do'];
+    const logs = await builderLogs('snap-refinish', async () => {
+      await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-refinish' }, runner);
+    });
+    const finishes = logs.filter((l) => l.step === 'finish');
+    expect(finishes.map((l) => l.outcome)).toEqual(['ok', 'ok']);
+    expect(finishes.some((l) => 'discarded' in l)).toBe(false);
+    expect(await objectKeys(id)).toEqual([snapshotKey(id, c.tree)]);
+    checkTar(readTar(await tarball(id, c.tree)), SMALL);
+    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'ready', reused: 0 });
   });
 
   it('a commit-not-found result from a superseded attempt leaves the active attempt alone', async () => {

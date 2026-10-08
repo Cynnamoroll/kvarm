@@ -1,5 +1,6 @@
-import { env as cfEnv } from 'cloudflare:workers';
-import { describe, expect, it } from 'vitest';
+import { env as cfEnv, RpcStub, RpcTarget } from 'cloudflare:workers';
+import { describe, expect, it, vi } from 'vitest';
+import { LazyRepo, withRepo } from '../src/artifacts/repo';
 import {
   CostMeter,
   countingFetch,
@@ -124,6 +125,46 @@ describe('CostMeter binding proxies', () => {
     await e.ARTIFACTS.create('n');
     expect(disposed).toBe(true);
     expect(m.art).toBe(4);
+  });
+
+  it('disposes a repo handle whose disposer requires the real handle as receiver, uncounted', async () => {
+    let disposed = 0;
+    const handle = {
+      readTree: async () => [],
+      [Symbol.dispose](this: unknown) {
+        if (this !== handle) throw new TypeError('Illegal invocation');
+        disposed++;
+      },
+    };
+    const ns = { get: async () => handle };
+    const { m, e } = metered({ ARTIFACTS: ns as unknown as Artifacts });
+    const repo = await e.ARTIFACTS.get('r');
+    repo[Symbol.dispose]();
+    expect(disposed).toBe(1);
+    await withRepo(e as unknown as Env, 'r', (h) => h.readTree('t'));
+    expect(disposed).toBe(2);
+    const lazy = new LazyRepo(e as unknown as Env, 'r');
+    await (await lazy.get()).readTree('t');
+    await lazy.dispose();
+    expect(disposed).toBe(3);
+    expect(m.art).toBe(5);
+  });
+
+  it('withRepo disposes a real RPC stub through the metered binding', async () => {
+    let disposed = false;
+    class Handle extends RpcTarget {
+      readTree() {
+        return [];
+      }
+      [Symbol.dispose]() {
+        disposed = true;
+      }
+    }
+    const ns = { get: async () => new RpcStub(new Handle()) };
+    const { m, e } = metered({ ARTIFACTS: ns as unknown as Artifacts });
+    await withRepo(e as unknown as Env, 'r', (h) => h.readTree('t'));
+    await vi.waitFor(() => expect(disposed).toBe(true), { timeout: 1000 });
+    expect(m.art).toBe(2);
   });
 
   it('counts repo-handle RPCs when the namespace returns a non-Promise thenable (Workers RPC)', async () => {
