@@ -5,7 +5,9 @@
  * Sections (all by default, or pick with --only=ready,lazy,private):
  *
  * - ready    public repo with an exec file, symlinks, a >100-byte path, a
- *            unicode name and an empty file pushed to main. After the eager
+ *            unicode name, an empty file and literal backslash/drive-like
+ *            POSIX names (`docs/back\slash.txt`, `..\literal.txt`,
+ *            `C:notes`) pushed to main. After the eager
  *            build is ready, `forge checkout <repo> main <dir>` exits 0,
  *            prints `source: snapshot` and the sha from ls-remote, and
  *            `diff -r -x .git` against a git clone + checkout is empty. The
@@ -141,6 +143,9 @@ function writeTreeFiles(dir) {
   mkdirSync(join(dir, 'docs'), { recursive: true });
   writeFileSync(join(dir, 'docs', 'résumé-日本.md'), 'unicode\n');
   writeFileSync(join(dir, 'docs', 'empty.txt'), '');
+  writeFileSync(join(dir, 'docs', 'back\\slash.txt'), 'backslash\n');
+  writeFileSync(join(dir, '..\\literal.txt'), 'dotdot backslash\n');
+  writeFileSync(join(dir, 'C:notes'), 'drive-like\n');
   writeFileSync(join(dir, 'blob.bin'), Buffer.from(Array.from({ length: 70_000 }, (_, i) => (i * 7) % 256)));
 }
 

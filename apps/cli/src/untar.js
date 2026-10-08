@@ -3,12 +3,20 @@
  * Streaming extractor for the POSIX ustar/pax archives the snapshot builder
  * writes (regular files, directories, symlinks; pax `path`, `linkpath` and
  * `size` records; global pax headers ignored). It never buffers a whole
- * file, refuses absolute and `..` paths, and creates symlinks only after
- * every other entry so no archive entry can be written through a link.
+ * file, refuses absolute and `..` paths under the host's path rules, never
+ * creates a directory or file through an existing symlink or over a file it
+ * did not create, and creates symlinks only after every other entry so no
+ * archive entry can be written through a link.
  */
 
-import { closeSync, lstatSync, mkdirSync, openSync, realpathSync, symlinkSync, writeSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, symlinkSync, writeSync } from 'node:fs';
+import * as nodePath from 'node:path';
+
+/** @typedef {import('node:path').PlatformPath} PlatformPath */
+
+const { dirname, relative } = nodePath;
+const CREATE_NEW = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL;
+const REWRITE_OWN = constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0);
 
 const BLOCK = 512;
 const decoder = new TextDecoder();
@@ -132,29 +140,43 @@ export function parsePax(data) {
 }
 
 /**
- * Validates an archive path and returns it relative to the destination, or
- * null for the archive root.
- * @param {string} raw
+ * @param {string} dest
+ * @param {string} target
+ * @param {PlatformPath} [p]
  */
-function safePath(raw) {
-  if (raw.includes('\0')) throw new TarError('archive path contains NUL');
-  const path = raw.replace(/\/+$/, '').replace(/^(\.\/)+/, '');
-  if (path === '' || path === '.') return null;
-  if (isAbsolute(path) || /^[A-Za-z]:/.test(path)) throw new TarError(`archive path is absolute: ${raw}`);
-  const parts = path.split('/');
-  for (const p of parts) {
-    if (p === '..' || p === '') throw new TarError(`unsafe archive path: ${raw}`);
-  }
-  return parts.join(sep);
+function inside(dest, target, p = nodePath) {
+  const rel = p.relative(dest, target);
+  return rel === '' || (!rel.startsWith(`..${p.sep}`) && rel !== '..' && !p.isAbsolute(rel));
 }
 
 /**
- * @param {string} dest
- * @param {string} target
+ * Resolves an archive entry path to its absolute target inside `root` (or
+ * `root` itself for the archive root), using the separators and absolute-path
+ * rules of `p`. On Windows both `/` and `\` separate components and drive,
+ * UNC and device prefixes are absolute; on POSIX a backslash is an ordinary
+ * filename byte, so Git names such as `a\b.txt` stay literal.
+ * @param {string} raw
+ * @param {string} root absolute destination directory
+ * @param {PlatformPath} [p] path implementation (defaults to the host's)
+ * @returns {string}
  */
-function inside(dest, target) {
-  const rel = relative(dest, target);
-  return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
+export function archiveTarget(raw, root, p = nodePath) {
+  if (raw.includes('\0')) throw new TarError('archive path contains NUL');
+  const windows = p.sep === '\\';
+  if (p.isAbsolute(raw) || (windows && /^[A-Za-z]:/.test(raw))) throw new TarError(`archive path is absolute: ${raw}`);
+  const parts = raw.split(windows ? /[\\/]/ : '/');
+  while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+  while (parts.length > 0 && parts[0] === '.') parts.shift();
+  for (const part of parts) {
+    if (part === '' || part === '..') throw new TarError(`unsafe archive path: ${raw}`);
+    // Win32 drops trailing dots and spaces (`.. ` and `...` can act as `..`); `:` names drives and NTFS streams.
+    if (windows && (part.includes(':') || (part !== '.' && /^[. ]+$/.test(part)))) {
+      throw new TarError(`unsafe archive path: ${raw}`);
+    }
+  }
+  const target = p.resolve(root, ...parts);
+  if (!inside(root, target, p)) throw new TarError(`archive path escapes the destination: ${raw}`);
+  return target;
 }
 
 /**
@@ -179,11 +201,55 @@ export async function extractTar(source, dest) {
   /** @type {string | null} */
   let longName = null;
 
-  /** @param {string} dir */
+  /** Inodes of files this extraction created; only these may be rewritten. */
+  /** @type {Set<string>} */
+  const madeFiles = new Set();
+
+  /**
+   * Creates `dir` one component at a time below the destination, refusing
+   * any existing component that is not a real directory so nothing is ever
+   * created through a symlink.
+   * @param {string} dir
+   */
   const ensureDir = (dir) => {
     if (madeDirs.has(dir)) return;
-    mkdirSync(dir, { recursive: true });
+    if (!inside(root, dir)) throw new TarError(`directory escapes the destination: ${dir}`);
+    ensureDir(dirname(dir));
+    /** @type {import('node:fs').Stats | undefined} */
+    let st;
+    try {
+      st = lstatSync(dir);
+    } catch (err) {
+      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err;
+    }
+    if (st && !st.isDirectory()) throw new TarError(`archive path is not a directory: ${relative(root, dir)}`);
+    if (!st) mkdirSync(dir);
     madeDirs.add(dir);
+  };
+
+  /**
+   * Opens a regular file for writing without following links: a new file is
+   * created exclusively; an existing path is reused only when this
+   * extraction created it (duplicate or case-folded names).
+   * @param {string} target
+   * @param {number} mode
+   */
+  const openEntryFile = (target, mode) => {
+    if (!inside(root, target) || target === root) throw new TarError(`file escapes the destination: ${target}`);
+    let fd;
+    try {
+      fd = openSync(target, CREATE_NEW, mode);
+    } catch (err) {
+      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err;
+      const st = lstatSync(target, { bigint: true });
+      if (!st.isFile() || !madeFiles.has(`${st.dev}:${st.ino}`)) {
+        throw new TarError(`archive path already exists: ${relative(root, target)}`);
+      }
+      fd = openSync(target, REWRITE_OWN);
+    }
+    const st = fstatSync(fd, { bigint: true });
+    madeFiles.add(`${st.dev}:${st.ino}`);
+    return fd;
   };
 
   for (;;) {
@@ -212,13 +278,12 @@ export async function extractTar(source, dest) {
     pax = null;
     longName = null;
 
-    const rel = safePath(rawPath);
-    const target = rel === null ? root : join(root, rel);
+    const target = archiveTarget(rawPath, root);
 
     if (type === '0' || type === '\0' || type === '7') {
-      if (rel === null) throw new TarError('file entry without a name');
+      if (target === root) throw new TarError('file entry without a name');
       ensureDir(dirname(target));
-      const fd = openSync(target, 'w', mode || 0o644);
+      const fd = openEntryFile(target, mode || 0o644);
       try {
         for await (const slice of reader.take(size)) {
           let done = 0;
@@ -234,7 +299,7 @@ export async function extractTar(source, dest) {
       if (size > 0) await reader.read(padded);
       counts.dirs++;
     } else if (type === '2') {
-      if (rel === null) throw new TarError('symlink entry without a name');
+      if (target === root) throw new TarError('symlink entry without a name');
       links.push({ path: target, target: linkname });
       if (size > 0) await reader.read(padded);
     } else {

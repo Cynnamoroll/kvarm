@@ -51,9 +51,13 @@ fallback goes to stderr. Exit status: 0 on success, 1 on failure (for
 example an unknown ref or a private repo without a token), 2 on usage errors.
 
 The extractor handles the snapshot builder's ustar/pax archives: modes,
-symlinks, long and unicode paths. It refuses absolute and `..` paths, and it
-creates symlinks only after all other entries, so no entry can be written
-through a link.
+symlinks, long and unicode paths. It refuses absolute and `..` paths under the
+host's path rules (on Windows that includes `\` separators, drive letters and
+UNC paths; on Linux and macOS a backslash is an ordinary filename character).
+Every entry must resolve inside the checkout directory; the extractor never
+creates anything through an existing symlink or overwrites a file it did not
+create, and it creates symlinks only after all other entries, so no entry can
+be written through a link.
 
 ### Snapshots have no git history
 

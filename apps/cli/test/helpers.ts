@@ -37,6 +37,10 @@ export function writeFixtureTree(dir: string, salt: string): void {
   mkdirSync(join(dir, 'docs', 'deep', 'er'), { recursive: true });
   writeFileSync(join(dir, 'docs', 'résumé-日本.md'), 'unicode\n');
   writeFileSync(join(dir, 'docs', 'empty.txt'), '');
+  // Literal backslashes and a drive-like prefix are ordinary POSIX filename bytes.
+  writeFileSync(join(dir, 'docs', 'back\\slash.txt'), 'backslash\n');
+  writeFileSync(join(dir, '..\\literal.txt'), 'dotdot backslash\n');
+  writeFileSync(join(dir, 'C:notes'), 'drive-like\n');
   writeFileSync(join(dir, 'docs', 'deep', 'er', 'x.txt'), 'deep\n');
   writeFileSync(join(dir, 'blob.bin'), Buffer.from(Array.from({ length: 70_000 }, (_, i) => (i * 7) % 256)));
 }
