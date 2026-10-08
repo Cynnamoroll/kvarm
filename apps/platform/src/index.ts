@@ -8,6 +8,7 @@ import { branchRulesApi } from './routes/api/branchRules';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
+import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
 export { TokenCache, RateLimiter, RealtimeHub, MergeLock } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
@@ -59,8 +60,13 @@ app.all('*', async (c) => {
 });
 
 export default {
-  // Every response carries x-forge-cost (src/cost/meter.ts).
-  fetch: (request, env, ctx) => serveMetered(request, env, ctx, app.fetch),
+  // Every response carries x-forge-cost (src/cost/meter.ts). Responses to a
+  // presented credential are never shared-cacheable, on every transport.
+  fetch: (request, env, ctx) =>
+    serveMetered(request, env, ctx, async (req, e, cx) => {
+      const res = await app.fetch(req, e, cx);
+      return presentsCredential(req) ? withPrivateCacheControl(res) : res;
+    }),
   async queue(batch: MessageBatch<unknown>, _env: Env, _ctx: ExecutionContext) {
     // Artifacts event subscription delivers here (wired in M4).
     for (const message of batch.messages) {

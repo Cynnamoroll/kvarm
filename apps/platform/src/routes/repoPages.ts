@@ -31,6 +31,8 @@ import {
 } from '../artifacts/repo';
 import { renderMarkdown } from '../render/markdown';
 import { edgeCachedPage } from '../cache/edge';
+import { readFileImmutable } from '../cache/content';
+import { PRIVATE_CACHE_CONTROL } from '../cache/scope';
 import * as svc from '../repos/service';
 import type { RepoNeed, RepoRole } from '../services/authz';
 import { resolveRepoAccess } from '../services/access';
@@ -283,10 +285,13 @@ async function renderBlob(
   ref: string,
   path: string,
   viewerLogin: string | null,
+  contentCache: boolean,
 ): Promise<Response> {
   let blob: Blob | null;
   try {
-    blob = await readFileAt(c.env, resolved.repo.artifacts_name, ref, path);
+    blob = contentCache
+      ? await readFileImmutable(c.env, c.executionCtx, resolved.repo, ref, path)
+      : await readFileAt(c.env, resolved.repo.artifacts_name, ref, path);
   } catch (err) {
     if (isWarming(err)) return warmingPage(c, resolved.repo, viewerLogin);
     throw err;
@@ -388,11 +393,11 @@ repoPages.get('/blob/:ref{.+}', async (c) => {
     resolved.repo.visibility === 'public' &&
     !c.req.header('cookie')?.includes('wos-session');
   if (cacheable) {
-    const render = () => renderBlob(c, resolved, parsed.ref, parsed.rest, null);
+    const render = () => renderBlob(c, resolved, parsed.ref, parsed.rest, null, false);
     return edgeCachedPage(c, isCommitRef(parsed.ref) ? 31536000 : 60, render);
   }
   const viewerLogin = resolved.viewer?.user.login ?? null;
-  return renderBlob(c, resolved, parsed.ref, parsed.rest, viewerLogin);
+  return renderBlob(c, resolved, parsed.ref, parsed.rest, viewerLogin, true);
 });
 
 repoPages.get('/raw/:ref{.+}', async (c) => {
@@ -403,13 +408,18 @@ repoPages.get('/raw/:ref{.+}', async (c) => {
   const cacheable =
     resolved.repo.visibility === 'public' &&
     !c.req.header('cookie')?.includes('wos-session');
+  const shared = resolved.repo.visibility === 'public' && resolved.viewer === null;
   const render = async (): Promise<Response> => {
     try {
-      const blob = await readFileAt(c.env, resolved.repo.artifacts_name, parsed.ref, parsed.rest);
+      const blob = cacheable
+        ? await readFileAt(c.env, resolved.repo.artifacts_name, parsed.ref, parsed.rest)
+        : await readFileImmutable(c.env, c.executionCtx, resolved.repo, parsed.ref, parsed.rest);
       if (!blob) return notFound(c);
       const headers = new Headers();
       headers.set('content-type', blob.type || 'application/octet-stream');
-      if (isCommitRef(parsed.ref)) {
+      if (!shared) {
+        headers.set('cache-control', PRIVATE_CACHE_CONTROL);
+      } else if (isCommitRef(parsed.ref)) {
         headers.set('cache-control', 'public, max-age=31536000, immutable');
       } else {
         headers.set('cache-control', 'public, max-age=60');

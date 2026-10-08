@@ -23,6 +23,7 @@ import { parseBasicAuth } from '../auth/pat';
 import { getGitToken } from '../artifacts/tokens';
 import { gitRateLimit } from '../ratelimit';
 import { markCache } from '../cost/meter';
+import { withPrivateCacheControl } from '../cache/scope';
 import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
@@ -135,6 +136,7 @@ export async function handleGitRequest(
   if (!access.ok) return access.response;
   const { repo, actor, op, branchRules } = access;
   const isPublic = repo.visibility === 'public';
+  const scoped = (res: Response): Response => (isPublic && !actor ? res : withPrivateCacheControl(res));
 
   // Rate limit by PAT id (or client IP for anonymous public reads).
   const identity = actor?.patId ?? `ip:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`;
@@ -168,7 +170,7 @@ export async function handleGitRequest(
     const cached = await caches.default.match(cacheKey);
     if (cached) {
       markCache('hit');
-      return cached;
+      return scoped(cached);
     }
     markCache('miss');
   }
@@ -212,8 +214,8 @@ export async function handleGitRequest(
     } catch {
       // cache.put can race on streaming bodies; never fail a clone over it.
     }
-    return res;
+    return scoped(res);
   }
 
-  return relay(upstreamRes);
+  return scoped(relay(upstreamRes));
 }
