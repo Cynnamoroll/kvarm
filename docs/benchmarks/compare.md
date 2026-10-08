@@ -36,23 +36,34 @@ Re-running it produces the same SHAs. The generated record is
 (`set -a; . apps/platform/.dev.vars.validation; set +a; node scripts/gate-m3.mjs --json=out.json`).
 The latest run is committed as `docs/benchmarks/gate-m3.json`.
 
-Result on 2026-10-08 (worker version `a107390b`): 17/17 checks pass.
+Result on 2026-10-08 (worker version `c6972ad1`): 17/17 checks pass.
+Since this version an admin `?nocache=1` reads and writes no compare cache
+entry at all (body, risk, ref, ref generation, commit or line counts), so
+every one of the 10 runs is a truly cold computation. Only the colo's git
+token cache is still used (a credential, not compare data).
 
 | check | result |
 | --- | --- |
-| 10 cold `compare/bench-base...bench-head?nocache=1` (admin PAT) | all 200 + `x-forge-cache: bypass`; **p50 401 ms** (min 361, max 796) |
-| cold body | 502 files, `truncated: false`, `statsOmitted: true`, 109 KB |
-| cold cost | `art=55` = 54 tree reads + 1 refs call, `d1=1` |
-| anonymous / bot `?nocache=1` | served normally from cache, never `bypass` |
+| 10 cold `compare/bench-base...bench-head?nocache=1` (admin PAT) | all 200 + `x-forge-cache: bypass`; **p50 494 ms** (min 406, max 1,490) |
+| cold body | 502 files, `truncated: false`, `totalsComplete: true`, `statsOmitted: true`, 109 KB |
+| cold cost | `art=56` = 54 tree reads + 2 (ls-refs and the head log; commits are no longer served from cache), `d1=1` |
+| anonymous / bot `?nocache=1` | served normally, never `bypass` (anonymous `miss`, bot `hit`) |
 | ordering | path-ascending; `?order=path` identical |
-| wide pair | 4,580 of 25,000 files, `truncated: true`, reason `tree read budget exhausted (2000 reads)`, 1.0 MB |
-| interleaved file diff | `approximate: true`, 559 KB, 163 ms warm |
-| largest file diff | +1 / -1, 759 B, 128 ms warm |
+| wide pair | 4,575 of 25,000 files, `truncated: true`, reason `tree read budget exhausted (2000 reads)`, `totalsComplete: false`, `totals.files` 4,575 (the listed subset), 1.0 MB, 8.4 s |
+| interleaved file diff | `approximate: true`, 559 KB, 173 ms warm |
+| largest file diff | +1 / -1, 759 B, 117 ms warm |
 | warm repeat | cache hit, identical body, `d1=1 art=0 sub=0` |
 | sweep (18 fixture requests) | no non-2xx, no request over 30 s |
-| edge: first-ever compare, non-parent base, cold read token | `art=5` <= tree reads 2 + blob reads 0 + 3, `d1=1` |
+| edge: first-ever compare, diverged base, write token warmed by the push | `art=5` <= tree reads 2 + blob reads 0 + 3, `d1=1` |
 
-Earlier runs gave cold p50 of 402 ms and 396 ms.
+A second truly cold run straight after (`--skip-edge`) gave p50 471 ms
+(min 381, max 650). The margin to 500 ms is thinner than before because the
+bypass now also skips the commit cache: the refs stage takes ~85-150 ms
+instead of ~70-90 ms.
+
+Earlier results, when the bypass still read the immutable commit and
+line-count entries (worker `a107390b`): cold p50 401 ms (min 361, max 796),
+`art=55`; other runs gave 402 ms and 396 ms. Those runs were not fully cold.
 
 ### Where the cold time goes
 
@@ -93,17 +104,21 @@ After these changes cold p50 is ~400 ms and `art=55`.
   A full diff needs ~10,104 reads (~27 s at the measured rate), which is close
   to the 30 s client limit and above the default Workers cap of 10,000
   subrequests per request, so the budget was not raised.
-- **Residual budget edge.** A first-ever cold compare whose base is not on
-  the head's first-parent chain (a diverged branch), in a colo with no cached
-  read or write token, still costs `treeReads + blobReads + 4`: token mint,
-  ls-refs, log, and readCommit. Covering it would need a token mint that also
-  returns refs or a log call that walks two tips; neither exists in the
-  Artifacts binding. The common case (a base on the head's chain, or any
-  compare after a push in the same colo) stays within `+3`.
+- **Approved budget exception.** A first-ever cold compare whose base is not
+  on the head's first-parent chain (a diverged base, or an ancestor beyond
+  the 50-entry head log), in a colo with no cached read or write token, costs
+  `treeReads + blobReads + 4`: token mint, repo handle, head log, and one
+  readCommit for the base. Covering it would need a token mint that also
+  opens the handle or a log call that walks two tips; neither exists in the
+  Artifacts binding. This exact path is the documented, user-approved
+  exception (VAL-COST-005). Every other compare, including the same one once
+  a token is cached, stays within `+3`; workerd tests pin both cases.
 
 ## Alternatives if the gate regresses
 
-None of these were needed.
+None of these were needed. With the truly cold bypass the most direct
+saving would be to overlap the head log with ls-refs (the log needs the
+resolved head sha today), worth roughly one upstream round trip (~30-60 ms).
 
 - **Pivot P1:** per-commit path-to-hash manifests written on push, so a
   compare reads two manifests instead of walking trees. This removes the

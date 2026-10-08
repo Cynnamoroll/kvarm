@@ -15,9 +15,16 @@
  *   flip      warm public compare + file diff, then a direct D1 flip and an owner
  *             PATCH flip to private: denied immediately, owner keeps reading
  *   bypass    fresh branch pair: admin ?nocache=1 -> bypass, then miss, then hit
- *   huge      a 5 MB text file change (tooLarge) and a 60k-line interleaved edit
+ *   huge      a 5 MB text file change (tooLarge), a 60k-line interleaved edit,
+ *             and a 200,000-line file removed plus one added (compare, root
+ *             commit diff, file diffs and nocache: 200, exact counts)
  *   wide      many changed directories: stats omitted above 300 files, and
- *             read-budget truncation with a reason, never a 5xx
+ *             read-budget truncation with a reason and totalsComplete false,
+ *             never a 5xx
+ *
+ * Every repo carries content stamped with this run's timestamp, so its tree
+ * pairs are new and the first normal compare is a genuine cache miss. Only
+ * repos this run created are ever deleted; a failed create aborts the part.
  *
  * Principals by env var NAME (load apps/platform/.dev.vars.validation):
  * FORGE_PAT (owner, admin), FORGE_PAT_BOT (non-admin, unrelated). Tokens are
@@ -94,7 +101,7 @@ chmodSync(askpass, 0o700);
 
 function git(args, cwd, who = null) {
   const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: who ? process.env[P[who]] : '' };
-  const r = spawnSync('git', ['-c', 'credential.helper=', '-c', 'user.name=compare-e2e', '-c', 'user.email=e2e@forge.invalid', ...args], {
+  const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd,
     env,
     encoding: 'utf8',
@@ -122,7 +129,8 @@ async function push(dir, refs) {
 const created = [];
 async function createRepo(repo, visibility) {
   const r = await http('owner', '/api/v1/repos', { method: 'POST', json: { name: repo, visibility } });
-  if (check(`create ${visibility} ${OWNER}/${repo}`, r.status === 201, show(r))) created.push(repo);
+  if (!check(`create ${visibility} ${OWNER}/${repo}`, r.status === 201, show(r))) throw new Error(`could not create ${OWNER}/${repo}; refusing to push to a repo this run did not create`);
+  created.push(repo);
   const dir = join(work, repo);
   git(['init', '-q', '-b', 'main', dir], work);
   git(['remote', 'add', 'origin', `${BASE}/${OWNER}/${repo}.git`], dir);
@@ -144,9 +152,9 @@ function d1Exec(sql) {
 }
 
 /** numstat lines keyed by the new path ("-" counts mean binary). */
-function numstat(dir, a, b) {
+function numstat(dir, a, b, renames = '-M') {
   const out = {};
-  for (const line of git(['diff', '--numstat', '-M', a, b], dir).out.split('\n').filter(Boolean)) {
+  for (const line of git(['diff', '--numstat', renames, a, b], dir).out.split('\n').filter(Boolean)) {
     const [add, del, ...rest] = line.split('\t');
     const p = rest.join('\t');
     const path = p.includes(' => ') ? p.split(' => ')[1] : p;
@@ -176,7 +184,7 @@ async function fixtureChecks() {
   const dir = await createRepo(repo, 'public');
   const a = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`);
   write(dir, 'a.txt', `${a.join('\n')}\n`);
-  write(dir, 'keep.txt', 'keep me\n');
+  write(dir, 'keep.txt', `keep me ${ts}\n`);
   const root = commitAll(dir, 'root');
   write(dir, 'gone.txt', 'one\ntwo\nthree\n');
   write(dir, 'old-name.txt', 'renamed content\n');
@@ -221,8 +229,8 @@ async function fixtureChecks() {
   check(`VAL-DIFF-001 anon compare main...feature ${show(r1)}`, r1.status === 200 &&
     b.base?.ref === 'main' && b.base?.sha === main && /^[0-9a-f]{40}$/.test(b.base?.tree ?? '') &&
     b.head?.ref === 'feature' && b.head?.sha === lsRemote && /^[0-9a-f]{40}$/.test(b.head?.tree ?? '') &&
-    Array.isArray(b.files) && b.files.length > 0 && b.totals && b.rating && b.truncated === false,
-    JSON.stringify({ base: b.base, head: b.head, truncated: b.truncated, rating: b.rating, totals: b.totals, treeReads: b.treeReads }));
+    Array.isArray(b.files) && b.files.length > 0 && b.totals && b.rating && b.truncated === false && b.totalsComplete === true,
+    JSON.stringify({ base: b.base, head: b.head, truncated: b.truncated, totalsComplete: b.totalsComplete, rating: b.rating, totals: b.totals, treeReads: b.treeReads }));
   const malformed = await http(null, api(repo, 'compare/main'));
   check(`VAL-DIFF-001 malformed range compare/main does not route ${show(malformed)}`, malformed.status === 404);
 
@@ -273,8 +281,8 @@ async function fixtureChecks() {
   const ss = /(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/.exec(truth.shortstat);
   const totalsOk = Number(ss?.[1]) === b.totals?.files && b.totals?.files === b.files?.length &&
     Number(ss?.[2] ?? 0) === b.totals?.additions && Number(ss?.[3] ?? 0) === b.totals?.deletions;
-  check('VAL-DIFF-007 per-file numstat and shortstat totals match git', statMismatches.length === 0 && totalsOk,
-    `numstat mismatches [${statMismatches.join(', ')}] totals ${JSON.stringify(b.totals)} vs "${truth.shortstat}"`);
+  check('VAL-DIFF-007 per-file numstat and shortstat totals match git (totalsComplete true)', statMismatches.length === 0 && totalsOk && b.totalsComplete === true,
+    `numstat mismatches [${statMismatches.join(', ')}] totals ${JSON.stringify(b.totals)} totalsComplete=${b.totalsComplete} vs "${truth.shortstat}"`);
 
   // VAL-DIFF-008
   const paths = (b.files ?? []).map((f) => f.path);
@@ -291,7 +299,7 @@ async function fixtureChecks() {
   do {
     const page = await http(null, api(repo, `compare/main...feature?limit=3${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
     if (pages === 0) firstPageLen = page.body?.files?.length ?? -1;
-    totalsStable &&= isDeepStrictEqual(page.body?.totals, b.totals);
+    totalsStable &&= isDeepStrictEqual(page.body?.totals, b.totals) && page.body?.totalsComplete === true;
     stitched.push(...(page.body?.files ?? []).map((f) => f.path));
     cursor = page.body?.nextCursor;
     pages++;
@@ -302,7 +310,7 @@ async function fixtureChecks() {
   // VAL-DIFF-010/011
   const same2 = await http(null, api(repo, 'compare/main...main'));
   check(`VAL-DIFF-010 main...main empty ${show(same2)}`, same2.status === 200 && isDeepStrictEqual(same2.body?.files, []) &&
-    isDeepStrictEqual(same2.body?.totals, { files: 0, additions: 0, deletions: 0 }) && same2.body?.truncated === false);
+    isDeepStrictEqual(same2.body?.totals, { files: 0, additions: 0, deletions: 0 }) && same2.body?.truncated === false && same2.body?.totalsComplete === true);
   for (const p of [api(repo, 'compare/main...no-such-branch'), api(repo, 'compare/no-such-branch...feature'), `/api/v1/repos/${OWNER}/no-such-repo-${ts}/compare/main...feature`]) {
     const r = await http(null, p);
     check(`VAL-DIFF-011 404 {error} for ${p.split('/').slice(4).join('/')} ${show(r)}`, r.status === 404 && typeof r.body?.error === 'string', r.text);
@@ -458,12 +466,17 @@ async function hugeChecks() {
   const n = 60_000;
   write(dir, 'big.txt', `${row.repeat(52_000)}tail a\n`);
   write(dir, 'mix.txt', Array.from({ length: n }, (_, i) => `row ${i}\n`).join(''));
-  commitAll(dir, 'base');
+  // ~1.8 MB: under the 4 MB per-file cap, so these are counted, not tooLarge.
+  const tall = (tag) => Array.from({ length: 200_000 }, (_, i) => (i === 0 ? `${tag} ${ts}\n` : `${tag}${i}\n`)).join('');
+  write(dir, 'tall-old.txt', tall('old'));
+  const root = commitAll(dir, 'base');
   git(['checkout', '-q', '-b', 'next'], dir);
   write(dir, 'big.txt', `${row.repeat(52_000)}tail b\n`);
   write(dir, 'mix.txt', Array.from({ length: n }, (_, i) => (i % 3 === 0 ? `row ${i}\n` : `moved ${(i * 7919) % n}\n`)).join(''));
+  rmSync(join(dir, 'tall-old.txt'));
+  write(dir, 'tall-new.txt', tall('new'));
   commitAll(dir, 'next');
-  check('huge: push main and next (5.2 MB file)', (await push(dir, ['main', 'next'])).code === 0);
+  check('huge: push main and next (5.2 MB file, 200,000-line files)', (await push(dir, ['main', 'next'])).code === 0);
   const big = await http(null, api(repo, 'compare/main...next/file?path=big.txt'));
   check(`VAL-DIFF-016 5 MB file tooLarge, no hunks, body ${big.text.length} B < 64 KB ${show(big)}`,
     big.status === 200 && big.body?.tooLarge === true && (big.body?.hunks ?? []).length === 0 && big.text.length < 64 * 1024 && big.ms < 30_000, big.text.slice(0, 200));
@@ -474,6 +487,28 @@ async function hugeChecks() {
   const list = await http(null, api(repo, 'compare/main...next'));
   check(`huge: compare lists big.txt as tooLarge without counts ${show(list)}`, list.status === 200 &&
     list.body?.files?.find((f) => f.path === 'big.txt')?.tooLarge === true, JSON.stringify(list.body?.files?.map((f) => ({ ...f, risk: undefined }))));
+
+  // 200,000-line files on every compare surface: 200, exact whole-file counts, bounded file-diff output.
+  // The platform does exact-hash rename detection only; git -M would pair these two by similarity.
+  const truth = numstat(dir, 'main', 'next', '--no-renames');
+  const tallOk = (b) => {
+    const by = Object.fromEntries((b?.files ?? []).map((f) => [f.path, f]));
+    return by['tall-old.txt']?.status === 'removed' && by['tall-old.txt']?.deletions === truth['tall-old.txt']?.deletions &&
+      by['tall-new.txt']?.status === 'added' && by['tall-new.txt']?.additions === truth['tall-new.txt']?.additions;
+  };
+  check(`huge: compare counts the 200,000-line files exactly (git -${truth['tall-old.txt']?.deletions}/+${truth['tall-new.txt']?.additions}) totalsComplete=${list.body?.totalsComplete}`,
+    list.status === 200 && tallOk(list.body) && list.body?.totalsComplete === true);
+  const tallBypass = await http('owner', api(repo, 'compare/main...next?nocache=1'));
+  check(`huge: admin nocache compare with 200,000-line files ${show(tallBypass)}`, tallBypass.status === 200 && tallBypass.cache === 'bypass' && tallOk(tallBypass.body));
+  const rootDiff = await http(null, api(repo, `commits/${root}/diff`));
+  const rootTall = rootDiff.body?.files?.find((f) => f.path === 'tall-old.txt');
+  check(`huge: root commit diff adds the 200,000-line file +${rootTall?.additions} ${show(rootDiff)}`, rootDiff.status === 200 && rootTall?.status === 'added' && rootTall?.additions === 200_000);
+  for (const [path, key, want] of [['tall-old.txt', 'totalDeletions', truth['tall-old.txt']?.deletions], ['tall-new.txt', 'totalAdditions', truth['tall-new.txt']?.additions]]) {
+    const fdTall = await http(null, api(repo, `compare/main...next/file?path=${path}`));
+    const shown = (fdTall.body?.hunks ?? []).reduce((acc, h) => acc + (h.lines?.length ?? 0), 0);
+    check(`huge: ${path} file diff ${key}=${fdTall.body?.[key]} (git ${want}) truncated=${fdTall.body?.truncated} lines shown ${shown} body ${fdTall.text.length} B ${show(fdTall)}`,
+      fdTall.status === 200 && fdTall.body?.[key] === want && fdTall.body?.truncated === true && shown <= 10_000 && fdTall.text.length < 10 * 1024 * 1024);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +524,7 @@ async function wideChecks() {
     ['wide', 1600, 1],
   ];
   for (const [prefix, dirs] of pairs) for (let i = 0; i < dirs; i++) write(dir, `${prefix}/d${i}/x.txt`, `a ${i}\n`);
+  write(dir, 'run.txt', `${ts}\n`);
   commitAll(dir, 'base');
   const branches = [];
   for (const [prefix, dirs] of pairs) {
@@ -502,8 +538,10 @@ async function wideChecks() {
   for (const [prefix, dirs] of pairs) {
     const r = await http('owner', api(repo, `compare/main...w-${prefix}?nocache=1`));
     const b = r.body ?? {};
-    const honest = b.truncated === true ? typeof b.truncatedReason === 'string' && b.truncatedReason.length > 0 && b.files?.length < dirs : b.files?.length === dirs;
-    check(`VAL-DIFF-021-style ${dirs} changed dirs: files=${b.files?.length} truncated=${b.truncated} reason="${b.truncatedReason ?? ''}" statsOmitted=${b.statsOmitted} treeReads=${b.treeReads} totals=${JSON.stringify(b.totals)} ${show(r)}`,
+    const honest = b.truncated === true
+      ? typeof b.truncatedReason === 'string' && b.truncatedReason.length > 0 && b.files?.length < dirs && b.totalsComplete === false && b.totals?.files === b.files?.length
+      : b.files?.length === dirs && b.totalsComplete === true;
+    check(`VAL-DIFF-021-style ${dirs} changed dirs: files=${b.files?.length} truncated=${b.truncated} reason="${b.truncatedReason ?? ''}" totalsComplete=${b.totalsComplete} statsOmitted=${b.statsOmitted} treeReads=${b.treeReads} totals=${JSON.stringify(b.totals)} ${show(r)}`,
       r.status === 200 && honest && b.statsOmitted === true && (b.files ?? []).every((f) => f.additions === undefined) && r.ms < 30_000);
   }
 }

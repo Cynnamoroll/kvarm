@@ -132,6 +132,37 @@ describe('classifyFile tags', () => {
     expect(dependencyNames('README.md', 'anything')).toBeNull();
   });
 
+  it('keeps reading a pyproject dependency array past quoted extras', () => {
+    const multiline = '[project]\nname = "x"\ndependencies = [\n  "requests[socks]>=2",\n  "httpx>=0.27",\n]\n';
+    expect(dependencyNames('pyproject.toml', multiline)).toEqual(['httpx', 'requests']);
+    const opening = '[project]\ndependencies = ["requests[socks,security]>=2",\n  \'uvicorn[standard]\',\n  "httpx>=0.27",\n]\n';
+    expect(dependencyNames('pyproject.toml', opening)).toEqual(['httpx', 'requests', 'uvicorn']);
+    const oneLine = '[project]\ndependencies = ["requests[socks]>=2", "httpx"]\nname = "x"\n';
+    expect(dependencyNames('pyproject.toml', oneLine)).toEqual(['httpx', 'requests']);
+    const optional =
+      '[project.optional-dependencies]\nserver = [\n  "uvicorn[standard]>=0.30",\n  "gunicorn",\n]\ncli = ["typer[all]", "rich"]\n\n[tool.other]\nfake = ["not-a-dep"]\n';
+    expect(dependencyNames('pyproject.toml', optional)).toEqual(['gunicorn', 'rich', 'typer', 'uvicorn']);
+    // A ] inside a comment or a quoted string never ends the array early, and the real terminator still does.
+    const tricky = '[project]\ndependencies = [\n  "a[x]",  # trailing ] comment\n  "b ; extra == \'y]\'",\n  "c",\n]\nversion = "1"\n';
+    expect(dependencyNames('pyproject.toml', tricky)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('tags a dependency added after a requirement with extras as new-dependency', () => {
+    const c = change('pyproject.toml');
+    const before = '[project]\nname = "x"\ndependencies = [\n  "requests[socks]>=2",\n]\n';
+    const after = '[project]\nname = "x"\ndependencies = [\n  "requests[socks]>=2",\n  "httpx>=0.27",\n]\n';
+    expect(tags(c, { oldText: before, newText: after })).toContain('new-dependency');
+    expect(classifyFile(c, { oldText: before, newText: after }).evidence?.newDependencies).toEqual(['httpx']);
+
+    const openBefore = '[project]\ndependencies = ["requests[socks]>=2",\n]\n';
+    const openAfter = '[project]\ndependencies = ["requests[socks]>=2",\n  "httpx>=0.27",\n]\n';
+    expect(classifyFile(c, { oldText: openBefore, newText: openAfter }).evidence?.newDependencies).toEqual(['httpx']);
+
+    const optBefore = '[project.optional-dependencies]\nserver = [\n  "uvicorn[standard]",\n]\n';
+    const optAfter = '[project.optional-dependencies]\nserver = [\n  "uvicorn[standard]",\n  "gunicorn",\n]\n';
+    expect(classifyFile(c, { oldText: optBefore, newText: optAfter }).evidence?.newDependencies).toEqual(['gunicorn']);
+  });
+
   it('tags exact renames, mode-only and whitespace-only edits as mechanical', () => {
     expect(tags(change('y.md', { status: 'renamed', oldPath: 'x.md', oldHash: H1, newHash: H1, additions: 0, deletions: 0 }))).toEqual(['mechanical']);
     expect(tags(change('run.sh', { status: 'typechange', oldHash: H1, newHash: H1, newMode: '100755', additions: 0, deletions: 0 }))).toContain(

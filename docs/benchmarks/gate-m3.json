@@ -1,5 +1,5 @@
 {
-  "at": "2026-10-08T17:13:57.532Z",
+  "at": "2026-10-08T17:53:38.547Z",
   "base": "https://forge-platform.cynnamoroll.workers.dev",
   "repo": "cynthia/fixture-1m",
   "refs": {
@@ -27,117 +27,119 @@
   "cold": {
     "runs": [
       {
-        "seconds": 0.796388,
+        "seconds": 1.489988,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=29, refs;dur=416, diff;dur=152",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=30, refs;dur=1089, diff;dur=222",
+        "bytes": 109018
       },
       {
-        "seconds": 0.383646,
+        "seconds": 0.561285,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=22, refs;dur=76, diff;dur=148",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=22, refs;dur=140, diff;dur=257",
+        "bytes": 109018
       },
       {
-        "seconds": 0.441019,
+        "seconds": 0.445614,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=27, refs;dur=88, diff;dur=221",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=21, refs;dur=92, diff;dur=190",
+        "bytes": 109018
       },
       {
-        "seconds": 0.373096,
+        "seconds": 0.483492,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=33, refs;dur=66, diff;dur=132",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=24, refs;dur=112, diff;dur=185",
+        "bytes": 109018
       },
       {
-        "seconds": 0.390457,
+        "seconds": 0.545823,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=23, refs;dur=70, diff;dur=143",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=20, refs;dur=119, diff;dur=295",
+        "bytes": 109018
       },
       {
-        "seconds": 0.381455,
+        "seconds": 0.472386,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=26, refs;dur=79, diff;dur=130",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=20, refs;dur=99, diff;dur=211",
+        "bytes": 109018
       },
       {
-        "seconds": 0.582424,
+        "seconds": 0.4055,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=27, refs;dur=103, diff;dur=322",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=26, refs;dur=102, diff;dur=135",
+        "bytes": 109018
       },
       {
-        "seconds": 0.46814,
+        "seconds": 0.50329,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=48, refs;dur=108, diff;dur=199",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=42, refs;dur=134, diff;dur=161",
+        "bytes": 109018
       },
       {
-        "seconds": 0.361177,
+        "seconds": 0.484945,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=21, refs;dur=69, diff;dur=130",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=24, refs;dur=120, diff;dur=197",
+        "bytes": 109018
       },
       {
-        "seconds": 0.411562,
+        "seconds": 0.509041,
         "status": 200,
         "cache": "bypass",
-        "cost": "d1=1;rr=5;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
-        "timing": "auth;dur=23, refs;dur=72, diff;dur=174",
-        "bytes": 108996
+        "cost": "d1=1;rr=5;rw=0;art=56;do=0;r2a=0;r2b=0;q=0;sub=1;cache=bypass",
+        "timing": "auth;dur=22, refs;dur=97, diff;dur=188",
+        "bytes": 109018
       }
     ],
-    "p50Seconds": 0.4010095,
-    "minSeconds": 0.361177,
-    "maxSeconds": 0.796388,
+    "p50Seconds": 0.4941175,
+    "minSeconds": 0.4055,
+    "maxSeconds": 1.489988,
     "body": {
       "files": 502,
       "truncated": false,
+      "totalsComplete": true,
       "statsOmitted": true,
       "treeReads": 54,
       "blobReads": 0
     }
   },
   "wide": {
-    "seconds": 0.190586,
+    "seconds": 8.401597,
     "status": 200,
-    "bytes": 1017436,
-    "files": 4580,
+    "bytes": 1016349,
+    "files": 4575,
     "expected": 25000,
     "truncated": true,
     "truncatedReason": "tree read budget exhausted (2000 reads)",
+    "totalsComplete": false,
     "statsOmitted": true,
     "treeReads": 2000,
     "totals": {
-      "files": 4580,
+      "files": 4575,
       "additions": null,
       "deletions": null
     },
-    "cost": "d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit",
-    "cache": "hit"
+    "cost": "d1=1;rr=5;rw=0;art=2001;do=0;r2a=0;r2b=0;q=0;sub=1;cache=miss",
+    "cache": "miss"
   },
   "interleaved": {
-    "seconds": 0.163173,
+    "seconds": 0.173303,
     "status": 200,
     "bytes": 559125,
     "approximate": true,
@@ -152,7 +154,7 @@
     "cache": "hit"
   },
   "largest": {
-    "seconds": 0.128343,
+    "seconds": 0.117162,
     "status": 200,
     "bytes": 759,
     "totalAdditions": 1,
@@ -166,13 +168,13 @@
   },
   "warm": [
     {
-      "seconds": 0.200273,
+      "seconds": 0.132757,
       "status": 200,
       "cache": "hit",
-      "cost": "d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=1;cache=hit"
+      "cost": "d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit"
     },
     {
-      "seconds": 0.116662,
+      "seconds": 0.130215,
       "status": 200,
       "cache": "hit",
       "cost": "d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit"
@@ -182,99 +184,99 @@
     {
       "label": "cold 1",
       "status": 200,
-      "seconds": 0.796388
+      "seconds": 1.489988
     },
     {
       "label": "cold 2",
       "status": 200,
-      "seconds": 0.383646
+      "seconds": 0.561285
     },
     {
       "label": "cold 3",
       "status": 200,
-      "seconds": 0.441019
+      "seconds": 0.445614
     },
     {
       "label": "cold 4",
       "status": 200,
-      "seconds": 0.373096
+      "seconds": 0.483492
     },
     {
       "label": "cold 5",
       "status": 200,
-      "seconds": 0.390457
+      "seconds": 0.545823
     },
     {
       "label": "cold 6",
       "status": 200,
-      "seconds": 0.381455
+      "seconds": 0.472386
     },
     {
       "label": "cold 7",
       "status": 200,
-      "seconds": 0.582424
+      "seconds": 0.4055
     },
     {
       "label": "cold 8",
       "status": 200,
-      "seconds": 0.46814
+      "seconds": 0.50329
     },
     {
       "label": "cold 9",
       "status": 200,
-      "seconds": 0.361177
+      "seconds": 0.484945
     },
     {
       "label": "cold 10",
       "status": 200,
-      "seconds": 0.411562
+      "seconds": 0.509041
     },
     {
       "label": "spot anon",
       "status": 200,
-      "seconds": 0.133201
+      "seconds": 0.603287
     },
     {
       "label": "spot bot",
       "status": 200,
-      "seconds": 0.182166
+      "seconds": 0.1245
     },
     {
       "label": "order=path",
       "status": 200,
-      "seconds": 0.12085
+      "seconds": 0.11351
     },
     {
       "label": "wide",
       "status": 200,
-      "seconds": 0.190586
+      "seconds": 8.401597
     },
     {
       "label": "interleaved",
       "status": 200,
-      "seconds": 0.163173
+      "seconds": 0.173303
     },
     {
       "label": "largest",
       "status": 200,
-      "seconds": 0.128343
+      "seconds": 0.117162
     },
     {
       "label": "warm 1",
       "status": 200,
-      "seconds": 0.200273
+      "seconds": 0.132757
     },
     {
       "label": "warm 2",
       "status": 200,
-      "seconds": 0.116662
+      "seconds": 0.130215
     }
   ],
   "edge": {
-    "repo": "cynthia/m3-fixture-1m-gate-edge-1791479643756",
-    "base": "45478a8531a2c565c71fe07301bd103595a2f85f",
-    "head": "5bedf24707cfd30ae26311205e1a3fea08579ea7",
-    "headParent": "d0dba0c6d2854cb78d99a2adcc2b63019d5fbd6a",
+    "repo": "cynthia/m3-fixture-1m-gate-edge-1791482034642",
+    "base": "d846ee27d73a1360d9b8d7a764e7ec2430f8920a",
+    "head": "46a8ffead6b83629c02ea4ae467375c08b4ec07e",
+    "headParent": "4a505020138fc0417ec0ee2f9e76baa058ea2576",
     "status": 200,
     "cache": "miss",
     "cost": "d1=1;rr=5;rw=0;art=5;do=0;r2a=0;r2b=0;q=0;sub=1;cache=miss",
@@ -290,27 +292,27 @@
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-022 cold p50 401 ms < 500 ms (min 361, max 796)",
+      "label": "VAL-DIFF-022 cold p50 494 ms < 500 ms (min 406, max 1490)",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "cold body lists every bench file: files=502 (expected 502) truncated=false statsOmitted=true",
+      "label": "cold body lists every bench file: files=502 (expected 502) truncated=false totalsComplete=true statsOmitted=true",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "cold cost within budget: art=55 <= treeReads 54 + blobReads 0 + 3, d1=1 <= 2",
+      "label": "cold cost within budget: art=56 <= treeReads 54 + blobReads 0 + 3, d1=1 <= 2",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-022 anonymous ?nocache=1 served normally (no bypass): 200 133 ms 108996 B cache=hit [d1=1;rr=1;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=28, refs;dur=7, diff;dur=5}",
+      "label": "VAL-DIFF-022 anonymous ?nocache=1 served normally (no bypass): 200 603 ms 109018 B cache=miss [d1=1;rr=1;rw=0;art=55;do=0;r2a=0;r2b=0;q=0;sub=1;cache=miss] {auth;dur=14, refs;dur=103, diff;dur=347}",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-022 bot ?nocache=1 served normally (no bypass): 200 182 ms 108996 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=77, refs;dur=5, diff;dur=4}",
+      "label": "VAL-DIFF-022 bot ?nocache=1 served normally (no bypass): 200 125 ms 109018 B cache=hit [d1=1;rr=8;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=21, refs;dur=13, diff;dur=3}",
       "detail": ""
     },
     {
@@ -320,27 +322,27 @@
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-008 ?order=path identical order: 200 121 ms 108996 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=32, refs;dur=6, diff;dur=3}",
+      "label": "VAL-DIFF-008 ?order=path identical order: 200 114 ms 109018 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=23, refs;dur=6, diff;dur=3}",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-021 wide pair: files=4580/25000 truncated=true reason=\"tree read budget exhausted (2000 reads)\" statsOmitted=true totals.files=4580 200 191 ms 1017436 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=25, refs;dur=12, diff;dur=8}",
+      "label": "VAL-DIFF-021 wide pair: files=4575/25000 truncated=true reason=\"tree read budget exhausted (2000 reads)\" totalsComplete=false statsOmitted=true totals.files=4575 200 8402 ms 1016349 B cache=miss [d1=1;rr=5;rw=0;art=2001;do=0;r2a=0;r2b=0;q=0;sub=1;cache=miss] {auth;dur=30, refs;dur=126, diff;dur=7738}",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-017 large/interleaved.txt (60000 lines): approximate=true +60000/-60000 (git +16000/-16000) 200 163 ms 559125 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=34, refs;dur=5, diff;dur=3}",
+      "label": "VAL-DIFF-017 large/interleaved.txt (60000 lines): approximate=true +60000/-60000 (git +16000/-16000) 200 173 ms 559125 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=29, refs;dur=9, diff;dur=4}",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-024 large/huge.txt (120000 lines, 2880000 B): +1/-1 (generator +1/-1) 200 128 ms 759 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=31, refs;dur=8, diff;dur=3}",
+      "label": "VAL-DIFF-024 large/huge.txt (120000 lines, 2880000 B): +1/-1 (generator +1/-1) 200 117 ms 759 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=20, refs;dur=6, diff;dur=3}",
       "detail": ""
     },
     {
       "ok": true,
-      "label": "VAL-DIFF-023 warm repeat is a cache hit with an identical body: hit -> hit 200 117 ms 108996 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=25, refs;dur=6, diff;dur=2}",
+      "label": "VAL-DIFF-023 warm repeat is a cache hit with an identical body: hit -> hit 200 130 ms 109018 B cache=hit [d1=1;rr=5;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=hit] {auth;dur=32, refs;dur=7, diff;dur=4}",
       "detail": ""
     },
     {
@@ -355,7 +357,7 @@
     },
     {
       "ok": true,
-      "label": "edge: create cynthia/m3-fixture-1m-gate-edge-1791479643756",
+      "label": "edge: create cynthia/m3-fixture-1m-gate-edge-1791482034642 (new, created by this run)",
       "detail": ""
     },
     {
@@ -365,7 +367,7 @@
     },
     {
       "ok": true,
-      "label": "edge: first-ever compare main...topic (base 45478a8 is not head 5bedf24's parent d0dba0c): art=5 <= treeReads 2 + blobReads 0 + 3, d1=1 <= 2 200 310 ms 673 B cache=miss [d1=1;rr=5;rw=0;art=5;do=0;r2a=0;r2b=0;q=0;sub=1;cache=miss] {auth;dur=27, refs;dur=156, diff;dur=45}",
+      "label": "edge: first-ever compare main...topic (base d846ee2 is not head 46a8ffe's parent 4a50502): art=5 <= treeReads 2 + blobReads 0 + 3, d1=1 <= 2 200 479 ms 695 B cache=miss [d1=1;rr=5;rw=0;art=5;do=0;r2a=0;r2b=0;q=0;sub=1;cache=miss] {auth;dur=23, refs;dur=316, diff;dur=49}",
       "detail": ""
     }
   ]

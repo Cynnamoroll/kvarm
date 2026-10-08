@@ -48,6 +48,8 @@ export interface FileDiff {
   totalDeletions: number;
   /** True if the middle-section diff was budget-fallback chunked. */
   approximate: boolean;
+  /** Hunks were cut at `maxLines` / `maxBytes`; the totals still cover the file. */
+  truncated?: true;
 }
 
 export interface DiffOptions {
@@ -60,6 +62,10 @@ export interface DiffOptions {
    * or removing it changes that line (default false).
    */
   eolAware?: boolean;
+  /** diffToHunks: max hunk lines materialized across all hunks (default unbounded). */
+  maxLines?: number;
+  /** diffToHunks: max line-text characters materialized across all hunks (default unbounded). */
+  maxBytes?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,9 +206,45 @@ function findPath(
   return (head ?? [snake.start]).concat(tail ?? [snake.finish]);
 }
 
+// ---------------------------------------------------------------------------
+// Edit scripts
+// ---------------------------------------------------------------------------
+
+const EQ = 0;
+const DEL = 1;
+const INS = 2;
+const OP_NAMES: readonly LineOp[] = ['eq', 'del', 'ins'];
+const DEFAULT_NODE_BUDGET = 400_000;
+
+/**
+ * An edit script as one byte per step. Steps are only ever appended one at a
+ * time or filled in runs, never spread into call arguments, so a file with
+ * millions of lines costs megabytes, not a stack overflow.
+ */
+class OpBuffer {
+  readonly codes: Uint8Array;
+  length = 0;
+
+  constructor(capacity: number) {
+    this.codes = new Uint8Array(capacity);
+  }
+
+  push(code: number): void {
+    this.codes[this.length++] = code;
+  }
+
+  fill(code: number, count: number): void {
+    this.codes.fill(code, this.length, this.length + count);
+    this.length += count;
+  }
+}
+
+function toLineOps(buf: OpBuffer): LineOp[] {
+  return Array.from({ length: buf.length }, (_, i) => OP_NAMES[buf.codes[i]!]!);
+}
+
 /** Expands snake endpoints into single steps. */
-function walkSnakes(a: readonly string[], b: readonly string[], path: Point[]): LineOp[] {
-  const ops: LineOp[] = [];
+function walkSnakes(a: readonly string[], b: readonly string[], path: Point[], out: OpBuffer): void {
   for (let i = 0; i + 1 < path.length; i++) {
     let x1 = path[i]!.x;
     let y1 = path[i]!.y;
@@ -210,24 +252,49 @@ function walkSnakes(a: readonly string[], b: readonly string[], path: Point[]): 
     const y2 = path[i + 1]!.y;
 
     while (x1 < x2 && y1 < y2 && a[x1] === b[y1]) {
-      ops.push('eq');
+      out.push(EQ);
       x1++;
       y1++;
     }
     if (x2 - x1 > y2 - y1) {
-      ops.push('del');
+      out.push(DEL);
       x1++;
     } else if (y2 - y1 > x2 - x1) {
-      ops.push('ins');
+      out.push(INS);
       y1++;
     }
     while (x1 < x2 && y1 < y2 && a[x1] === b[y1]) {
-      ops.push('eq');
+      out.push(EQ);
       x1++;
       y1++;
     }
   }
-  return ops;
+}
+
+/**
+ * Appends the optimal edit script for `box` (absolute line coordinates into
+ * `a` and `b`). Returns false, having appended nothing, when the budget ran out.
+ */
+function diffBox(a: readonly string[], b: readonly string[], box: Box, nodeBudget: number, out: OpBuffer): boolean {
+  const n = box.right - box.left;
+  const m = box.bottom - box.top;
+  if (n === 0) {
+    out.fill(INS, m);
+    return true;
+  }
+  if (m === 0) {
+    out.fill(DEL, n);
+    return true;
+  }
+  let path: Point[] | null;
+  try {
+    path = findPath(a, b, box, new Budget(nodeBudget));
+  } catch (err) {
+    if (err instanceof DiffBudgetExceeded) return false;
+    throw err;
+  }
+  walkSnakes(a, b, path ?? [{ x: box.left, y: box.top }, { x: box.right, y: box.bottom }], out);
+  return true;
 }
 
 /**
@@ -237,21 +304,10 @@ function walkSnakes(a: readonly string[], b: readonly string[], path: Point[]): 
 export function diffLineOps(
   a: readonly string[],
   b: readonly string[],
-  nodeBudget = 400_000,
+  nodeBudget = DEFAULT_NODE_BUDGET,
 ): LineOp[] | null {
-  const n = a.length;
-  const m = b.length;
-  if (n === 0 && m === 0) return [];
-  if (n === 0) return Array.from({ length: m }, () => 'ins' as LineOp);
-  if (m === 0) return Array.from({ length: n }, () => 'del' as LineOp);
-  try {
-    const budget = new Budget(nodeBudget);
-    const path = findPath(a, b, { left: 0, top: 0, right: n, bottom: m }, budget);
-    return walkSnakes(a, b, path ?? [{ x: 0, y: 0 }, { x: n, y: m }]);
-  } catch (err) {
-    if (err instanceof DiffBudgetExceeded) return null;
-    throw err;
-  }
+  const out = new OpBuffer(a.length + b.length);
+  return diffBox(a, b, { left: 0, top: 0, right: a.length, bottom: b.length }, nodeBudget, out) ? toLineOps(out) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,152 +342,168 @@ function stripMark(line: string): { text: string; noEol: boolean } {
     : { text: line, noEol: false };
 }
 
-export function diffOps(
-  oldText: string,
-  newText: string,
-  opts: DiffOptions = {},
-): { ops: LineOp[]; approximate: boolean } {
-  const eol = opts.eolAware === true;
-  return diffLineArrays(fileLines(oldText, eol), fileLines(newText, eol), opts.nodeBudget ?? 400_000);
-}
-
-function diffLineArrays(
-  a: readonly string[],
-  b: readonly string[],
-  budget: number,
-): { ops: LineOp[]; approximate: boolean } {
-  // Trim the common prefix and suffix (cheap, and keeps big near-identical
-  // files far inside the budget).
+/**
+ * The edit script for two line arrays. The common prefix and suffix are
+ * trimmed first (cheap, and keeps big near-identical files far inside the
+ * budget); over budget, the middle becomes a replace block (all deletions,
+ * then all insertions) and `approximate` is set.
+ */
+function diffCodes(a: readonly string[], b: readonly string[], budget: number): { ops: OpBuffer; approximate: boolean } {
   let p = 0;
   while (p < a.length && p < b.length && a[p] === b[p]) p++;
   let s = 0;
   while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) {
     s++;
   }
-
-  const midA = a.slice(p, a.length - s);
-  const midB = b.slice(p, b.length - s);
-  const mid = diffLineOps(midA, midB, budget);
-  if (mid !== null) {
-    const ops: LineOp[] = Array.from({ length: p }, () => 'eq' as LineOp);
-    ops.push(...mid);
-    ops.push(...Array.from({ length: s }, () => 'eq' as LineOp));
-    return { ops, approximate: false };
+  const out = new OpBuffer(a.length + b.length - p - s);
+  out.fill(EQ, p);
+  const exact = diffBox(a, b, { left: p, top: p, right: a.length - s, bottom: b.length - s }, budget, out);
+  if (!exact) {
+    out.length = p;
+    out.fill(DEL, a.length - p - s);
+    out.fill(INS, b.length - p - s);
   }
-
-  return { ops: fallbackOps(a, b), approximate: true };
+  out.fill(EQ, s);
+  return { ops: out, approximate: !exact };
 }
 
-/** Over-budget fallback: common prefix/suffix + chunked replace middle. */
-function fallbackOps(a: readonly string[], b: readonly string[]): LineOp[] {
-  const ops: LineOp[] = [];
-  let p = 0;
-  while (p < a.length && p < b.length && a[p] === b[p]) {
-    ops.push('eq');
-    p++;
-  }
-  let s = 0;
-  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) {
-    s++;
-  }
-  const midA = a.length - p - s;
-  const midB = b.length - p - s;
-  const CHUNK = 1000;
-  for (let i = 0; i < midA; i += CHUNK) {
-    ops.push(...Array.from({ length: Math.min(CHUNK, midA - i) }, () => 'del' as LineOp));
-  }
-  for (let i = 0; i < midB; i += CHUNK) {
-    ops.push(...Array.from({ length: Math.min(CHUNK, midB - i) }, () => 'ins' as LineOp));
-  }
-  ops.push(...Array.from({ length: s }, () => 'eq' as LineOp));
-  return ops;
-}
-
-export function diffToHunks(oldText: string, newText: string, opts: DiffOptions = {}): FileDiff {
-  const context = opts.context ?? 3;
+function textDiff(oldText: string, newText: string, opts: DiffOptions) {
   const eol = opts.eolAware === true;
   const a = fileLines(oldText, eol);
   const b = fileLines(newText, eol);
-  const { ops, approximate } = diffLineArrays(a, b, opts.nodeBudget ?? 400_000);
+  return { a, b, ...diffCodes(a, b, opts.nodeBudget ?? DEFAULT_NODE_BUDGET) };
+}
 
-  // Annotate ops with line numbers and text.
-  const lines: DiffLine[] = [];
-  let oldNo = 0;
-  let newNo = 0;
-  let i = 0;
-  let j = 0;
+export function diffOps(
+  oldText: string,
+  newText: string,
+  opts: DiffOptions = {},
+): { ops: LineOp[]; approximate: boolean } {
+  const { ops, approximate } = textDiff(oldText, newText, opts);
+  return { ops: toLineOps(ops), approximate };
+}
+
+/** Line counts only (what `git diff --numstat` reports), without materializing any line. */
+export function diffStat(
+  oldText: string,
+  newText: string,
+  opts: DiffOptions = {},
+): { additions: number; deletions: number; approximate: boolean } {
+  const { ops, approximate } = textDiff(oldText, newText, opts);
+  let additions = 0;
+  let deletions = 0;
+  for (let k = 0; k < ops.length; k++) {
+    const c = ops.codes[k];
+    if (c === INS) additions++;
+    else if (c === DEL) deletions++;
+  }
+  return { additions, deletions, approximate };
+}
+
+/**
+ * git-style hunks. Totals always cover the whole file; with `maxLines` /
+ * `maxBytes` only the lines that fit are materialized (same cut as
+ * `limitHunks` over the full output) and `truncated` is set.
+ */
+export function diffToHunks(oldText: string, newText: string, opts: DiffOptions = {}): FileDiff {
+  const context = opts.context ?? 3;
+  const eol = opts.eolAware === true;
+  const maxLines = opts.maxLines ?? Infinity;
+  const maxBytes = opts.maxBytes ?? Infinity;
+  const { a, b, ops, approximate } = textDiff(oldText, newText, opts);
+  const codes = ops.codes;
+  const len = ops.length;
+
+  // Pass 1: totals, and groups of changed steps bridged when within
+  // context*2+1 of each other, as [first, last] pairs.
   let totalAdditions = 0;
   let totalDeletions = 0;
-  const line = (type: LineOp, raw: string, nums: { oldNo?: number; newNo?: number }): DiffLine => {
-    const { text, noEol } = eol ? stripMark(raw) : { text: raw, noEol: false };
-    const out: DiffLine = { type, text, ...nums };
-    if (noEol) out.noEol = true;
-    return out;
-  };
-  for (const op of ops) {
-    if (op === 'eq') {
-      oldNo++;
-      newNo++;
-      lines.push(line('eq', a[i] ?? '', { oldNo, newNo }));
-      i++;
-      j++;
-    } else if (op === 'del') {
-      oldNo++;
-      totalDeletions++;
-      lines.push(line('del', a[i] ?? '', { oldNo }));
-      i++;
-    } else {
-      newNo++;
-      totalAdditions++;
-      lines.push(line('ins', b[j] ?? '', { newNo }));
-      j++;
+  const groups: number[] = [];
+  let first = -1;
+  let last = -1;
+  for (let k = 0; k < len; k++) {
+    const c = codes[k];
+    if (c === EQ) continue;
+    if (c === INS) totalAdditions++;
+    else totalDeletions++;
+    if (first === -1) {
+      first = k;
+    } else if (k - last > context * 2 + 1) {
+      groups.push(first, last);
+      first = k;
     }
+    last = k;
   }
+  if (first !== -1) groups.push(first, last);
 
-  // Group changed lines (bridged when within context*2+1 of each other)
-  // into git-style hunks.
-  const changedIdx: number[] = [];
-  for (let idx = 0; idx < lines.length; idx++) {
-    if (lines[idx]!.type !== 'eq') changedIdx.push(idx);
-  }
+  // Pass 2: one forward walk; groups never overlap, so the old/new line
+  // counters only move ahead.
   const hunks: Hunk[] = [];
-  let ci = 0;
-  while (ci < changedIdx.length) {
-    const group: number[] = [changedIdx[ci]!];
-    let last = changedIdx[ci]!;
-    let next = ci + 1;
-    while (next < changedIdx.length && changedIdx[next]! - last <= context * 2 + 1) {
-      last = changedIdx[next]!;
-      group.push(last);
-      next++;
+  let truncated = false;
+  let usedLines = 0;
+  let usedBytes = 0;
+  let k = 0;
+  let i = 0;
+  let j = 0;
+  for (let g = 0; g < groups.length && !truncated; g += 2) {
+    const start = Math.max(0, groups[g]! - context);
+    const end = Math.min(len, groups[g + 1]! + context + 1);
+    for (; k < start; k++) {
+      if (codes[k] !== INS) i++;
+      if (codes[k] !== DEL) j++;
     }
-    ci = next;
-
-    const start = Math.max(0, group[0]! - context);
-    const end = Math.min(lines.length, last + context + 1);
-    const slice = lines.slice(start, end);
-
-    const oldCount = slice.filter((l) => l.type === 'eq' || l.type === 'del').length;
-    const newCount = slice.filter((l) => l.type === 'eq' || l.type === 'ins').length;
-
+    let oldCount = 0;
+    let newCount = 0;
+    for (let q = start; q < end; q++) {
+      if (codes[q] !== INS) oldCount++;
+      if (codes[q] !== DEL) newCount++;
+    }
     // Git hunk-start conventions: the first line's number on each side, or
     // the line *before* the hunk when that side has no lines at all.
-    const firstOld = slice.find((l) => l.oldNo !== undefined)?.oldNo;
-    const firstNew = slice.find((l) => l.newNo !== undefined)?.newNo;
-    const prevOld = start > 0 ? lines[start - 1]!.oldNo : undefined;
-    const prevNew = start > 0 ? lines[start - 1]!.newNo : undefined;
+    const prev = start > 0 ? codes[start - 1] : undefined;
+    const oldStart = oldCount > 0 ? i + 1 : prev !== undefined && prev !== INS ? i : 0;
+    const newStart = newCount > 0 ? j + 1 : prev !== undefined && prev !== DEL ? j : 0;
 
+    const lines: DiffLine[] = [];
+    let keptOld = 0;
+    let keptNew = 0;
+    for (; k < end; k++) {
+      const c = codes[k];
+      const raw = (c === INS ? b[j] : a[i]) ?? '';
+      const { text, noEol } = eol ? stripMark(raw) : { text: raw, noEol: false };
+      if (usedLines + 1 > maxLines || usedBytes + text.length > maxBytes) {
+        truncated = true;
+        break;
+      }
+      usedLines++;
+      usedBytes += text.length;
+      const line: DiffLine =
+        c === EQ ? { type: 'eq', text, oldNo: i + 1, newNo: j + 1 } : c === DEL ? { type: 'del', text, oldNo: i + 1 } : { type: 'ins', text, newNo: j + 1 };
+      if (noEol) line.noEol = true;
+      lines.push(line);
+      if (c !== INS) {
+        i++;
+        keptOld++;
+      }
+      if (c !== DEL) {
+        j++;
+        keptNew++;
+      }
+    }
+    if (lines.length === 0) break;
     hunks.push({
-      oldStart: oldCount > 0 ? (firstOld ?? 1) : (prevOld ?? 0),
-      oldLines: oldCount,
-      newStart: newCount > 0 ? (firstNew ?? 1) : (prevNew ?? 0),
-      newLines: newCount,
-      lines: slice,
+      oldStart,
+      oldLines: truncated ? keptOld : oldCount,
+      newStart,
+      newLines: truncated ? keptNew : newCount,
+      lines,
       approximate: approximate || undefined,
     });
   }
 
-  return { hunks, totalAdditions, totalDeletions, approximate };
+  const out: FileDiff = { hunks, totalAdditions, totalDeletions, approximate };
+  if (truncated) out.truncated = true;
+  return out;
 }
 
 /** git's heuristic (xdiff `buffer_is_binary`): a NUL byte in the first 8000 bytes. */

@@ -20,9 +20,9 @@ import {
   readPktLines,
   type TreeEntry,
 } from '@forge/gitops';
-import { getGitToken } from '../src/artifacts/tokens';
+import { getGitToken, purgeGitTokens } from '../src/artifacts/tokens';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { bumpRefGeneration, compareKeys } from '../src/cache/compare';
+import { bumpRefGeneration, compareKeys, refGeneration } from '../src/cache/compare';
 import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { COMPARE_BUDGETS } from '../src/services/compare';
 import worker from '../src/index';
@@ -328,6 +328,7 @@ describe('compare by branch names', () => {
     expect(r.json.base).toEqual({ ref: 'main', sha: fx.main.sha, tree: fx.main.tree });
     expect(r.json.head).toEqual({ ref: 'feature', sha: fx.feature.sha, tree: fx.feature.tree });
     expect(r.json.truncated).toBe(false);
+    expect(r.json.totalsComplete).toBe(true);
     expect(r.json.truncatedReason).toBeUndefined();
     expect(r.json.statsOmitted).toBeUndefined();
     expect(r.json.nextCursor).toBeUndefined();
@@ -408,6 +409,7 @@ describe('compare by branch names', () => {
     expect(r.json.files).toEqual([]);
     expect(r.json.totals).toEqual({ files: 0, additions: 0, deletions: 0 });
     expect(r.json.truncated).toBe(false);
+    expect(r.json.totalsComplete).toBe(true);
   });
 });
 
@@ -537,6 +539,86 @@ describe('cost, cache and the admin bypass', () => {
     expect(hit.text).toBe(miss.text);
   });
 
+  it('reads no warm cache entry of any kind under ?nocache=1: commit, numstat, risk, ref, compare and file diff', async () => {
+    const warm = await seedRepo('nocache-warm', 'public');
+    const pkgOld = '{"dependencies":{"hono":"^4"}}\n';
+    const pkgNew = '{"dependencies":{"hono":"^4","left-pad":"1"}}\n';
+    const b = await commit(warm, { 'a.txt': 'one\ntwo\n', 'package.json': pkgOld });
+    const h = await commit(warm, { 'a.txt': 'one\nTWO\nthree\n', 'package.json': pkgNew }, [b.sha]);
+    warm.refs.set('refs/heads/main', b.sha);
+    warm.refs.set('refs/heads/topic', h.sha);
+    const path = api('nocache-warm', 'compare/main...topic');
+    const normal = await call(path);
+    expect(normal.cache).toBe('miss');
+    const real = files(normal);
+    const aTxt = real.find((f) => f.path === 'a.txt')!;
+    expect([aTxt.additions, aTxt.deletions]).toEqual([2, 1]);
+
+    // Poison every warm entry a bypass could read; a read would surface in the response.
+    const repoId = repoIds['nocache-warm']!;
+    const poisonCommit = JSON.stringify({ tree: EMPTY_TREE, parents: [] });
+    const put = (k: Request, body: string) => caches.default.put(k, new Response(body, { headers: { 'cache-control': 'max-age=3600' } }));
+    await put(compareKeys.commit(repoId, b.sha), poisonCommit);
+    await put(compareKeys.commit(repoId, h.sha), poisonCommit);
+    await put(compareKeys.numstat(aTxt.oldHash, aTxt.newHash), JSON.stringify({ additions: 999, deletions: 999 }));
+    await put(compareKeys.risk(b.tree, h.tree), JSON.stringify({ files: real.map(() => ({ score: 99, tags: ['poison'] })), rating: { score: 99, level: 'high', reasons: ['poison'] } }));
+    await put(compareKeys.filediff(aTxt.oldHash, aTxt.newHash), JSON.stringify({ hunks: [], approximate: false, totalAdditions: 999, totalDeletions: 999 }));
+    const gen = await refGeneration(repoId);
+    await put(compareKeys.ref(repoId, gen, 'main'), JSON.stringify({ sha: h.sha, tree: h.tree }));
+
+    const mark = warm.calls.length;
+    const bypass = await call(`${path}?nocache=1`, tok.admin);
+    expect(bypass.status, bypass.text).toBe(200);
+    expect(bypass.cache).toBe('bypass');
+    expect(bypass.json.base).toEqual({ ref: 'main', sha: b.sha, tree: b.tree });
+    expect(bypass.json.head).toEqual({ ref: 'topic', sha: h.sha, tree: h.tree });
+    expect(bypass.json.files).toEqual(normal.json.files);
+    expect(bypass.json.rating).toEqual(normal.json.rating);
+    const since = warm.calls.slice(mark);
+    expect(since).toContain(`log:${h.sha}`);
+    // Every changed blob is read again: no numstat entry served the line counts.
+    expect(since.filter((c) => c.startsWith('readBlob')).length).toBe(4);
+    expect(bypass.json.blobReads).toBe(4);
+
+    const fileBypass = await call(api('nocache-warm', 'compare/main...topic/file?path=a.txt&nocache=1'), tok.admin);
+    expect(fileBypass.cache).toBe('bypass');
+    expect(fileBypass.json).toMatchObject({ totalAdditions: 2, totalDeletions: 1 });
+
+    const commitBypass = await call(api('nocache-warm', `commits/${h.sha}/diff?nocache=1`), tok.admin);
+    expect(commitBypass.cache).toBe('bypass');
+    expect(commitBypass.json.base).toEqual({ ref: b.sha, sha: b.sha, tree: b.tree });
+    expect(commitBypass.json.files).toEqual(normal.json.files);
+  });
+
+  it('writes no cache entry of any kind under ?nocache=1', async () => {
+    const clean = await seedRepo('nocache-clean', 'public');
+    const b = await commit(clean, { 'a.txt': 'alpha\n', 'package.json': '{"dependencies":{}}\n' });
+    const h = await commit(clean, { 'a.txt': 'alpha\nbeta\n', 'package.json': '{"dependencies":{"x":"1"}}\n' }, [b.sha]);
+    clean.refs.set('refs/heads/main', b.sha);
+    clean.refs.set('refs/heads/topic', h.sha);
+    const repoId = repoIds['nocache-clean']!;
+    const blobs = async (text: string) => (await buildBlob(enc(text))).hash;
+    const aOld = await blobs('alpha\n');
+    const aNew = await blobs('alpha\nbeta\n');
+    const gen = await refGeneration(repoId);
+    const keys = () => [
+      compareKeys.treediff(b.tree, h.tree),
+      compareKeys.risk(b.tree, h.tree),
+      compareKeys.commit(repoId, b.sha),
+      compareKeys.commit(repoId, h.sha),
+      compareKeys.numstat(aOld, aNew),
+      compareKeys.filediff(aOld, aNew),
+      compareKeys.ref(repoId, gen, 'main'),
+      compareKeys.ref(repoId, gen, 'topic'),
+    ];
+    for (const p of ['compare/main...topic?nocache=1', 'compare/main...topic/file?path=a.txt&nocache=1', `commits/${h.sha}/diff?nocache=1`]) {
+      const r = await call(api('nocache-clean', p), tok.admin);
+      expect(r.status, p).toBe(200);
+      expect(r.cache, p).toBe('bypass');
+    }
+    for (const k of keys()) expect(await caches.default.match(k), k.url).toBeUndefined();
+  });
+
   it('keeps a cold bypass compare within art <= treeReads + blobReads + 3 and d1 <= 2', async () => {
     await call(api('fixture', 'compare/main...feature'));
     const r = await call(api('fixture', 'compare/main...feature?nocache=1'), tok.admin);
@@ -641,6 +723,79 @@ describe('cost, cache and the admin bypass', () => {
     expect(r.cost.art).toBeLessThanOrEqual((r.json.treeReads as number) + (r.json.blobReads as number) + 3);
   });
 
+  describe('first-ever compare with neither a read nor a write token cached', () => {
+    const overhead = (r: Reply) => r.cost.art - (r.json.treeReads as number) - (r.json.blobReads as number);
+    const commitCalls = (repo: FakeRepo) => repo.calls.filter((c) => c.startsWith('log') || c.startsWith('readCommit'));
+
+    async function noTokens(name: string): Promise<FakeRepo> {
+      const repo = await seedRepo(name, 'public');
+      await purgeGitTokens(`${OWNER}--${name}`);
+      return repo;
+    }
+
+    it('costs exactly +3 for a base on the head first-parent chain', async () => {
+      const chain = await noTokens('notoken-chain');
+      const one = await commit(chain, { 'c.txt': '1\n' });
+      const two = await commit(chain, { 'c.txt': '2\n' }, [one.sha]);
+      const three = await commit(chain, { 'c.txt': '3\n' }, [two.sha]);
+      chain.refs.set('refs/heads/main', one.sha);
+      chain.refs.set('refs/heads/tip', three.sha);
+      const r = await call(api('notoken-chain', 'compare/main...tip'));
+      expect(r.status).toBe(200);
+      expect(chain.calls).toContain('createToken');
+      expect(commitCalls(chain)).toEqual([`log:${three.sha}`]);
+      expect(r.cost.art).toBe(1 + chain.calls.length);
+      expect(overhead(r)).toBe(3);
+      expect(r.cost.d1).toBeLessThanOrEqual(2);
+
+      // A bypass recomputes commits too, yet the token minted above keeps it within +3.
+      await purgeGitTokens(`${OWNER}--notoken-chain`);
+      const mark = chain.calls.length;
+      const bypass = await call(api('notoken-chain', 'compare/main...tip?nocache=1'), tok.admin);
+      expect(bypass.cache).toBe('bypass');
+      expect(chain.calls.slice(mark)).toContain('createToken');
+      expect(overhead(bypass)).toBeLessThanOrEqual(3);
+    });
+
+    it('costs at most +4 only for a diverged base, and +3 again once a token is cached', async () => {
+      const apart = await noTokens('notoken-diverged');
+      const one = await commit(apart, { 'v.txt': '1\n' });
+      const two = await commit(apart, { 'v.txt': '2\n' }, [one.sha]);
+      const three = await commit(apart, { 'v.txt': '3\n' }, [one.sha]);
+      apart.refs.set('refs/heads/main', two.sha);
+      apart.refs.set('refs/heads/side', three.sha);
+      const r = await call(api('notoken-diverged', 'compare/main...side'));
+      expect(r.status).toBe(200);
+      expect((r.json.base as { sha: string }).sha).toBe(two.sha);
+      expect(apart.calls).toContain('createToken');
+      expect(commitCalls(apart).sort()).toEqual([`log:${three.sha}`, `readCommit:${two.sha}`].sort());
+      expect(r.cost.art).toBe(1 + apart.calls.length);
+      expect(overhead(r)).toBe(4);
+      expect(r.cost.d1).toBeLessThanOrEqual(2);
+
+      // The same off-chain resolution with the read token now cached is back within +3.
+      const mark = apart.calls.length;
+      const again = await call(api('notoken-diverged', 'compare/main...side?nocache=1'), tok.admin);
+      expect(again.cache).toBe('bypass');
+      expect(apart.calls.slice(mark)).not.toContain('createToken');
+      expect(overhead(again)).toBeLessThanOrEqual(3);
+    });
+
+    it('costs at most +4 for an ancestor beyond the 50-entry head log', async () => {
+      const long = await noTokens('notoken-deep');
+      let prev = await commit(long, { 'l.txt': '0\n' });
+      const first = prev;
+      for (let i = 1; i <= 55; i++) prev = await commit(long, { 'l.txt': `${i}\n` }, [prev.sha]);
+      long.refs.set('refs/heads/main', first.sha);
+      long.refs.set('refs/heads/tip', prev.sha);
+      const r = await call(api('notoken-deep', 'compare/main...tip'));
+      expect(r.status).toBe(200);
+      expect((r.json.base as { sha: string }).sha).toBe(first.sha);
+      expect(commitCalls(long).sort()).toEqual([`log:${prev.sha}`, `readCommit:${first.sha}`].sort());
+      expect(overhead(r)).toBe(4);
+    });
+  });
+
   it('reports treeReads and blobReads that match the fake binding and the meter', async () => {
     const counted = await seedRepo('counted', 'public');
     const b = await commit(counted, {
@@ -675,13 +830,13 @@ describe('cost, cache and the admin bypass', () => {
     expect(counted.calls).toContain('createToken');
     expect(first.cost.art).toBeLessThanOrEqual((first.json.treeReads as number) + (first.json.blobReads as number) + 3);
 
-    // Bypass with line counts cached: only the risk content reads remain
-    // (package.json and the modified test file, both sides each).
+    // A bypass reads no line-count entry, so it reads every changed blob again
+    // (risk still reuses those texts).
     const mark = counted.calls.length;
     const bypass = await call(api('counted', 'compare/main...topic?nocache=1'), tok.admin);
     expect(bypass.cache).toBe('bypass');
     expect(bypass.json.blobReads).toBe(reads(mark, 'readBlob'));
-    expect(bypass.json.blobReads).toBe(4);
+    expect(bypass.json.blobReads).toBe(7);
     expect(bypass.cost.art).toBe(1 + (counted.calls.length - mark));
     expect(bypass.cost.art).toBeLessThanOrEqual((bypass.json.treeReads as number) + (bypass.json.blobReads as number) + 3);
     expect(bypass.json.files).toEqual(first.json.files);
@@ -728,6 +883,7 @@ describe('budgets and truncation', () => {
     expect(r.status).toBe(200);
     expect(r.json.statsOmitted).toBe(true);
     expect(r.json.truncated).toBe(false);
+    expect(r.json.totalsComplete).toBe(true);
     expect(files(r).length).toBe(n);
     expect(files(r).every((f) => f.additions === undefined && f.deletions === undefined)).toBe(true);
     expect((r.json.totals as { files: number }).files).toBe(n);
@@ -758,6 +914,30 @@ describe('budgets and truncation', () => {
     expect(files(r).length).toBeLessThan(dirs);
     expect(r.json.treeReads).toBe(COMPARE_BUDGETS.maxTreeReads);
     expect(r.cost.art).toBeLessThanOrEqual(COMPARE_BUDGETS.maxTreeReads + 4);
+    // Totals are a labeled lower bound over exactly the discovered subset.
+    expect(r.json.totalsComplete).toBe(false);
+    expect(r.json.totals).toEqual({ files: files(r).length, additions: null, deletions: null });
+
+    // Pages stitch to exactly the unpaginated subset and repeat its totals.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = await call(api('widetree', `compare/main...wide?limit=400${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
+      expect(page.status).toBe(200);
+      expect(page.json.totals).toEqual(r.json.totals);
+      expect(page.json.totalsComplete).toBe(false);
+      expect(page.json.truncated).toBe(true);
+      seen.push(...files(page).map((f) => f.path));
+      cursor = page.json.nextCursor as string | undefined;
+      pages++;
+    } while (cursor && pages < 20);
+    expect(seen).toEqual(files(r).map((f) => f.path));
+
+    // A budget-truncated body is deterministic, so it is cached with its label.
+    const hit = await call(api('widetree', 'compare/main...wide'));
+    expect(hit.cache).toBe('hit');
+    expect(hit.text).toBe(r.text);
   });
 
   it('reports a failed tree read as truncated and does not cache it', async () => {
@@ -772,11 +952,15 @@ describe('budgets and truncation', () => {
     expect(r.status).toBe(200);
     expect(r.json.truncated).toBe(true);
     expect(r.json.truncatedReason).toMatch(/tree read failed/);
+    expect(r.json.totalsComplete).toBe(false);
+    expect((r.json.totals as { files: number }).files).toBe(1);
     expect(files(r).map((f) => f.path)).toEqual(['ok.txt']);
+    expect(await caches.default.match(compareKeys.risk(b.tree, h.tree))).toBeUndefined();
     flaky.failTrees.clear();
     const again = await call(api('flaky', 'compare/main...next'));
     expect(again.cache).toBe('miss');
     expect(again.json.truncated).toBe(false);
+    expect(again.json.totalsComplete).toBe(true);
     expect(files(again).map((f) => f.path)).toEqual(['ok.txt', 'sub/x.txt']);
   });
 });
@@ -864,6 +1048,63 @@ describe('per-file diff', () => {
     expect(lines).toBeLessThanOrEqual(COMPARE_BUDGETS.fileMaxLines);
     expect(r.text.length).toBeLessThan(10 * 1024 * 1024);
     if (r.json.approximate !== true) expect(r.json.truncated).toBe(true);
+  });
+});
+
+describe('200,000-line files', () => {
+  const N = 200_000;
+  // 400,000 and 1,200,000 bytes: both under the 4 MiB per-side cap.
+  const added = 'x\n'.repeat(N);
+  const removed = Array.from({ length: N }, (_, i) => `r${i}\n`).join('');
+  const sides = { root: { sha: '', tree: '' }, next: { sha: '', tree: '' } };
+
+  beforeAll(async () => {
+    const repo = await seedRepo('lines', 'public');
+    sides.root = await commit(repo, { 'gone.txt': removed, 'keep.txt': 'k\n' });
+    sides.next = await commit(repo, { 'grown.txt': added, 'keep.txt': 'k\n' }, [sides.root.sha]);
+    repo.refs.set('refs/heads/main', sides.root.sha);
+    repo.refs.set('refs/heads/next', sides.next.sha);
+  });
+
+  it('counts an added and a removed 200,000-line file in the compare list', async () => {
+    const r = await call(api('lines', 'compare/main...next'));
+    expect(r.status, r.text.slice(0, 300)).toBe(200);
+    expect(files(r).map((f) => [f.path, f.status, f.additions, f.deletions])).toEqual([
+      ['gone.txt', 'removed', 0, N],
+      ['grown.txt', 'added', N, 0],
+    ]);
+    expect(r.json.totals).toEqual({ files: 2, additions: N, deletions: N });
+    expect(r.json.totalsComplete).toBe(true);
+    const bypass = await call(api('lines', 'compare/main...next?nocache=1'), tok.admin);
+    expect(bypass.status).toBe(200);
+    expect(bypass.json.files).toEqual(r.json.files);
+  });
+
+  it('lists the root commit with a 200,000-line file', async () => {
+    const r = await call(api('lines', `commits/${sides.root.sha}/diff`));
+    expect(r.status, r.text.slice(0, 300)).toBe(200);
+    expect(files(r).map((f) => [f.path, f.status, f.additions, f.deletions])).toEqual([
+      ['gone.txt', 'added', N, 0],
+      ['keep.txt', 'added', 1, 0],
+    ]);
+  });
+
+  it('returns bounded file diffs whose totals cover the whole file', async () => {
+    for (const [path, adds, dels] of [
+      ['grown.txt', N, 0],
+      ['gone.txt', 0, N],
+    ] as const) {
+      const r = await call(api('lines', `compare/main...next/file?path=${path}`));
+      expect(r.status, `${path}: ${r.text.slice(0, 300)}`).toBe(200);
+      expect(r.json).toMatchObject({ path, totalAdditions: adds, totalDeletions: dels, truncated: true, approximate: false });
+      const hunks = r.json.hunks as Array<{ lines: unknown[] }>;
+      expect(hunks.reduce((s, h) => s + h.lines.length, 0)).toBe(COMPARE_BUDGETS.fileMaxLines);
+      expect(r.text.length).toBeLessThan(2 * 1024 * 1024);
+    }
+    const bypass = await call(api('lines', `compare/${sides.root.sha}...next/file?path=gone.txt&nocache=1`), tok.admin);
+    expect(bypass.status).toBe(200);
+    expect(bypass.cache).toBe('bypass');
+    expect(bypass.json).toMatchObject({ totalAdditions: 0, totalDeletions: N, truncated: true });
   });
 });
 

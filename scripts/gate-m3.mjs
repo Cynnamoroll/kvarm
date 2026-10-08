@@ -6,20 +6,25 @@
  *
  *   cold    10 sequential `GET compare/bench-base...bench-head?nocache=1` with
  *           the admin PAT, timed with `curl -w %{time_total} --max-time 30`;
- *           pass when all are 200 + `x-forge-cache: bypass` and p50 < 500 ms
+ *           pass when all are 200 + `x-forge-cache: bypass` and p50 < 500 ms.
+ *           The bypass reads no compare cache entry (body, risk, ref, commit
+ *           or line counts), so every run is a full cold computation
  *   spot    the same URL anonymously and as FORGE_PAT_BOT: served normally,
  *           never `bypass`
  *   order   files are path-ascending and `?order=path` is identical
- *   wide    `compare/wide-base...wide-head`: complete, or truncated with a
- *           reason; statsOmitted with no per-file stats
+ *   wide    `compare/wide-base...wide-head`: complete (totalsComplete true),
+ *           or truncated with a reason and totalsComplete false (totals cover
+ *           the listed subset); statsOmitted with no per-file stats
  *   files   the ~60k-line interleaved file (approximate, < 30 s, < 10 MB) and
  *           the largest file (< 10 s, < 1 MB, totals = generator record)
  *   warm    one normal compare issued twice: the second is a cache hit with an
  *           identical body
  *   sweep   every response above is 2xx within the 30 s client timeout
  *   edge    fresh repo m3-fixture-1m-gate-edge-<ts>: push main and a diverged
- *           topic, then the very first request is the compare, which must stay
- *           within art <= treeReads + blobReads + 3 and d1 <= 2 (deleted after)
+ *           topic, then the very first request is the compare. The push warmed
+ *           the write token, so the +4 cold off-chain/no-token exception does
+ *           not apply: art <= treeReads + blobReads + 3 and d1 <= 2. Only the
+ *           repo created by this run is deleted (scripts/lib/fixture-repo.mjs)
  *
  * Usage (from the repo root, after `node scripts/fixture-1m.mjs`):
  *   set -a; . apps/platform/.dev.vars.validation; set +a
@@ -35,6 +40,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
@@ -141,12 +147,12 @@ function coldGate() {
     maxSeconds: Math.max(...times),
   };
   const first = runs[0]?.body ?? {};
-  summary.cold.body = { files: first.files?.length, truncated: first.truncated, statsOmitted: first.statsOmitted, treeReads: first.treeReads, blobReads: first.blobReads };
+  summary.cold.body = { files: first.files?.length, truncated: first.truncated, totalsComplete: first.totalsComplete, statsOmitted: first.statsOmitted, treeReads: first.treeReads, blobReads: first.blobReads };
   check(`VAL-DIFF-022 ${RUNS} cold compares all 200 + x-forge-cache: bypass`, runs.every((r) => r.status === 200 && r.cache === 'bypass'));
   check(`VAL-DIFF-022 cold p50 ${(p50 * 1000).toFixed(0)} ms < 500 ms (min ${(Math.min(...times) * 1000).toFixed(0)}, max ${(Math.max(...times) * 1000).toFixed(0)})`, p50 < 0.5);
   check(
-    `cold body lists every bench file: files=${first.files?.length} (expected ${expected.bench.files}) truncated=${first.truncated} statsOmitted=${first.statsOmitted}`,
-    first.files?.length === expected.bench.files && first.truncated === false && first.statsOmitted === true,
+    `cold body lists every bench file: files=${first.files?.length} (expected ${expected.bench.files}) truncated=${first.truncated} totalsComplete=${first.totalsComplete} statsOmitted=${first.statsOmitted}`,
+    first.files?.length === expected.bench.files && first.truncated === false && first.totalsComplete === true && first.statsOmitted === true,
   );
   const cost = costOf(runs[0]?.cost);
   check(`cold cost within budget: art=${cost.art} <= treeReads ${first.treeReads} + blobReads ${first.blobReads} + 3, d1=${cost.d1} <= 2`,
@@ -177,11 +183,11 @@ function wideCheck() {
   const files = b.files ?? [];
   const honest =
     b.truncated === true
-      ? typeof b.truncatedReason === 'string' && b.truncatedReason.length > 0 && files.length < expected.wide.changedPaths
-      : files.length === expected.wide.changedPaths;
-  summary.wide = { seconds: r.seconds, status: r.status, bytes: r.bytes, files: files.length, expected: expected.wide.changedPaths, truncated: b.truncated, truncatedReason: b.truncatedReason, statsOmitted: b.statsOmitted, treeReads: b.treeReads, totals: b.totals, cost: r.cost, cache: r.cache };
+      ? typeof b.truncatedReason === 'string' && b.truncatedReason.length > 0 && files.length < expected.wide.changedPaths && b.totalsComplete === false
+      : files.length === expected.wide.changedPaths && b.totalsComplete === true;
+  summary.wide = { seconds: r.seconds, status: r.status, bytes: r.bytes, files: files.length, expected: expected.wide.changedPaths, truncated: b.truncated, truncatedReason: b.truncatedReason, totalsComplete: b.totalsComplete, statsOmitted: b.statsOmitted, treeReads: b.treeReads, totals: b.totals, cost: r.cost, cache: r.cache };
   check(
-    `VAL-DIFF-021 wide pair: files=${files.length}/${expected.wide.changedPaths} truncated=${b.truncated} reason="${b.truncatedReason ?? ''}" statsOmitted=${b.statsOmitted} totals.files=${b.totals?.files} ${show(r)}`,
+    `VAL-DIFF-021 wide pair: files=${files.length}/${expected.wide.changedPaths} truncated=${b.truncated} reason="${b.truncatedReason ?? ''}" totalsComplete=${b.totalsComplete} statsOmitted=${b.statsOmitted} totals.files=${b.totals?.files} ${show(r)}`,
     r.status === 200 && !r.timedOut && honest && b.statsOmitted === true && files.every((f) => f.additions === undefined && f.deletions === undefined) && b.totals?.files === files.length,
   );
 }
@@ -230,11 +236,11 @@ chmodSync(askpass, 0o700);
 
 function git(args, cwd) {
   const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', GATE_GIT_TOKEN: process.env.FORGE_PAT };
-  const r = spawnSync('git', ['-c', 'credential.helper=', '-c', 'user.name=gate-m3', '-c', 'user.email=gate@forge.invalid', ...args], { cwd, env, encoding: 'utf8' });
+  const r = spawnSync('git', ['-c', 'credential.helper=', ...args], { cwd, env, encoding: 'utf8' });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
 }
 
-async function rest(method, path, json) {
+async function rest(path, { method = 'GET', json } = {}) {
   const init = { method, headers: { Authorization: `Bearer ${process.env.FORGE_PAT}` } };
   if (json) {
     init.headers['content-type'] = 'application/json';
@@ -246,9 +252,8 @@ async function rest(method, path, json) {
 
 async function edgeCheck() {
   const name = `m3-fixture-1m-gate-edge-${Date.now()}`;
-  const made = await rest('POST', '/api/v1/repos', { name, visibility: 'public' });
-  if (!check(`edge: create ${OWNER}/${name}`, made.status === 201, made.status === 201 ? '' : made.text.slice(0, 200))) return;
-  try {
+  const run = await withFixtureRepo({ owner: OWNER, repo: name, prefix: 'm3-fixture-1m-gate', http: rest, log: console.log }, async () => {
+    check(`edge: create ${OWNER}/${name} (new, created by this run)`, true);
     const dir = join(work, 'edge');
     mkdirSync(dir);
     git(['init', '-q', '-b', 'main'], dir);
@@ -276,10 +281,8 @@ async function edgeCheck() {
       `edge: first-ever compare main...topic (base ${c2.slice(0, 7)} is not head ${c3.slice(0, 7)}'s parent ${c1.slice(0, 7)}): art=${c.art} <= treeReads ${b.treeReads} + blobReads ${b.blobReads} + 3, d1=${c.d1} <= 2 ${show(r)}`,
       r.status === 200 && b.base?.sha === c2 && b.head?.sha === c3 && r.cache === 'miss' && c.art <= b.treeReads + b.blobReads + 3 && c.d1 <= 2,
     );
-  } finally {
-    const del = await rest('DELETE', `/api/v1/repos/${OWNER}/${name}`);
-    console.log(`# edge: delete ${OWNER}/${name}: ${del.status}`);
-  }
+  });
+  if (!run.ok) check(`edge: refusing to run: ${run.reason}`, false);
 }
 
 // ---------------------------------------------------------------------------

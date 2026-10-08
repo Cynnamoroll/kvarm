@@ -130,24 +130,54 @@ function cargoDeps(text: string): string[] {
 
 const POETRY_SECTION = /^tool\.poetry\.(?:dependencies|dev-dependencies|group\.[^.]+\.dependencies)$/;
 
-function quoted(line: string): string[] {
-  return [...line.matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2] ?? '');
+/**
+ * The quoted strings in one line of a TOML array, and whether an unquoted `]`
+ * (outside strings and before any `#` comment) closes the array. Brackets
+ * inside strings, such as PEP 508 extras in "requests[socks]", do not count.
+ */
+function scanArrayLine(line: string): { strings: string[]; closed: boolean } {
+  const strings: string[] = [];
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i]!;
+    if (ch === '#') break;
+    if (ch === ']') return { strings, closed: true };
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      let value = '';
+      while (j < line.length && line[j] !== ch) {
+        // Basic (double-quoted) strings take backslash escapes; literal ones do not.
+        if (ch === '"' && line[j] === '\\' && j + 1 < line.length) j++;
+        value += line[j];
+        j++;
+      }
+      strings.push(value);
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return { strings, closed: false };
 }
 
 function pyprojectDeps(text: string): string[] {
   const out: string[] = [];
   let section = '';
   let collecting = false;
+  const collect = (rest: string) => {
+    const { strings, closed } = scanArrayLine(rest);
+    for (const s of strings) {
+      const name = pythonName(s);
+      if (name) out.push(name);
+    }
+    collecting = !closed;
+  };
   for (const raw of text.split('\n')) {
-    const line = raw.replace(/(^|\s)#.*$/, '').trim();
     if (collecting) {
-      for (const s of quoted(line)) {
-        const name = pythonName(s);
-        if (name) out.push(name);
-      }
-      if (line.includes(']')) collecting = false;
+      collect(raw);
       continue;
     }
+    const line = raw.replace(/(^|\s)#.*$/, '').trim();
     const header = /^\[([^\]]+)\]$/.exec(line);
     if (header) {
       section = header[1]!.trim();
@@ -157,12 +187,8 @@ function pyprojectDeps(text: string): string[] {
       (section === 'project' && /^dependencies\s*=\s*\[/.test(line)) ||
       (section === 'project.optional-dependencies' && /^[\w.-]+\s*=\s*\[/.test(line));
     if (arrayStart) {
-      const rest = line.slice(line.indexOf('[') + 1);
-      for (const s of quoted(rest)) {
-        const name = pythonName(s);
-        if (name) out.push(name);
-      }
-      collecting = !rest.includes(']');
+      const open = raw.indexOf('[');
+      collect(raw.slice(open + 1));
       continue;
     }
     if (POETRY_SECTION.test(section)) {

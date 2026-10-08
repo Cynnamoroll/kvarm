@@ -8,8 +8,8 @@
  * Resolved names are kept for REF_TTL_SECONDS under the repo's current ref
  * generation, which a push through the git gate replaces.
  *
- * With `bypass`, the mutable ref cache is neither read nor written and no
- * entry of any kind is written; immutable commit entries may still be read.
+ * With `bypass`, no compare cache entry (ref, ref generation or commit) is
+ * read or written: every name and commit resolves from upstream.
  */
 
 import { lsRefsRequest, parseLsRefs, pickRef, refCandidates } from '@forge/gitops';
@@ -68,9 +68,13 @@ function remember(ctx: ResolveContext, sha: string, entry: CommitEntry): void {
   if (!ctx.bypass) ctx.waitUntil(writeJson(compareKeys.commit(ctx.repo.id, sha), JSON.stringify(entry)));
 }
 
+function recall(ctx: ResolveContext, sha: string): Promise<CommitEntry | undefined> {
+  return ctx.bypass ? Promise.resolve(undefined) : readJson<CommitEntry>(compareKeys.commit(ctx.repo.id, sha));
+}
+
 /** A commit's tree and parents from the commit cache or one `readCommit`. */
 export async function readCommitInfo(ctx: ResolveContext, sha: string): Promise<CommitWithParents | null> {
-  const cached = await readJson<CommitEntry>(compareKeys.commit(ctx.repo.id, sha));
+  const cached = await recall(ctx, sha);
   if (cached) return { sha, tree: cached.tree, parents: cached.parents };
   let commit: ArtifactsCommitMetadata | null;
   try {
@@ -92,7 +96,7 @@ export async function readCommitAndParent(
   ctx: ResolveContext,
   sha: string,
 ): Promise<{ commit: CommitWithParents; parent: CommitWithParents | null } | null> {
-  const cached = await readJson<CommitEntry>(compareKeys.commit(ctx.repo.id, sha));
+  const cached = await recall(ctx, sha);
   let commit: CommitWithParents;
   let parent: CommitWithParents | null = null;
   if (cached) {
@@ -133,10 +137,7 @@ export const COMMIT_CHAIN_LIMIT = 50;
  */
 async function readCommitPair(ctx: ResolveContext, base: string, head: string): Promise<Map<string, CommitWithParents | null>> {
   const out = new Map<string, CommitWithParents | null>();
-  const [baseHit, headHit] = await Promise.all([
-    readJson<CommitEntry>(compareKeys.commit(ctx.repo.id, base)),
-    readJson<CommitEntry>(compareKeys.commit(ctx.repo.id, head)),
-  ]);
+  const [baseHit, headHit] = await Promise.all([recall(ctx, base), recall(ctx, head)]);
   if (baseHit || headHit) return out;
   let log: ArtifactsCommitMetadata[];
   try {

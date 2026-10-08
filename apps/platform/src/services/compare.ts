@@ -12,7 +12,7 @@
  */
 
 import { diffTrees, type TreeChange, type TreeEntry, type TreeReader } from '@forge/gitops';
-import { diffOps, diffToHunks, isBinaryContent, limitHunks, type Hunk } from '@forge/diffcore';
+import { diffStat, diffToHunks, isBinaryContent, type Hunk } from '@forge/diffcore';
 import { GENERATED_MARKER_WINDOW, hasGeneratedMarker, isWhitespaceOnlyChange, needsContent } from '@forge/review';
 import type { RepoRow } from '../db/repos';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
@@ -71,7 +71,10 @@ export interface CompareFile {
 /** The content-addressed body stored under treediff/<baseTree>/<headTree>. */
 export interface CompareBody {
   files: CompareFile[];
+  /** Over `files`: the whole comparison when totalsComplete, else a lower bound over the discovered subset. */
   totals: { files: number; additions: number | null; deletions: number | null };
+  /** False exactly when the comparison is truncated (discovery stopped early). */
+  totalsComplete: boolean;
   rating: ChangeRating;
   truncated: boolean;
   truncatedReason?: string;
@@ -92,6 +95,7 @@ export interface CompareResponse {
   head: RefView;
   files: CompareFile[];
   totals: CompareBody['totals'];
+  totalsComplete: boolean;
   rating: ChangeRating;
   truncated: boolean;
   truncatedReason?: string;
@@ -325,7 +329,7 @@ class StatsBudgetExceeded extends Error {}
 
 async function computeStat(ctx: Ctx, change: TreeChange, budget: { bytes: number }, state: ComputeState): Promise<FileStat> {
   const key = statKey(change);
-  if (key) {
+  if (key && !ctx.bypass) {
     const cached = await readJson<FileStat>(key);
     if (cached) return cached;
   }
@@ -342,13 +346,7 @@ async function computeStat(ctx: Ctx, change: TreeChange, budget: { bytes: number
     if (change.oldHash !== null && change.oldHash === change.newHash) {
       stat = { additions: 0, deletions: 0, ...hints };
     } else {
-      const { ops, approximate } = diffOps(a.text, b.text, { eolAware: true });
-      let additions = 0;
-      let deletions = 0;
-      for (const op of ops) {
-        if (op === 'ins') additions++;
-        else if (op === 'del') deletions++;
-      }
+      const { additions, deletions, approximate } = diffStat(a.text, b.text, { eolAware: true });
       stat = approximate ? { additions, deletions, approximate: true, ...hints } : { additions, deletions, ...hints };
     }
   }
@@ -442,6 +440,7 @@ async function computeCompare(ctx: Ctx, baseTree: string, headTree: string): Pro
   const body: CompareBody = {
     files,
     totals: { files: files.length, additions: stats ? additions : null, deletions: stats ? deletions : null },
+    totalsComplete: !diff.truncated,
     rating: risk.rating,
     truncated: diff.truncated,
     treeReads: diff.treeReads,
@@ -540,6 +539,7 @@ function render(
     head,
     files: ordered.slice(offset, end),
     totals: body.totals,
+    totalsComplete: body.totalsComplete,
     rating: body.rating,
     truncated: body.truncated,
     treeReads: body.treeReads,
@@ -676,9 +676,12 @@ async function computeFileDiff(ctx: Ctx, change: CompareFile | TreeChange): Prom
   if ('tooLarge' in a || 'tooLarge' in b) return { hunks: [], approximate: false, tooLarge: true };
   if ('binary' in a || 'binary' in b) return { hunks: [], approximate: false, binary: true };
   if ('missing' in a || 'missing' in b) throw new Error('blob missing from the repository');
-  const diff = diffToHunks(a.text, b.text, { eolAware: true });
-  const limited = limitHunks(diff.hunks, { maxLines: COMPARE_BUDGETS.fileMaxLines, maxBytes: COMPARE_BUDGETS.fileMaxBytes });
-  const hunks = limited.hunks.map((h) => ({
+  const diff = diffToHunks(a.text, b.text, {
+    eolAware: true,
+    maxLines: COMPARE_BUDGETS.fileMaxLines,
+    maxBytes: COMPARE_BUDGETS.fileMaxBytes,
+  });
+  const hunks = diff.hunks.map((h) => ({
     ...h,
     lines: h.lines.map((l) => ({ ...l, text: displayText(l.text) })),
   }));
@@ -688,7 +691,7 @@ async function computeFileDiff(ctx: Ctx, change: CompareFile | TreeChange): Prom
     totalDeletions: diff.totalDeletions,
     approximate: diff.approximate,
   };
-  if (limited.truncated) out.truncated = true;
+  if (diff.truncated) out.truncated = true;
   return out;
 }
 

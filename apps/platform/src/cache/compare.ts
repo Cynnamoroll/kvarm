@@ -1,7 +1,7 @@
 /**
  * Cache API entries behind compare and per-file diffs (architecture §2.3).
  *
- *  - treediff/v2/<baseTree>/<headTree>   compare body for a tree pair (immutable)
+ *  - treediff/v3/<baseTree>/<headTree>   compare body for a tree pair (immutable)
  *  - risk/v1/<baseTree>/<headTree>       per-file risk + change rating for a tree pair (immutable)
  *  - filediff/v1/<oldBlob>/<newBlob>     per-file diff body for a blob pair (immutable)
  *  - numstat/v2/<oldBlob>/<newBlob>      line counts + content hints for a blob pair (immutable)
@@ -30,8 +30,8 @@ function key(path: string, query?: Record<string, string>): Request {
 }
 
 export const compareKeys = {
-  // v2: bodies carry real risk and blobReads; v1 bodies held the neutral placeholder.
-  treediff: (baseTree: string, headTree: string) => key(`treediff/v2/${baseTree}/${headTree}`),
+  // v3 adds totalsComplete; v2 added real risk and blobReads over v1's placeholder.
+  treediff: (baseTree: string, headTree: string) => key(`treediff/v3/${baseTree}/${headTree}`),
   risk: (baseTree: string, headTree: string) => key(`risk/v1/${baseTree}/${headTree}`),
   filediff: (oldBlob: string | null, newBlob: string | null) =>
     key(`filediff/v1/${oldBlob ?? NONE}/${newBlob ?? NONE}`),
