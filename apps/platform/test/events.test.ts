@@ -351,6 +351,73 @@ describe('queue dispatcher', () => {
     expect(await pushedAt(other.id)).toBe(T0 + 5000);
   });
 
+  for (const [label, at] of [
+    ['no timestamp', null],
+    ['an invalid timestamp', 'not-a-date'],
+  ] as const) {
+    it(`replays an untimed event (${label}) at its original position without rolling the ref back`, async () => {
+      const wf = new FakeWorkflow();
+      const env = envWith(wf);
+      const repo = await seedRepo(`untimed-${at ?? 'none'}`);
+      const main = 'refs/heads/main';
+      const m1 = { id: `untimed-m1-${at ?? 'none'}`, body: pushBody(repo.artifactsName, main, ZERO, A, at) };
+      const m2 = { id: `untimed-m2-${at ?? 'none'}`, body: pushBody(repo.artifactsName, main, A, B, at) };
+      const now = vi.spyOn(Date, 'now');
+
+      now.mockReturnValue(T0 + 1000);
+      await deliver(env, [m1]);
+      now.mockReturnValue(T0 + 2000);
+      await deliver(env, [m2]);
+      const gen = await refGeneration(repo.id);
+      const log = vi.spyOn(console, 'log');
+      now.mockReturnValue(T0 + 3000);
+      const replay = await deliver(env, [{ ...m1, attempts: 2 }]);
+      now.mockRestore();
+
+      expect(replay.result.explicitAcks).toEqual([m1.id]);
+      const rows = await events(repo.id);
+      expect(rows.map((r) => [r.after_sha[0], r.event_at, r.deliveries])).toEqual([
+        ['a', T0 + 1000, 2],
+        ['b', T0 + 2000, 1],
+      ]);
+      expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows[1]!.id, event_at: T0 + 2000 });
+      expect(await pushedAt(repo.id)).toBe(T0 + 2000);
+      expect(await refGeneration(repo.id)).toBe(gen);
+      expect([...wf.instances.keys()].sort()).toEqual([snapshotInstanceId(repo.id, A), snapshotInstanceId(repo.id, B)].sort());
+      const line = log.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('{"cost"'))!;
+      expect(JSON.parse(line)).toMatchObject({ outcome: 'duplicate', cost: { d1: 1 } });
+    });
+  }
+
+  it('skips an interrupted untimed event superseded before its replay', async () => {
+    const wf = new FakeWorkflow();
+    const env = envWith(wf);
+    const repo = await seedRepo('untimed-interrupted');
+    const main = 'refs/heads/main';
+    const m1 = { id: 'untimed-int-m1', body: pushBody(repo.artifactsName, main, ZERO, A, null) };
+    const m2 = { id: 'untimed-int-m2', body: pushBody(repo.artifactsName, main, A, B, null) };
+    const now = vi.spyOn(Date, 'now');
+
+    now.mockReturnValue(T0 + 1000);
+    wf.failNext = 1;
+    const first = await deliver(env, [m1]);
+    expect(first.result.retryMessages.map((m) => m.msgId)).toEqual([m1.id]);
+    now.mockReturnValue(T0 + 2000);
+    await deliver(env, [m2]);
+    now.mockReturnValue(T0 + 3000);
+    const replay = await deliver(env, [{ ...m1, attempts: 2 }]);
+    now.mockRestore();
+
+    expect(replay.result.explicitAcks).toEqual([m1.id]);
+    const rows = await events(repo.id);
+    expect(rows.map((r) => r.after_sha[0])).toEqual(['a', 'b']);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows[1]!.id });
+    expect(await pushedAt(repo.id)).toBe(T0 + 2000);
+    expect((await effects(rows[0]!.id)).snapshot).toEqual({ state: 'skipped', detail: 'superseded' });
+    expect(rows[0]!.completed_at).not.toBeNull();
+    expect([...wf.instances.keys()]).toEqual([snapshotInstanceId(repo.id, B)]);
+  });
+
   it('does not lower a pushed_at that the git gate already advanced', async () => {
     const env = envWith(new FakeWorkflow());
     const repo = await seedRepo('gate-ahead');

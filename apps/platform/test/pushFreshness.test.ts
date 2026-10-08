@@ -219,6 +219,14 @@ const SCENARIOS: Record<string, { body: Uint8Array; label: string }> = {
     label: 'truncated report',
     body: okPlain.subarray(0, okPlain.length - 4),
   },
+  'no-outer-flush': {
+    label: 'side-band reply missing its outer flush',
+    body: okSideband.subarray(0, okSideband.length - 4),
+  },
+  'partial-outer': {
+    label: 'side-band reply ending inside a subsequent outer packet',
+    body: cat(okSideband.subarray(0, okSideband.length - 4), band(2, 'remote: done\n').subarray(0, 9)),
+  },
 };
 
 beforeAll(async () => {

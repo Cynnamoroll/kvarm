@@ -118,9 +118,17 @@ export interface Ingested {
   done: Set<string>;
 }
 
-/** One D1 batch; null when the repo is unknown to the platform. */
+/**
+ * One D1 batch; null when the repo is unknown to the platform.
+ *
+ * Ref position and pushed_at use the event_at persisted by the event's first
+ * delivery, not this delivery's: an event without a source timestamp falls
+ * back to its first receive time, and a later redelivery must keep that
+ * position or it would outrank, and roll back, newer events.
+ */
 async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: string, now: number): Promise<Ingested | null> {
   const eventAt = Number.isFinite(ev.eventAt) ? ev.eventAt : now;
+  const persistedAt = 'SELECT p.event_at FROM push_events p WHERE p.id = ?2 AND p.repo_id = r.id';
   const results = await db.batch([
     db
       .prepare(
@@ -132,20 +140,24 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
       .bind(id, ev.repoName, ev.ref, ev.before, ev.after, ev.source, deliveryId, eventAt, now),
     db.prepare('UPDATE push_events SET deliveries = deliveries + 1, last_delivery_id = ?2 WHERE id = ?1').bind(id, deliveryId),
     db
-      .prepare('UPDATE repos SET pushed_at = MAX(COALESCE(pushed_at, 0), ?2) WHERE artifacts_name = ?1')
-      .bind(ev.repoName, eventAt),
+      .prepare(
+        `UPDATE repos AS r SET pushed_at = MAX(COALESCE(r.pushed_at, 0), COALESCE((${persistedAt}), 0))
+         WHERE r.artifacts_name = ?1`,
+      )
+      .bind(ev.repoName, id),
     // Only a newer event (event time, then id as a deterministic tiebreak)
     // moves the ref, so a late older delivery never rolls state back.
     db
       .prepare(
         `INSERT INTO repo_refs (repo_id, ref, sha, event_id, event_at, updated_at)
-         SELECT r.id, ?2, ?3, ?4, ?5, ?6 FROM repos r WHERE r.artifacts_name = ?1
+         SELECT r.id, ?3, ?4, ?2, (${persistedAt}), ?5 FROM repos r
+          WHERE r.artifacts_name = ?1 AND EXISTS (${persistedAt})
          ON CONFLICT (repo_id, ref) DO UPDATE SET
            sha = excluded.sha, event_id = excluded.event_id, event_at = excluded.event_at, updated_at = excluded.updated_at
          WHERE excluded.event_at > repo_refs.event_at
             OR (excluded.event_at = repo_refs.event_at AND excluded.event_id > repo_refs.event_id)`,
       )
-      .bind(ev.repoName, ev.ref, ev.after, id, eventAt, now),
+      .bind(ev.repoName, id, ev.ref, ev.after, now),
     db
       .prepare(
         `SELECT r.id AS repo_id, r.default_branch, p.deliveries, f.event_id AS head_event_id,

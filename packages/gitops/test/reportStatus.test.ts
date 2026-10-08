@@ -127,6 +127,39 @@ describe('ReportStatusReader', () => {
     expect(confirmedRefs(r.result())).toEqual([]);
   });
 
+  it('confirms nothing for a side-band reply missing its outer flush', () => {
+    const full = buildReportStatus([{ ref: 'refs/heads/main', ok: true }], 'side-band-64k');
+    for (const chunk of [1, 5, full.length]) {
+      const r = read(full.subarray(0, full.length - 4), chunk);
+      expect(r.unpack).toBe('ok');
+      expect(r.complete).toBe(false);
+      expect(confirmedRefs(r)).toEqual([]);
+    }
+  });
+
+  it('confirms nothing when a side-band reply ends inside a subsequent outer packet', () => {
+    const full = buildReportStatus([{ ref: 'refs/heads/main', ok: true }], 'side-band-64k');
+    const progress = band(2, 'remote: resolving deltas\n');
+    for (const cut of [1, 3, 4, 6, progress.length - 1]) {
+      const r = read(cat(full.subarray(0, full.length - 4), progress.subarray(0, cut)));
+      expect(r.complete, `cut ${cut}`).toBe(false);
+      expect(confirmedRefs(r)).toEqual([]);
+    }
+  });
+
+  it('confirms nothing when report data continues after the inner flush', () => {
+    const inner = buildReportStatus([{ ref: 'refs/heads/main', ok: true }], 'none');
+    const r = read(cat(band(1, inner), band(1, pktLine('ok refs/heads/other\n')), '0000'));
+    expect(confirmedRefs(r)).toEqual([]);
+  });
+
+  it('confirms nothing when the outer flush arrives with the inner report still open', () => {
+    const inner = buildReportStatus([{ ref: 'refs/heads/main', ok: true }], 'none');
+    const r = read(cat(band(1, inner.subarray(0, inner.length - 4)), '0000'));
+    expect(r.complete).toBe(false);
+    expect(confirmedRefs(r)).toEqual([]);
+  });
+
   it('ignores bytes after the outer flush', () => {
     const body = cat(buildReportStatus([{ ref: 'refs/heads/main', ok: true }], 'side-band-64k'), 'garbage');
     expect(confirmedRefs(read(body))).toEqual(['refs/heads/main']);

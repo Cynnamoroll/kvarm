@@ -20,7 +20,10 @@ export interface ReportStatus {
   /** `ok`, the unpack error text, or null before the unpack line arrived. */
   unpack: string | null;
   refs: RefResult[];
-  /** The report's terminating flush was seen. */
+  /**
+   * The reply ended cleanly: the report's terminating flush, and for
+   * side-band the outer flush right after it with no partial packet open.
+   */
   complete: boolean;
   /** A band-3 message, if the server sent one. */
   fatal: string | null;
@@ -68,6 +71,11 @@ class PktSplitter {
     this.buf = merged.slice(off);
     return this.buf.length > this.limit ? 'overflow' : 'ok';
   }
+
+  /** Bytes of a packet that has started but not yet finished. */
+  get pending(): number {
+    return this.buf.length;
+  }
 }
 
 export class ReportStatusReader {
@@ -76,6 +84,8 @@ export class ReportStatusReader {
   private inner: PktSplitter;
   private mode: 'unknown' | 'plain' | 'sideband' = 'unknown';
   private reportBytes = 0;
+  /** The report-status stream's own flush was seen. */
+  private reportEnded = false;
   private done = false;
   private readonly state: ReportStatus = {
     sideband: false,
@@ -118,10 +128,19 @@ export class ReportStatusReader {
       this.state.sideband = this.mode === 'sideband';
     }
     if (this.mode === 'plain') return this.onReportPkt(payload);
-    if (payload === null) return false;
+    if (payload === null) {
+      // Only the outer flush ends a side-band reply; the inner report must
+      // have ended on a packet boundary before it.
+      this.state.complete = this.reportEnded && this.state.unpack !== null && this.inner.pending === 0;
+      return false;
+    }
     const bandNo = payload[0];
     const data = payload.subarray(1);
     if (bandNo === 1) {
+      if (this.reportEnded) {
+        this.fail('malformed');
+        return false;
+      }
       this.reportBytes += data.length;
       if (this.reportBytes > this.maxBytes) {
         this.fail('overflow');
@@ -142,10 +161,17 @@ export class ReportStatusReader {
   }
 
   private onReportPkt(payload: Uint8Array | null): boolean {
+    if (this.reportEnded) {
+      this.fail('malformed');
+      return false;
+    }
     if (payload === null) {
-      if (this.state.unpack !== null) this.state.complete = true;
-      // The plain report ends here; in side-band mode the outer flush follows.
-      return this.mode === 'sideband';
+      this.reportEnded = true;
+      if (this.mode === 'plain') {
+        this.state.complete = this.state.unpack !== null;
+        return false;
+      }
+      return true;
     }
     if (this.mode === 'plain') {
       this.reportBytes += payload.length;
