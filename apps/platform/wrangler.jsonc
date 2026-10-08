@@ -24,7 +24,7 @@
       "migrations_dir": "migrations"
     }
   ],
-    "r2_buckets": [
+  "r2_buckets": [
     {
       "binding": "SNAPSHOTS",
       "bucket_name": "forge-snapshots"
@@ -69,14 +69,14 @@
   ],
   "vars": {
     "SITE_NAME": "Forge",
-    "APP_ORIGIN": "http://localhost:8787",
+    "APP_ORIGIN": "https://forge-platform.cynnamoroll.workers.dev",
     "ARTIFACTS_NAMESPACE": "default",
     "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback"
   },
   "observability": {
     "enabled": true
   },
-  "smart_placement": {
-    "enabled": true
+  "placement": {
+    "mode": "smart"
   }
 }
