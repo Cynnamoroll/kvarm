@@ -1,0 +1,222 @@
+{
+  "measuredAt": "2026-10-08T21:40:31.858Z",
+  "baseUrl": "https://forge-platform.cynnamoroll.workers.dev",
+  "runs": 3,
+  "host": {
+    "platform": "darwin 27.0.0",
+    "arch": "arm64",
+    "cpus": 6,
+    "node": "v26.8.2",
+    "git": "git version 2.54.0 (Apple Git-157)"
+  },
+  "targets": [
+    {
+      "target": "fixture",
+      "repo": "cynthia/fixture-1m",
+      "ref": "bench-head",
+      "sha": "08333c79998f410b9c40a84cc430ce9762c29ae8",
+      "snapshot": {
+        "size": 33487360,
+        "gzipBytes": 3140134,
+        "files": 502,
+        "reused": false
+      },
+      "summary": {
+        "clone": {
+          "minMs": 25948.8,
+          "medianMs": 27182.8,
+          "maxMs": 41718.9,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        "shallow": {
+          "minMs": 1795.2,
+          "medianMs": 1879.3,
+          "maxMs": 2334,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        "snapshot": {
+          "minMs": 3158.5,
+          "medianMs": 4231.4,
+          "maxMs": 5390.6,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        }
+      },
+      "speedup": {
+        "vsClone": 6.4,
+        "vsShallow": 0.4
+      },
+      "runs": [
+        {
+          "run": 1,
+          "variant": "clone",
+          "ms": 41718.9,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 1,
+          "variant": "shallow",
+          "ms": 1879.3,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 1,
+          "variant": "snapshot",
+          "ms": 4231.4,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 2,
+          "variant": "snapshot",
+          "ms": 3158.5,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 2,
+          "variant": "shallow",
+          "ms": 1795.2,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 2,
+          "variant": "clone",
+          "ms": 25948.8,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 3,
+          "variant": "clone",
+          "ms": 27182.8,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 3,
+          "variant": "shallow",
+          "ms": 2334,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 3,
+          "variant": "snapshot",
+          "ms": 5390.6,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        }
+      ]
+    },
+    {
+      "target": "small",
+      "repo": "cynthia/m4-cli-checkout-bench-1791495493420",
+      "ref": "main",
+      "sha": "ab676901de44f70a4898a54a1fa580eadb5968a3",
+      "snapshot": {
+        "size": 319488,
+        "gzipBytes": 10971,
+        "files": 61,
+        "reused": false
+      },
+      "summary": {
+        "clone": {
+          "minMs": 638.8,
+          "medianMs": 926.2,
+          "maxMs": 1009.5,
+          "transferBytes": 15900,
+          "treeBytes": 268487
+        },
+        "shallow": {
+          "minMs": 599.8,
+          "medianMs": 653.4,
+          "maxMs": 775.7,
+          "transferBytes": 13662,
+          "treeBytes": 268487
+        },
+        "snapshot": {
+          "minMs": 643.6,
+          "medianMs": 858.7,
+          "maxMs": 1432.6,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        }
+      },
+      "speedup": {
+        "vsClone": 1.1,
+        "vsShallow": 0.8
+      },
+      "runs": [
+        {
+          "run": 1,
+          "variant": "clone",
+          "ms": 1009.5,
+          "transferBytes": 15900,
+          "treeBytes": 268487
+        },
+        {
+          "run": 1,
+          "variant": "shallow",
+          "ms": 599.8,
+          "transferBytes": 13662,
+          "treeBytes": 268487
+        },
+        {
+          "run": 1,
+          "variant": "snapshot",
+          "ms": 1432.6,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        },
+        {
+          "run": 2,
+          "variant": "snapshot",
+          "ms": 858.7,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        },
+        {
+          "run": 2,
+          "variant": "shallow",
+          "ms": 775.7,
+          "transferBytes": 13662,
+          "treeBytes": 268487
+        },
+        {
+          "run": 2,
+          "variant": "clone",
+          "ms": 638.8,
+          "transferBytes": 15900,
+          "treeBytes": 268487
+        },
+        {
+          "run": 3,
+          "variant": "clone",
+          "ms": 926.2,
+          "transferBytes": 15900,
+          "treeBytes": 268487
+        },
+        {
+          "run": 3,
+          "variant": "shallow",
+          "ms": 653.4,
+          "transferBytes": 13662,
+          "treeBytes": 268487
+        },
+        {
+          "run": 3,
+          "variant": "snapshot",
+          "ms": 643.6,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        }
+      ]
+    }
+  ]
+}

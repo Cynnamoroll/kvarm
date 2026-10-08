@@ -1,0 +1,17 @@
+{
+  "name": "@forge/cli",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Veyr-9 command-line client: snapshot-first checkout",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "forge": "bin/forge.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@forge/gitops": "*"
+  }
+}
