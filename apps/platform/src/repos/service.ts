@@ -15,7 +15,9 @@ import {
 import { purgeRepoCache } from '../cache/repos';
 import { purgeGitTokens } from '../artifacts/tokens';
 
-export type ServiceResult<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
+export type ServiceResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; status: number; error: string; code?: string };
 
 export interface CreateRepoParams {
   ownerLogin: string;
@@ -23,6 +25,8 @@ export interface CreateRepoParams {
   description?: string | null;
   visibility?: 'public' | 'private';
   defaultBranch?: string;
+  /** Set for org repos; personal repos leave it unset. */
+  ownerOrgId?: string | null;
 }
 
 export async function createRepo(env: Env, p: CreateRepoParams): Promise<ServiceResult<RepoRow>> {
@@ -57,6 +61,7 @@ export async function createRepo(env: Env, p: CreateRepoParams): Promise<Service
     default_branch: created.defaultBranch ?? defaultBranch,
     description: p.description ?? null,
     fork_parent_id: null,
+    owner_org_id: p.ownerOrgId ?? null,
   });
   return { ok: true, value: row };
 }

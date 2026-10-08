@@ -1,8 +1,8 @@
 /**
  * Repository authorization shared by every transport (git gate, REST, SSR
  * pages, and later MCP). One decision combines:
- *   1. the actor's role on the repo (owner, instance admin; org membership and
- *      explicit grants extend `repoRole`),
+ *   1. the actor's role on the repo (personal owner, instance admin, org
+ *      owner/maintainer, or an explicit per-repo grant),
  *   2. the credential ceiling (PAT scopes for the transport; sessions are
  *      bounded only by the role),
  *   3. public visibility, which grants read to everyone.
@@ -17,6 +17,30 @@ import type { PATInfo, Scope } from '../auth/pat';
 export type RepoRole = 'none' | 'read' | 'write' | 'admin';
 export type Transport = 'git' | 'api' | 'page';
 export type RepoNeed = Exclude<RepoRole, 'none'>;
+export type OrgRole = 'owner' | 'maintainer' | 'member';
+
+/**
+ * Mutable access facts for one actor and repo, read authoritatively from D1
+ * (services/access.ts) whenever the decision is not a public read.
+ */
+export interface AccessFacts {
+  /** The repo is owned by an organization rather than a personal account. */
+  ownerIsOrg: boolean;
+  /** The actor's direct membership role in the org that owns the repo. */
+  orgRole: OrgRole | null;
+  /** The actor's explicit grant on this repo. */
+  grant: RepoNeed | null;
+}
+
+export const NO_FACTS: AccessFacts = { ownerIsOrg: false, orgRole: null, grant: null };
+
+export function isOrgRole(v: unknown): v is OrgRole {
+  return v === 'owner' || v === 'maintainer' || v === 'member';
+}
+
+export function isRepoNeed(v: unknown): v is RepoNeed {
+  return v === 'read' || v === 'write' || v === 'admin';
+}
 
 export interface Actor {
   user: UserRow;
@@ -52,16 +76,20 @@ function maxRole(a: RepoRole, b: RepoRole): RepoRole {
 
 /**
  * The actor's own role on the repo, ignoring credential scopes and public
- * visibility. Async so membership/grant lookups can join it without changing
- * callers.
+ * visibility. Org owners and maintainers administer the org's repos; plain
+ * members get nothing implicitly, only their explicit grant.
  */
-export async function repoRole(_env: Env, repo: RepoRow, actor: Actor | null): Promise<RepoRole> {
+export function repoRole(repo: RepoRow, actor: Actor | null, facts: AccessFacts = NO_FACTS): RepoRole {
   if (!actor) return 'none';
-  if (actor.user.login === repo.owner_login) return 'admin';
+  if (!facts.ownerIsOrg && actor.user.login === repo.owner_login) return 'admin';
   // Instance admin is an explicit operations role; it never bypasses
   // protected-ref policy, which is enforced separately.
   if (actor.user.is_admin === true) return 'admin';
-  return 'none';
+  if (facts.orgRole === 'owner' || facts.orgRole === 'maintainer') return 'admin';
+  // Grants on org repos lapse as soon as membership ends, even before the
+  // grant rows are cleaned up.
+  if (facts.ownerIsOrg && facts.orgRole === null) return 'none';
+  return facts.grant ?? 'none';
 }
 
 /** Highest role a credential may exercise on the given transport. */
@@ -76,13 +104,13 @@ export function scopeCeiling(scopes: Scope[] | null, transport: Transport): Repo
 }
 
 /** Effective role: role ∩ credential ceiling, plus public read for everyone. */
-export async function effectiveRole(
-  env: Env,
+export function effectiveRole(
   repo: RepoRow,
   actor: Actor | null,
   transport: Transport,
-): Promise<{ role: RepoRole; uncapped: RepoRole }> {
-  const own = await repoRole(env, repo, actor);
+  facts: AccessFacts = NO_FACTS,
+): { role: RepoRole; uncapped: RepoRole } {
+  const own = repoRole(repo, actor, facts);
   const publicRole: RepoRole = repo.visibility === 'public' ? 'read' : 'none';
   const capped = actor ? minRole(own, scopeCeiling(actor.scopes, transport)) : 'none';
   return { role: maxRole(capped, publicRole), uncapped: maxRole(own, publicRole) };
@@ -97,15 +125,20 @@ function concealed(actor: Actor | null, transport: Transport): AuthzDecision {
   return { ok: false, status: 404, error: 'not found', code: 'NOT_FOUND' };
 }
 
+/**
+ * `facts` must come from an authoritative read unless the request is a read of
+ * a public repo, where visibility alone already decides the outcome.
+ */
 export async function authorizeRepo(
-  env: Env,
+  _env: Env,
   repo: RepoRow | null,
   actor: Actor | null,
   need: RepoNeed,
   transport: Transport,
+  facts: AccessFacts = NO_FACTS,
 ): Promise<AuthzDecision> {
   if (!repo) return concealed(actor, transport);
-  const { role, uncapped } = await effectiveRole(env, repo, actor, transport);
+  const { role, uncapped } = effectiveRole(repo, actor, transport, facts);
   if (atLeast(role, need)) return { ok: true, role, repo };
   if (!atLeast(uncapped, 'read')) return concealed(actor, transport);
   if (!actor) {

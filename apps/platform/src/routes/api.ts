@@ -19,7 +19,7 @@ import {
   type RepoAccess,
 } from '../services/access';
 
-type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
+export type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const api = new Hono<App>();
 
 export type ApiActor = Actor;
@@ -73,7 +73,7 @@ export function actorJson(c: Context<App>, data: unknown, status = 200): Respons
 }
 
 /** Resolves the caller and :owner/:repo, then applies the shared repository policy. */
-async function authorizeRoute(
+export async function authorizeRoute(
   c: Context<App>,
   need: RepoNeed,
   opts: { requireActor?: boolean } = {},
@@ -89,7 +89,7 @@ async function authorizeRoute(
   });
 }
 
-function denyJson(c: Context<App>, d: AccessDenied): Response {
+export function denyJson(c: Context<App>, d: AccessDenied): Response {
   if (d.status === 429) {
     return c.json({ error: d.error, code: d.code }, 429, { 'Retry-After': '60' });
   }
@@ -98,7 +98,7 @@ function denyJson(c: Context<App>, d: AccessDenied): Response {
   return c.json({ error: d.error, code: d.code }, d.status);
 }
 
-async function requireActor(c: Context<App>): Promise<ApiActor | Response> {
+export async function requireActor(c: Context<App>): Promise<ApiActor | Response> {
   const res = await apiActor(c);
   if (!res.ok) return denyJson(c, res);
   if (!res.actor) return c.json({ error: 'unauthorized' }, 401);
@@ -278,7 +278,7 @@ api.post('/repos/:owner/:repo/forks', async (c) => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function repoJson(c: Context<App>, r: RepoRow) {
+export function repoJson(c: Context<App>, r: RepoRow) {
   return {
     id: r.id,
     owner: r.owner_login,

@@ -15,6 +15,8 @@ export interface RepoRow {
   stars: number;
   created_at: number;
   pushed_at: number | null;
+  /** Owning organization for org repos; null (or absent in older cached rows) for personal repos. */
+  owner_org_id?: string | null;
 }
 
 export interface NewRepo {
@@ -26,6 +28,7 @@ export interface NewRepo {
   default_branch: string;
   description: string | null;
   fork_parent_id: string | null;
+  owner_org_id?: string | null;
 }
 
 /** Artifacts namespace is flat; owner/name is encoded deterministically. */
@@ -42,8 +45,8 @@ export async function createRepoRow(env: Env, data: NewRepo): Promise<RepoRow> {
   const now = Date.now();
   await env.DB.prepare(
     `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote,
-      visibility, default_branch, description, fork_parent_id, stars, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      visibility, default_branch, description, fork_parent_id, stars, created_at, owner_org_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   )
     .bind(
       id,
@@ -56,6 +59,7 @@ export async function createRepoRow(env: Env, data: NewRepo): Promise<RepoRow> {
       data.description,
       data.fork_parent_id,
       now,
+      data.owner_org_id ?? null,
     )
     .run();
   return {
@@ -71,6 +75,7 @@ export async function createRepoRow(env: Env, data: NewRepo): Promise<RepoRow> {
     stars: 0,
     created_at: now,
     pushed_at: null,
+    owner_org_id: data.owner_org_id ?? null,
   };
 }
 
