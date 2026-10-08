@@ -462,7 +462,7 @@ function riskStat(s: FileStat): RiskStat {
   return { additions: s.additions, deletions: s.deletions, whitespaceOnly: s.whitespaceOnly === true, generated: s.generated === true };
 }
 
-/** Risk for a tree pair: the risk/v1 entry, or computed (and cached unless bypassed). */
+/** Risk for a tree pair: the cached risk entry, or computed (and cached unless bypassed). */
 async function loadRisk(ctx: Ctx, baseTree: string, headTree: string, input: RiskInput, cacheable: boolean): Promise<RiskResult> {
   const key = compareKeys.risk(baseTree, headTree);
   if (!ctx.bypass && cacheable) {

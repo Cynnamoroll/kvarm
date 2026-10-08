@@ -1278,3 +1278,95 @@ describe('risk-ranked compare', () => {
     expect((hit.json.rating as { level: string }).level).toBe('high');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Derived-output compatibility: entries written before the pyproject extras repair
+// ---------------------------------------------------------------------------
+
+describe('pre-repair risk cache entries', () => {
+  // Literal keys of the namespaces that held pre-repair risk output.
+  const legacyRisk = (b: string, h: string) => new Request(`https://forge.internal/risk/v1/${b}/${h}`);
+  const legacyBody = (b: string, h: string) => new Request(`https://forge.internal/treediff/v3/${b}/${h}`);
+  const put = (k: Request, body: unknown) =>
+    caches.default.put(k, new Response(JSON.stringify(body), { headers: { 'cache-control': 'max-age=3600, immutable' } }));
+
+  interface Rating {
+    score: number;
+    level: string;
+    reasons: string[];
+  }
+
+  /** Extras before an added dependency: the pre-repair parser ended the array at "requests[socks]". */
+  async function extrasRepo(name: string) {
+    const repo = await seedRepo(name, 'public');
+    const before = `[project]\nname = "${name}"\ndependencies = [\n  "requests[socks]>=2",\n]\n`;
+    const after = `[project]\nname = "${name}"\ndependencies = [\n  "requests[socks]>=2",\n  "httpx>=0.27",\n]\n`;
+    const b = await commit(repo, { 'pyproject.toml': before, 'app.py': 'print(1)\n' });
+    const h = await commit(repo, { 'pyproject.toml': after, 'app.py': 'print(2)\n' }, [b.sha]);
+    repo.refs.set('refs/heads/main', b.sha);
+    repo.refs.set('refs/heads/deps', h.sha);
+    const fresh = await call(api(name, 'compare/main...deps?nocache=1'), tok.admin);
+    expect(fresh.status, fresh.text).toBe(200);
+    const freshRating = fresh.json.rating as Rating;
+    const pyproject = files(fresh).find((f) => f.path === 'pyproject.toml')!;
+    expect(pyproject.risk.tags).toContain('new-dependency');
+    expect(freshRating.reasons).toContain('New dependencies added: pyproject.toml (httpx)');
+    // What the pre-repair parser cached: no new-dependency tag and no rating contribution from it.
+    const staleFiles = files(fresh).map((f) =>
+      f.path === 'pyproject.toml' ? { score: 0, tags: f.risk.tags.filter((t) => t !== 'new-dependency') } : f.risk,
+    );
+    const staleRating: Rating = {
+      score: Math.max(0, freshRating.score - 25),
+      level: 'low',
+      reasons: freshRating.reasons.filter((r) => !r.startsWith('New dependencies added')),
+    };
+    return { b, h, fresh, freshRating, staleFiles, staleRating, path: api(name, 'compare/main...deps') };
+  }
+
+  function expectCorrected(r: Reply, freshRating: Rating) {
+    expect(r.status, r.text).toBe(200);
+    const pyproject = files(r).find((f) => f.path === 'pyproject.toml')!;
+    expect(pyproject.risk.tags).toContain('new-dependency');
+    expect(pyproject.risk.score).toBeGreaterThanOrEqual(25);
+    expect(r.json.rating).toEqual(freshRating);
+    expect((r.json.rating as Rating).reasons).toContain('New dependencies added: pyproject.toml (httpx)');
+  }
+
+  it('recomputes risk instead of adopting a pre-repair risk entry after a compare-body miss', async () => {
+    const s = await extrasRepo('extras-risk');
+    await put(legacyRisk(s.b.tree, s.h.tree), { files: s.staleFiles, rating: s.staleRating });
+
+    const normal = await call(s.path, tok.owner);
+    expect(normal.cache).toBe('miss');
+    expectCorrected(normal, s.freshRating);
+    expect(files(normal)).toEqual(files(s.fresh));
+
+    const warm = await call(s.path, tok.owner);
+    expect(warm.cache).toBe('hit');
+    expectCorrected(warm, s.freshRating);
+    expect(warm.text).toBe(normal.text);
+  });
+
+  it('never serves a compare body that embedded pre-repair risk', async () => {
+    const s = await extrasRepo('extras-body');
+    const { base: _b, head: _h, ...body } = s.fresh.json;
+    const staleBody = {
+      ...body,
+      files: files(s.fresh).map((f, i) => ({ ...f, risk: s.staleFiles[i] })),
+      rating: s.staleRating,
+    };
+    await put(legacyRisk(s.b.tree, s.h.tree), { files: s.staleFiles, rating: s.staleRating });
+    await put(legacyBody(s.b.tree, s.h.tree), staleBody);
+
+    const normal = await call(s.path, tok.owner);
+    expect(normal.cache).toBe('miss');
+    expectCorrected(normal, s.freshRating);
+
+    const warm = await call(s.path, tok.owner);
+    expect(warm.cache).toBe('hit');
+    expectCorrected(warm, s.freshRating);
+
+    const commitDiff = await call(api('extras-body', `commits/${s.h.sha}/diff`), tok.owner);
+    expectCorrected(commitDiff, s.freshRating);
+  });
+});

@@ -1,8 +1,8 @@
 /**
  * Cache API entries behind compare and per-file diffs (architecture §2.3).
  *
- *  - treediff/v3/<baseTree>/<headTree>   compare body for a tree pair (immutable)
- *  - risk/v1/<baseTree>/<headTree>       per-file risk + change rating for a tree pair (immutable)
+ *  - treediff/v4/<baseTree>/<headTree>   compare body for a tree pair, embeds risk (immutable)
+ *  - risk/v2/<baseTree>/<headTree>       per-file risk + change rating for a tree pair (immutable)
  *  - filediff/v1/<oldBlob>/<newBlob>     per-file diff body for a blob pair (immutable)
  *  - numstat/v2/<oldBlob>/<newBlob>      line counts + content hints for a blob pair (immutable)
  *  - commit/v1?repo&sha                  commit -> {tree, parents}, repo-scoped (immutable)
@@ -30,9 +30,12 @@ function key(path: string, query?: Record<string, string>): Request {
 }
 
 export const compareKeys = {
-  // v3 adds totalsComplete; v2 added real risk and blobReads over v1's placeholder.
-  treediff: (baseTree: string, headTree: string) => key(`treediff/v3/${baseTree}/${headTree}`),
-  risk: (baseTree: string, headTree: string) => key(`risk/v1/${baseTree}/${headTree}`),
+  // Advance a namespace whenever its derived output changes, and treediff with
+  // risk since compare bodies embed it: old immutable entries must never be adopted.
+  // treediff v4 / risk v2: quote-aware pyproject arrays (extras no longer hide added
+  // dependencies). treediff v3 added totalsComplete; v2 added real risk and blobReads.
+  treediff: (baseTree: string, headTree: string) => key(`treediff/v4/${baseTree}/${headTree}`),
+  risk: (baseTree: string, headTree: string) => key(`risk/v2/${baseTree}/${headTree}`),
   filediff: (oldBlob: string | null, newBlob: string | null) =>
     key(`filediff/v1/${oldBlob ?? NONE}/${newBlob ?? NONE}`),
   // v2 adds the whitespaceOnly/generated hints risk relies on.
