@@ -68,7 +68,9 @@ async function http(path, { method = 'GET', headers = {}, body, auth } = {}) {
   const h = { ...headers };
   if (auth === 'bearer') h.Authorization = `Bearer ${process.env.FORGE_PAT}`;
   if (auth === 'basic') h.Authorization = `Basic ${Buffer.from(`x:${process.env.FORGE_PAT}`).toString('base64')}`;
-  const res = await fetch(`${BASE}${path}`, { method, headers: h, body, redirect: 'manual' });
+  const init = { method, headers: h, redirect: 'manual' };
+  if (body !== undefined) init.body = body;
+  const res = await fetch(`${BASE}${path}`, init);
   const buf = Buffer.from(await res.arrayBuffer());
   const header = res.headers.get('x-forge-cost');
   return { status: res.status, buf, text: buf.toString('latin1'), header, cost: costOf(header) };
