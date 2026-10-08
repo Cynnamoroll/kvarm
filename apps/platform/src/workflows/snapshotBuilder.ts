@@ -715,6 +715,10 @@ async function finishStep(
     };
     if (repoGone) return final;
     const measured = JSON.stringify(final);
+    // Both writes are fenced by tree ownership, not the commit's instance_id:
+    // the attempt that built the tree measured the work even if the commit was
+    // since taken over, and a superseded attempt must not replace the counters
+    // of the successor that built it.
     note.excluded = await measureD1(meter, () =>
       db.batch([
         db
@@ -723,9 +727,11 @@ async function finishStep(
         db
           .prepare(
             `UPDATE snapshot_commits SET build_cost = ?4
-             WHERE repo_id = ?1 AND sha = ?2 AND tree = ?3 AND state = 'ready' AND reused = 0`,
+             WHERE repo_id = ?1 AND sha = ?2 AND tree = ?3 AND state = 'ready' AND reused = 0
+               AND EXISTS (SELECT 1 FROM snapshot_trees t
+                            WHERE t.repo_id = ?1 AND t.tree = ?3 AND t.builder = ?5 AND t.state = 'ready')`,
           )
-          .bind(p.repoId, p.sha, target.tree, measured),
+          .bind(p.repoId, p.sha, target.tree, measured, p.instanceId),
       ]),
     );
     return final;

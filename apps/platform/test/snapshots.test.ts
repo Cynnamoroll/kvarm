@@ -655,6 +655,12 @@ describe('SnapshotBuilder', () => {
     ]);
     const successor = await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-late-r1', trigger: 'demand' }, new Runner());
     expect(successor.outcome).toBe('built');
+    const successorCost = (await commitRow(id, c.sha))?.build_cost;
+    expect(successorCost).toBe(JSON.stringify(successor.cost));
+    const treeCost = async () =>
+      (await env.DB.prepare('SELECT build_cost FROM snapshot_trees WHERE repo_id = ? AND tree = ?').bind(id, c.tree).first<{ build_cost: string }>())
+        ?.build_cost;
+    const successorTreeCost = await treeCost();
 
     let oldOutcome: string | undefined;
     const logs = await builderLogs('snap-late', async () => {
@@ -667,7 +673,8 @@ describe('SnapshotBuilder', () => {
     expect(finish).not.toHaveProperty('discarded');
     expect(await objectKeys(id)).toEqual([snapshotKey(id, c.tree)]);
     checkTar(readTar(await tarball(id, c.tree)), files);
-    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'ready', instance_id: 'snap-late-r1' });
+    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'ready', instance_id: 'snap-late-r1', reused: 0, build_cost: successorCost });
+    expect(await treeCost()).toBe(successorTreeCost);
   });
 
   it('a replayed finish with the repo alive deletes nothing', async () => {
@@ -680,15 +687,17 @@ describe('SnapshotBuilder', () => {
       if (name === 'finish') await fn({ attempt: 1 });
       return run(name, fn);
     }) as StepRunner['do'];
+    let outcome: Awaited<ReturnType<typeof buildSnapshot>> | undefined;
     const logs = await builderLogs('snap-refinish', async () => {
-      await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-refinish' }, runner);
+      outcome = await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-refinish' }, runner);
     });
     const finishes = logs.filter((l) => l.step === 'finish');
     expect(finishes.map((l) => l.outcome)).toEqual(['ok', 'ok']);
     expect(finishes.some((l) => 'discarded' in l)).toBe(false);
     expect(await objectKeys(id)).toEqual([snapshotKey(id, c.tree)]);
     checkTar(readTar(await tarball(id, c.tree)), SMALL);
-    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'ready', reused: 0 });
+    // The tree's own builder still records its measured cost on the replay.
+    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'ready', reused: 0, build_cost: JSON.stringify(outcome?.cost) });
   });
 
   it('a commit-not-found result from a superseded attempt leaves the active attempt alone', async () => {
