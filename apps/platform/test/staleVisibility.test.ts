@@ -10,7 +10,7 @@
 
 import { env as cfEnv, exports } from 'cloudflare:workers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mintPAT, type Scope } from '../src/auth/pat';
+import { mintPAT, patHash, readPatCache, type Scope } from '../src/auth/pat';
 import { internalKey, readCachedJson, writeCachedJson } from '../src/cache/internal';
 import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import type { RepoRow } from '../src/db/repos';
@@ -126,6 +126,8 @@ beforeAll(async () => {
   await seedRepo('flip', 'public');
   await seedRepo('budget', 'public');
   await seedRepo('unflip', 'private');
+  await seedRepo('pages', 'public');
+  await seedRepo('concealed', 'private');
   // Upstream Artifacts is unavailable hermetically; record any upload-pack or
   // info/refs that gets past authorization instead.
   globalThis.fetch = countingFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -272,5 +274,117 @@ describe('authority lookup on warm public hits', () => {
       expect(res.cost).toMatchObject({ d1: 1, rw: 0, art: 0, do: 0, sub: 0, cache: 'hit' });
       expect(res.cost.rr).toBeLessThanOrEqual(8);
     }
+  });
+});
+
+describe('rejected Bearer on a page falls back to anonymous on the same authority lookup', () => {
+  const PAGE_MARK = 'sv-fallback-page-marker';
+  const RAW_MARK = 'sv-fallback-raw-marker';
+
+  function unknownPat(): string {
+    const hex = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
+    return `forge_pat_${hex}`;
+  }
+
+  /** Retained edge bodies for a page and a raw file, as a colo would hold them. */
+  async function warmBodies(name: string): Promise<{ page: string; raw: string }> {
+    const page = `/${OWNER}/${name}`;
+    const raw = `/${OWNER}/${name}/raw/main/MARKER.txt`;
+    const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' };
+    await caches.default.put(new Request(`${ORIGIN}${page}`), new Response(`<html>${PAGE_MARK}</html>`, { headers }));
+    await caches.default.put(
+      new Request(`${ORIGIN}${raw}`),
+      new Response(RAW_MARK, { headers: { 'content-type': 'text/plain', 'cache-control': 'public, max-age=60' } }),
+    );
+    return { page, raw };
+  }
+
+  async function expectAnonymousHit(path: string, token: string, mark: string): Promise<void> {
+    const r = await read(await call(path, { headers: bearer(token) }));
+    expect(r.status, path).toBe(200);
+    expect(r.text).toContain(mark);
+    expect(r.cost, path).toMatchObject({ d1: 1, rw: 0, do: 0, art: 0, sub: 0, cache: 'hit' });
+    expect(r.cost.rr).toBeLessThanOrEqual(8);
+  }
+
+  it('serves the cached public page and raw body to an unknown well-formed Bearer after one lookup', async () => {
+    const { page, raw } = await warmBodies('pages');
+    await expectAnonymousHit(page, unknownPat(), PAGE_MARK);
+    await expectAnonymousHit(raw, unknownPat(), RAW_MARK);
+    // Once the rejection is cached the fallback needs no PAT read at all.
+    const seen = unknownPat();
+    await expectAnonymousHit(page, seen, PAGE_MARK);
+    await expectAnonymousHit(raw, seen, RAW_MARK);
+    // Malformed tokens are rejected before any lookup and fall back the same way.
+    await expectAnonymousHit(page, 'not-a-token', PAGE_MARK);
+  });
+
+  it('treats a newly revoked warmed PAT as anonymous on pages, but REST and git still reject it', async () => {
+    const { page, raw } = await warmBodies('pages');
+    const userId = await seedUser('sv-revoked');
+    const minted = await mintPAT(env, userId, 'sv-revoked', FULL);
+    const hash = await patHash(minted.token);
+    const warm = await read(await call(page, { headers: bearer(minted.token) }));
+    expect(warm.status).toBe(200);
+    expect(await readPatCache(hash, Date.now())).toMatchObject({ userId });
+
+    // Revoked in another colo: the row is gone, this colo's PAT copy is not.
+    await env.DB.prepare('DELETE FROM pat WHERE hash = ?').bind(hash).run();
+    expect(await readPatCache(hash, Date.now())).toMatchObject({ userId });
+    await expectAnonymousHit(page, minted.token, PAGE_MARK);
+    await expectAnonymousHit(raw, minted.token, RAW_MARK);
+
+    const meta = await read(await call(`/api/v1/repos/${OWNER}/pages`, { headers: bearer(minted.token) }));
+    expect(meta.status).toBe(401);
+    expect(meta.text).not.toContain(MARK.meta);
+    const refs = await read(
+      await call(`/${OWNER}/pages.git/info/refs?service=git-upload-pack`, { headers: basic(minted.token) }),
+    );
+    expect(refs.status).toBe(401);
+
+    // REST and git reject a previously unseen token after their single lookup, too.
+    const restUnknown = await read(await call(`/api/v1/repos/${OWNER}/pages`, { headers: bearer(unknownPat()) }));
+    expect(restUnknown.status).toBe(401);
+    expect(restUnknown.cost.d1).toBeLessThanOrEqual(1);
+    const gitUnknown = await read(
+      await call(`/${OWNER}/pages.git/info/refs?service=git-upload-pack`, { headers: basic(unknownPat()) }),
+    );
+    expect(gitUnknown.status).toBe(401);
+    expect(gitUnknown.cost.d1).toBeLessThanOrEqual(1);
+  });
+
+  it('keeps a private page concealed from a rejected Bearer, without a second lookup or a cached body', async () => {
+    const { page, raw } = await warmBodies('concealed');
+    const userId = await seedUser('sv-revoked-private');
+    const minted = await mintPAT(env, userId, 'sv-revoked-private', FULL);
+    await call(page, { headers: bearer(minted.token) }).then((r) => r.body?.cancel());
+    await env.DB.prepare('DELETE FROM pat WHERE hash = ?').bind(await patHash(minted.token)).run();
+    for (const token of [unknownPat(), minted.token, 'not-a-token']) {
+      for (const path of [page, raw]) {
+        const r = await read(await call(path, { headers: bearer(token) }));
+        expect(r.status, path).toBe(404);
+        expect(r.text).not.toContain(PAGE_MARK);
+        expect(r.text).not.toContain(RAW_MARK);
+        expect(r.cost, path).toMatchObject({ do: 0, art: 0, sub: 0, cache: 'none' });
+        expect(r.cost.d1, path).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('never turns a throttled credential check into an anonymous read', async () => {
+    const throttled = {
+      ...env,
+      WRITE_LIMITER: { limit: async () => ({ success: false }) },
+    } as unknown as Env;
+    const access = await resolveRepoAccess(throttled, {
+      owner: OWNER,
+      name: 'pages',
+      need: 'read',
+      transport: 'page',
+      credential: { kind: 'pat', token: unknownPat() },
+      clientIp: '203.0.113.9',
+      rejectedCredentialAsAnonymous: true,
+    });
+    expect(access).toMatchObject({ ok: false, status: 429, code: 'RATE_LIMITED' });
   });
 });

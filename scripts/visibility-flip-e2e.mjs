@@ -15,6 +15,13 @@
  * public then shows the same edge entries were retained (cache=hit) and were
  * never served while private. A second flip uses the documented PATCH.
  *
+ * Before the flip it also sends a rejected Bearer to the warm public page and
+ * raw file: a previously unseen well-formed token and a just-revoked warmed
+ * scratch owner PAT (inserted and then deleted directly in D1, so the cached
+ * PAT copy is retained). Pages answer as anonymous from the cache on one
+ * authority lookup (d1<=1), while REST and git still return 401. Right after
+ * the flip the same kinds of rejected Bearer get 404 on the private pages.
+ *
  * Cost: warm public metadata (FORGE_PAT and the owner), warm cached info/refs,
  * warm private personal and private org repo reads, and the first denial after
  * a grant revoke, all from x-forge-cost.
@@ -30,6 +37,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -116,8 +124,8 @@ function uploadPack(who, repo, sha) {
   });
 }
 
-function d1Flip(repo, visibility) {
-  const sql = `UPDATE repos SET visibility = '${visibility}' WHERE owner_login = '${OWNER}' AND name = '${repo}'`;
+/** Runs SQL on the remote D1 directly; `changes` is from the first statement. */
+function d1Exec(sql) {
   const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql], {
     cwd: platformDir,
     encoding: 'utf8',
@@ -129,6 +137,43 @@ function d1Flip(repo, visibility) {
     // reported below
   }
   return { code: r.status, changes, err: r.status === 0 ? '' : r.stderr.slice(-300) };
+}
+
+function d1Flip(repo, visibility) {
+  return d1Exec(`UPDATE repos SET visibility = '${visibility}' WHERE owner_login = '${OWNER}' AND name = '${repo}'`);
+}
+
+const randomPat = () => `forge_pat_${randomBytes(32).toString('hex')}`;
+const bearerOnly = (token) => ({ headers: { Authorization: `Bearer ${token}` } });
+const basicOnly = (token) => ({ kind: 'basic', headers: { Authorization: `Basic ${Buffer.from(`x:${token}`).toString('base64')}` } });
+
+/**
+ * Scratch PATs for the owner, inserted directly (as scripts/mint-pat.mjs does)
+ * so they can be revoked by a direct D1 DELETE that leaves this colo's cached
+ * PAT copy in place. Tokens live only in this process's env, under SCRATCH_*.
+ */
+const scratchIds = [];
+function mintScratchPats(n) {
+  const rows = [];
+  for (let i = 0; i < n; i++) {
+    const token = randomPat();
+    const id = randomUUID();
+    process.env[`SCRATCH_PAT_${i}`] = token;
+    P[`scratch${i}`] = `SCRATCH_PAT_${i}`;
+    scratchIds.push(id);
+    rows.push(
+      `INSERT INTO pat (id, user_id, name, prefix, hash, scopes, created_at)
+         SELECT '${id}', id, 'avca-scratch-${ts}-${i}', '${token.slice(0, 18)}',
+                '${createHash('sha256').update(token).digest('hex')}', '["read","write","api"]', ${Date.now()}
+           FROM users WHERE login = '${OWNER}'`,
+    );
+  }
+  return d1Exec(rows.join(';\n'));
+}
+
+function revokeScratchPats() {
+  if (scratchIds.length === 0) return { code: 0, changes: 0, err: '' };
+  return d1Exec(`DELETE FROM pat WHERE id IN (${scratchIds.map((id) => `'${id}'`).join(', ')})`);
 }
 
 async function pushWithRetry(dir) {
@@ -251,10 +296,54 @@ try {
   const anonClone = git(null, ['clone', '-q', `${BASE}/${OWNER}/${FLIP}.git`, join(work, 'anon-public')]);
   check('warm: anonymous git clone of the public repo', anonClone.code, 0);
 
+  // ---- Rejected Bearer on warm public pages: anonymous outcome on one lookup ----
+  console.log(`# ${stamp()} rejected-Bearer page fallback`);
+  const pagePaths = [`/${OWNER}/${FLIP}`, `/${OWNER}/${FLIP}/raw/main/MARKER.txt`];
+  const pageMark = (path) => (path.endsWith('.txt') ? MARKER : 'MARKER.txt');
+  const hitBudget = { d1: 1, rr: 8, rw: 0, art: 0, do: 0, sub: 0, cache: 'hit' };
+  const minted = mintScratchPats(2);
+  check(`scratch owner PATs inserted directly in D1 ${minted.err}`, minted.code === 0 && minted.changes === 1, true);
+  for (const who of ['scratch0', 'scratch1']) {
+    const r = await http(who, `/api/v1/repos/${OWNER}/${FLIP}`);
+    check(`fallback: ${who} warmed (REST metadata 200) ${r.header}`, r.status, 200);
+  }
+  for (const path of pagePaths) {
+    const r = await http(null, path, bearerOnly(randomPat()));
+    check(`fallback: unknown well-formed Bearer page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} anonymous hit [${r.at}] ${r.header}`,
+      r.status === 200 && r.text.includes(pageMark(path)) && within(r.cost, hitBudget), true);
+  }
+  const revoke = revokeScratchPats();
+  check(`fallback: scratch PATs revoked by direct D1 DELETE (cached PAT copies retained) [${stamp()}] ${revoke.err}`,
+    revoke.code === 0 && revoke.changes === 2, true);
+  for (const path of pagePaths) {
+    const r = await http('scratch0', path);
+    check(`fallback: newly revoked warmed PAT page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} anonymous hit [${r.at}] ${r.header}`,
+      r.status === 200 && r.text.includes(pageMark(path)) && within(r.cost, hitBudget), true);
+  }
+  const revokedRest = await http('scratch0', `/api/v1/repos/${OWNER}/${FLIP}`);
+  check(`fallback: revoked PAT REST metadata still 401 ${revokedRest.header}`,
+    revokedRest.status === 401 && !revokedRest.text.includes(FLIP), true);
+  const revokedGit = await http('scratch0', `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, { kind: 'basic' });
+  check(`fallback: revoked PAT git info/refs still 401 ${revokedGit.header}`, revokedGit.status === 401 && !revokedGit.text.includes(sha), true);
+  const unknownRest = await http(null, `/api/v1/repos/${OWNER}/${FLIP}`, bearerOnly(randomPat()));
+  check(`fallback: unknown Bearer REST metadata 401 ${unknownRest.header}`,
+    unknownRest.status === 401 && !unknownRest.text.includes(FLIP) && within(unknownRest.cost, deniedBudget), true);
+  const unknownGit = await http(null, `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, basicOnly(randomPat()));
+  check(`fallback: unknown basic git info/refs 401 ${unknownGit.header}`,
+    unknownGit.status === 401 && !unknownGit.text.includes(sha) && within(unknownGit.cost, deniedBudget), true);
+
   // ---- Flip 1: direct D1 update, nothing purged ----
   const flip = d1Flip(FLIP, 'private');
   check(`flip 1: direct remote D1 UPDATE visibility=private (no Worker, no purge) [${stamp()}] ${flip.err}`, flip.code === 0 && flip.changes === 1, true);
   const t0 = Date.now();
+  // A rejected Bearer, even the owner's own just-revoked PAT, is anonymous and sees nothing private.
+  for (const [label, opts] of [['revoked owner PAT', {}], ['unknown Bearer', null]]) {
+    for (const path of pagePaths) {
+      const r = opts ? await http('scratch1', path, opts) : await http(null, path, bearerOnly(randomPat()));
+      check(`flip 1: ${label} private page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} concealed [${r.at}] ${r.header}`,
+        r.status === 404 && !r.text.includes(MARKER) && !r.text.includes('MARKER.txt') && within(r.cost, { ...deniedBudget, cache: 'none' }), true);
+    }
+  }
   for (const who of [null, 'outsider']) await assertDenied('flip 1', who, sha);
   await assertOwnerReads('flip 1', sha);
   check('flip 1: all denials and owner reads ran inside the 60 s warm window', Date.now() - t0 < 60_000, true);
@@ -302,6 +391,8 @@ try {
   check('VAL-COST-021 first read after revoke denied without the warmed body', `${revoked.status} ${revoked.header}`,
     () => revoked.status === 404 && !revoked.text.includes(ORGREPO) && within(revoked.cost, deniedBudget));
 } finally {
+  const leftover = revokeScratchPats();
+  if (leftover.changes) console.log(`# cleanup removed ${leftover.changes} scratch PAT rows`);
   if (!KEEP) {
     for (const repo of created) {
       const r = await api('owner', 'DELETE', `/repos/${repo}`);

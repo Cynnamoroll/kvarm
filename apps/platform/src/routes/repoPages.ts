@@ -70,11 +70,15 @@ async function resolveRepo(c: Context<App>, need: RepoNeed = 'read'): Promise<Re
   const owner = c.req.param('owner');
   const name = c.req.param('repo');
   if (!owner || !name) return null;
-  const base = { owner, name, need, transport: 'page' as const, clientIp: clientIp(c) };
-  let access = await resolveRepoAccess(c.env, { ...base, credential: await requestCredential(c) });
-  if (!access.ok && access.badCredential) {
-    access = await resolveRepoAccess(c.env, { ...base, credential: { kind: 'anonymous' } });
-  }
+  const access = await resolveRepoAccess(c.env, {
+    owner,
+    name,
+    need,
+    transport: 'page',
+    credential: await requestCredential(c),
+    clientIp: clientIp(c),
+    rejectedCredentialAsAnonymous: true,
+  });
   if (!access.ok) return null;
   return { repo: access.repo, viewer: access.actor, role: access.role };
 }

@@ -112,6 +112,13 @@ export interface RepoAccessRequest {
   allowAgent?: boolean;
   /** Also read the repo's branch rules in the authoritative batch (git pushes; `write`/`admin` only). */
   branchRules?: boolean;
+  /**
+   * Decide as an anonymous caller when the presented token is malformed,
+   * unknown, revoked or expired, instead of rejecting it with a 401. The
+   * decision reuses the repo row already read in the authoritative batch, so
+   * it costs no second lookup. Throttled checks are never downgraded.
+   */
+  rejectedCredentialAsAnonymous?: boolean;
 }
 
 const BAD_CREDENTIAL: AccessDenied = {
@@ -318,17 +325,26 @@ export async function resolveRepoAccess(env: Env, req: RepoAccessRequest): Promi
   const now = Date.now();
   const cred = req.credential;
   if (req.requireActor && cred.kind === 'anonymous') return NO_ACTOR;
+  const asAnonymous = req.rejectedCredentialAsAnonymous === true && !req.requireActor;
   let hash: string | null = null;
   let kind: TokenKind | undefined;
   if (cred.kind === 'pat') {
     const k = tokenKind(cred.token);
-    if (!k) return BAD_CREDENTIAL;
-    kind = k;
-    hash = await patHash(cred.token);
+    if (k) {
+      kind = k;
+      hash = await patHash(cred.token);
+    } else if (!asAnonymous) {
+      return BAD_CREDENTIAL;
+    }
   }
 
-  const cachedEntry = hash ? await readPatCache(hash, now) : undefined;
-  if (cachedEntry === 'invalid') return BAD_CREDENTIAL;
+  let cachedEntry = hash ? await readPatCache(hash, now) : undefined;
+  if (cachedEntry === 'invalid') {
+    if (!asAnonymous) return BAD_CREDENTIAL;
+    hash = null;
+    kind = undefined;
+    cachedEntry = undefined;
+  }
   // Agent tokens never resolve from cache ('seen' only skips the preauth throttle).
   const cachedPat = cachedEntry === 'seen' ? undefined : cachedEntry;
 
@@ -355,7 +371,12 @@ export async function resolveRepoAccess(env: Env, req: RepoAccessRequest): Promi
     branchRules: req.branchRules === true && req.need !== 'read',
     now,
   });
-  if (hash && !fresh.pat) return BAD_CREDENTIAL;
+  if (hash && !fresh.pat) {
+    if (!asAnonymous) return BAD_CREDENTIAL;
+    // The repo row is current regardless of whose facts were joined to it;
+    // the rejected principal's membership and grant are discarded.
+    return decide(env, fresh.repo, null, req, NO_FACTS);
+  }
   const actor = cred.kind === 'session' ? cred.actor : actorFor(req.transport, fresh.pat);
   const facts = actor && fresh.factsUserId === actor.user.id ? fresh.facts : NO_FACTS;
   const decision = await decide(env, fresh.repo, actor, req, facts);
