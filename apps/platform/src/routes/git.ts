@@ -15,9 +15,10 @@
 
 import type { Context } from 'hono';
 import { getRepo, type RepoRow } from '../db/repos';
-import { parseBasicAuth, scopesAllow, verifyPAT, type PATInfo } from '../auth/pat';
+import { parseBasicAuth, verifyPAT } from '../auth/pat';
 import { getGitToken } from '../artifacts/tokens';
 import { rateLimit } from '../ratelimit';
+import { authorizeRepo, patActor, type Actor, type AuthzDenyCode } from '../services/authz';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -30,8 +31,25 @@ function unauthorized(): Response {
   });
 }
 
-function forbidden(): Response {
-  return new Response('insufficient token scope\n', { status: 403 });
+function denied(status: 401 | 403 | 404, code: AuthzDenyCode): Response {
+  if (status === 401) return unauthorized();
+  if (status === 404) return new Response('repository not found\n', { status: 404 });
+  return new Response(
+    code === 'INSUFFICIENT_SCOPE' ? 'insufficient token scope\n' : 'permission denied\n',
+    { status: 403 },
+  );
+}
+
+/** Upstream headers relayed to git clients; everything else stays server-side. */
+const RELAYED_HEADERS = ['content-type', 'cache-control', 'expires', 'pragma', 'content-encoding'];
+
+function relay(upstream: Response): Response {
+  const headers = new Headers();
+  for (const h of RELAYED_HEADERS) {
+    const v = upstream.headers.get(h);
+    if (v) headers.set(h, v);
+  }
+  return new Response(upstream.body, { status: upstream.status, headers });
 }
 
 function operation(subpath: string, service: string | null): 'read' | 'write' {
@@ -43,6 +61,37 @@ function operation(subpath: string, service: string | null): 'read' | 'write' {
 /** Rate limits per identity, per minute. Generous for CI, bounded for abuse. */
 const RATE_LIMITS = { read: 600, write: 120 } as const;
 
+export type GitAccess =
+  | { ok: true; repo: RepoRow; actor: Actor | null; op: 'read' | 'write' }
+  | { ok: false; response: Response };
+
+/** Authenticates and authorizes one git request; nothing upstream is touched. */
+export async function authorizeGitRequest(
+  env: Env,
+  request: Request,
+  owner: string,
+  name: string,
+  subpath: string,
+): Promise<GitAccess> {
+  const op = operation(subpath, new URL(request.url).searchParams.get('service'));
+
+  const basic = parseBasicAuth(request.headers.get('Authorization') ?? undefined);
+  let actor: Actor | null = null;
+  if (basic) {
+    const pat = await verifyPAT(env, basic.password);
+    if (!pat) return { ok: false, response: unauthorized() };
+    actor = patActor(pat);
+  }
+
+  // Anonymous writes never need a repo lookup; challenge before touching D1.
+  if (op === 'write' && !actor) return { ok: false, response: unauthorized() };
+
+  const found = await getRepo(env.DB, owner, name);
+  const decision = await authorizeRepo(env, found, actor, op, 'git');
+  if (!decision.ok) return { ok: false, response: denied(decision.status, decision.code) };
+  return { ok: true, repo: decision.repo, actor, op };
+}
+
 export async function handleGitRequest(
   c: Context<{ Bindings: Env }>,
   owner: string,
@@ -51,30 +100,13 @@ export async function handleGitRequest(
 ): Promise<Response> {
   const env = c.env;
   const url = new URL(c.req.url);
-
-  const repo: RepoRow | null = await getRepo(env.DB, owner, name);
-  if (!repo) return new Response('repository not found\n', { status: 404 });
-
-  const op = operation(subpath, url.searchParams.get('service'));
+  const access = await authorizeGitRequest(env, c.req.raw, owner, name, subpath);
+  if (!access.ok) return access.response;
+  const { repo, actor, op } = access;
   const isPublic = repo.visibility === 'public';
 
-  const basic = parseBasicAuth(c.req.header('Authorization'));
-  let pat: PATInfo | null = null;
-  if (basic) {
-    pat = await verifyPAT(env, basic.password);
-    if (!pat) return unauthorized();
-  }
-
-  if (op === 'write') {
-    if (!pat) return unauthorized();
-    if (!scopesAllow(pat.scopes, 'write')) return forbidden();
-  } else if (!isPublic) {
-    if (!pat) return unauthorized();
-    if (!scopesAllow(pat.scopes, 'read')) return forbidden();
-  }
-
   // Rate limit by PAT id (or client IP for anonymous public reads).
-  const identity = pat?.id ?? `ip:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`;
+  const identity = actor?.patId ?? `ip:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`;
   const allowed = await rateLimit(env, `git:${op}:${identity}`, RATE_LIMITS[op]);
   if (!allowed) {
     return new Response('rate limit exceeded, slow down\n', {
@@ -88,11 +120,13 @@ export async function handleGitRequest(
   try {
     artifactsToken = await getGitToken(env, repo.artifacts_name, op);
   } catch (err) {
-    // Most common cause: repo is still importing/creating upstream.
-    return new Response(
-      `repository storage is warming up, retry shortly (${String(err)})\n`,
-      { status: 503, headers: { 'Retry-After': '5' } },
-    );
+    // Most common cause: repo is still importing/creating upstream. Upstream
+    // detail stays in logs, never in the client response.
+    console.warn(JSON.stringify({ gitTokenMintFailed: String(err).slice(0, 200) }));
+    return new Response('repository storage is warming up, retry shortly\n', {
+      status: 503,
+      headers: { 'Retry-After': '5' },
+    });
   }
 
   const upstream = new URL(`${repo.artifacts_remote}/${subpath}`);
@@ -114,10 +148,13 @@ export async function handleGitRequest(
   // Briefly edge-cache public clone bootstrapping (purge-on-push lands in M4).
   if (op === 'read' && isPublic && subpath === 'info/refs' && c.req.method === 'GET') {
     const cache = caches.default;
-    const cacheKey = new Request(upstream.toString(), { method: 'GET' });
+    // v0 and v2 advertisements differ for the same URL; key on the protocol.
+    const keyUrl = new URL(upstream);
+    keyUrl.searchParams.set('forge-git-protocol', c.req.header('git-protocol') ?? '');
+    const cacheKey = new Request(keyUrl.toString(), { method: 'GET' });
     const cached = await cache.match(cacheKey);
     if (cached) return cached;
-    const res = new Response(upstreamRes.body, upstreamRes);
+    const res = relay(upstreamRes);
     res.headers.set('Cache-Control', 'public, max-age=30');
     try {
       c.executionCtx.waitUntil(cache.put(cacheKey, res.clone()));
@@ -127,5 +164,5 @@ export async function handleGitRequest(
     return res;
   }
 
-  return new Response(upstreamRes.body, upstreamRes);
+  return relay(upstreamRes);
 }

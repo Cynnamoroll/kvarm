@@ -32,6 +32,7 @@ import {
 import { renderMarkdown } from '../render/markdown';
 import { edgeCachedPage } from '../cache/edge';
 import * as svc from '../repos/service';
+import { authorizeRepo, type RepoRole } from '../services/authz';
 
 type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const repoPages = new Hono<App>();
@@ -42,6 +43,7 @@ const WINDOW_LINES = 1000;
 interface Resolved {
   repo: RepoRow;
   viewer: ApiActor | null;
+  role: RepoRole;
 }
 
 /** Persist refreshed session cookies (threaded by apiActor) on responses. */
@@ -67,11 +69,14 @@ async function resolveRepo(c: Context<App>): Promise<Resolved | null> {
   const repo = await getRepo(c.env.DB, owner, name);
   if (!repo) return null;
   const viewer = await apiActor(c);
-  const allowed =
-    repo.visibility === 'public' ||
-    (viewer && (viewer.user.login === repo.owner_login || viewer.user.is_admin));
-  if (!allowed) return null;
-  return { repo, viewer };
+  const decision = await authorizeRepo(c.env, repo, viewer, 'read', 'page');
+  if (!decision.ok) return null;
+  return { repo, viewer, role: decision.role };
+}
+
+/** Settings pages are concealed from viewers without admin on the repo. */
+function canAdminister(resolved: Resolved): resolved is Resolved & { viewer: ApiActor } {
+  return resolved.viewer !== null && resolved.role === 'admin';
 }
 
 /** Segments after /{owner}/{repo}/{marker}/..., with ref and path decoded. */
@@ -563,9 +568,7 @@ repoPages.get('/branches', async (c) => {
 repoPages.get('/settings', async (c) => {
   const resolved = await resolveRepo(c);
   if (!resolved) return notFound(c);
-  if (!resolved.viewer || resolved.viewer.user.login !== resolved.repo.owner_login) {
-    return notFound(c);
-  }
+  if (!canAdminister(resolved)) return notFound(c);
   const repo = resolved.repo;
   const viewerLogin = resolved.viewer.user.login;
   const body = html`
@@ -602,9 +605,7 @@ repoPages.get('/settings', async (c) => {
 repoPages.post('/settings', async (c) => {
   const resolved = await resolveRepo(c);
   if (!resolved) return notFound(c);
-  if (!resolved.viewer || resolved.viewer.user.login !== resolved.repo.owner_login) {
-    return notFound(c);
-  }
+  if (!canAdminister(resolved)) return notFound(c);
   const form = await c.req.parseBody();
   const updated = await svc.updateRepo(c.env, resolved.repo, {
     description: String(form.description ?? ''),
@@ -616,9 +617,7 @@ repoPages.post('/settings', async (c) => {
 repoPages.post('/delete', async (c) => {
   const resolved = await resolveRepo(c);
   if (!resolved) return notFound(c);
-  if (!resolved.viewer || resolved.viewer.user.login !== resolved.repo.owner_login) {
-    return notFound(c);
-  }
+  if (!canAdminister(resolved)) return notFound(c);
   await svc.deleteRepo(c.env, resolved.repo);
   return finish(c, c.redirect('/'));
 });

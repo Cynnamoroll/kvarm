@@ -6,21 +6,16 @@
 
 import { Hono, type Context } from 'hono';
 import { getRepo, listReposForOwner, type RepoRow } from '../db/repos';
-import { findOrCreateUser, getUserById, type UserRow } from '../db/users';
+import { findOrCreateUser } from '../db/users';
 import { getSessionInfo, type SessionInfo } from '../auth/workos';
-import { mintPAT, revokePAT, scopesAllow, verifyPAT, type Scope } from '../auth/pat';
+import { mintPAT, revokePAT, scopesAllow, verifyPAT, SCOPES, type Scope } from '../auth/pat';
 import * as svc from '../repos/service';
+import { authorizeRepo, patActor, type Actor, type AuthzDecision, type RepoNeed } from '../services/authz';
 
 type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const api = new Hono<App>();
 
-const SCOPES: Scope[] = ['read', 'write', 'api', 'ci'];
-
-export interface ApiActor {
-  user: UserRow;
-  via: 'session' | 'pat';
-  patId?: string;
-}
+export type ApiActor = Actor;
 
 /** Resolves the API actor: session cookie first, then Bearer PAT. */
 export async function apiActor(c: Context<App>): Promise<ApiActor | null> {
@@ -30,15 +25,12 @@ export async function apiActor(c: Context<App>): Promise<ApiActor | null> {
     if (session.refreshCookies.length > 0) {
       c.set('refreshCookies', session.refreshCookies);
     }
-    return { user, via: 'session' };
+    return { user, via: 'session', scopes: null };
   }
   const header = c.req.header('Authorization');
   if (header?.startsWith('Bearer ')) {
     const pat = await verifyPAT(c.env, header.slice('Bearer '.length).trim());
-    if (pat && scopesAllow(pat.scopes, 'api')) {
-      const user = await getUserById(c.env.DB, pat.userId);
-      if (user) return { user, via: 'pat', patId: pat.id };
-    }
+    if (pat && scopesAllow(pat.scopes, 'api')) return patActor(pat);
   }
   return null;
 }
@@ -52,13 +44,18 @@ export function actorJson(c: Context<App>, data: unknown, status = 200): Respons
   return res;
 }
 
-function canRead(repo: RepoRow, actor: ApiActor | null): boolean {
-  if (repo.visibility === 'public') return true;
-  return actor !== null && (actor.user.login === repo.owner_login || actor.user.is_admin);
+/** Loads :owner/:repo and applies the shared repository policy. */
+async function authorizeRoute(
+  c: Context<App>,
+  actor: ApiActor | null,
+  need: RepoNeed,
+): Promise<AuthzDecision> {
+  const repo = await getRepo(c.env.DB, c.req.param('owner') ?? '', c.req.param('repo') ?? '');
+  return authorizeRepo(c.env, repo, actor, need, 'api');
 }
 
-function canWrite(repo: RepoRow, actor: ApiActor | null): boolean {
-  return actor !== null && (actor.user.login === repo.owner_login || actor.user.is_admin);
+function denyJson(c: Context<App>, d: Extract<AuthzDecision, { ok: false }>): Response {
+  return c.json({ error: d.error, code: d.code }, d.status);
 }
 
 function requireActor(c: Context<App>): Promise<ApiActor | Response> | never;
@@ -81,7 +78,7 @@ api.get('/user', async (c) => {
       login: actor.user.login,
       email: actor.user.email,
       name: actor.user.name,
-      isAdmin: actor.user.is_admin,
+      isAdmin: actor.user.is_admin === true,
     },
     via: actor.via,
   });
@@ -199,17 +196,17 @@ api.post('/import', async (c) => {
 
 api.get('/repos/:owner/:repo', async (c) => {
   const actor = await apiActor(c);
-  const repo = await getRepo(c.env.DB, c.req.param('owner'), c.req.param('repo'));
-  if (!repo || !canRead(repo, actor)) return c.json({ error: 'not found' }, 404);
-  return c.json({ repo: repoJson(c, repo) });
+  const d = await authorizeRoute(c, actor, 'read');
+  if (!d.ok) return denyJson(c, d);
+  return c.json({ repo: repoJson(c, d.repo) });
 });
 
 api.patch('/repos/:owner/:repo', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const repo = await getRepo(c.env.DB, c.req.param('owner'), c.req.param('repo'));
-  if (!repo) return c.json({ error: 'not found' }, 404);
-  if (!canWrite(repo, actor)) return c.json({ error: 'forbidden' }, 403);
+  const d = await authorizeRoute(c, actor, 'admin');
+  if (!d.ok) return denyJson(c, d);
+  const repo = d.repo;
   const body = (await c.req.json().catch(() => ({}))) as {
     description?: string;
     visibility?: string;
@@ -224,10 +221,9 @@ api.patch('/repos/:owner/:repo', async (c) => {
 api.delete('/repos/:owner/:repo', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const repo = await getRepo(c.env.DB, c.req.param('owner'), c.req.param('repo'));
-  if (!repo) return c.json({ error: 'not found' }, 404);
-  if (!canWrite(repo, actor)) return c.json({ error: 'forbidden' }, 403);
-  const result = await svc.deleteRepo(c.env, repo);
+  const d = await authorizeRoute(c, actor, 'admin');
+  if (!d.ok) return denyJson(c, d);
+  const result = await svc.deleteRepo(c.env, d.repo);
   if (!result.ok) return c.json({ error: result.error }, result.status as never);
   return c.json({ deleted: true });
 });
@@ -235,8 +231,9 @@ api.delete('/repos/:owner/:repo', async (c) => {
 api.post('/repos/:owner/:repo/forks', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const repo = await getRepo(c.env.DB, c.req.param('owner'), c.req.param('repo'));
-  if (!repo || !canRead(repo, actor)) return c.json({ error: 'not found' }, 404);
+  const d = await authorizeRoute(c, actor, 'read');
+  if (!d.ok) return denyJson(c, d);
+  const repo = d.repo;
   const body = (await c.req.json().catch(() => ({}))) as { name?: string };
   const result = await svc.forkRepo(c.env, repo, actor.user.login, body.name ?? `${repo.name}-fork`);
   if (!result.ok) return c.json({ error: result.error }, result.status as never);

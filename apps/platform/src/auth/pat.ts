@@ -6,13 +6,17 @@
  */
 
 import { sha256Hex } from '@forge/gitops';
+import { toUserRow, type UserRow } from '../db/users';
 
 export type Scope = 'read' | 'write' | 'api' | 'ci';
+
+export const SCOPES: readonly Scope[] = ['read', 'write', 'api', 'ci'];
 
 export interface PATInfo {
   id: string;
   userId: string;
   scopes: Scope[];
+  user: UserRow;
 }
 
 /** write implies read for git operations. */
@@ -67,23 +71,38 @@ export async function revokePAT(env: Env, id: string, userId: string): Promise<b
   return (res.meta.changes ?? 0) > 0;
 }
 
+/**
+ * Resolves a PAT and its owning user in one query. A token whose user row is
+ * gone yields null (the inner join fails closed on deleted principals).
+ */
 export async function verifyPAT(env: Env, token: string): Promise<PATInfo | null> {
   if (!token.startsWith('forge_pat_')) return null;
   const hash = await sha256Hex(token);
   const row = await env.DB.prepare(
-    'SELECT id, user_id, scopes, expires_at FROM pat WHERE hash = ?',
+    `SELECT p.id AS pat_id, p.scopes AS pat_scopes, p.expires_at AS pat_expires_at, u.*
+       FROM pat p JOIN users u ON u.id = p.user_id
+      WHERE p.hash = ?`,
   )
     .bind(hash)
-    .first<{ id: string; user_id: string; scopes: string; expires_at: number | null }>();
+    .first<
+      Omit<UserRow, 'is_admin'> & {
+        is_admin: unknown;
+        pat_id: string;
+        pat_scopes: string;
+        pat_expires_at: number | null;
+      }
+    >();
   if (!row) return null;
-  if (row.expires_at !== null && row.expires_at < Date.now()) return null;
+  if (row.pat_expires_at !== null && row.pat_expires_at < Date.now()) return null;
   let scopes: Scope[] = [];
   try {
-    scopes = JSON.parse(row.scopes) as Scope[];
+    const parsed: unknown = JSON.parse(row.pat_scopes);
+    if (Array.isArray(parsed)) scopes = parsed.filter((s): s is Scope => SCOPES.includes(s as Scope));
   } catch {
     scopes = [];
   }
-  return { id: row.id, userId: row.user_id, scopes };
+  const { pat_id, pat_scopes: _s, pat_expires_at: _e, ...user } = row;
+  return { id: pat_id, userId: user.id, scopes, user: toUserRow(user) };
 }
 
 /** Fire-and-forget last-used stamping (callers wrap in waitUntil). */

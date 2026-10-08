@@ -13,6 +13,11 @@ export interface UserRow {
   created_at: number;
 }
 
+/** D1 stores is_admin as INTEGER 0/1; every UserRow leaving this module is boolean. */
+export function toUserRow(raw: Omit<UserRow, 'is_admin'> & { is_admin: unknown }): UserRow {
+  return { ...raw, is_admin: raw.is_admin === true || raw.is_admin === 1 || raw.is_admin === '1' };
+}
+
 export function loginFromEmail(email: string): string {
   const raw = (email.split('@')[0] ?? 'user').toLowerCase();
   const sanitized = raw.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -21,7 +26,7 @@ export function loginFromEmail(email: string): string {
 
 export async function getUserById(db: D1Database, id: string): Promise<UserRow | null> {
   const row = await db.prepare('SELECT * FROM users WHERE id = ?').bind(id).first<UserRow>();
-  return row ?? null;
+  return row ? toUserRow(row) : null;
 }
 
 export async function getUserByLogin(db: D1Database, login: string): Promise<UserRow | null> {
@@ -29,7 +34,7 @@ export async function getUserByLogin(db: D1Database, login: string): Promise<Use
     .prepare('SELECT * FROM users WHERE login = ?')
     .bind(login)
     .first<UserRow>();
-  return row ?? null;
+  return row ? toUserRow(row) : null;
 }
 
 /**
@@ -37,10 +42,11 @@ export async function getUserByLogin(db: D1Database, login: string): Promise<Use
  * a numeric suffix. The first ever user becomes admin (bootstrap owner).
  */
 export async function findOrCreateUser(env: Env, session: SessionUser): Promise<UserRow> {
-  const existing = await env.DB.prepare('SELECT * FROM users WHERE workos_user_id = ?')
+  const raw = await env.DB.prepare('SELECT * FROM users WHERE workos_user_id = ?')
     .bind(session.workosUserId)
     .first<UserRow>();
-  if (existing) {
+  if (raw) {
+    const existing = toUserRow(raw);
     // Keep display fields fresh from WorkOS.
     if (existing.email !== session.email || existing.name !== session.name) {
       await env.DB.prepare('UPDATE users SET email = ?, name = ?, avatar_url = ? WHERE id = ?')
