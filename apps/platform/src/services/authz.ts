@@ -65,7 +65,7 @@ export function isAgentActor(actor: Actor | null | undefined): boolean {
 
 /**
  * Ref-level ceiling of the credential. Humans are limited only by their repo
- * role (and, later, protected-ref policy); agent tokens may touch only refs
+ * role (and protected-ref policy, services/branchRules.ts); agent tokens may touch only refs
  * that match one of their granted patterns.
  */
 export function credentialMayUpdateRef(actor: Actor | null, ref: string): boolean {

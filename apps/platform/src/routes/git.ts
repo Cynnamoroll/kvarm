@@ -26,6 +26,7 @@ import { markCache } from '../cost/meter';
 import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
+import { directPushDenial, type BranchRule } from '../services/branchRules';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -91,7 +92,7 @@ export function infoRefsCacheKey(artifactsRemote: string, search: string, gitPro
 }
 
 export type GitAccess =
-  | { ok: true; repo: RepoRow; actor: Actor | null; op: 'read' | 'write' }
+  | { ok: true; repo: RepoRow; actor: Actor | null; op: 'read' | 'write'; branchRules: BranchRule[] }
   | { ok: false; response: Response };
 
 /** Authenticates and authorizes one git request; nothing upstream is touched. */
@@ -116,9 +117,10 @@ export async function authorizeGitRequest(
     transport: 'git',
     credential: basic ? { kind: 'pat', token: basic.password } : { kind: 'anonymous' },
     clientIp: request.headers.get('CF-Connecting-IP'),
+    branchRules: subpath === 'git-receive-pack',
   });
   if (!access.ok) return { ok: false, response: denied(access.status, access.code) };
-  return { ok: true, repo: access.repo, actor: access.actor, op };
+  return { ok: true, repo: access.repo, actor: access.actor, op, branchRules: access.branchRules ?? [] };
 }
 
 export async function handleGitRequest(
@@ -131,27 +133,29 @@ export async function handleGitRequest(
   const url = new URL(c.req.url);
   const access = await authorizeGitRequest(env, c.req.raw, owner, name, subpath);
   if (!access.ok) return access.response;
-  const { repo, actor, op } = access;
+  const { repo, actor, op, branchRules } = access;
   const isPublic = repo.visibility === 'public';
 
   // Rate limit by PAT id (or client IP for anonymous public reads).
   const identity = actor?.patId ?? `ip:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`;
   if (!(await gitRateLimit(env, op, identity))) return rateLimited();
 
-  // Agent tokens are confined to their granted refs: the push command list is
-  // checked before any upstream token mint or byte of the pack is forwarded.
+  if (actor?.agent && !agentMethodAllowed(subpath, c.req.method)) {
+    return new Response('method not allowed\n', { status: 405 });
+  }
+
+  // Agent tokens are confined to their granted refs, and protected refs refuse
+  // direct pushes from everyone (instance admin included). The push command
+  // list is checked before any upstream token mint or byte of the pack is
+  // forwarded; pushes to repos without branch rules stay unparsed for humans.
   let pushBody: ReadableStream<Uint8Array> | null = null;
-  if (actor?.agent) {
-    if (!agentMethodAllowed(subpath, c.req.method)) {
-      return new Response('method not allowed\n', { status: 405 });
-    }
-    if (subpath === 'git-receive-pack') {
-      const gate = await gateReceivePack(c.req.raw, (cmd) =>
-        credentialMayUpdateRef(actor, cmd.ref) ? null : 'ref outside agent token grant',
-      );
-      if (!gate.ok) return gate.response;
-      pushBody = gate.body;
-    }
+  if (subpath === 'git-receive-pack' && (actor?.agent || branchRules.length > 0)) {
+    const gate = await gateReceivePack(c.req.raw, (cmd) => {
+      if (actor?.agent && !credentialMayUpdateRef(actor, cmd.ref)) return 'ref outside agent token grant';
+      return directPushDenial(branchRules, cmd.ref);
+    });
+    if (!gate.ok) return gate.response;
+    pushBody = gate.body;
   }
 
   // Warm public advertisements are served before any token mint or upstream

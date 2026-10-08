@@ -4,6 +4,7 @@ import { authRoutes } from './routes/auth';
 import { api } from './routes/api';
 import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
+import { branchRulesApi } from './routes/api/branchRules';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
@@ -42,6 +43,7 @@ app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/api/v1', tenancyApi);
 app.route('/api/v1', agentsApi);
+app.route('/api/v1', branchRulesApi);
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.

@@ -35,6 +35,7 @@ import { agentFromRow, agentTokenSelect, agentTokenStamp, isAgentToken, type Age
 import { PAT_STAMP_INTERVAL_MS } from '../auth/pat';
 import type { RepoRow } from '../db/repos';
 import { readRepoCache, writeRepoCache } from '../cache/repos';
+import { branchRulesSelect, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
 import { preauthAllowed } from '../ratelimit';
 import {
   authorizeRepo,
@@ -84,7 +85,16 @@ export interface AccessDenied {
 
 export type PrincipalResult = { ok: true; pat: PATInfo } | AccessDenied;
 
-export type RepoAccess = { ok: true; repo: RepoRow; actor: Actor | null; role: RepoRole } | AccessDenied;
+export type RepoAccess =
+  | {
+      ok: true;
+      repo: RepoRow;
+      actor: Actor | null;
+      role: RepoRole;
+      /** The repo's branch rules, present only when requested (read in the authoritative batch). */
+      branchRules?: BranchRule[];
+    }
+  | AccessDenied;
 
 export interface RepoAccessRequest {
   owner: string;
@@ -100,6 +110,11 @@ export interface RepoAccessRequest {
    * act on an account (forks, grants, settings) are human-only.
    */
   allowAgent?: boolean;
+  /**
+   * Also read the repo's branch rules in the authoritative batch (git pushes).
+   * Only honored for `write`/`admin`, which never take the cached path.
+   */
+  branchRules?: boolean;
 }
 
 const BAD_CREDENTIAL: AccessDenied = {
@@ -143,6 +158,7 @@ interface Authoritative {
   facts: AccessFacts;
   /** The user the facts were read for; null when none were read. */
   factsUserId: string | null;
+  branchRules?: BranchRule[];
 }
 
 /**
@@ -215,6 +231,7 @@ async function authoritativeLookup(
     stamp: boolean;
     repo: { owner: string; name: string } | null;
     subject?: FactsSubject;
+    branchRules?: boolean;
     now: number;
   },
 ): Promise<Authoritative> {
@@ -235,6 +252,10 @@ async function authoritativeLookup(
   if (opts.repo) {
     repoIndex = stmts.push(repoFactsSelect(env.DB, opts.repo.owner, opts.repo.name, opts.subject ?? null)) - 1;
   }
+  let rulesIndex = -1;
+  if (opts.repo && opts.branchRules) {
+    rulesIndex = stmts.push(branchRulesSelect(env.DB, opts.repo.owner, opts.repo.name)) - 1;
+  }
   if (stmts.length === 0) return { pat: null, repo: null, facts: NO_FACTS, factsUserId: null };
   const results = await env.DB.batch(stmts);
   const row = patIndex >= 0 ? results[patIndex]?.results?.[0] : undefined;
@@ -247,7 +268,11 @@ async function authoritativeLookup(
     opts.hash ? writePatCache(opts.hash, pat, opts.now) : undefined,
     repo ? writeRepoCache(repo) : undefined,
   ]);
-  return { pat, repo, facts, factsUserId: userId };
+  const out: Authoritative = { pat, repo, facts, factsUserId: userId };
+  if (rulesIndex >= 0) {
+    out.branchRules = ((results[rulesIndex]?.results ?? []) as unknown as BranchRuleRow[]).map(ruleFromRow);
+  }
+  return out;
 }
 
 /**
@@ -348,10 +373,13 @@ export async function resolveRepoAccess(env: Env, req: RepoAccessRequest): Promi
     stamp: hash !== null && (kind === 'agent' || patNeedsStamp(cachedPat, now)),
     repo: { owner: req.owner, name: req.name },
     subject,
+    branchRules: req.branchRules === true && req.need !== 'read',
     now,
   });
   if (hash && !fresh.pat) return BAD_CREDENTIAL;
   const actor = cred.kind === 'session' ? cred.actor : actorFor(req.transport, fresh.pat);
   const facts = actor && fresh.factsUserId === actor.user.id ? fresh.facts : NO_FACTS;
-  return decide(env, fresh.repo, actor, req, facts);
+  const decision = await decide(env, fresh.repo, actor, req, facts);
+  if (decision.ok && fresh.branchRules) decision.branchRules = fresh.branchRules;
+  return decision;
 }
