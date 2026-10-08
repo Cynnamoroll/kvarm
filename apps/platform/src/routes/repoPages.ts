@@ -1,7 +1,8 @@
 /**
  * Repo web pages: tree browser, file view, raw files, commit history, commit
  * detail, branch list, settings. SSR HTML, zero client JS except the copy
- * button. Public anonymous views are edge-cached (push purges arrive in M4).
+ * button. Public anonymous views are edge-cached; mutable-ref keys carry the
+ * repo view generation that a confirmed push moves.
  *
  * Speed choices baked in:
  *  - No last-commit-message per tree row (that needs a history walk per path,
@@ -36,6 +37,7 @@ import { PRIVATE_CACHE_CONTROL } from '../cache/scope';
 import * as svc from '../repos/service';
 import type { RepoNeed, RepoRole } from '../services/authz';
 import { resolveRepoAccess } from '../services/access';
+import { repoViewGeneration } from '../services/pushFreshness';
 
 type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const repoPages = new Hono<App>();
@@ -126,6 +128,17 @@ function warmingPage(c: Context<App>, repo: RepoRow, viewerLogin: string | null)
 
 function isWarming(err: unknown): boolean {
   return /NOT_FOUND|not exist|not ready|importing/i.test(String(err));
+}
+
+/** Anonymous public view cache; mutable refs are keyed by the repo view generation. */
+async function cachedView(
+  c: Context<App>,
+  resolved: Resolved,
+  ref: string,
+  render: () => Promise<Response>,
+): Promise<Response> {
+  if (isCommitRef(ref)) return edgeCachedPage(c, 31536000, null, render);
+  return edgeCachedPage(c, 60, await repoViewGeneration(resolved.repo), render);
 }
 
 async function defaultRef(c: Context<App>, repo: RepoRow): Promise<string> {
@@ -253,7 +266,7 @@ repoPages.get('/', async (c) => {
     !c.req.header('cookie')?.includes('wos-session');
   if (cacheable) {
     const render = () => renderTreeView(c, resolved, ref, '', null);
-    return edgeCachedPage(c, isCommitRef(ref) ? 31536000 : 60, render);
+    return cachedView(c, resolved, ref, render);
   }
   const viewerLogin = resolved.viewer?.user.login ?? null;
   return renderTreeView(c, resolved, ref, '', viewerLogin);
@@ -269,7 +282,7 @@ repoPages.get('/tree/:ref{.+}', async (c) => {
     !c.req.header('cookie')?.includes('wos-session');
   if (cacheable) {
     const render = () => renderTreeView(c, resolved, parsed.ref, parsed.rest, null);
-    return edgeCachedPage(c, isCommitRef(parsed.ref) ? 31536000 : 60, render);
+    return cachedView(c, resolved, parsed.ref, render);
   }
   const viewerLogin = resolved.viewer?.user.login ?? null;
   return renderTreeView(c, resolved, parsed.ref, parsed.rest, viewerLogin);
@@ -394,7 +407,7 @@ repoPages.get('/blob/:ref{.+}', async (c) => {
     !c.req.header('cookie')?.includes('wos-session');
   if (cacheable) {
     const render = () => renderBlob(c, resolved, parsed.ref, parsed.rest, null, false);
-    return edgeCachedPage(c, isCommitRef(parsed.ref) ? 31536000 : 60, render);
+    return cachedView(c, resolved, parsed.ref, render);
   }
   const viewerLogin = resolved.viewer?.user.login ?? null;
   return renderBlob(c, resolved, parsed.ref, parsed.rest, viewerLogin, true);
@@ -430,7 +443,7 @@ repoPages.get('/raw/:ref{.+}', async (c) => {
       throw err;
     }
   };
-  if (cacheable) return edgeCachedPage(c, isCommitRef(parsed.ref) ? 31536000 : 60, render);
+  if (cacheable) return cachedView(c, resolved, parsed.ref, render);
   return render();
 });
 

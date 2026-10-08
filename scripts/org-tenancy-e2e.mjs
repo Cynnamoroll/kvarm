@@ -97,7 +97,7 @@ function lsRemote(who, repo) {
 function commit(dir, file, content) {
   writeFileSync(join(dir, file), content);
   git(null, ['add', file], dir);
-  git(null, ['-c', 'user.name=org-tenancy-e2e', '-c', 'user.email=e2e@forge.invalid', 'commit', '-q', '-m', `${file}: ${content.trim()}`], dir);
+  git(null, ['commit', '-q', '-m', `${file}: ${content.trim()}`], dir);
   return git(null, ['rev-parse', 'HEAD'], dir).out;
 }
 

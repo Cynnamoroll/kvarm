@@ -14,8 +14,10 @@ import { mintPAT, patHash, readPatCache, type Scope } from '../src/auth/pat';
 import { internalKey, readCachedJson, writeCachedJson } from '../src/cache/internal';
 import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import type { RepoRow } from '../src/db/repos';
+import { pageCacheKey } from '../src/cache/edge';
 import { infoRefsCacheKey } from '../src/routes/git';
 import { resolveRepoAccess } from '../src/services/access';
+import { repoViewGeneration } from '../src/services/pushFreshness';
 
 const env = cfEnv as unknown as Env;
 const ORIGIN = 'https://forge.test';
@@ -82,6 +84,16 @@ async function repoRow(name: string): Promise<RepoRow> {
   return row!;
 }
 
+/** Edge keys a colo holds for a public repo's branch views at its current generation. */
+async function pageKey(name: string, path: string): Promise<Request> {
+  return pageCacheKey(new Request(`${ORIGIN}${path}`), await repoViewGeneration(await repoRow(name)));
+}
+
+async function refsKey(name: string, gitProtocol: string | null): Promise<Request> {
+  const gen = await repoViewGeneration(await repoRow(name));
+  return infoRefsCacheKey(remoteOf(name), '?service=git-upload-pack', gitProtocol, gen);
+}
+
 /** The repo-row Cache API entry another colo may still hold. */
 function retainedRowKey(name: string): Request {
   return internalKey('repo', OWNER, name);
@@ -99,20 +111,16 @@ async function flipInD1(name: string, visibility: 'public' | 'private'): Promise
  * upstream without an Artifacts mint) and the public repo row itself.
  */
 async function warmCaches(name: string): Promise<void> {
-  const search = '?service=git-upload-pack';
   const adv = { 'content-type': 'application/x-git-upload-pack-advertisement', 'cache-control': 'public, max-age=30' };
   await Promise.all([
     caches.default.put(
-      new Request(`${ORIGIN}/${OWNER}/${name}`),
+      await pageKey(name, `/${OWNER}/${name}`),
       new Response(`<html>${MARK.page}</html>`, {
         headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' },
       }),
     ),
-    caches.default.put(infoRefsCacheKey(remoteOf(name), search, null), new Response(`v0 ${MARK.refs}`, { headers: adv })),
-    caches.default.put(
-      infoRefsCacheKey(remoteOf(name), search, 'version=2'),
-      new Response(`v2 ${MARK.refs}`, { headers: adv }),
-    ),
+    caches.default.put(await refsKey(name, null), new Response(`v0 ${MARK.refs}`, { headers: adv })),
+    caches.default.put(await refsKey(name, 'version=2'), new Response(`v2 ${MARK.refs}`, { headers: adv })),
     writeCachedJson(internalKey('gittoken', `${OWNER}--${name}`, 'read'), { token: 'fake', expiresAt: Date.now() + 3_600_000 }, 3600),
     writeCachedJson(retainedRowKey(name), await repoRow(name), 60),
   ]);
@@ -180,8 +188,8 @@ describe('retained cached-public row after a direct D1 visibility flip', () => {
     await writeCachedJson(retainedRowKey(name), await repoRow(name), 60);
     await flipInD1(name, 'private');
     expect((await readCachedJson<RepoRow>(retainedRowKey(name)))?.visibility).toBe('public');
-    expect(await caches.default.match(new Request(`${ORIGIN}${page}`))).toBeTruthy();
-    expect(await caches.default.match(infoRefsCacheKey(remoteOf(name), '?service=git-upload-pack', null))).toBeTruthy();
+    expect(await caches.default.match(await pageKey(name, page))).toBeTruthy();
+    expect(await caches.default.match(await refsKey(name, null))).toBeTruthy();
 
     const upstreamBefore = upstreamCalls.length;
     const deniedBudget = { art: 0, do: 0, sub: 0 };
@@ -291,9 +299,9 @@ describe('rejected Bearer on a page falls back to anonymous on the same authorit
     const page = `/${OWNER}/${name}`;
     const raw = `/${OWNER}/${name}/raw/main/MARKER.txt`;
     const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' };
-    await caches.default.put(new Request(`${ORIGIN}${page}`), new Response(`<html>${PAGE_MARK}</html>`, { headers }));
+    await caches.default.put(await pageKey(name, page), new Response(`<html>${PAGE_MARK}</html>`, { headers }));
     await caches.default.put(
-      new Request(`${ORIGIN}${raw}`),
+      await pageKey(name, raw),
       new Response(RAW_MARK, { headers: { 'content-type': 'text/plain', 'cache-control': 'public, max-age=60' } }),
     );
     return { page, raw };

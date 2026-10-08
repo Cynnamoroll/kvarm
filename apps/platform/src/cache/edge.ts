@@ -1,7 +1,7 @@
 /**
  * Edge caching for public content. Only anonymous views are cached (signed-in
- * pages differ), keyed by URL. Push-event purges land with the event consumer
- * (M4); short TTLs keep the window small in the meantime.
+ * pages differ), keyed by URL plus, for mutable refs, the repo view
+ * generation that a confirmed push moves (services/pushFreshness.ts).
  */
 
 import type { Context } from 'hono';
@@ -16,18 +16,31 @@ export function cacheableViewer<S extends AnyApp>(c: Context<S>): boolean {
 }
 
 /**
+ * Cache key for a page. `generation` is null for views pinned to a commit
+ * SHA, which never change.
+ */
+export function pageCacheKey(request: Request, generation: string | null): Request {
+  if (generation === null) return request;
+  const url = new URL(request.url);
+  url.searchParams.set('forge-gen', generation);
+  return new Request(url.toString(), { method: 'GET' });
+}
+
+/**
  * Serve a public page from cache when possible; otherwise render and store.
  * `render` is only called on misses.
  */
 export async function edgeCachedPage<S extends AnyApp>(
   c: Context<S>,
   ttlSeconds: number,
+  generation: string | null,
   render: () => Promise<Response>,
 ): Promise<Response> {
   if (!cacheableViewer(c)) return render();
 
   const cache = caches.default;
-  const cached = await cache.match(c.req.raw);
+  const key = pageCacheKey(c.req.raw, generation);
+  const cached = await cache.match(key);
   if (cached) {
     markCache('hit');
     const res = new Response(cached.body, cached);
@@ -42,7 +55,7 @@ export async function edgeCachedPage<S extends AnyApp>(
     store.headers.set('Cache-Control', `public, max-age=${ttlSeconds}`);
     store.headers.set('x-forge-cache', 'miss');
     c.executionCtx.waitUntil(
-      cache.put(c.req.raw, store).catch(() => undefined),
+      cache.put(key, store).catch(() => undefined),
     );
   }
   return res;

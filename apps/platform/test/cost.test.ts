@@ -3,7 +3,9 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, patCacheKey, patHash, PAT_STAMP_INTERVAL_MS, type Scope } from '../src/auth/pat';
 import { CostMeter, COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { resolveRepoAccess } from '../src/services/access';
+import type { RepoRow } from '../src/db/repos';
 import { infoRefsCacheKey } from '../src/routes/git';
+import { repoViewGeneration } from '../src/services/pushFreshness';
 
 const env = cfEnv as unknown as Env;
 const ORIGIN = 'https://forge.test';
@@ -276,9 +278,11 @@ describe('git gate', () => {
     const search = '?service=git-upload-pack';
     const v0 = 'v0-advertisement';
     const v2 = 'v2-advertisement';
+    const row = await env.DB.prepare('SELECT * FROM repos WHERE owner_login = ? AND name = ?').bind(OWNER, 'open').first<RepoRow>();
+    const gen = await repoViewGeneration(row!);
     for (const [proto, body] of [[null, v0], ['version=2', v2]] as const) {
       await caches.default.put(
-        infoRefsCacheKey(openRemote, search, proto),
+        infoRefsCacheKey(openRemote, search, proto, gen),
         new Response(body, { headers: { 'content-type': 'application/x-git-upload-pack-advertisement', 'cache-control': 'public, max-age=30' } }),
       );
     }

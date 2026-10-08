@@ -191,7 +191,7 @@ async function seedMarker(owner, repo, file, content) {
   git(null, ['init', '-q', '-b', 'main', dir]);
   writeFileSync(join(dir, file), `${content}\n`);
   git(null, ['add', file], dir);
-  git(null, ['-c', 'user.name=visibility-flip-e2e', '-c', 'user.email=e2e@forge.invalid', 'commit', '-q', '-m', 'marker'], dir);
+  git(null, ['commit', '-q', '-m', 'marker'], dir);
   git(null, ['remote', 'add', 'origin', `${BASE}/${owner}/${repo}.git`], dir);
   const pushed = await pushWithRetry(dir);
   return { code: pushed.code, sha: git(null, ['rev-parse', 'HEAD'], dir).out };
@@ -300,7 +300,7 @@ try {
   git(null, ['init', '-q', '-b', 'main', seed]);
   writeFileSync(join(seed, 'MARKER.txt'), `${MARKER}\n`);
   git(null, ['add', 'MARKER.txt'], seed);
-  git(null, ['-c', 'user.name=visibility-flip-e2e', '-c', 'user.email=e2e@forge.invalid', 'commit', '-q', '-m', 'marker'], seed);
+  git(null, ['commit', '-q', '-m', 'marker'], seed);
   const sha = git(null, ['rev-parse', 'HEAD'], seed).out;
   git(null, ['remote', 'add', 'origin', `${BASE}/${OWNER}/${FLIP}.git`], seed);
   check('owner pushes marker commit', (await pushWithRetry(seed)).code, 0);

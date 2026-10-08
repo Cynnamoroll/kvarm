@@ -11,8 +11,8 @@
  *    (platform authorization has already happened by then).
  *  - info/refs advertisements for public repos are edge-cached briefly so
  *    bursty CI clones skip the backend hop. The cache is checked after
- *    authorization and before any token mint or upstream fetch. Purged by
- *    push events (M4).
+ *    authorization and before any token mint or upstream fetch, keyed by the
+ *    repo view generation that a confirmed push moves before its reply ends.
  *  - No Durable Object on this path: rate limits use the Workers Rate
  *    Limiting bindings and tokens come from the Cache API.
  */
@@ -24,11 +24,11 @@ import { getGitToken } from '../artifacts/tokens';
 import { gitRateLimit } from '../ratelimit';
 import { markCache } from '../cost/meter';
 import { withPrivateCacheControl } from '../cache/scope';
-import { bumpRefGeneration } from '../cache/compare';
 import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
 import { directPushDenial, type BranchRule } from '../services/branchRules';
+import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -84,12 +84,19 @@ function operation(subpath: string, service: string | null): 'read' | 'write' {
 
 /**
  * Edge-cache key for a public info/refs advertisement. v0 and v2
- * advertisements differ for the same URL, so the key includes Git-Protocol.
+ * advertisements differ for the same URL, so the key includes Git-Protocol;
+ * the repo view generation retires it on a confirmed push.
  */
-export function infoRefsCacheKey(artifactsRemote: string, search: string, gitProtocol: string | null): Request {
+export function infoRefsCacheKey(
+  artifactsRemote: string,
+  search: string,
+  gitProtocol: string | null,
+  generation: string,
+): Request {
   const keyUrl = new URL(`${artifactsRemote}/info/refs`);
   keyUrl.search = search;
   keyUrl.searchParams.set('forge-git-protocol', gitProtocol ?? '');
+  keyUrl.searchParams.set('forge-gen', generation);
   return new Request(keyUrl.toString(), { method: 'GET' });
 }
 
@@ -165,7 +172,12 @@ export async function handleGitRequest(
   // fetch; authorization above already ran on the current repo state.
   const cacheKey =
     op === 'read' && isPublic && subpath === 'info/refs' && c.req.method === 'GET'
-      ? infoRefsCacheKey(repo.artifacts_remote, url.search, c.req.header('git-protocol') ?? null)
+      ? infoRefsCacheKey(
+          repo.artifacts_remote,
+          url.search,
+          c.req.header('git-protocol') ?? null,
+          await repoViewGeneration(repo),
+        )
       : null;
   if (cacheKey) {
     const cached = await caches.default.match(cacheKey);
@@ -206,7 +218,7 @@ export async function handleGitRequest(
   }
   const upstreamRes = await fetch(upstream.toString(), init);
 
-  // Briefly edge-cache public clone bootstrapping (purge-on-push lands in M4).
+  // Briefly edge-cache public clone bootstrapping.
   if (cacheKey && upstreamRes.status === 200) {
     const res = relay(upstreamRes);
     res.headers.set('Cache-Control', 'public, max-age=30');
@@ -219,12 +231,13 @@ export async function handleGitRequest(
   }
 
   if (subpath === 'git-receive-pack' && upstreamRes.ok && upstreamRes.body) {
-    // Refs may move while report-status streams, so cached compare ref
-    // resolutions are invalidated again once the reply has fully passed.
-    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-    const bump = () => bumpRefGeneration(repo.id);
-    c.executionCtx.waitUntil(bump().then(() => upstreamRes.body!.pipeTo(writable).then(bump, bump)));
-    return scoped(relay(new Response(readable, upstreamRes)));
+    // The client's push completes only after a confirmed update has moved the
+    // view generation, so the next read cannot be served a pre-push entry.
+    const body = relayReceivePackReply(upstreamRes.body, {
+      onConfirmed: () => recordConfirmedPush(env, repo.id),
+      waitUntil: (p) => c.executionCtx.waitUntil(p),
+    });
+    return scoped(relay(new Response(body, upstreamRes)));
   }
 
   return scoped(relay(upstreamRes));

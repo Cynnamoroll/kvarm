@@ -108,8 +108,15 @@ export async function listReposForOwner(
   return results ?? [];
 }
 
+/**
+ * Advances pushed_at strictly: it never moves backwards and two pushes within
+ * the same millisecond still yield distinct values (it keys cached views).
+ */
 export async function touchRepoPushed(db: D1Database, id: string, at = Date.now()): Promise<void> {
-  await db.prepare('UPDATE repos SET pushed_at = ? WHERE id = ?').bind(at, id).run();
+  await db
+    .prepare('UPDATE repos SET pushed_at = MAX(COALESCE(pushed_at, 0) + 1, ?) WHERE id = ?')
+    .bind(at, id)
+    .run();
 }
 
 export async function deleteRepoRow(db: D1Database, id: string): Promise<void> {
