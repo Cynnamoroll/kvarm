@@ -147,16 +147,21 @@ export function snapshotView(ref: string, sha: string, row: SnapshotRow | null, 
   return { status: 202, body: { ...common, state: 'building' } };
 }
 
+export interface DemandOutcome {
+  row: SnapshotRow;
+  started: string | null;
+  /** Set when the Workflow could not be started; the attempt is then marked failed. */
+  startError?: string;
+}
+
 /**
  * Records an explicit demand and starts a build when none is live: a new
  * commit, a failed build, or a build stuck past STALE_BUILD_MS. A live or
  * finished build is left alone. One D1 batch; at most one Workflow create.
+ * If the create fails and no instance exists, the unstarted attempt is
+ * marked failed (one more D1 write) so the next demand starts a new one.
  */
-export async function demandSnapshot(
-  env: Env,
-  repoId: string,
-  sha: string,
-): Promise<{ row: SnapshotRow; started: string | null }> {
+export async function demandSnapshot(env: Env, repoId: string, sha: string): Promise<DemandOutcome> {
   const now = Date.now();
   const base = snapshotInstanceId(repoId, sha);
   const db = env.DB;
@@ -189,23 +194,46 @@ export async function demandSnapshot(
         () => true,
         () => false,
       );
-      if (!exists) throw err;
+      if (!exists) {
+        const startError = `snapshot build could not be started: ${String(err instanceof Error ? err.message : err).slice(0, 200)}`;
+        // Only this unstarted attempt: a newer demand's attempt is left alone.
+        const failed = await db
+          .prepare(
+            `UPDATE snapshot_commits SET state = 'failed', error = ?4
+             WHERE repo_id = ?1 AND sha = ?2 AND instance_id = ?3 AND state = 'building'`,
+          )
+          .bind(repoId, sha, started, startError)
+          .run();
+        const marked = (failed.meta?.changes ?? 0) > 0;
+        return { row: marked ? { ...row, state: 'failed', error: startError } : row, started: null, startError };
+      }
     }
   }
   return { row, started };
 }
 
-/** Removes a deleted repo's snapshot rows and tarballs (bounded: up to 10,000 objects). */
-export async function deleteRepoSnapshots(env: Env, repoId: string): Promise<void> {
-  await env.DB.batch([
-    env.DB.prepare('DELETE FROM snapshot_commits WHERE repo_id = ?').bind(repoId),
-    env.DB.prepare('DELETE FROM snapshot_trees WHERE repo_id = ?').bind(repoId),
-  ]);
-  let cursor: string | undefined;
-  for (let page = 0; page < 10; page++) {
-    const list = await env.SNAPSHOTS.list({ prefix: `trees/v1/${repoId}/`, cursor, limit: 1000 });
-    if (list.objects.length > 0) await env.SNAPSHOTS.delete(list.objects.map((o) => o.key));
-    if (!list.truncated) return;
-    cursor = list.cursor;
+const SNAPSHOT_DELETE_KEYS = 1000;
+
+/**
+ * Statements that delete a repo's snapshot rows, for the caller's repo
+ * deletion batch. The first returns the repo's tarball keys for
+ * deleteSnapshotObjects.
+ */
+export function snapshotCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
+  return [
+    db.prepare('SELECT r2_key FROM snapshot_trees WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM snapshot_commits WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM snapshot_trees WHERE repo_id = ?').bind(repoId),
+  ];
+}
+
+/**
+ * Deletes the tarballs named by the repo's tree rows, up to 1,000 keys per
+ * call. A repo without snapshots makes no R2 call. Incomplete multipart
+ * uploads of an interrupted build are left to R2's automatic abort.
+ */
+export async function deleteSnapshotObjects(env: Env, keys: string[]): Promise<void> {
+  for (let i = 0; i < keys.length; i += SNAPSHOT_DELETE_KEYS) {
+    await env.SNAPSHOTS.delete(keys.slice(i, i + SNAPSHOT_DELETE_KEYS));
   }
 }

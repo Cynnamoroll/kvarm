@@ -10,13 +10,24 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { snapshotInstanceId } from '../src/services/events';
-import { BLOBS_PER_STEP, buildSnapshot, snapshotKey, type BuildCost, type SnapshotParams, type StepRunner } from '../src/workflows/snapshotBuilder';
+import {
+  BLOBS_PER_STEP,
+  READ_AHEAD,
+  READ_BUDGET,
+  STALE_BUILD_MS,
+  buildSnapshot,
+  snapshotKey,
+  type BuildCost,
+  type SnapshotParams,
+  type StepRunner,
+} from '../src/workflows/snapshotBuilder';
 import worker from '../src/index';
 import {
+  FAKE_STREAM_CHUNK,
   FakeRepo,
   blobHash,
   commit,
@@ -52,18 +63,21 @@ class Runner implements StepRunner {
   steps: string[] = [];
   attempts: string[] = [];
   gates = new Map<string, Promise<void>>();
+  onAttempt?: (name: string, attempt: number) => void;
 
   constructor(private readonly retries = 0) {}
 
-  async do<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  async do<T>(name: string, fn: (ctx?: { attempt: number }) => Promise<T>): Promise<T> {
     await this.gates.get(name);
     this.steps.push(name);
     for (let attempt = 0; ; attempt++) {
       this.attempts.push(name);
+      this.onAttempt?.(name, attempt + 1);
       try {
-        return await persist(await fn());
+        return await persist(await fn({ attempt: attempt + 1 }));
       } catch (err) {
-        if (attempt >= this.retries) throw err;
+        // Workflows never retry a NonRetryableError.
+        if (attempt >= this.retries || (err as Error).name === 'NonRetryableError') throw err;
       }
     }
   }
@@ -74,8 +88,14 @@ class FakeBuilder {
   instances = new Map<string, SnapshotParams>();
   creates: string[] = [];
   ran = new Set<string>();
+  /** The next N creates fail without creating anything (Workflows outage). */
+  failCreates = 0;
 
   async create(opts: { id: string; params: SnapshotParams }) {
+    if (this.failCreates > 0) {
+      this.failCreates--;
+      throw new Error('workflows: service unavailable');
+    }
     if (this.instances.has(opts.id)) throw new Error(`instance.already_exists: ${opts.id}`);
     this.instances.set(opts.id, opts.params);
     this.creates.push(opts.id);
@@ -99,7 +119,7 @@ class FakeBuilder {
 const builder = new FakeBuilder();
 const env = {
   ...baseEnv,
-  ARTIFACTS: fakeArtifacts,
+  ARTIFACTS: { get: fakeArtifacts.get, delete: async () => true } as unknown as Artifacts,
   SNAPSHOT_BUILDER: builder as unknown as Env['SNAPSHOT_BUILDER'],
 } as Env;
 
@@ -221,6 +241,48 @@ const SMALL: Files = {
   [longName]: 'deep file\n',
 };
 
+/** One `{cost, workflow: 'snapshot-builder', …}` line per step attempt. */
+interface StepLog {
+  cost: CostCounters;
+  workflow: string;
+  instance: string;
+  step: string;
+  outcome: 'ok' | 'failed';
+  error?: string;
+  /** Counters of the statement that stores buildCost, which buildCost cannot include. */
+  excluded?: Partial<Record<'d1' | 'rr' | 'rw', number>>;
+}
+
+/** Runs `fn` and returns the builder's step-attempt log lines for `instance`. */
+async function builderLogs(instance: string, fn: () => Promise<unknown>): Promise<StepLog[]> {
+  const lines: unknown[] = [];
+  const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+    lines.push(args[0]);
+  });
+  try {
+    await fn().catch(() => undefined);
+  } finally {
+    spy.mockRestore();
+  }
+  const out: StepLog[] = [];
+  for (const line of lines) {
+    if (typeof line !== 'string' || !line.startsWith('{')) continue;
+    const parsed = JSON.parse(line) as StepLog;
+    if (parsed.workflow === 'snapshot-builder' && parsed.instance === instance) out.push(parsed);
+  }
+  return out;
+}
+
+/** The stored counters are exactly the completed step attempts' metered work, less the excluded store. */
+function expectStoredMatchesLogs(cost: BuildCost, logs: StepLog[]): void {
+  const ok = logs.filter((l) => l.outcome === 'ok');
+  expect(cost.steps).toBe(ok.length);
+  for (const k of ['d1', 'rr', 'rw', 'art', 'r2a', 'r2b', 'sub'] as const) {
+    const sum = ok.reduce((n, l) => n + l.cost[k] - ((l.excluded as Record<string, number> | undefined)?.[k] ?? 0), 0);
+    expect(cost[k], k).toBe(sum);
+  }
+}
+
 /** F files of `size` bytes in 10 directories. */
 function manyFiles(count: number, size: number, salt = ''): Files {
   const files: Files = {};
@@ -248,8 +310,11 @@ describe('SnapshotBuilder', () => {
     const { id, repo } = await seedRepo('small');
     const c = await commit(repo, SMALL);
     const runner = new Runner();
-    const out = await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-small' }, runner);
-    expect(out.outcome).toBe('built');
+    let out: Awaited<ReturnType<typeof buildSnapshot>> | undefined;
+    const logs = await builderLogs('snap-small', async () => {
+      out = await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-small' }, runner);
+    });
+    expect(out?.outcome).toBe('built');
     expect(runner.steps).toEqual(['resolve', 'batch-1', 'finish']);
     const bytes = await tarball(id, c.tree);
     checkTar(readTar(bytes), SMALL);
@@ -257,9 +322,16 @@ describe('SnapshotBuilder', () => {
     const row = await commitRow(id, c.sha);
     expect(row).toMatchObject({ state: 'ready', tree: c.tree, reused: 0 });
     const cost = JSON.parse(row!.build_cost!) as BuildCost;
-    // resolve: repo row + claim batch, get + readCommit; batch: get + 5 trees + 6 blob/symlink reads, one put; finish: one batch.
+    // resolve: repo row + claim batch, get + readCommit; batch: get + 5 trees + 6 blob/symlink reads, one put;
+    // finish: the ready transition batch (the batch that stores buildCost is excluded).
     expect(cost).toMatchObject({ steps: 3, d1: 3, art: 2 + 1 + 5 + 6, r2a: 1, r2b: 0, treeReads: 5, blobReads: 6, parts: 0, objects: 1, reused: false });
     expect(cost.bytes).toBe(bytes.length);
+    // The stored counters are the measured ones, including the finish transition's rows.
+    expect(logs.map((l) => `${l.step}:${l.outcome}`)).toEqual(['resolve:ok', 'batch-1:ok', 'finish:ok']);
+    expectStoredMatchesLogs(cost, logs);
+    const finish = logs.find((l) => l.step === 'finish')!;
+    expect(finish.cost.rw - (finish.excluded?.rw ?? 0)).toBeGreaterThan(0);
+    expect(finish.excluded).toMatchObject({ d1: 1 });
     const tree = await env.DB.prepare('SELECT size, files FROM snapshot_trees WHERE repo_id = ? AND tree = ?')
       .bind(id, c.tree)
       .first<{ size: number; files: number }>();
@@ -294,11 +366,111 @@ describe('SnapshotBuilder', () => {
     const victim = Object.keys(files).sort()[900]!;
     repo.failBlobOnce.add(await blobHash(files[victim] as string));
     const runner = new Runner(2);
-    await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-retry' }, runner);
+    const logs = await builderLogs('snap-retry', () => buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-retry' }, runner));
     expect(runner.attempts.filter((s) => s.startsWith('batch-')).length).toBe(4);
     expect(runner.steps).toEqual(['resolve', 'batch-1', 'batch-2', 'batch-3', 'finish']);
     checkTar(readTar(await tarball(id, c.tree)), files);
     expect(await objectKeys(id)).toEqual([snapshotKey(id, c.tree)]);
+
+    // The failed attempt's work is logged, not dropped; buildCost holds the completed attempts.
+    const failed = logs.filter((l) => l.outcome === 'failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ step: 'batch-2', error: expect.stringMatching(/transient/) });
+    expect(failed[0]!.cost.art).toBeGreaterThan(400);
+    const cost = JSON.parse((await commitRow(id, c.sha))!.build_cost!) as BuildCost;
+    expectStoredMatchesLogs(cost, logs);
+    const attempted = logs.reduce((n, l) => n + l.cost.art, 0);
+    expect(attempted).toBe(cost.art + failed[0]!.cost.art);
+  });
+
+  it('streams each blob into parts within the read-ahead byte budget, no whole-blob copies, complete tar', async () => {
+    const { id, repo } = await seedRepo('stream');
+    const partSize = 5 * 1024 * 1024; // the R2 minimum part size
+    const files = manyFiles(20, 300 * 1024, '-stream');
+    const bigLine = 'large blob line 0123456789abcdef\n';
+    files['big/large.txt'] = bigLine.repeat(Math.ceil((12 * 1024 * 1024) / bigLine.length));
+    files['big/link'] = { content: 'large.txt', mode: '120000' };
+    const c = await commit(repo, files);
+    const runner = new Runner();
+    await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-stream' }, runner, { partSize });
+    // Small blobs are read ahead; the 12 MiB blob is never held together with
+    // more than the budget allows.
+    expect(repo.maxOpenBlobs).toBeGreaterThan(1);
+    expect(repo.maxOpenBlobs).toBeLessThanOrEqual(READ_AHEAD);
+    expect(repo.maxOpenBytes).toBeLessThanOrEqual(READ_BUDGET);
+    expect(repo.materialized).toBe(0);
+    const bytes = await tarball(id, c.tree);
+    checkTar(readTar(bytes), files);
+    const cost = JSON.parse((await commitRow(id, c.sha))!.build_cost!) as BuildCost;
+    expect(cost.bytes).toBe(bytes.length);
+    expect(cost.parts).toBe(Math.ceil(bytes.length / partSize));
+    expect(cost.largestBlob).toBe((files['big/large.txt'] as string).length);
+    // Unflushed tar bytes never exceed one part plus one stream chunk and a header.
+    expect(cost.peakBuffer).toBeLessThan(partSize + FAKE_STREAM_CHUNK + 2048);
+    expect(cost.peakHeld).toBeGreaterThanOrEqual(repo.maxOpenBytes);
+    expect(cost.peakHeld).toBeLessThanOrEqual(READ_BUDGET);
+  });
+
+  it('once blob sizes are known, read-ahead stays within the byte budget', async () => {
+    const { id, repo } = await seedRepo('budget');
+    const readBudget = 2 * 1024 * 1024;
+    const files = manyFiles(6, 768 * 1024, '-budget');
+    const c = await commit(repo, files);
+    await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-budget' }, new Runner(), { readBudget });
+    // 768 KiB each: two fit in 2 MiB, a third would not.
+    expect(repo.maxOpenBlobs).toBe(2);
+    expect(repo.maxOpenBytes).toBeLessThanOrEqual(readBudget);
+    expect(repo.materialized).toBe(0);
+    checkTar(readTar(await tarball(id, c.tree)), files);
+    const cost = JSON.parse((await commitRow(id, c.sha))!.build_cost!) as BuildCost;
+    expect(cost.peakHeld).toBeGreaterThanOrEqual(repo.maxOpenBytes);
+    expect(cost.peakHeld).toBeLessThanOrEqual(readBudget);
+  });
+
+  it('a retried batch reads one blob at a time', async () => {
+    const { id, repo } = await seedRepo('retry-serial');
+    const files = manyFiles(30, 1024, '-retry');
+    const c = await commit(repo, files);
+    repo.failBlobOnce.add(await blobHash(files['d9/f00019.txt'] as string));
+    const runner = new Runner(2);
+    const peak: Record<number, number> = {};
+    let attempt = 0;
+    let base = 0;
+    const record = () => {
+      if (attempt > 0) peak[attempt] = repo.maxOpenBlobs - base;
+    };
+    runner.onAttempt = (name, n) => {
+      record();
+      if (!name.startsWith('batch')) return;
+      attempt = n;
+      // Blobs read ahead by a failed attempt are never consumed; count from here.
+      base = repo.openBlobs;
+      repo.maxOpenBlobs = repo.openBlobs;
+    };
+    await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-retry-serial' }, runner);
+    record();
+    expect(runner.attempts.filter((s) => s === 'batch-1')).toHaveLength(2);
+    expect(peak[1]).toBeGreaterThan(1);
+    expect(peak[2]).toBe(1);
+    checkTar(readTar(await tarball(id, c.tree)), files);
+  });
+
+  it('a blob the binding cannot buffer (MEMORY_LIMIT) fails the build with that reason, without retries', async () => {
+    const { id, repo } = await seedRepo('memlimit');
+    const small: Files = {};
+    for (let i = 0; i < 10; i++) small[`a/${i}.txt`] = `small ${i}\n`;
+    // The refused blob is read ahead behind the small ones.
+    const c = await commit(repo, { ...small, 'ok.txt': 'ok\n', 'huge/blob.bin': 'pretend this is huge\n' });
+    repo.memoryLimit.add(await blobHash('pretend this is huge\n'));
+    const runner = new Runner(3);
+    await expect(buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-memlimit' }, runner)).rejects.toThrow(/MEMORY_LIMIT/);
+    expect(runner.attempts.filter((s) => s === 'batch-1')).toHaveLength(1);
+    expect(runner.steps).toEqual(['resolve', 'batch-1', 'fail']);
+    const row = await commitRow(id, c.sha);
+    expect(row).toMatchObject({ state: 'failed' });
+    expect(row!.error).toMatch(/huge\/blob\.bin/);
+    expect(row!.error).toMatch(/MEMORY_LIMIT/);
+    expect(await objectKeys(id)).toEqual([]);
   });
 
   it('a commit with an already-built tree reuses the tarball and keeps its own metadata', async () => {
@@ -309,8 +481,11 @@ describe('SnapshotBuilder', () => {
     expect(second.tree).toBe(first.tree);
     const before = repo.count('readBlob');
     const runner = new Runner();
-    const out = await buildSnapshot(env, { repoId: id, sha: second.sha, instanceId: 'snap-reuse-2', trigger: 'demand' }, runner);
-    expect(out.outcome).toBe('done');
+    let out: Awaited<ReturnType<typeof buildSnapshot>> | undefined;
+    const logs = await builderLogs('snap-reuse-2', async () => {
+      out = await buildSnapshot(env, { repoId: id, sha: second.sha, instanceId: 'snap-reuse-2', trigger: 'demand' }, runner);
+    });
+    expect(out?.outcome).toBe('done');
     expect(runner.steps).toEqual(['resolve']);
     expect(repo.count('readBlob')).toBe(before);
     expect(await objectKeys(id)).toEqual([snapshotKey(id, first.tree)]);
@@ -318,7 +493,11 @@ describe('SnapshotBuilder', () => {
     const b = await commitRow(id, second.sha);
     expect(b).toMatchObject({ state: 'ready', tree: first.tree, reused: 1 });
     expect(a!.reused).toBe(0);
-    expect(JSON.parse(b!.build_cost!)).toMatchObject({ steps: 1, r2a: 0, objects: 0, blobReads: 0, reused: true });
+    const cost = JSON.parse(b!.build_cost!) as BuildCost;
+    expect(cost).toMatchObject({ steps: 1, d1: 2, r2a: 0, objects: 0, blobReads: 0, reused: true });
+    // The reused commit's own metadata writes are counted.
+    expect(cost.rw).toBeGreaterThan(0);
+    expectStoredMatchesLogs(cost, logs);
   });
 
   it('replaying a finished build does nothing', async () => {
@@ -363,6 +542,83 @@ describe('SnapshotBuilder', () => {
     expect(await commitRow(id, c.sha)).toMatchObject({ state: 'failed' });
     const tree = await env.DB.prepare('SELECT state FROM snapshot_trees WHERE repo_id = ? AND tree = ?').bind(id, c.tree).first();
     expect(tree).toEqual({ state: 'failed' });
+  });
+
+  it('a commit waiting on a tree fails with that tree build', async () => {
+    const { id, repo } = await seedRepo('waitfail');
+    const x = await commit(repo, { 'a.txt': 'a\n', 'b.txt': 'doomed\n' });
+    const y = await commit(repo, { 'a.txt': 'a\n', 'b.txt': 'doomed\n' }, [x.sha]);
+    let release!: () => void;
+    const slow = new Runner();
+    slow.gates.set('batch-1', new Promise<void>((r) => (release = r)));
+    const xBuild = buildSnapshot(env, { repoId: id, sha: x.sha, instanceId: 'snap-waitfail-x' }, slow);
+    await new Promise((r) => setTimeout(r, 50));
+    const yOut = await buildSnapshot(env, { repoId: id, sha: y.sha, instanceId: 'snap-waitfail-y' }, new Runner());
+    expect(yOut.reason).toBe('waiting on snap-waitfail-x');
+    for (const [hash, o] of repo.objects) if (o.type === 'blob' && new TextDecoder().decode(o.content) === 'doomed\n') repo.objects.delete(hash);
+    release();
+    await expect(xBuild).rejects.toThrow(/not found/);
+    expect(await commitRow(id, x.sha)).toMatchObject({ state: 'failed' });
+    expect(await commitRow(id, y.sha)).toMatchObject({ state: 'failed' });
+  });
+
+  it('after a stale takeover, the old attempt failing cannot fail the successor, which then finishes', async () => {
+    const { id, repo } = await seedRepo('takeover');
+    const c = await commit(repo, { 'a.txt': 'takeover a\n', 'b.txt': 'takeover b\n' });
+    repo.refs.set('refs/heads/main', c.sha);
+    const base = snapshotInstanceId(id, c.sha);
+    let releaseOld!: () => void;
+    const oldRunner = new Runner();
+    oldRunner.gates.set('batch-1', new Promise<void>((r) => (releaseOld = r)));
+    const oldBuild = buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: base, trigger: 'push' }, oldRunner);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'building', instance_id: base, tree: c.tree });
+
+    // The old attempt looks dead: a demand takes over with -r1.
+    await env.DB.batch([
+      env.DB.prepare('UPDATE snapshot_commits SET requested_at = requested_at - ? WHERE repo_id = ?').bind(STALE_BUILD_MS + 1000, id),
+      env.DB.prepare('UPDATE snapshot_trees SET created_at = created_at - ? WHERE repo_id = ?').bind(STALE_BUILD_MS + 1000, id),
+    ]);
+    const demand = await call(snap('takeover', 'main'), { method: 'POST', token: tok.owner });
+    expect(demand.json).toMatchObject({ state: 'building', started: true });
+    const successor = `${base}-r1`;
+    expect(builder.creates.at(-1)).toBe(successor);
+    builder.ran.add(successor);
+    let releaseNew!: () => void;
+    const newRunner = new Runner();
+    newRunner.gates.set('batch-1', new Promise<void>((r) => (releaseNew = r)));
+    const newBuild = buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: successor, trigger: 'demand' }, newRunner);
+    await new Promise((r) => setTimeout(r, 50));
+    const claimed = await env.DB.prepare('SELECT builder FROM snapshot_trees WHERE repo_id = ? AND tree = ?').bind(id, c.tree).first();
+    expect(claimed).toEqual({ builder: successor });
+
+    // The old attempt now fails.
+    repo.failBlobOnce.add(await blobHash('takeover a\n'));
+    releaseOld();
+    await expect(oldBuild).rejects.toThrow(/transient/);
+    expect(await commitRow(id, c.sha)).toMatchObject({ state: 'building', instance_id: successor, error: null });
+
+    releaseNew();
+    await expect(newBuild).resolves.toMatchObject({ outcome: 'built' });
+    const ready = await call(snap('takeover', 'main'), { token: tok.owner });
+    expect(ready.status).toBe(200);
+    expect(ready.json).toMatchObject({ state: 'ready', sha: c.sha, tree: c.tree });
+    checkTar(readTar(await tarball(id, c.tree)), { 'a.txt': 'takeover a\n', 'b.txt': 'takeover b\n' });
+  });
+
+  it('a commit-not-found result from a superseded attempt leaves the active attempt alone', async () => {
+    const { id } = await seedRepo('gone');
+    const sha = 'a'.repeat(40);
+    await env.DB.prepare(
+      `INSERT INTO snapshot_commits (repo_id, sha, tree, state, trigger, instance_id, attempt, requested_at)
+       VALUES (?, ?, NULL, 'building', 'demand', 'gone-x-r1', 1, ?)`,
+    )
+      .bind(id, sha, Date.now())
+      .run();
+    await buildSnapshot(env, { repoId: id, sha, instanceId: 'gone-x' }, new Runner());
+    expect(await commitRow(id, sha)).toMatchObject({ state: 'building', instance_id: 'gone-x-r1', error: null });
+    await buildSnapshot(env, { repoId: id, sha, instanceId: 'gone-x-r1', trigger: 'demand' }, new Runner());
+    expect(await commitRow(id, sha)).toMatchObject({ state: 'failed', instance_id: 'gone-x-r1', error: 'commit not found' });
   });
 });
 
@@ -475,6 +731,44 @@ describe('snapshot API', () => {
     expect((await call(snap('flaky', 'main'), { token: tok.owner })).json.state).toBe('ready');
   });
 
+  it('a demand whose Workflow could not start is recoverable by the very next demand', async () => {
+    const { id, repo } = await seedRepo('nostart');
+    const c = await commit(repo, { 'n.txt': 'n\n' });
+    repo.refs.set('refs/heads/main', c.sha);
+    builder.failCreates = 1;
+    const failed = await call(snap('nostart', 'main'), { method: 'POST', token: tok.owner });
+    expect(failed.status).toBe(503);
+    expect(failed.json).toMatchObject({ code: 'SNAPSHOT_START_FAILED' });
+    expect(builder.instances.has(snapshotInstanceId(id, c.sha))).toBe(false);
+    // The unstarted attempt is not left looking like a live build.
+    const meta = await call(snap('nostart', 'main'), { token: tok.owner });
+    expect(meta.status).toBe(409);
+    expect(meta.json).toMatchObject({ state: 'failed', code: 'SNAPSHOT_FAILED' });
+
+    // No stale-clock wait: the next demand starts a build at once.
+    const retry = await call(snap('nostart', 'main'), { method: 'POST', token: tok.owner });
+    expect(retry.status).toBe(202);
+    expect(retry.json).toMatchObject({ state: 'building', started: true });
+    expect(builder.creates.at(-1)).toBe(`${snapshotInstanceId(id, c.sha)}-r1`);
+    await builder.drain();
+    const ready = await call(snap('nostart', 'main'), { token: tok.owner });
+    expect(ready.status).toBe(200);
+    expect(ready.json).toMatchObject({ state: 'ready', sha: c.sha });
+  });
+
+  it('a create error for an instance that does exist is the same build, not a failure', async () => {
+    const { id, repo } = await seedRepo('exists');
+    const c = await commit(repo, { 'e.txt': 'e\n' });
+    repo.refs.set('refs/heads/main', c.sha);
+    // The eager push build already owns the base id.
+    await builder.create({ id: snapshotInstanceId(id, c.sha), params: { repoId: id, sha: c.sha } });
+    const demand = await call(snap('exists', 'main'), { method: 'POST', token: tok.owner });
+    expect(demand.status).toBe(202);
+    expect(demand.json).toMatchObject({ state: 'building', started: true });
+    await builder.drain();
+    expect((await call(snap('exists', 'main'), { token: tok.owner })).status).toBe(200);
+  });
+
   it('private snapshots are concealed from anonymous and unrelated callers', async () => {
     const { id, repo } = await seedRepo('secret', 'private');
     const c = await commit(repo, SMALL);
@@ -517,20 +811,34 @@ describe('snapshot API', () => {
     expect((await call(snap('flip', 'main/download'), { token: tok.owner })).status).toBe(200);
   });
 
-  it('deleting a repo removes its snapshot rows and tarballs', async () => {
+  it('deleting a repo removes its snapshot rows and tarballs within the DELETE budget (d1 <= 2)', async () => {
     const { id, repo } = await seedRepo('doomed');
-    const c = await commit(repo, SMALL);
-    repo.refs.set('refs/heads/main', c.sha);
+    const main = await commit(repo, SMALL);
+    const other = await commit(repo, { 'other.txt': 'other\n' }, [main.sha]);
+    repo.refs.set('refs/heads/main', main.sha);
+    repo.refs.set('refs/heads/other', other.sha);
     await call(snap('doomed', 'main'), { method: 'POST', token: tok.owner });
+    await call(snap('doomed', 'other'), { method: 'POST', token: tok.owner });
     await builder.drain();
-    expect(await objectKeys(id)).toHaveLength(1);
-    const deleteEnv = { ...env, ARTIFACTS: { ...fakeArtifacts, delete: async () => true } } as unknown as Env;
-    const { deleteRepo } = await import('../src/repos/service');
-    const row = await env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(id).first();
-    const out = await deleteRepo(deleteEnv, row as never);
-    expect(out.ok).toBe(true);
+    expect(await objectKeys(id)).toHaveLength(2);
+    const del = await call(`/api/v1/repos/${OWNER}/doomed`, { method: 'DELETE', token: tok.owner });
+    expect(del.status).toBe(200);
+    expect(del.cost.d1).toBeLessThanOrEqual(2);
+    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 0 });
     expect(await objectKeys(id)).toHaveLength(0);
-    expect(await commitRow(id, c.sha)).toBeNull();
+    expect(await commitRow(id, main.sha)).toBeNull();
+    const trees = await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_trees WHERE repo_id = ?').bind(id).first();
+    expect(trees).toEqual({ n: 0 });
+    expect(await env.DB.prepare('SELECT id FROM repos WHERE id = ?').bind(id).first()).toBeNull();
+  });
+
+  it('deleting a repo without snapshots stays within the DELETE budget and touches no R2', async () => {
+    const { id } = await seedRepo('bare');
+    const del = await call(`/api/v1/repos/${OWNER}/bare`, { method: 'DELETE', token: tok.owner });
+    expect(del.status).toBe(200);
+    expect(del.cost.d1).toBeLessThanOrEqual(2);
+    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 0 });
+    expect(await env.DB.prepare('SELECT id FROM repos WHERE id = ?').bind(id).first()).toBeNull();
   });
 });
 

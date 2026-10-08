@@ -30,6 +30,17 @@
  * - fixture  cynthia/fixture-1m (read-only): explicit demand for bench-head,
  *            poll to ready within 15 minutes, download, diff -r against a
  *            clone checked out at the same sha.
+ * - large    sixteen 9 MiB files (144 MiB of blobs, compressible so the push
+ *            stays small): ready, buildCost.largestBlob, peakHeld and
+ *            peakBuffer show returned blobs held within the 16 MiB read
+ *            budget plus one blob, and part buffers, parts == ceil(size / 8 MiB),
+ *            and the download is byte-complete and identical to a checkout.
+ * - delete   DELETE cost (d1 ≤ 2, r2a=0) for a repo with no snapshots and for
+ *            one with two tarballs; afterwards its snapshot rows and R2
+ *            objects are gone (remote D1 query, wrangler r2 object get).
+ *            Needs wrangler on PATH.
+ *
+ * Cleanup DELETEs of every created repo are checked for d1 ≤ 2 too.
  *
  * Env (load apps/platform/.dev.vars.validation): FORGE_PAT (cynthia, owner),
  * FORGE_PAT_OUTSIDER (unrelated principal). Tokens are never printed; git
@@ -53,7 +64,9 @@ const { values: args } = parseArgs({
 const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
 const OWNER = process.env.FORGE_USER ?? 'cynthia';
 if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
-const SECTIONS = new Set((args.only ?? 'core,cost,lazy,private,flip,fixture').split(','));
+const SECTIONS = new Set((args.only ?? 'core,cost,lazy,private,flip,fixture,large,delete').split(','));
+const PART_SIZE = 8 * 1024 * 1024;
+const READ_BUDGET = 16 * 1024 * 1024;
 const READY_BOUND_MS = 120_000;
 const FIXTURE_BOUND_MS = 15 * 60_000;
 const FIXTURE = { repo: 'fixture-1m', ref: 'bench-head', sha: '08333c79998f410b9c40a84cc430ce9762c29ae8' };
@@ -109,6 +122,24 @@ function d1Exec(sql) {
   const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql], { cwd: PLATFORM_DIR, encoding: 'utf8' });
   if (r.status !== 0) console.log(`#   wrangler d1 execute failed: ${(r.stderr ?? '').slice(-300)}`);
   return r.status;
+}
+/** Rows of one read-only remote D1 query, or null when it failed. */
+function d1Query(sql) {
+  const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql], { cwd: PLATFORM_DIR, encoding: 'utf8' });
+  if (r.status !== 0) {
+    console.log(`#   wrangler d1 execute failed: ${(r.stderr ?? '').slice(-300)}`);
+    return null;
+  }
+  return JSON.parse(r.stdout)[0]?.results ?? null;
+}
+/** True when the R2 object exists (wrangler r2 object get to /dev/null). */
+function r2Exists(key) {
+  const r = spawnSync('npx', ['wrangler', 'r2', 'object', 'get', `forge-snapshots/${key}`, '--remote', '--file', '/dev/null'], { cwd: PLATFORM_DIR, encoding: 'utf8' });
+  const text = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  if (r.status === 0) return true;
+  if (/does not exist|not found|NoSuchKey/i.test(text)) return false;
+  console.log(`#   wrangler r2 object get failed: ${text.slice(-300)}`);
+  return null;
 }
 function sh(cmd, cmdArgs, cwd) {
   const r = spawnSync(cmd, cmdArgs, { cwd, encoding: 'utf8', maxBuffer: 64 << 20 });
@@ -413,12 +444,85 @@ try {
     await downloadAndDiff('VAL-SNAP-005', FIXTURE.repo, FIXTURE.ref, FIXTURE.sha, ready.body?.size, `${BASE}/${OWNER}/${FIXTURE.repo}.git`);
   }
 
+  // ---------------------------------------------------------------- large
+  if (SECTIONS.has('large')) {
+    console.log('# large: bounded blob streaming (16 x 9 MiB blobs)');
+    const name = `m4-snapshot-streaming-large-${ts}`;
+    const dir = await createRepo(name, 'public');
+    const blobSize = 9 * 1024 * 1024;
+    const line = 'large snapshot blob line, compressible on the wire 0123456789\n';
+    mkdirSync(join(dir, 'big'), { recursive: true });
+    for (let i = 0; i < 16; i++) {
+      const head = `big file ${i} ${ts}\n`;
+      const body = line.repeat(Math.ceil(blobSize / line.length)).slice(0, blobSize - head.length);
+      writeFileSync(join(dir, 'big', `blob-${String(i).padStart(2, '0')}.txt`), head + body);
+    }
+    writeFileSync(join(dir, 'README.md'), `large blobs ${ts}\n`);
+    const sha = commitAll(dir, 'sixteen 9 MiB blobs');
+    const p = await push(dir, 'main');
+    check(`push main ${sha.slice(0, 12)} (16 x ${blobSize} B blobs)`, p.code, 0);
+    const ready = await pollReady(name, 'main', sha, { since: p.doneAt, bound: 10 * 60_000, every: 3000 });
+    console.log(`#   ready metadata ${JSON.stringify(ready.body)}`);
+    check(`large tree ready (${ready.at} ms after the push)`, ready.ok, true);
+    const b = ready.body?.buildCost ?? {};
+    check(`largestBlob ${b.largestBlob} == ${blobSize}`, b.largestBlob, blobSize);
+    check(`peakBuffer ${b.peakBuffer} <= one part + one blob (${PART_SIZE + blobSize})`, b.peakBuffer, (v) => typeof v === 'number' && v > 0 && v <= PART_SIZE + blobSize);
+    // README.md is read first, so slow start lets at most two unknown 9 MiB reads overlap.
+    check(`peakHeld ${b.peakHeld} <= read budget + one blob (${READ_BUDGET + blobSize}), not 16 blobs`, b.peakHeld, (v) => typeof v === 'number' && v >= blobSize && v <= READ_BUDGET + blobSize);
+    check(`parts ${b.parts} == ceil(size / 8 MiB)`, b.parts, Math.ceil((ready.body?.size ?? 0) / PART_SIZE));
+    check(`blobReads ${b.blobReads} == 17 files`, b.blobReads, 17);
+    await downloadAndDiff('large', name, 'main', sha, ready.body?.size, `${BASE}/${OWNER}/${name}.git`);
+  }
+
+  // ---------------------------------------------------------------- delete
+  if (SECTIONS.has('delete')) {
+    console.log('# delete: repository DELETE cost with and without snapshots');
+    const emptyName = `m4-snapshot-streaming-delete-empty-${ts}`;
+    await createRepo(emptyName, 'public');
+    const del0 = await http(`/api/v1/repos/${OWNER}/${emptyName}`, { method: 'DELETE' });
+    console.log(`#   DELETE (no snapshots) x-forge-cost: ${del0.cost}`);
+    const c0 = costOf(del0.cost);
+    check('DELETE repo without snapshots: 200, d1<=2, r2a=0, r2b=0', `${del0.status} d1=${c0.d1} r2a=${c0.r2a} r2b=${c0.r2b}`, () => del0.status === 200 && c0.d1 <= 2 && c0.r2a === 0 && c0.r2b === 0);
+    if (del0.status === 200) created.splice(created.indexOf(emptyName), 1);
+
+    const name = `m4-snapshot-streaming-delete-full-${ts}`;
+    const dir = await createRepo(name, 'public');
+    writeFileSync(join(dir, 'README.md'), `delete ${ts}\n`);
+    const sha = commitAll(dir, 'main');
+    const p = await push(dir, 'main');
+    const ready = await pollReady(name, 'main', sha, { since: p.doneAt });
+    check(`main ready (${ready.at} ms)`, ready.ok, true);
+    const ref = `agents/delete-${ts}`;
+    git(dir, ['checkout', '-q', '-b', ref]);
+    writeFileSync(join(dir, 'other.txt'), 'other tree\n');
+    const wsha = commitAll(dir, 'second tree');
+    await push(dir, ref);
+    const demand = await http(snapPath(name, ref), { method: 'POST' });
+    check(`demand ${ref}`, demand.status === 200 || demand.status === 202, true);
+    const wready = await pollReady(name, ref, wsha, { every: 1000 });
+    check(`${ref} ready (${wready.at} ms)`, wready.ok, true);
+    const repoRow = d1Query(`SELECT id FROM repos WHERE owner_login = '${OWNER}' AND name = '${name}'`);
+    const repoId = repoRow?.[0]?.id;
+    const keys = (d1Query(`SELECT r2_key FROM snapshot_trees WHERE repo_id = '${repoId}' AND state = 'ready'`) ?? []).map((r) => r.r2_key);
+    check('two ready tarballs before DELETE', keys.length, 2);
+    check('both tarballs exist in R2 before DELETE', keys.map(r2Exists), (v) => v.length === 2 && v.every((x) => x === true));
+    const del = await http(`/api/v1/repos/${OWNER}/${name}`, { method: 'DELETE' });
+    console.log(`#   DELETE (two snapshots) x-forge-cost: ${del.cost}`);
+    const c = costOf(del.cost);
+    check('DELETE repo with snapshots: 200, d1<=2, r2a=0, r2b=0', `${del.status} d1=${c.d1} r2a=${c.r2a} r2b=${c.r2b}`, () => del.status === 200 && c.d1 <= 2 && c.r2a === 0 && c.r2b === 0);
+    if (del.status === 200) created.splice(created.indexOf(name), 1);
+    const left = d1Query(`SELECT (SELECT COUNT(*) FROM snapshot_trees WHERE repo_id = '${repoId}') AS trees, (SELECT COUNT(*) FROM snapshot_commits WHERE repo_id = '${repoId}') AS commits, (SELECT COUNT(*) FROM repos WHERE id = '${repoId}') AS repos`);
+    check('repo and snapshot rows gone after DELETE', JSON.stringify(left?.[0]), JSON.stringify({ trees: 0, commits: 0, repos: 0 }));
+    check('tarballs gone from R2 after DELETE', keys.map(r2Exists), (v) => v.length === 2 && v.every((x) => x === false));
+  }
+
   check('no 5xx anywhere in the run', statuses.filter((s) => s >= 500), (v) => v.length === 0);
 } finally {
   if (!args.keep) {
     for (const name of created) {
       const r = await http(`/api/v1/repos/${OWNER}/${name}`, { method: 'DELETE' });
-      console.log(`# cleanup DELETE ${OWNER}/${name} -> ${r.status}`);
+      console.log(`# cleanup DELETE ${OWNER}/${name} -> ${r.status} (${r.cost})`);
+      check(`cleanup DELETE ${name} d1<=2`, `${r.status} d1=${costOf(r.cost).d1}`, () => r.status === 200 && costOf(r.cost).d1 <= 2);
     }
   }
   rmSync(work, { recursive: true, force: true });

@@ -127,7 +127,10 @@ snapshotsApi.post('/repos/:owner/:repo/snapshots/*', async (c) => {
     }
     if (!sha) return notFound(c);
     if (isFullSha(parsed.ref) && !(await commitExists(ctx, sha))) return notFound(c);
-    const { row, started } = await demandSnapshot(c.env, repo.id, sha);
+    const { row, started, startError } = await demandSnapshot(c.env, repo.id, sha);
+    if (startError) {
+      return actorJson(c, { ref: parsed.ref, sha, error: startError, code: 'SNAPSHOT_START_FAILED', started: false }, 503);
+    }
     const view = snapshotView(parsed.ref, sha, row, demandPath(repo, parsed.ref));
     return actorJson(c, { ...view.body, started: started !== null }, view.status);
   });

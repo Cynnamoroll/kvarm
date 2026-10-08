@@ -7,13 +7,13 @@
 import {
   artifactsRepoName,
   createRepoRow,
-  deleteRepoRow,
+  deleteRepoRowStatement,
   getRepo,
   isValidRepoName,
   type RepoRow,
 } from '../db/repos';
 import { purgeGitTokens } from '../artifacts/tokens';
-import { deleteRepoSnapshots } from '../services/snapshots';
+import { deleteSnapshotObjects, snapshotCleanupStatements } from '../services/snapshots';
 
 export type ServiceResult<T> =
   | { ok: true; value: T }
@@ -151,12 +151,16 @@ export async function deleteRepo(
   } catch (err) {
     return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}` };
   }
-  await deleteRepoRow(env.DB, repo.id);
+  // One batch: the repo row and its snapshot rows go together, returning the tarball keys.
+  const [, keys] = await env.DB.batch<{ r2_key: string }>([
+    deleteRepoRowStatement(env.DB, repo.id),
+    ...snapshotCleanupStatements(env.DB, repo.id),
+  ]);
   await purgeGitTokens(repo.artifacts_name);
   try {
-    await deleteRepoSnapshots(env, repo.id);
+    await deleteSnapshotObjects(env, (keys?.results ?? []).map((r) => r.r2_key));
   } catch (err) {
-    // The repo is gone either way; leftover snapshot rows are unreachable.
+    // The repo is gone either way; leftover tarballs are unreachable.
     console.log(JSON.stringify({ snapshotCleanupFailed: repo.id, error: String(err).slice(0, 200) }));
   }
   return { ok: true, value: { deleted: true } };

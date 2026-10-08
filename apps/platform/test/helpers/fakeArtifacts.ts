@@ -30,10 +30,79 @@ export class FakeRepo {
   calls: string[] = [];
   /** Blob hashes whose next read throws once (simulated transient failure). */
   failBlobOnce = new Set<string>();
+  /** Blob hashes the binding refuses to buffer (ArtifactsError MEMORY_LIMIT). */
+  memoryLimit = new Set<string>();
+  /** Returned blobs not yet fully consumed, and the most held at once. */
+  openBlobs = 0;
+  maxOpenBlobs = 0;
+  /** Bytes of the open blobs, and the most held at once. */
+  openBytes = 0;
+  maxOpenBytes = 0;
+  /** Whole-blob materializations (arrayBuffer/bytes) by the caller. */
+  materialized = 0;
 
   count(prefix: string): number {
     return this.calls.filter((c) => c.startsWith(prefix)).length;
   }
+}
+
+/** Chunk size of the fake blob streams. */
+export const FAKE_STREAM_CHUNK = 64 * 1024;
+
+/**
+ * A real Blob whose reads are tracked on the repo: it counts as open from
+ * the readBlob reply until a full read (stream end, text or a
+ * materialization), and stream() yields FAKE_STREAM_CHUNK slices.
+ */
+function trackedBlob(r: FakeRepo, content: Uint8Array): Blob {
+  const blob = new Blob([content as Uint8Array<ArrayBuffer>]);
+  r.openBlobs++;
+  r.maxOpenBlobs = Math.max(r.maxOpenBlobs, r.openBlobs);
+  r.openBytes += content.length;
+  r.maxOpenBytes = Math.max(r.maxOpenBytes, r.openBytes);
+  let open = true;
+  const close = () => {
+    if (open) {
+      r.openBlobs--;
+      r.openBytes -= content.length;
+    }
+    open = false;
+  };
+  return new Proxy(blob, {
+    get(t, prop) {
+      if (prop === 'arrayBuffer' || prop === 'bytes') {
+        return async () => {
+          r.materialized++;
+          close();
+          return prop === 'arrayBuffer' ? t.arrayBuffer() : new Uint8Array(await t.arrayBuffer());
+        };
+      }
+      if (prop === 'text') {
+        return async () => {
+          close();
+          return t.text();
+        };
+      }
+      if (prop === 'stream') {
+        return () => {
+          let off = 0;
+          return new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (off >= content.length) {
+                close();
+                controller.close();
+                return;
+              }
+              controller.enqueue(content.slice(off, off + FAKE_STREAM_CHUNK));
+              off += FAKE_STREAM_CHUNK;
+            },
+          });
+        };
+      }
+      const value: unknown = Reflect.get(t, prop);
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(t) : value;
+    },
+  });
 }
 
 export const fakeRepos = new Map<string, FakeRepo>();
@@ -69,8 +138,11 @@ function handle(name: string): ArtifactsRepo {
     async readBlob(hash: string) {
       r.calls.push(`readBlob:${hash}`);
       if (r.failBlobOnce.delete(hash)) throw new Error('simulated transient readBlob failure');
+      if (r.memoryLimit.has(hash)) {
+        throw Object.assign(new Error('object cannot be buffered safely'), { name: 'ArtifactsError', code: 'MEMORY_LIMIT' });
+      }
       const o = r.objects.get(hash);
-      return o && o.type === 'blob' ? new Blob([o.content as Uint8Array<ArrayBuffer>]) : null;
+      return o && o.type === 'blob' ? trackedBlob(r, o.content) : null;
     },
     async readCommit(hash: string) {
       r.calls.push(`readCommit:${hash}`);

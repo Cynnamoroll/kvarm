@@ -119,6 +119,7 @@ export async function touchRepoPushed(db: D1Database, id: string, at = Date.now(
     .run();
 }
 
-export async function deleteRepoRow(db: D1Database, id: string): Promise<void> {
-  await db.prepare('DELETE FROM repos WHERE id = ?').bind(id).run();
+/** The repo-row DELETE, for a batch with the repo's dependent cleanup. */
+export function deleteRepoRowStatement(db: D1Database, id: string): D1PreparedStatement {
+  return db.prepare('DELETE FROM repos WHERE id = ?').bind(id);
 }
