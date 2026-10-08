@@ -10,14 +10,18 @@
  *   pushedAt is strictly later (≤ 10 s) and anonymous info/refs until it
  *   advertises A (≤ 2 s), then waits for the queue to complete the event.
  * - VAL-EVENT-004: pushes B, force-pushes back to A, then forward to B again,
- *   waiting for each event. The two genuine A→B transitions must appear as two
- *   distinct, completed event rows; the repeat snapshot effects reuse the
- *   deterministic snapshot instance instead of creating new ones. ls-remote
- *   shows B at the end and no request in the cycle returns 5xx.
+ *   waiting for each event and then polling GET .../snapshots/main every 2 s
+ *   until it is 200 ready for the pushed sha (≤ 120 s). {sha,size,files,builtAt}
+ *   recorded at A and B must come back unchanged after B→A and after the
+ *   repeated A→B (reuse, not rebuild). The two genuine A→B transitions must
+ *   appear as two distinct, completed event rows; the repeat snapshot effects
+ *   reuse the deterministic snapshot instance instead of creating new ones.
+ *   ls-remote shows B at the end and no request in the cycle returns 5xx.
  * - VAL-EVENT-005: creates an orphan Artifacts repo with wrangler (no D1 row),
  *   pushes to it directly with a wrangler-issued token, checks the platform
  *   answers 404 for it, then pushes C to the platform repo and requires
- *   pushedAt to move and the event to complete with a snapshot effect.
+ *   pushedAt to move, the event to complete with a snapshot effect and
+ *   snapshots/main to reach ready for C within 120 s.
  *
  * With --tail it also runs `wrangler tail` and prints the consumer's
  * per-message {cost, outcome} lines.
@@ -141,6 +145,32 @@ async function waitEvent(before, after, t0, seen) {
   }
 }
 
+const SNAPSHOT_BOUND_MS = 120000;
+const pick = (b) => b && { sha: b.sha, size: b.size, files: b.files, builtAt: b.builtAt };
+
+/** Polls GET .../snapshots/main every 2 s until 200 ready for `sha`; returns {sha,size,files,builtAt}. */
+async function snapshotReady(label, sha, t0) {
+  let last = '';
+  for (;;) {
+    const r = await api('GET', `/repos/${OWNER}/${REPO}/snapshots/main`);
+    const body = r.status === 200 || r.status === 202 ? JSON.parse(r.text) : null;
+    const at = Date.now() - t0;
+    const line = `${r.status} ${body?.state ?? ''} ${body?.sha?.slice(0, 7) ?? ''}`;
+    if (line !== last) console.log(`#   ${label} snapshots/main poll ${at} ms: ${line} (${r.header})`);
+    last = line;
+    if (r.status === 200 && body.state === 'ready' && body.sha === sha) {
+      const meta = pick(body);
+      check(`${label} snapshots/main ready for ${sha.slice(0, 7)} within ${SNAPSHOT_BOUND_MS} ms (${at} ms) ${JSON.stringify(meta)}`, true, true);
+      return { meta, body };
+    }
+    if (r.status >= 500 || r.status === 404 || r.status === 409 || at > SNAPSHOT_BOUND_MS) {
+      check(`${label} snapshots/main ready for ${sha.slice(0, 7)} within ${SNAPSHOT_BOUND_MS} ms`, `${r.status} ${r.text.slice(0, 200)}`, () => false);
+      return { meta: null, body };
+    }
+    await sleep(2000);
+  }
+}
+
 function snapshotDetail(event) {
   const s = event?.effects?.find((f) => f.effect === 'snapshot');
   return s ? `${s.state}:${s.detail ?? ''}` : '(none)';
@@ -209,15 +239,22 @@ try {
   const wa = await waitEvent(seed, a, t0, seen);
   check(`queue completed seed→A in ${wa.at} ms`, wa.event !== null, true);
   check('seed→A snapshot effect created', snapshotDetail(wa.event), (s) => s.startsWith('done:created'));
+  const snapA = await snapshotReady('step 1 (A)', a, t0);
 
   // ---- VAL-EVENT-004: A→B, B→A, A→B ----
   const b = commit(dir, 'B');
   const ab1 = await pushAndWait('A→B #1', dir, 'main', a, b, seen);
   check('A→B #1 snapshot effect created', snapshotDetail(ab1.event), (s) => s.startsWith('done:created'));
+  const snapB = await snapshotReady('step 2 (B)', b, ab1.doneAt);
+  check('A and B snapshots are distinct builds', snapA.meta?.builtAt !== snapB.meta?.builtAt && snapA.meta?.sha !== snapB.meta?.sha, true);
   const ba = await pushAndWait('B→A', dir, `${a}:refs/heads/main`, b, a, seen, true);
   check('B→A snapshot reuses the immutable A instance', snapshotDetail(ba.event), (s) => s.startsWith('done:reused') && s.endsWith(a));
+  const snapBA = await snapshotReady('step 3 (B→A)', a, ba.doneAt);
+  check('step 3 metadata {sha,size,files,builtAt} equals step 1 (A reused, not rebuilt)', JSON.stringify(snapBA.meta), JSON.stringify(snapA.meta));
   const ab2 = await pushAndWait('A→B #2', dir, `${b}:refs/heads/main`, a, b, seen, true);
   check('A→B #2 snapshot reuses the immutable B instance', snapshotDetail(ab2.event), (s) => s.startsWith('done:reused') && s.endsWith(b));
+  const snapAB2 = await snapshotReady('step 4 (A→B #2)', b, ab2.doneAt);
+  check('step 4 metadata {sha,size,files,builtAt} equals step 2 (B absorbed, no rebuild)', JSON.stringify(snapAB2.meta), JSON.stringify(snapB.meta));
 
   const list = (await events()).list;
   const abRows = list.filter((e) => e.before === a && e.after === b);
@@ -256,6 +293,7 @@ try {
   const afterC = await pushedAt();
   check('pushedAt moved for the push after the orphan event', afterC, (v) => typeof v === 'number' && v > beforeC);
   check('after-orphan snapshot effect created', snapshotDetail(pc.event), (s) => s.startsWith('done:created') && s.endsWith(cSha));
+  await snapshotReady('after-orphan (C)', cSha, pc.doneAt);
 
   check('no 5xx anywhere in the run', statuses.filter((s) => s >= 500), (v) => v.length === 0);
 } finally {
@@ -280,6 +318,10 @@ try {
       if (!line.startsWith('"{\\"cost\\"')) continue;
       const m = JSON.parse(JSON.parse(line));
       const cost = Object.entries(m.cost).map(([k, v]) => `${k}=${v}`).join(';');
+      if (m.workflow) {
+        console.log(`# tail workflow=${m.workflow} step=${m.step} cost=${cost}`);
+        continue;
+      }
       console.log(`# tail ${m.queue} outcome=${m.outcome} attempts=${m.attempts} wf=${m.wf} cost=${cost} effects=${JSON.stringify(m.effects ?? {})}`);
       n++;
     }

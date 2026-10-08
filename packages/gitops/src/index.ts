@@ -17,6 +17,7 @@ export * from './treediff';
 export * from './refUpdates';
 export * from './lsRefs';
 export * from './reportStatus';
+export * from './tar';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

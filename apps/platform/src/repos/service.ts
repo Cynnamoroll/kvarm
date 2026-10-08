@@ -13,6 +13,7 @@ import {
   type RepoRow,
 } from '../db/repos';
 import { purgeGitTokens } from '../artifacts/tokens';
+import { deleteRepoSnapshots } from '../services/snapshots';
 
 export type ServiceResult<T> =
   | { ok: true; value: T }
@@ -152,6 +153,12 @@ export async function deleteRepo(
   }
   await deleteRepoRow(env.DB, repo.id);
   await purgeGitTokens(repo.artifacts_name);
+  try {
+    await deleteRepoSnapshots(env, repo.id);
+  } catch (err) {
+    // The repo is gone either way; leftover snapshot rows are unreachable.
+    console.log(JSON.stringify({ snapshotCleanupFailed: repo.id, error: String(err).slice(0, 200) }));
+  }
   return { ok: true, value: { deleted: true } };
 }
 

@@ -168,7 +168,7 @@ async function readCommitPair(ctx: ResolveContext, base: string, head: string): 
 }
 
 /** Name -> commit oid for every name, through a single ls-refs round trip. */
-async function lsRefs(ctx: ResolveContext, names: string[]): Promise<Map<string, string | null>> {
+export async function lsRefs(ctx: ResolveContext, names: string[]): Promise<Map<string, string | null>> {
   let res: Response;
   try {
     const token = await getReadCapableToken(ctx.env, ctx.repo.artifacts_name, ctx.artifacts.get);
