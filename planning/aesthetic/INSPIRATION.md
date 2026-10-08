@@ -13,6 +13,12 @@ Both posts are by **Brooklyn! (@imbabybrooklyn, Nous Research)**, dated **2026-1
 | https://x.com/imbabybrooklyn/status/2107553909162356906 | Brooklyn! (@imbabybrooklyn) | 2026-10-06 | "/ˈfæʃ(ɪ)ə/ n. A sheath of connective tissue that encloses muscles and organs, binding everything in place" | `post-2107553909162356906-video-1080p.mp4` (22s); `post-2107553909162356906-poster.jpg` |
 | https://x.com/imbabybrooklyn/status/2107568622013173808 | Brooklyn! (@imbabybrooklyn) | 2026-10-06 | "She's so pretty. I'm pretty sure I've figured out how to make a hyper intelligent, focused, agentic environment" | `post-2107568622013173808-photo1.jpg`; `post-2107568622013173808-photo2.jpg`; `post-2107568622013173808-photo3.jpg` |
 
+### Additional reference: @imbabybrooklyn (2108010039223185503)
+
+- Source: https://x.com/imbabybrooklyn/status/2108010039223185503
+- For the later collaborative paper UI session only.
+- Image not yet retrieved; X connector reconnection pending.
+
 All filenames above are relative to `/Users/cyn/git/planning/aesthetic/`. The second post quotes the first.
 
 ## Visual observations
