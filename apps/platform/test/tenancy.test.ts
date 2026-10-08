@@ -400,6 +400,82 @@ describe('revocation beats warmed state', () => {
     expect((await body(await call(`/api/v1/orgs/${org}`, as('twinB')))).viewerRole).toBe('owner');
   });
 
+  it('cleans the same grants when removal names the org in mixed case', async () => {
+    const org = 'acme-cased';
+    const spelled = 'Acme-CASED';
+    const secret = `${org}/secret`;
+    const notes = `${org}/notes`;
+    const member = (who: Who, role: string, by: Who, path = org) =>
+      call(`/api/v1/orgs/${path}/members/${logins[who]}`, as(by, { method: 'PUT', json: { role } }));
+    const remove = (who: Who, by: Who, path = spelled) =>
+      call(`/api/v1/orgs/${path}/members/${logins[who]}`, as(by, { method: 'DELETE' }));
+    const grantsOf = async (who: Who) =>
+      (
+        await env.DB.prepare(
+          `SELECT g.role FROM repo_grants g JOIN repos r ON r.id = g.repo_id JOIN users u ON u.id = g.user_id
+            WHERE r.owner_login = ? AND u.login = ? ORDER BY r.name`,
+        )
+          .bind(org, logins[who])
+          .all<{ role: string }>()
+      ).results.map((r) => r.role);
+    const deniedEverywhere = async (who: Who) => {
+      expect(await grantsOf(who)).toEqual([]);
+      expect(await status(`/api/v1/repos/${secret}`, as(who))).toBe(404);
+      expect(await git(who, secret, 'read')).toBe(404);
+      expect(await git(who, notes, 'write')).toBe(404);
+      expect(await status(`/api/v1/repos/${secret}`, as(who, { method: 'PATCH', json: { description: 'x' } }))).toBe(404);
+      expect(await status(`/api/v1/repos/${secret}/grants`, as(who))).toBe(404);
+    };
+
+    expect(await status('/api/v1/orgs', as('twinA', { method: 'POST', json: { login: org } }))).toBe(201);
+    expect((await member('twinB', 'owner', 'twinA')).status).toBe(200);
+    expect((await member('twinM', 'member', 'twinA')).status).toBe(200);
+    await seedRepo(org, 'secret', 'private');
+    await seedRepo(org, 'notes', 'private');
+    expect((await grant(secret, 'twinA', 'admin', 'twinB')).status).toBe(200);
+    expect((await grant(notes, 'twinA', 'write', 'twinB')).status).toBe(200);
+    expect((await grant(secret, 'twinM', 'admin', 'twinB')).status).toBe(200);
+    expect((await grant(notes, 'twinM', 'write', 'twinB')).status).toBe(200);
+    expect((await grant(secret, 'twinB', 'admin', 'twinA')).status).toBe(200);
+
+    // A rejected mixed-case removal deletes nothing.
+    expect((await remove('twinA', 'twinM')).status).toBe(403);
+    expect(await grantsOf('twinA')).toEqual(['write', 'admin']);
+
+    // Owner self-removal through a mixed-case path.
+    const left = await remove('twinA', 'twinA');
+    expect(left.status).toBe(200);
+    expect(await body(left)).toEqual({ removed: true });
+    await deniedEverywhere('twinA');
+    expect((await member('twinA', 'member', 'twinB')).status).toBe(200);
+    await deniedEverywhere('twinA');
+
+    // Ordinary owner-removes-member through another mixed-case spelling.
+    expect((await remove('twinM', 'twinB', 'ACME-cased')).status).toBe(200);
+    await deniedEverywhere('twinM');
+    expect((await member('twinM', 'member', 'twinB')).status).toBe(200);
+    await deniedEverywhere('twinM');
+
+    // Fresh grants work normally.
+    expect((await grant(secret, 'twinA', 'read', 'twinB')).status).toBe(200);
+    expect(await status(`/api/v1/repos/${secret}`, as('twinA'))).toBe(200);
+    expect(await git('twinA', secret, 'read')).toBe(200);
+    expect(await git('twinA', secret, 'write')).toBe(403);
+    expect((await grant(notes, 'twinM', 'write', 'twinB')).status).toBe(200);
+    expect(await git('twinM', notes, 'write')).toBe(200);
+    expect(await git('twinM', secret, 'read')).toBe(404);
+
+    // The survivor is the last owner: mixed-case self-removal and demotion stay rejected, grants intact.
+    const last = await remove('twinB', 'twinB');
+    expect(last.status).toBe(409);
+    expect(await body(last)).toMatchObject({ code: 'LAST_OWNER' });
+    const demote = await member('twinB', 'member', 'twinB', spelled);
+    expect(demote.status).toBe(409);
+    expect(await body(demote)).toMatchObject({ code: 'LAST_OWNER' });
+    expect(await grantsOf('twinB')).toEqual(['admin']);
+    expect((await body(await call(`/api/v1/orgs/${org}`, as('twinB')))).viewerRole).toBe('owner');
+  });
+
   it('denies a warmed public read right after the repo becomes private', async () => {
     const repo = `${ORG}/flip`;
     expect(await status(`/api/v1/repos/${repo}`, as('outsider'))).toBe(200);

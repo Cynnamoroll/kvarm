@@ -277,6 +277,10 @@ const REMOVAL_GUARD = `EXISTS (SELECT 1 FROM org_members t
  * Grants are deleted first, under the same guard as the membership delete, so
  * neither statement depends on membership the other has already removed (an
  * owner leaving would otherwise fail their own "actor is owner" check).
+ *
+ * `orgs.login` matches the route NOCASE but `repos.owner_login` is
+ * case-sensitive, so repos are matched on the canonical login from `orgs`
+ * (still via idx_repos_owner), never on the route spelling.
  */
 export async function removeMember(
   env: Env,
@@ -289,7 +293,7 @@ export async function removeMember(
     env.DB.prepare(
       `DELETE FROM repo_grants
         WHERE user_id = (SELECT id FROM users WHERE login = ?2)
-          AND repo_id IN (SELECT id FROM repos WHERE owner_login = ?1)
+          AND repo_id IN (SELECT id FROM repos WHERE owner_login = (SELECT login FROM orgs WHERE login = ?1))
           AND ${REMOVAL_GUARD}`,
     ).bind(orgLogin, targetLogin, actor.user.id),
     env.DB.prepare(

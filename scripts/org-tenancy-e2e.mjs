@@ -3,8 +3,8 @@
  * Live validation driver for organization tenancy (VAL-ORG-001, VAL-ORG-002,
  * VAL-ORG-003, VAL-ACCESS-003, VAL-COST-021). Creates its own orgs and repos
  * named `org-tenancy-*-<ts>` / `org-self-rm*-<ts>`, walks the role/grant
- * matrix and the owner self-removal lifecycle over REST, the repo page and
- * git, and deletes its repos at the end (orgs have no delete API and are left
+ * matrix and the owner self-removal lifecycle (canonical and mixed-case org
+ * route spellings) over REST, the repo page and git, and deletes its repos at the end (orgs have no delete API and are left
  * as inert test data).
  *
  * Principals come from env vars by NAME (load apps/platform/.dev.vars.validation):
@@ -395,6 +395,55 @@ try {
   check('re-added plain member: REST read concealed', (await api('maint', 'GET', `/repos/${selfRepo}`)).status, 404);
   check('re-added plain member: git ls-remote discloses no refs', lsRemote('maint', selfRepo).refs, 0);
 
+  // --- Mixed-case org route spellings clean the same grants (round-2 repair) ---
+  const MIXED = SELF_ORG.replace(/^org-self-rm/, 'Org-SELF-rm');
+  const MIXED2 = SELF_ORG.toUpperCase();
+  console.log(`# mixed-case spellings ${MIXED}, ${MIXED2}`);
+  const reOwner = await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${leaver}`, { role: 'owner' });
+  check(`${leaver} promoted back to owner`, `${reOwner.status} ${reOwner.body?.member?.role}`, '200 owner');
+  check('admin grant to co-owner again', (await api('owner', 'PUT', `/repos/${selfRepo}/grants/${leaver}`, { role: 'admin' })).body?.grant?.role, 'admin');
+  check(`write grant to ${LOGIN.maint} again`, (await api('owner', 'PUT', `/repos/${selfRepo}/grants/${LOGIN.maint}`, { role: 'write' })).body?.grant?.role, 'write');
+  check('mixed-case setup grants', await leftGrants(), [`${leaver}:admin`, `${LOGIN.maint}:write`].sort().join(','));
+  check('co-owner admin grant effective before mixed-case leave', (await api('member', 'GET', `/repos/${selfRepo}/grants`)).status, 200);
+
+  const mixedForbidden = await api('outsider', 'DELETE', `/orgs/${MIXED}/members/${leaver}`);
+  check('outsider mixed-case removal rejected', `${mixedForbidden.status} ${mixedForbidden.body?.code}`, '403 FORBIDDEN');
+  const maintForbidden = await api('maint', 'DELETE', `/orgs/${MIXED2}/members/${leaver}`);
+  check('plain member mixed-case removal rejected', `${maintForbidden.status} ${maintForbidden.body?.code}`, '403 FORBIDDEN');
+  check('rejected mixed-case removals deleted no grant', await leftGrants(), [`${leaver}:admin`, `${LOGIN.maint}:write`].sort().join(','));
+
+  const mixedSelf = await api('member', 'DELETE', `/orgs/${MIXED}/members/${leaver}`);
+  check('co-owner self-removal via mixed-case org path', `${mixedSelf.status} ${mixedSelf.text}`, '200 {"removed":true}');
+  console.log(`# cost mixed-case self-removal DELETE:  ${mixedSelf.cost}`);
+  check('mixed-case self-removal deleted the leaver’s grant', await leftGrants(), `${LOGIN.maint}:write`);
+  await deniedChecks('after mixed-case self-removal');
+  const rejoinMixed = await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${leaver}`, { role: 'member' });
+  check('former owner re-added as plain member (mixed-case flow)', `${rejoinMixed.status} ${rejoinMixed.body?.member?.role}`, '200 member');
+  check('mixed-case re-add revived no grant', await leftGrants(), `${LOGIN.maint}:write`);
+  await deniedChecks('rejoined after mixed-case self-removal');
+
+  const mixedOrdinary = await api('owner', 'DELETE', `/orgs/${MIXED2}/members/${LOGIN.maint}`);
+  check('owner removes a plain member via mixed-case org path', `${mixedOrdinary.status} ${mixedOrdinary.text}`, '200 {"removed":true}');
+  console.log(`# cost mixed-case ordinary DELETE:      ${mixedOrdinary.cost}`);
+  check('mixed-case ordinary removal deleted the member’s grant', await leftGrants(), '');
+  await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${LOGIN.maint}`, { role: 'member' });
+  check('mixed-case re-add revived no member grant', await leftGrants(), '');
+  check('re-added member (mixed-case flow): REST read concealed', (await api('maint', 'GET', `/repos/${selfRepo}`)).status, 404);
+  check('re-added member (mixed-case flow): git ls-remote discloses no refs', lsRemote('maint', selfRepo).refs, 0);
+  check('re-added member (mixed-case flow): receive-pack info/refs concealed', (await raw('maint', `/${selfRepo}.git/info/refs?service=git-receive-pack`)).status, 404);
+
+  check('fresh read grant after mixed-case rejoin', (await api('owner', 'PUT', `/repos/${selfRepo}/grants/${leaver}`, { role: 'read' })).body?.grant?.role, 'read');
+  check('fresh grant (mixed-case flow): REST read', (await api('member', 'GET', `/repos/${selfRepo}`)).status, 200);
+  check('fresh grant (mixed-case flow): git ls-remote', lsRemote('member', selfRepo).refs, (n) => n >= 2);
+  check('fresh write grant to re-added member', (await api('owner', 'PUT', `/repos/${selfRepo}/grants/${LOGIN.maint}`, { role: 'write' })).body?.grant?.role, 'write');
+  check('fresh write grant: receive-pack info/refs allowed', (await raw('maint', `/${selfRepo}.git/info/refs?service=git-receive-pack`)).status, 200);
+  check('authz-probe ref unchanged across mixed-case denials', await ownerRef(selfRepo, probeRef), selfBefore);
+
+  const mixedLast = await api('owner', 'DELETE', `/orgs/${MIXED}/members/${LOGIN.owner}`);
+  check('last owner cannot remove themselves via mixed-case path', `${mixedLast.status} ${mixedLast.body?.code}`, '409 LAST_OWNER');
+  const mixedDemote = await api('owner', 'PUT', `/orgs/${MIXED2}/members/${LOGIN.owner}`, { role: 'member' });
+  check('last owner cannot be demoted via mixed-case path', `${mixedDemote.status} ${mixedDemote.body?.code}`, '409 LAST_OWNER');
+
   const lastRemove = await api('owner', 'DELETE', `/orgs/${SELF_ORG}/members/${LOGIN.owner}`);
   check('last remaining owner cannot remove themselves', `${lastRemove.status} ${lastRemove.body?.code}`, '409 LAST_OWNER');
   const lastDemote = await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${LOGIN.owner}`, { role: 'member' });
@@ -405,7 +454,7 @@ try {
     (intact.body?.members ?? []).map((m) => `${m.login}:${m.role}`).sort().join(','),
     [`${LOGIN.maint}:member`, `${leaver}:member`, `${LOGIN.owner}:owner`].sort().join(','),
   );
-  check('grants intact after rejected last-owner changes', await leftGrants(), `${leaver}:read`);
+  check('grants intact after rejected last-owner changes', await leftGrants(), [`${leaver}:read`, `${LOGIN.maint}:write`].sort().join(','));
 } finally {
   if (!KEEP) {
     for (const [who, r] of [
