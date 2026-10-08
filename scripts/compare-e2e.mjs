@@ -208,6 +208,13 @@ async function fixtureChecks() {
   const lsRemote = git(['ls-remote', `${BASE}/${OWNER}/${repo}.git`, 'refs/heads/feature'], dir, 'owner').out.split('\t')[0];
   check('fixture: ls-remote feature equals local feature', lsRemote === feature, lsRemote);
 
+  // VAL-COST-005, first-ever: no commit or line-count entries exist for this pair yet.
+  const firstEver = await http('owner', api(repo, 'compare/main...feature?nocache=1'));
+  const fe = firstEver.body ?? {};
+  check(`VAL-COST-005 first-ever cold compare: treeReads=${fe.treeReads} blobReads=${fe.blobReads} ${show(firstEver)}`,
+    firstEver.status === 200 && firstEver.cache === 'bypass' && Number.isInteger(fe.treeReads) && fe.treeReads >= 1 &&
+    Number.isInteger(fe.blobReads) && fe.blobReads >= 0 && firstEver.cost.art <= fe.treeReads + fe.blobReads + 3 && firstEver.cost.d1 <= 2);
+
   // VAL-DIFF-001 + VAL-DIFF-020 (response 1)
   const r1 = await http(null, api(repo, 'compare/main...feature'));
   const b = r1.body ?? {};
@@ -341,8 +348,9 @@ async function fixtureChecks() {
   // VAL-COST-005
   const cold = await http('owner', api(repo, 'compare/main...feature?nocache=1'));
   const tr = cold.body?.treeReads;
-  check(`VAL-COST-005 admin nocache compare: treeReads=${tr} ${show(cold)}`, cold.status === 200 && cold.cache === 'bypass' &&
-    Number.isInteger(tr) && tr >= 1 && cold.cost.art <= tr + 2 && cold.cost.d1 <= 2);
+  const br = cold.body?.blobReads;
+  check(`VAL-COST-005 admin nocache compare: treeReads=${tr} blobReads=${br} ${show(cold)}`, cold.status === 200 && cold.cache === 'bypass' &&
+    Number.isInteger(tr) && tr >= 1 && Number.isInteger(br) && br >= 0 && cold.cost.art <= tr + br + 3 && cold.cost.d1 <= 2);
   for (const who of [null, 'bot']) {
     const r = await http(who, api(repo, 'compare/main...feature?nocache=1'));
     check(`VAL-DIFF-022 spot check: ${who ?? 'anonymous'} nocache served normally, no bypass ${show(r)}`, r.status === 200 && r.cache !== 'bypass');

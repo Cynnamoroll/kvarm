@@ -4,20 +4,23 @@
  * `base...head` is a direct two-tree diff (`git diff base head`), not git's
  * merge-base syntax. Refs resolve to trees (services/refs.ts); the changed
  * file list comes from gitops `diffTrees` over one lazily opened repo handle;
- * per-file line counts are included when at most STATS_MAX_FILES changed.
- * Compare bodies are cached by tree pair and file diffs by blob pair, both
- * immutable; ref fields are rendered per request. Every caller has already
+ * per-file line counts are included when at most STATS_MAX_FILES changed, and
+ * risk (services/risk.ts) reuses the texts and hints that pass produced.
+ * Compare bodies and risk are cached by tree pair and file diffs by blob
+ * pair, all immutable; ref fields are rendered per request. Every caller has already
  * passed the authoritative repo lookup (authorizeRoute) before reaching here.
  */
 
 import { diffTrees, type TreeChange, type TreeEntry, type TreeReader } from '@forge/gitops';
 import { diffOps, diffToHunks, isBinaryContent, limitHunks, type Hunk } from '@forge/diffcore';
+import { GENERATED_MARKER_WINDOW, hasGeneratedMarker, isWhitespaceOnlyChange, needsContent } from '@forge/review';
 import type { RepoRow } from '../db/repos';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { markCache } from '../cost/meter';
 import { compareKeys, readJson, writeJson } from '../cache/compare';
 import type { ServiceResult } from '../repos/service';
-import { assessRisk, type ChangeRating, type FileRisk } from './risk';
+import { runPool } from './pool';
+import { RISK_BUDGETS, assessRisk, type ChangeRating, type FileRisk, type RiskInput, type RiskResult, type RiskStat } from './risk';
 import {
   EMPTY_TREE,
   RefStoreUnavailable,
@@ -74,6 +77,8 @@ export interface CompareBody {
   truncatedReason?: string;
   statsOmitted?: true;
   treeReads: number;
+  /** Artifacts readBlob calls made computing this body (line counts and risk content). */
+  blobReads: number;
 }
 
 export interface RefView {
@@ -92,6 +97,7 @@ export interface CompareResponse {
   truncatedReason?: string;
   statsOmitted?: true;
   treeReads: number;
+  blobReads: number;
   nextCursor?: string;
 }
 
@@ -148,20 +154,32 @@ class ArtifactsTreeReader implements TreeReader {
 
 type BlobRead = { bytes: Uint8Array } | { tooLarge: true } | null;
 
+/** Counts readBlob RPCs for the compare body's `blobReads`. */
+interface BlobCounter {
+  blobReads: number;
+}
+
 function errorCode(err: unknown): unknown {
   return (err as { code?: unknown } | null)?.code;
 }
 
-async function readBlobBytes(artifacts: LazyRepo, hash: string): Promise<BlobRead> {
+async function readBlobBytes(
+  artifacts: LazyRepo,
+  hash: string,
+  counter?: BlobCounter,
+  maxBytes: number = COMPARE_BUDGETS.maxBlobBytes,
+): Promise<BlobRead> {
   let blob: Blob | null;
+  const handle = await artifacts.get();
+  if (counter) counter.blobReads++;
   try {
-    blob = await (await artifacts.get()).readBlob(hash);
+    blob = await handle.readBlob(hash);
   } catch (err) {
     if (errorCode(err) === 'MEMORY_LIMIT') return { tooLarge: true };
     throw err;
   }
   if (!blob) return null;
-  if (blob.size > COMPARE_BUDGETS.maxBlobBytes) return { tooLarge: true };
+  if (blob.size > maxBytes) return { tooLarge: true };
   return { bytes: new Uint8Array(await blob.arrayBuffer()) };
 }
 
@@ -199,10 +217,15 @@ function displayText(byteStr: string): string {
   return utf8.decode(bytes);
 }
 
-async function loadSide(artifacts: LazyRepo, spec: SideSpec): Promise<SideContent> {
+async function loadSide(
+  artifacts: LazyRepo,
+  spec: SideSpec,
+  counter?: BlobCounter,
+  maxBytes?: number,
+): Promise<SideContent> {
   if (spec.kind === 'empty') return { text: '', bytes: 0 };
   if (spec.kind === 'literal') return { text: spec.text, bytes: spec.text.length };
-  const read = await readBlobBytes(artifacts, spec.hash);
+  const read = await readBlobBytes(artifacts, spec.hash, counter, maxBytes);
   if (!read) return { missing: true };
   if ('tooLarge' in read) return { tooLarge: true };
   if (isBinaryContent(read.bytes)) return { binary: true };
@@ -213,35 +236,63 @@ async function loadSide(artifacts: LazyRepo, spec: SideSpec): Promise<SideConten
 async function loadSides(
   artifacts: LazyRepo,
   change: Pick<TreeChange, 'oldMode' | 'newMode' | 'oldHash' | 'newHash'>,
+  counter?: BlobCounter,
 ): Promise<[SideContent, SideContent]> {
   const old = sideSpec(change.oldMode, change.oldHash);
   const neu = sideSpec(change.newMode, change.newHash);
   if (old.kind === 'blob' && neu.kind === 'blob' && old.hash === neu.hash) {
-    const side = await loadSide(artifacts, old);
+    const side = await loadSide(artifacts, old, counter);
     return [side, side];
   }
-  return Promise.all([loadSide(artifacts, old), loadSide(artifacts, neu)]);
-}
-
-async function runPool<T>(items: T[], limit: number, fn: (item: T, index: number) => Promise<void>): Promise<void> {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const i = next++;
-      await fn(items[i]!, i);
-    }
-  });
-  await Promise.all(workers);
+  return Promise.all([loadSide(artifacts, old, counter), loadSide(artifacts, neu, counter)]);
 }
 
 // ---------------------------------------------------------------------------
 // Line counts
 // ---------------------------------------------------------------------------
 
+/** Content hints risk needs from every file, computed while the texts are loaded. */
+interface ContentHints {
+  whitespaceOnly?: true;
+  generated?: true;
+}
+
 type FileStat =
-  | { additions: number; deletions: number; approximate?: true }
+  | ({ additions: number; deletions: number; approximate?: true } & ContentHints)
   | { binary: true }
   | { tooLarge: true };
+
+/** Per-computation state: blob read count and texts kept for risk. */
+interface ComputeState extends BlobCounter {
+  /** Decoded texts of blobs risk will ask for (manifests, modified tests), by hash. */
+  texts: Map<string, string>;
+  keptBytes: number;
+}
+
+function contentHints(change: TreeChange, a: { text: string }, b: { text: string }): ContentHints {
+  const hints: ContentHints = {};
+  const markerSide = change.status === 'removed' ? a : b;
+  // Bytes, not chars: four bytes per char covers the marker window for any UTF-8.
+  if (hasGeneratedMarker(displayText(markerSide.text.slice(0, GENERATED_MARKER_WINDOW * 4)))) hints.generated = true;
+  if (change.oldHash !== null && change.newHash !== null && change.oldHash !== change.newHash) {
+    if (isWhitespaceOnlyChange(displayText(a.text), displayText(b.text))) hints.whitespaceOnly = true;
+  }
+  return hints;
+}
+
+/** Keeps the texts risk will want so it does not read the same blobs again. */
+function keepRiskTexts(state: ComputeState, change: TreeChange, a: SideContent, b: SideContent): void {
+  const want = needsContent(change);
+  const keep = (hash: string | null, side: SideContent, wanted: boolean) => {
+    if (!wanted || !hash || !('text' in side) || side.bytes > RISK_BUDGETS.maxTextBytes || state.texts.has(hash)) return;
+    // Past the cap risk simply reads the blob again; results are unaffected.
+    if (state.keptBytes + side.bytes > RISK_BUDGETS.maxKeptBytes) return;
+    state.keptBytes += side.bytes;
+    state.texts.set(hash, displayText(side.text));
+  };
+  keep(change.oldHash, a, want.old);
+  keep(change.newHash, b, want.new);
+}
 
 function statKey(change: TreeChange): Request | null {
   const old = sideSpec(change.oldMode, change.oldHash);
@@ -252,13 +303,13 @@ function statKey(change: TreeChange): Request | null {
 
 class StatsBudgetExceeded extends Error {}
 
-async function computeStat(ctx: Ctx, change: TreeChange, budget: { bytes: number }): Promise<FileStat> {
+async function computeStat(ctx: Ctx, change: TreeChange, budget: { bytes: number }, state: ComputeState): Promise<FileStat> {
   const key = statKey(change);
   if (key) {
     const cached = await readJson<FileStat>(key);
     if (cached) return cached;
   }
-  const [a, b] = await loadSides(ctx.artifacts, change);
+  const [a, b] = await loadSides(ctx.artifacts, change, state);
   let stat: FileStat;
   if ('tooLarge' in a || 'tooLarge' in b) stat = { tooLarge: true };
   else if ('binary' in a || 'binary' in b) stat = { binary: true };
@@ -266,8 +317,10 @@ async function computeStat(ctx: Ctx, change: TreeChange, budget: { bytes: number
   else {
     budget.bytes += a === b ? a.bytes : a.bytes + b.bytes;
     if (budget.bytes > COMPARE_BUDGETS.statsMaxTotalBytes) throw new StatsBudgetExceeded();
+    keepRiskTexts(state, change, a, b);
+    const hints = contentHints(change, a, b);
     if (change.oldHash !== null && change.oldHash === change.newHash) {
-      stat = { additions: 0, deletions: 0 };
+      stat = { additions: 0, deletions: 0, ...hints };
     } else {
       const { ops, approximate } = diffOps(a.text, b.text, { eolAware: true });
       let additions = 0;
@@ -276,7 +329,7 @@ async function computeStat(ctx: Ctx, change: TreeChange, budget: { bytes: number
         if (op === 'ins') additions++;
         else if (op === 'del') deletions++;
       }
-      stat = approximate ? { additions, deletions, approximate: true } : { additions, deletions };
+      stat = approximate ? { additions, deletions, approximate: true, ...hints } : { additions, deletions, ...hints };
     }
   }
   if (key && !ctx.bypass) ctx.waitUntil(writeJson(key, JSON.stringify(stat)));
@@ -284,12 +337,12 @@ async function computeStat(ctx: Ctx, change: TreeChange, budget: { bytes: number
 }
 
 /** Line counts for every change, or null when the byte budget ran out. */
-async function computeStats(ctx: Ctx, changes: TreeChange[]): Promise<FileStat[] | null> {
+async function computeStats(ctx: Ctx, changes: TreeChange[], state: ComputeState): Promise<FileStat[] | null> {
   const out: FileStat[] = [];
   const budget = { bytes: 0 };
   try {
     await runPool(changes, COMPARE_BUDGETS.blobConcurrency, async (change, i) => {
-      out[i] = await computeStat(ctx, change, budget);
+      out[i] = await computeStat(ctx, change, budget, state);
     });
   } catch (err) {
     if (err instanceof StatsBudgetExceeded) return null;
@@ -314,21 +367,29 @@ async function computeCompare(ctx: Ctx, baseTree: string, headTree: string): Pro
     concurrency: COMPARE_BUDGETS.treeConcurrency,
   });
   const changes = diff.changes;
+  const state: ComputeState = { blobReads: 0, texts: new Map(), keptBytes: 0 };
   const withStats = !diff.truncated && changes.length <= COMPARE_BUDGETS.statsMaxFiles;
-  const stats = withStats ? await computeStats(ctx, changes) : null;
+  const stats = withStats ? await computeStats(ctx, changes, state) : null;
+  // A failed read may be transient: serve it truthfully but never pin it.
+  const cacheable = diff.truncatedReason !== 'readError';
 
-  const risk = await assessRisk({
-    changes,
-    stats: changes.map((_, i) => {
-      const s = stats?.[i];
-      if (!s || 'tooLarge' in s) return null;
-      return 'binary' in s ? { additions: 0, deletions: 0, binary: true } : { additions: s.additions, deletions: s.deletions, binary: false };
-    }),
-    readText: async (hash) => {
-      const side = await loadSide(ctx.artifacts, { kind: 'blob', hash });
-      return 'text' in side ? displayText(side.text) : null;
+  const risk = await loadRisk(
+    ctx,
+    baseTree,
+    headTree,
+    {
+      changes,
+      stats: stats ? stats.map(riskStat) : null,
+      truncated: diff.truncated,
+      readText: async (hash) => {
+        const kept = state.texts.get(hash);
+        if (kept !== undefined) return kept;
+        const side = await loadSide(ctx.artifacts, { kind: 'blob', hash }, state, RISK_BUDGETS.maxTextBytes);
+        return 'text' in side ? displayText(side.text) : null;
+      },
     },
-  });
+    cacheable,
+  );
 
   let additions = 0;
   let deletions = 0;
@@ -364,6 +425,7 @@ async function computeCompare(ctx: Ctx, baseTree: string, headTree: string): Pro
     rating: risk.rating,
     truncated: diff.truncated,
     treeReads: diff.treeReads,
+    blobReads: state.blobReads,
   };
   if (diff.truncatedReason) {
     body.truncatedReason =
@@ -372,8 +434,25 @@ async function computeCompare(ctx: Ctx, baseTree: string, headTree: string): Pro
         : TRUNCATION_REASONS[diff.truncatedReason];
   }
   if (!stats) body.statsOmitted = true;
-  // A failed read may be transient: serve it truthfully but never pin it.
-  return { body, cacheable: diff.truncatedReason !== 'readError' };
+  return { body, cacheable };
+}
+
+function riskStat(s: FileStat): RiskStat {
+  if ('binary' in s) return { binary: true };
+  if ('tooLarge' in s) return { tooLarge: true };
+  return { additions: s.additions, deletions: s.deletions, whitespaceOnly: s.whitespaceOnly === true, generated: s.generated === true };
+}
+
+/** Risk for a tree pair: the risk/v1 entry, or computed (and cached unless bypassed). */
+async function loadRisk(ctx: Ctx, baseTree: string, headTree: string, input: RiskInput, cacheable: boolean): Promise<RiskResult> {
+  const key = compareKeys.risk(baseTree, headTree);
+  if (!ctx.bypass && cacheable) {
+    const hit = await readJson<RiskResult>(key);
+    if (hit && hit.files.length === input.changes.length) return hit;
+  }
+  const risk = await assessRisk(input);
+  if (!ctx.bypass && cacheable) ctx.waitUntil(writeJson(key, JSON.stringify(risk)));
+  return risk;
 }
 
 /** The compare body for a tree pair: cached, or computed (and cached unless bypassed). */
@@ -444,6 +523,7 @@ function render(
     rating: body.rating,
     truncated: body.truncated,
     treeReads: body.treeReads,
+    blobReads: body.blobReads,
   };
   if (body.truncatedReason !== undefined) out.truncatedReason = body.truncatedReason;
   if (body.statsOmitted) out.statsOmitted = true;

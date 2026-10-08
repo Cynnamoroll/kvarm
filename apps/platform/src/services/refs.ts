@@ -121,6 +121,42 @@ export async function readCommitAndParent(
   return parent ? { commit, parent } : null;
 }
 
+/**
+ * Base and head commits for a compare. When neither is cached and the base is
+ * the head's first parent (a one-commit branch), one `log` returns both, so a
+ * cold compare spends one commit read instead of two. Otherwise each commit
+ * is read on its own.
+ */
+async function readCommitPair(ctx: ResolveContext, base: string, head: string): Promise<Map<string, CommitWithParents | null>> {
+  const out = new Map<string, CommitWithParents | null>();
+  const [baseHit, headHit] = await Promise.all([
+    readJson<CommitEntry>(compareKeys.commit(ctx.repo.id, base)),
+    readJson<CommitEntry>(compareKeys.commit(ctx.repo.id, head)),
+  ]);
+  if (baseHit || headHit) return out;
+  let log: ArtifactsCommitMetadata[];
+  try {
+    log = await (await ctx.artifacts.get()).log({ ref: head, limit: 2 });
+  } catch (err) {
+    if (isInvalidObject(err)) out.set(head, null);
+    else throw err;
+    return out;
+  }
+  const h = log[0];
+  if (!h || h.hash !== head) {
+    out.set(head, null);
+    return out;
+  }
+  out.set(head, { sha: head, tree: h.treeHash, parents: h.parents });
+  remember(ctx, head, { tree: h.treeHash, parents: h.parents });
+  const p = log[1];
+  if (p && p.hash === base && h.parents[0] === base) {
+    out.set(base, { sha: base, tree: p.treeHash, parents: p.parents });
+    remember(ctx, base, { tree: p.treeHash, parents: p.parents });
+  }
+  return out;
+}
+
 /** Name -> commit oid for every name, through a single ls-refs round trip. */
 async function lsRefs(ctx: ResolveContext, names: string[]): Promise<Map<string, string | null>> {
   let res: Response;
@@ -184,9 +220,13 @@ export async function resolveCommitish(
       else out.set(name, null);
     }
   }
+  // Insertion order follows `names`, so a [base, head] call reads as (base, head).
+  const commitOids = [...new Set(toCommit.values())];
+  const infos =
+    commitOids.length === 2 ? await readCommitPair(ctx, commitOids[0]!, commitOids[1]!) : new Map<string, CommitWithParents | null>();
   await Promise.all(
     [...toCommit].map(async ([name, oid]) => {
-      const info = await readCommitInfo(ctx, oid);
+      const info = infos.has(oid) ? infos.get(oid)! : await readCommitInfo(ctx, oid);
       const resolved = info ? { sha: info.sha, tree: info.tree } : null;
       out.set(name, resolved);
       if (resolved && !isFullSha(name) && !ctx.bypass) {

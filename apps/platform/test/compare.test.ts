@@ -329,7 +329,7 @@ describe('compare by branch names', () => {
     expect(r.json.truncatedReason).toBeUndefined();
     expect(r.json.statsOmitted).toBeUndefined();
     expect(r.json.nextCursor).toBeUndefined();
-    expect(r.json.rating).toEqual({ score: 0, level: 'low', reasons: [] });
+    expect(r.json.rating).toMatchObject({ level: 'low' });
     expect(r.cache).toBe('miss');
 
     const byPath = Object.fromEntries(files(r).map((f) => [f.path, f]));
@@ -357,11 +357,17 @@ describe('compare by branch names', () => {
     expect(byPath['script.sh']).toMatchObject({ status: 'typechange', oldMode: '100644', newMode: '100755', additions: 0, deletions: 0 });
     expect(byPath['script.sh']!.oldHash).toBe(byPath['script.sh']!.newHash);
     expect(byPath['a.txt']!.oldHash).toBe((await buildBlob(enc(`${A_LINES.join('\n')}\n`))).hash);
-    for (const f of files(r)) expect(f.risk).toEqual({ score: 0, tags: [] });
+    for (const f of files(r)) {
+      expect(Object.keys(f.risk).sort()).toEqual(['score', 'tags']);
+      expect(Number.isInteger(f.risk.score) && f.risk.score >= 0 && f.risk.score <= 100).toBe(true);
+    }
+    expect(rename.risk.tags).toContain('mechanical');
+    expect(byPath['script.sh']!.risk.tags).toContain('mechanical');
 
     expect(r.json.totals).toEqual({ files: 7, additions: 1 + 2 + 0 + 2, deletions: 1 + 1 + 3 });
     expect(Number.isInteger(r.json.treeReads)).toBe(true);
     expect(r.json.treeReads as number).toBeGreaterThanOrEqual(2);
+    expect(Number.isInteger(r.json.blobReads)).toBe(true);
   });
 
   it('serves the repeat from the tree-pair cache with an identical body after one authority lookup', async () => {
@@ -382,7 +388,7 @@ describe('compare by branch names', () => {
     expect(bySha.cache).toBe('hit');
     expect(bySha.json.base).toEqual({ ref: fx.main.sha, sha: fx.main.sha, tree: fx.main.tree });
     expect(bySha.json.head).toEqual({ ref: fx.feature.sha, sha: fx.feature.sha, tree: fx.feature.tree });
-    for (const k of ['files', 'totals', 'rating', 'truncated', 'treeReads']) expect(bySha.json[k]).toEqual(byName.json[k]);
+    for (const k of ['files', 'totals', 'rating', 'truncated', 'treeReads', 'blobReads']) expect(bySha.json[k]).toEqual(byName.json[k]);
   });
 
   it('accepts ?order=path with the identical order and rejects unknown orders', async () => {
@@ -528,14 +534,16 @@ describe('cost, cache and the admin bypass', () => {
     expect(hit.text).toBe(miss.text);
   });
 
-  it('keeps a cold bypass compare within art <= treeReads + 2 and d1 <= 2', async () => {
+  it('keeps a cold bypass compare within art <= treeReads + blobReads + 3 and d1 <= 2', async () => {
     await call(api('fixture', 'compare/main...feature'));
     const r = await call(api('fixture', 'compare/main...feature?nocache=1'), tok.admin);
     expect(r.status).toBe(200);
     expect(r.cache).toBe('bypass');
     const treeReads = r.json.treeReads as number;
+    const blobReads = r.json.blobReads as number;
     expect(Number.isInteger(treeReads) && treeReads >= 1).toBe(true);
-    expect(r.cost.art).toBeLessThanOrEqual(treeReads + 2);
+    expect(Number.isInteger(blobReads) && blobReads >= 0).toBe(true);
+    expect(r.cost.art).toBeLessThanOrEqual(treeReads + blobReads + 3);
     expect(r.cost.d1).toBeLessThanOrEqual(2);
     expect(r.cost.do).toBe(0);
     expect(r.cost.sub).toBeLessThanOrEqual(1);
@@ -550,10 +558,86 @@ describe('cost, cache and the admin bypass', () => {
     const r = await call(api('cold', 'compare/main...x'));
     expect(r.status).toBe(200);
     expect(r.json.treeReads).toBe(4);
-    // get + createToken + 2 readCommit + 4 readTree + 2 readBlob
-    expect(r.cost.art).toBe(10);
+    expect(r.json.blobReads).toBe(2);
+    // get + createToken + one log for head and its parent (the base) + 4 readTree + 2 readBlob
+    expect(r.cost.art).toBe(9);
+    expect(r.cost.art).toBeLessThanOrEqual(4 + 2 + 3);
     expect(r.cost.sub).toBe(1);
     expect(cold.calls.filter((c) => c.startsWith('readTree')).length).toBe(4);
+    expect(cold.calls.filter((c) => c.startsWith('log') || c.startsWith('readCommit'))).toEqual([`log:${h.sha}`]);
+  });
+
+  it('reads base and head separately when the base is not the head parent', async () => {
+    const apart = await seedRepo('apart', 'public');
+    const one = await commit(apart, { 'p.txt': '1\n' });
+    const two = await commit(apart, { 'p.txt': '2\n' }, [one.sha]);
+    const three = await commit(apart, { 'p.txt': '3\n' }, [two.sha]);
+    apart.refs.set('refs/heads/main', one.sha);
+    apart.refs.set('refs/heads/tip', three.sha);
+    const r = await call(api('apart', 'compare/main...tip'));
+    expect(r.status).toBe(200);
+    expect((r.json.base as { tree: string }).tree).toBe(one.tree);
+    expect((r.json.head as { tree: string }).tree).toBe(three.tree);
+    expect(apart.calls.filter((c) => c.startsWith('log') || c.startsWith('readCommit')).sort()).toEqual(
+      [`log:${three.sha}`, `readCommit:${one.sha}`].sort(),
+    );
+    // The reverse direction (base is the child) still resolves correctly.
+    const back = await call(api('apart', 'compare/tip...main'));
+    expect((back.json.base as { sha: string }).sha).toBe(three.sha);
+    expect((back.json.head as { sha: string }).sha).toBe(one.sha);
+  });
+
+  it('reports treeReads and blobReads that match the fake binding and the meter', async () => {
+    const counted = await seedRepo('counted', 'public');
+    const b = await commit(counted, {
+      'package.json': '{"dependencies":{"hono":"^4"}}\n',
+      'test/a.test.ts': "it('a', () => {});\nit('b', () => {});\n",
+      'src/x.ts': 'x\n',
+      'same.txt': 'same\n',
+    });
+    const h = await commit(
+      counted,
+      {
+        'package.json': '{"dependencies":{"hono":"^4","left-pad":"1"}}\n',
+        'test/a.test.ts': "it('a', () => {});\n",
+        'src/x.ts': 'y\n',
+        'moved.txt': 'same\n',
+      },
+      [b.sha],
+    );
+    counted.refs.set('refs/heads/main', b.sha);
+    counted.refs.set('refs/heads/topic', h.sha);
+    const reads = (from: number, kind: string) => counted.calls.slice(from).filter((c) => c.startsWith(kind)).length;
+
+    // First-ever: line stats read every changed blob; risk reuses those texts.
+    const first = await call(api('counted', 'compare/main...topic'));
+    expect(first.status).toBe(200);
+    expect(first.json.treeReads).toBe(reads(0, 'readTree'));
+    expect(first.json.blobReads).toBe(reads(0, 'readBlob'));
+    expect(first.json.blobReads).toBe(7);
+    // The meter's art is exactly get + every handle RPC.
+    expect(first.cost.art).toBe(1 + counted.calls.length);
+    // Even with a cold upstream token (createToken), base-is-parent keeps the +3 budget.
+    expect(counted.calls).toContain('createToken');
+    expect(first.cost.art).toBeLessThanOrEqual((first.json.treeReads as number) + (first.json.blobReads as number) + 3);
+
+    // Bypass with line counts cached: only the risk content reads remain
+    // (package.json and the modified test file, both sides each).
+    const mark = counted.calls.length;
+    const bypass = await call(api('counted', 'compare/main...topic?nocache=1'), tok.admin);
+    expect(bypass.cache).toBe('bypass');
+    expect(bypass.json.blobReads).toBe(reads(mark, 'readBlob'));
+    expect(bypass.json.blobReads).toBe(4);
+    expect(bypass.cost.art).toBe(1 + (counted.calls.length - mark));
+    expect(bypass.cost.art).toBeLessThanOrEqual((bypass.json.treeReads as number) + (bypass.json.blobReads as number) + 3);
+    expect(bypass.json.files).toEqual(first.json.files);
+    expect(bypass.json.rating).toEqual(first.json.rating);
+
+    // A hit reports the counts of the computation it serves and reads nothing.
+    const hit = await call(api('counted', 'compare/main...topic'));
+    expect(hit.cache).toBe('hit');
+    expect(hit.json.blobReads).toBe(first.json.blobReads);
+    expect(hit.cost.art).toBe(0);
   });
 
   it('serves moved refs after a ref generation bump', async () => {
@@ -594,6 +678,8 @@ describe('budgets and truncation', () => {
     expect(files(r).every((f) => f.additions === undefined && f.deletions === undefined)).toBe(true);
     expect((r.json.totals as { files: number }).files).toBe(n);
     expect(many.calls.some((c) => c.startsWith('readBlob'))).toBe(false);
+    expect(r.json.blobReads).toBe(0);
+    expect((r.json.rating as { reasons: string[] }).reasons.some((x) => /line stats omitted/.test(x))).toBe(true);
   });
 
   it('truncates a wide tree on the read budget with a reason instead of failing', async () => {
@@ -765,5 +851,135 @@ describe('commit diff', () => {
   it('404s unknown commits', async () => {
     expect((await call(api('fixture', `commits/${'e'.repeat(40)}/diff`))).status).toBe(404);
     expect((await call(api('fixture', 'commits/main/diff'))).status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Risk (the contract's risk-fixture shape)
+// ---------------------------------------------------------------------------
+
+describe('risk-ranked compare', () => {
+  const pkg = (deps: Record<string, string>) => `${JSON.stringify({ name: 'risk', version: '1.0.0', dependencies: deps }, null, 2)}\n`;
+  const base: Files = {
+    '.forge/ci.json': '{"jobs":[{"name":"test","run":"npm test"}]}\n',
+    'test/app.test.ts': "import { it } from 'vitest';\nit('adds', () => {});\nit('subtracts', () => {});\n",
+    'package-lock.json': '{"lockfileVersion":3,"packages":{"":{"name":"risk"}}}\n',
+    'package.json': pkg({ hono: '^4.6.0' }),
+    'x.md': '# X\n\nnotes\n',
+    'ws.txt': 'alpha beta\ngamma\n',
+    'src/billing.ts': 'export function total(a: number, b: number): number {\n  return a + b;\n}\n',
+    'src/generated/api.gen.ts': '// Code generated by api-gen. DO NOT EDIT.\nexport const version = 1;\n',
+    'src/auth/session.ts': 'export const SESSION_TTL = 3600;\n',
+    'README.md': '# Risk fixture\n\nThis repository exercises risk tags.\n',
+  };
+  const expected: Record<string, string> = {
+    '.forge/ci.json': 'ci-config',
+    'test/app.test.ts': 'test-deletion',
+    'package-lock.json': 'lockfile',
+    'package.json': 'new-dependency',
+    'y.md': 'mechanical',
+    'ws.txt': 'mechanical',
+    'src/billing.ts': 'semantic',
+    'src/generated/api.gen.ts': 'generated',
+    'src/auth/session.ts': 'security-sensitive',
+    'big.ts': 'large',
+  };
+
+  beforeAll(async () => {
+    const repo = await seedRepo('risk', 'public');
+    const main = await commit(repo, base);
+    const { 'test/app.test.ts': _deleted, 'x.md': moved, ...kept } = base;
+    const risky = await commit(
+      repo,
+      {
+        ...kept,
+        '.forge/ci.json': '{"jobs":[{"name":"test","run":"npm test || true"}]}\n',
+        'package-lock.json': '{"lockfileVersion":3,"packages":{"":{"name":"risk"},"node_modules/left-pad":{"version":"1.3.0"}}}\n',
+        'package.json': pkg({ hono: '^4.6.0', 'left-pad': '1.3.0' }),
+        'y.md': moved!,
+        'ws.txt': 'alpha  beta\n\tgamma\n',
+        'src/billing.ts': 'export function total(a: number, b: number): number {\n  return a - b;\n}\n',
+        'src/generated/api.gen.ts': '// Code generated by api-gen. DO NOT EDIT.\nexport const version = 2;\n',
+        'src/auth/session.ts': 'export const SESSION_TTL = 60;\n',
+        'big.ts': Array.from({ length: 5000 }, (_, i) => `export const v${i} = ${i};`).join('\n') + '\n',
+      },
+      [main.sha],
+    );
+    const docs = await commit(repo, { ...base, 'README.md': '# Risk fixture\n\nThis repository exercises risk tags and ratings.\n' }, [main.sha]);
+    repo.refs.set('refs/heads/main', main.sha);
+    repo.refs.set('refs/heads/risky', risky.sha);
+    repo.refs.set('refs/heads/docs-only', docs.sha);
+  });
+
+  it('gives every file an integer score in 0..100 and a tags array', async () => {
+    const r = await call(api('risk', 'compare/main...risky'), tok.owner);
+    expect(r.status, r.text).toBe(200);
+    expect(files(r)).toHaveLength(10);
+    for (const f of files(r)) {
+      expect(Number.isInteger(f.risk.score), f.path).toBe(true);
+      expect(f.risk.score).toBeGreaterThanOrEqual(0);
+      expect(f.risk.score).toBeLessThanOrEqual(100);
+      expect(Array.isArray(f.risk.tags)).toBe(true);
+    }
+  });
+
+  it('tags each crafted change as the contract expects', async () => {
+    const r = await call(api('risk', 'compare/main...risky'), tok.owner);
+    const byPath = Object.fromEntries(files(r).map((f) => [f.path, f]));
+    for (const [path, tag] of Object.entries(expected)) expect(byPath[path]?.risk.tags, path).toContain(tag);
+    expect(byPath['y.md']).toMatchObject({ status: 'renamed', oldPath: 'x.md' });
+    expect(byPath['src/billing.ts']!.risk.tags).not.toContain('mechanical');
+  });
+
+  it('sorts ?order=risk by score descending with a path tiebreak', async () => {
+    const plain = await call(api('risk', 'compare/main...risky?order=path'), tok.owner);
+    const ranked = await call(api('risk', 'compare/main...risky?order=risk'), tok.owner);
+    expect(ranked.status).toBe(200);
+    const want = [...files(plain)]
+      .sort((a, b) => b.risk.score - a.risk.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+      .map((f) => f.path);
+    expect(files(ranked).map((f) => f.path)).toEqual(want);
+    expect(files(ranked)[0]!.risk.score).toBeGreaterThan(files(ranked).at(-1)!.risk.score);
+    // Paging in risk order walks the same sequence.
+    const page1 = await call(api('risk', 'compare/main...risky?order=risk&limit=4'), tok.owner);
+    const page2 = await call(api('risk', `compare/main...risky?order=risk&limit=100&cursor=${encodeURIComponent(page1.json.nextCursor as string)}`), tok.owner);
+    expect([...files(page1), ...files(page2)].map((f) => f.path)).toEqual(want);
+  });
+
+  it('rates the risky change high with reasons, and docs-only low below it', async () => {
+    const risky = await call(api('risk', 'compare/main...risky'), tok.owner);
+    const rating = risky.json.rating as { score: number; level: string; reasons: string[] };
+    expect(rating.level).toBe('high');
+    expect(Number.isInteger(rating.score) && rating.score <= 100).toBe(true);
+    expect(rating.reasons.length).toBeGreaterThan(0);
+    expect(rating.reasons.join('\n')).toMatch(/\.forge\/ci\.json/);
+    expect(rating.reasons.join('\n')).toMatch(/test\/app\.test\.ts/);
+
+    const docs = await call(api('risk', 'compare/main...docs-only'), tok.owner);
+    expect(docs.status).toBe(200);
+    const docsRating = docs.json.rating as { score: number; level: string };
+    expect(docsRating.level).toBe('low');
+    expect(docsRating.score).toBeLessThan(rating.score);
+    expect(files(docs).map((f) => [f.path, f.risk.tags])).toEqual([['README.md', []]]);
+  });
+
+  it('returns identical risk output for repeated cold computations', async () => {
+    const extract = (r: Reply) => JSON.stringify({ files: files(r).map((f) => [f.path, f.risk]), rating: r.json.rating });
+    const a = await call(api('risk', 'compare/main...risky?nocache=1'), tok.admin);
+    const b = await call(api('risk', 'compare/main...risky?nocache=1'), tok.admin);
+    expect(a.cache).toBe('bypass');
+    expect(b.cache).toBe('bypass');
+    expect(extract(b)).toBe(extract(a));
+    expect(extract(await call(api('risk', 'compare/main...risky'), tok.owner))).toBe(extract(a));
+  });
+
+  it('serves risk from the tree-pair caches without re-reading content', async () => {
+    const repo = repos.get(`${OWNER}--risk`)!;
+    await call(api('risk', 'compare/main...risky'), tok.owner);
+    const mark = repo.calls.length;
+    const hit = await call(api('risk', `compare/${repo.refs.get('refs/heads/main')}...${repo.refs.get('refs/heads/risky')}`), tok.owner);
+    expect(hit.cache).toBe('hit');
+    expect(repo.calls.length).toBe(mark);
+    expect((hit.json.rating as { level: string }).level).toBe('high');
   });
 });

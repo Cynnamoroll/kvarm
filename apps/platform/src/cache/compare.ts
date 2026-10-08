@@ -1,9 +1,10 @@
 /**
  * Cache API entries behind compare and per-file diffs (architecture §2.3).
  *
- *  - treediff/v1/<baseTree>/<headTree>   compare body for a tree pair (immutable)
+ *  - treediff/v2/<baseTree>/<headTree>   compare body for a tree pair (immutable)
+ *  - risk/v1/<baseTree>/<headTree>       per-file risk + change rating for a tree pair (immutable)
  *  - filediff/v1/<oldBlob>/<newBlob>     per-file diff body for a blob pair (immutable)
- *  - numstat/v1/<oldBlob>/<newBlob>      line counts for a blob pair (immutable)
+ *  - numstat/v2/<oldBlob>/<newBlob>      line counts + content hints for a blob pair (immutable)
  *  - commit/v1?repo&sha                  commit -> {tree, parents}, repo-scoped (immutable)
  *  - ref/v1?repo&gen&name                ref name -> commit, short TTL, repo-scoped
  *  - refgen/v1?repo                      ref generation, replaced after a push
@@ -29,11 +30,14 @@ function key(path: string, query?: Record<string, string>): Request {
 }
 
 export const compareKeys = {
-  treediff: (baseTree: string, headTree: string) => key(`treediff/v1/${baseTree}/${headTree}`),
+  // v2: bodies carry real risk and blobReads; v1 bodies held the neutral placeholder.
+  treediff: (baseTree: string, headTree: string) => key(`treediff/v2/${baseTree}/${headTree}`),
+  risk: (baseTree: string, headTree: string) => key(`risk/v1/${baseTree}/${headTree}`),
   filediff: (oldBlob: string | null, newBlob: string | null) =>
     key(`filediff/v1/${oldBlob ?? NONE}/${newBlob ?? NONE}`),
+  // v2 adds the whitespaceOnly/generated hints risk relies on.
   numstat: (oldBlob: string | null, newBlob: string | null) =>
-    key(`numstat/v1/${oldBlob ?? NONE}/${newBlob ?? NONE}`),
+    key(`numstat/v2/${oldBlob ?? NONE}/${newBlob ?? NONE}`),
   commit: (repoId: string, sha: string) => key('commit/v1', { repo: repoId, sha }),
   ref: (repoId: string, gen: string, name: string) => key('ref/v1', { repo: repoId, gen, name }),
   refgen: (repoId: string) => key('refgen/v1', { repo: repoId }),
