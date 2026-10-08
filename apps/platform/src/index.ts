@@ -4,9 +4,12 @@ import { authRoutes } from './routes/auth';
 import { api } from './routes/api';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
+import { installFetchMeter, serveMetered } from './cost/meter';
 
 export { TokenCache, RateLimiter, RealtimeHub, MergeLock } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
+
+installFetchMeter();
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -50,7 +53,8 @@ app.all('*', async (c) => {
 });
 
 export default {
-  fetch: app.fetch,
+  // Every response carries x-forge-cost (src/cost/meter.ts).
+  fetch: (request, env, ctx) => serveMetered(request, env, ctx, app.fetch),
   async queue(batch: MessageBatch<unknown>, _env: Env, _ctx: ExecutionContext) {
     // Artifacts event subscription delivers here (wired in M4).
     for (const message of batch.messages) {

@@ -5,34 +5,62 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { getRepo, listReposForOwner, type RepoRow } from '../db/repos';
+import { listReposForOwner, type RepoRow } from '../db/repos';
 import { findOrCreateUser } from '../db/users';
 import { getSessionInfo, type SessionInfo } from '../auth/workos';
-import { mintPAT, revokePAT, scopesAllow, verifyPAT, SCOPES, type Scope } from '../auth/pat';
+import { mintPAT, revokePAT, scopesAllow, SCOPES, type Scope } from '../auth/pat';
 import * as svc from '../repos/service';
-import { authorizeRepo, patActor, type Actor, type AuthzDecision, type RepoNeed } from '../services/authz';
+import { patActor, type Actor, type RepoNeed } from '../services/authz';
+import {
+  resolvePAT,
+  resolveRepoAccess,
+  type AccessDenied,
+  type Credential,
+  type RepoAccess,
+} from '../services/access';
 
 type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const api = new Hono<App>();
 
 export type ApiActor = Actor;
 
-/** Resolves the API actor: session cookie first, then Bearer PAT. */
-export async function apiActor(c: Context<App>): Promise<ApiActor | null> {
+export function clientIp(c: Context<App>): string | null {
+  return c.req.header('CF-Connecting-IP') ?? null;
+}
+
+/**
+ * The presented credential, unverified: session cookie first (resolved to its
+ * user), then Bearer PAT. PATs are verified by services/access.ts.
+ */
+export async function requestCredential(c: Context<App>): Promise<Credential> {
   const session: SessionInfo | null = await getSessionInfo(c.req.raw, c.env);
   if (session) {
     const user = await findOrCreateUser(c.env, session.user);
     if (session.refreshCookies.length > 0) {
       c.set('refreshCookies', session.refreshCookies);
     }
-    return { user, via: 'session', scopes: null };
+    return { kind: 'session', actor: { user, via: 'session', scopes: null } };
   }
   const header = c.req.header('Authorization');
   if (header?.startsWith('Bearer ')) {
-    const pat = await verifyPAT(c.env, header.slice('Bearer '.length).trim());
-    if (pat && scopesAllow(pat.scopes, 'api')) return patActor(pat);
+    return { kind: 'pat', token: header.slice('Bearer '.length).trim() };
   }
-  return null;
+  return { kind: 'anonymous' };
+}
+
+type ActorResult = { ok: true; actor: ApiActor | null } | AccessDenied;
+
+/**
+ * Resolves the API actor with authoritative PAT verification. Non-api PATs
+ * act as anonymous; unknown, revoked or expired PATs are rejected.
+ */
+export async function apiActor(c: Context<App>): Promise<ActorResult> {
+  const cred = await requestCredential(c);
+  if (cred.kind === 'anonymous') return { ok: true, actor: null };
+  if (cred.kind === 'session') return { ok: true, actor: cred.actor };
+  const res = await resolvePAT(c.env, cred.token, clientIp(c));
+  if (!res.ok) return res;
+  return { ok: true, actor: scopesAllow(res.pat.scopes, 'api') ? patActor(res.pat) : null };
 }
 
 /** JSON response that persists refreshed session cookies when present. */
@@ -44,25 +72,37 @@ export function actorJson(c: Context<App>, data: unknown, status = 200): Respons
   return res;
 }
 
-/** Loads :owner/:repo and applies the shared repository policy. */
+/** Resolves the caller and :owner/:repo, then applies the shared repository policy. */
 async function authorizeRoute(
   c: Context<App>,
-  actor: ApiActor | null,
   need: RepoNeed,
-): Promise<AuthzDecision> {
-  const repo = await getRepo(c.env.DB, c.req.param('owner') ?? '', c.req.param('repo') ?? '');
-  return authorizeRepo(c.env, repo, actor, need, 'api');
+  opts: { requireActor?: boolean } = {},
+): Promise<RepoAccess> {
+  return resolveRepoAccess(c.env, {
+    owner: c.req.param('owner') ?? '',
+    name: c.req.param('repo') ?? '',
+    need,
+    transport: 'api',
+    credential: await requestCredential(c),
+    clientIp: clientIp(c),
+    requireActor: opts.requireActor,
+  });
 }
 
-function denyJson(c: Context<App>, d: Extract<AuthzDecision, { ok: false }>): Response {
+function denyJson(c: Context<App>, d: AccessDenied): Response {
+  if (d.status === 429) {
+    return c.json({ error: d.error, code: d.code }, 429, { 'Retry-After': '60' });
+  }
+  // Rejected or missing credentials keep the existing `{error:"unauthorized"}` shape.
+  if (d.status === 401 && d.error === 'unauthorized') return c.json({ error: 'unauthorized' }, 401);
   return c.json({ error: d.error, code: d.code }, d.status);
 }
 
-function requireActor(c: Context<App>): Promise<ApiActor | Response> | never;
 async function requireActor(c: Context<App>): Promise<ApiActor | Response> {
-  const actor = await apiActor(c);
-  if (!actor) return c.json({ error: 'unauthorized' }, 401);
-  return actor;
+  const res = await apiActor(c);
+  if (!res.ok) return denyJson(c, res);
+  if (!res.actor) return c.json({ error: 'unauthorized' }, 401);
+  return res.actor;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,16 +235,13 @@ api.post('/import', async (c) => {
 });
 
 api.get('/repos/:owner/:repo', async (c) => {
-  const actor = await apiActor(c);
-  const d = await authorizeRoute(c, actor, 'read');
+  const d = await authorizeRoute(c, 'read');
   if (!d.ok) return denyJson(c, d);
   return c.json({ repo: repoJson(c, d.repo) });
 });
 
 api.patch('/repos/:owner/:repo', async (c) => {
-  const actor = await requireActor(c);
-  if (actor instanceof Response) return actor;
-  const d = await authorizeRoute(c, actor, 'admin');
+  const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
   const repo = d.repo;
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -219,9 +256,7 @@ api.patch('/repos/:owner/:repo', async (c) => {
 });
 
 api.delete('/repos/:owner/:repo', async (c) => {
-  const actor = await requireActor(c);
-  if (actor instanceof Response) return actor;
-  const d = await authorizeRoute(c, actor, 'admin');
+  const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
   const result = await svc.deleteRepo(c.env, d.repo);
   if (!result.ok) return c.json({ error: result.error }, result.status as never);
@@ -229,13 +264,12 @@ api.delete('/repos/:owner/:repo', async (c) => {
 });
 
 api.post('/repos/:owner/:repo/forks', async (c) => {
-  const actor = await requireActor(c);
-  if (actor instanceof Response) return actor;
-  const d = await authorizeRoute(c, actor, 'read');
+  const d = await authorizeRoute(c, 'read', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
+  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
   const repo = d.repo;
   const body = (await c.req.json().catch(() => ({}))) as { name?: string };
-  const result = await svc.forkRepo(c.env, repo, actor.user.login, body.name ?? `${repo.name}-fork`);
+  const result = await svc.forkRepo(c.env, repo, d.actor.user.login, body.name ?? `${repo.name}-fork`);
   if (!result.ok) return c.json({ error: result.error }, result.status as never);
   return c.json({ repo: repoJson(c, result.value) }, 201);
 });

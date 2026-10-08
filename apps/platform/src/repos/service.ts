@@ -9,10 +9,11 @@ import {
   createRepoRow,
   deleteRepoRow,
   getRepo,
-  getRepoById,
   isValidRepoName,
   type RepoRow,
 } from '../db/repos';
+import { purgeRepoCache } from '../cache/repos';
+import { purgeGitTokens } from '../artifacts/tokens';
 
 export type ServiceResult<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
 
@@ -146,6 +147,7 @@ export async function deleteRepo(
     return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}` };
   }
   await deleteRepoRow(env.DB, repo.id);
+  await Promise.all([purgeRepoCache(repo.owner_login, repo.name), purgeGitTokens(repo.artifacts_name)]);
   return { ok: true, value: { deleted: true } };
 }
 
@@ -155,15 +157,17 @@ export async function updateRepo(
   repo: RepoRow,
   patch: { description?: string; visibility?: 'public' | 'private' },
 ): Promise<RepoRow> {
+  const stmts: D1PreparedStatement[] = [];
   if (typeof patch.description === 'string') {
-    await env.DB.prepare('UPDATE repos SET description = ? WHERE id = ?')
-      .bind(patch.description.slice(0, 500), repo.id)
-      .run();
+    stmts.push(
+      env.DB.prepare('UPDATE repos SET description = ? WHERE id = ?').bind(patch.description.slice(0, 500), repo.id),
+    );
   }
   if (patch.visibility === 'public' || patch.visibility === 'private') {
-    await env.DB.prepare('UPDATE repos SET visibility = ? WHERE id = ?')
-      .bind(patch.visibility, repo.id)
-      .run();
+    stmts.push(env.DB.prepare('UPDATE repos SET visibility = ? WHERE id = ?').bind(patch.visibility, repo.id));
   }
-  return (await getRepoById(env.DB, repo.id)) ?? repo;
+  stmts.push(env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repo.id));
+  const results = await env.DB.batch<RepoRow>(stmts);
+  await purgeRepoCache(repo.owner_login, repo.name);
+  return results[results.length - 1]?.results?.[0] ?? repo;
 }

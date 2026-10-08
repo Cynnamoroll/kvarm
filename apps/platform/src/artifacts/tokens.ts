@@ -1,25 +1,58 @@
 /**
- * Repo-scoped Artifacts git tokens, cached per (repo, scope) in the
- * TokenCache DO. Mints via the Artifacts binding; refreshes at ~25%
- * remaining TTL. Anonymous public reads and PAT-authenticated reads share
- * the same read token since platform authorization already happened.
+ * Repo-scoped Artifacts git tokens, cached per (repo, scope) in the Cache API.
+ * A miss mints through the Artifacts binding directly, so the git gate never
+ * calls a Durable Object (git-gate budget do=0); the cost is one mint per colo
+ * per refresh window. Anonymous public reads and PAT-authenticated reads share
+ * the read token because platform authorization has already happened.
  */
+
+import { deleteCached, internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
+
+const TTL_SECONDS: Record<'read' | 'write', number> = {
+  read: 3600, // 1 hour
+  write: 21600, // 6 hours
+};
+
+interface CachedToken {
+  token: string;
+  expiresAt: number;
+}
+
+function tokenKey(artifactsName: string, scope: 'read' | 'write'): Request {
+  return internalKey('gittoken', artifactsName, scope);
+}
 
 export async function getGitToken(
   env: Env,
   artifactsName: string,
   scope: 'read' | 'write',
 ): Promise<string> {
-  const id = env.TOKENS.idFromName(`${artifactsName}:${scope}`);
-  const stub = env.TOKENS.get(id);
-  const res = await stub.fetch('https://token-cache/token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ repo: artifactsName, scope }),
-  });
-  if (!res.ok) {
-    throw new Error(`artifacts token mint failed (${res.status})`);
+  const ttl = TTL_SECONDS[scope];
+  // Tokens are refreshed once less than a quarter of their lifetime remains.
+  const refreshMarginMs = (ttl * 1000) / 4;
+  const key = tokenKey(artifactsName, scope);
+  const now = Date.now();
+  const cached = await readCachedJson<CachedToken>(key);
+  if (cached && cached.expiresAt - now > refreshMarginMs) return cached.token;
+
+  const repo = await env.ARTIFACTS.get(artifactsName);
+  let minted: ArtifactsCreateTokenResult;
+  try {
+    minted = await repo.createToken(scope, ttl);
+  } finally {
+    try {
+      repo[Symbol.dispose]();
+    } catch {
+      // disposal is best-effort
+    }
   }
-  const body = (await res.json()) as { token: string };
-  return body.token;
+  const parsed = minted.expiresAt ? Date.parse(minted.expiresAt) : NaN;
+  const expiresAt = Number.isNaN(parsed) ? now + ttl * 1000 : parsed;
+  await writeCachedJson(key, { token: minted.plaintext, expiresAt } satisfies CachedToken, (expiresAt - now - refreshMarginMs) / 1000);
+  return minted.plaintext;
+}
+
+/** Drops this colo's token copies, e.g. when the repo is deleted. */
+export async function purgeGitTokens(artifactsName: string): Promise<void> {
+  await Promise.all([deleteCached(tokenKey(artifactsName, 'read')), deleteCached(tokenKey(artifactsName, 'write'))]);
 }

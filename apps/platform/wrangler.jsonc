@@ -47,6 +47,12 @@
       }
     ]
   },
+  // Workers Rate Limiting (per-colo counters). The RateLimiter Durable Object
+  // stays exported for its migration but is no longer on any request path.
+  "ratelimits": [
+    { "name": "READ_LIMITER", "namespace_id": "4601", "simple": { "limit": 600, "period": 60 } },
+    { "name": "WRITE_LIMITER", "namespace_id": "4602", "simple": { "limit": 120, "period": 60 } }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "TOKENS", "class_name": "TokenCache" },

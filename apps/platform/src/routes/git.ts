@@ -7,18 +7,24 @@
  *  - The proxy streams both directions and buffers nothing, so clones and
  *    pushes add ~1-3ms and flat memory/CPU regardless of repo size.
  *  - Anonymous and authenticated reads share a per-repo read-only Artifacts
- *    token minted through the binding and cached in the TokenCache DO
+ *    token minted through the binding and cached in the Cache API
  *    (platform authorization has already happened by then).
  *  - info/refs advertisements for public repos are edge-cached briefly so
- *    bursty CI clones skip the backend hop. Purged by push events (M4).
+ *    bursty CI clones skip the backend hop. The cache is checked after
+ *    authorization and before any token mint or upstream fetch. Purged by
+ *    push events (M4).
+ *  - No Durable Object on this path: rate limits use the Workers Rate
+ *    Limiting bindings and tokens come from the Cache API.
  */
 
 import type { Context } from 'hono';
-import { getRepo, type RepoRow } from '../db/repos';
-import { parseBasicAuth, verifyPAT } from '../auth/pat';
+import type { RepoRow } from '../db/repos';
+import { parseBasicAuth } from '../auth/pat';
 import { getGitToken } from '../artifacts/tokens';
-import { rateLimit } from '../ratelimit';
-import { authorizeRepo, patActor, type Actor, type AuthzDenyCode } from '../services/authz';
+import { gitRateLimit } from '../ratelimit';
+import { markCache } from '../cost/meter';
+import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
+import type { Actor } from '../services/authz';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -31,8 +37,16 @@ function unauthorized(): Response {
   });
 }
 
-function denied(status: 401 | 403 | 404, code: AuthzDenyCode): Response {
+function rateLimited(): Response {
+  return new Response('rate limit exceeded, slow down\n', {
+    status: 429,
+    headers: { 'Retry-After': '60' },
+  });
+}
+
+function denied(status: 401 | 403 | 404 | 429, code: AccessDenyCode): Response {
   if (status === 401) return unauthorized();
+  if (status === 429) return rateLimited();
   if (status === 404) return new Response('repository not found\n', { status: 404 });
   return new Response(
     code === 'INSUFFICIENT_SCOPE' ? 'insufficient token scope\n' : 'permission denied\n',
@@ -58,8 +72,16 @@ function operation(subpath: string, service: string | null): 'read' | 'write' {
   return 'read';
 }
 
-/** Rate limits per identity, per minute. Generous for CI, bounded for abuse. */
-const RATE_LIMITS = { read: 600, write: 120 } as const;
+/**
+ * Edge-cache key for a public info/refs advertisement. v0 and v2
+ * advertisements differ for the same URL, so the key includes Git-Protocol.
+ */
+export function infoRefsCacheKey(artifactsRemote: string, search: string, gitProtocol: string | null): Request {
+  const keyUrl = new URL(`${artifactsRemote}/info/refs`);
+  keyUrl.search = search;
+  keyUrl.searchParams.set('forge-git-protocol', gitProtocol ?? '');
+  return new Request(keyUrl.toString(), { method: 'GET' });
+}
 
 export type GitAccess =
   | { ok: true; repo: RepoRow; actor: Actor | null; op: 'read' | 'write' }
@@ -76,20 +98,20 @@ export async function authorizeGitRequest(
   const op = operation(subpath, new URL(request.url).searchParams.get('service'));
 
   const basic = parseBasicAuth(request.headers.get('Authorization') ?? undefined);
-  let actor: Actor | null = null;
-  if (basic) {
-    const pat = await verifyPAT(env, basic.password);
-    if (!pat) return { ok: false, response: unauthorized() };
-    actor = patActor(pat);
-  }
 
   // Anonymous writes never need a repo lookup; challenge before touching D1.
-  if (op === 'write' && !actor) return { ok: false, response: unauthorized() };
+  if (op === 'write' && !basic) return { ok: false, response: unauthorized() };
 
-  const found = await getRepo(env.DB, owner, name);
-  const decision = await authorizeRepo(env, found, actor, op, 'git');
-  if (!decision.ok) return { ok: false, response: denied(decision.status, decision.code) };
-  return { ok: true, repo: decision.repo, actor, op };
+  const access = await resolveRepoAccess(env, {
+    owner,
+    name,
+    need: op,
+    transport: 'git',
+    credential: basic ? { kind: 'pat', token: basic.password } : { kind: 'anonymous' },
+    clientIp: request.headers.get('CF-Connecting-IP'),
+  });
+  if (!access.ok) return { ok: false, response: denied(access.status, access.code) };
+  return { ok: true, repo: access.repo, actor: access.actor, op };
 }
 
 export async function handleGitRequest(
@@ -107,12 +129,21 @@ export async function handleGitRequest(
 
   // Rate limit by PAT id (or client IP for anonymous public reads).
   const identity = actor?.patId ?? `ip:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`;
-  const allowed = await rateLimit(env, `git:${op}:${identity}`, RATE_LIMITS[op]);
-  if (!allowed) {
-    return new Response('rate limit exceeded, slow down\n', {
-      status: 429,
-      headers: { 'Retry-After': '60' },
-    });
+  if (!(await gitRateLimit(env, op, identity))) return rateLimited();
+
+  // Warm public advertisements are served before any token mint or upstream
+  // fetch; authorization above already ran on the current repo state.
+  const cacheKey =
+    op === 'read' && isPublic && subpath === 'info/refs' && c.req.method === 'GET'
+      ? infoRefsCacheKey(repo.artifacts_remote, url.search, c.req.header('git-protocol') ?? null)
+      : null;
+  if (cacheKey) {
+    const cached = await caches.default.match(cacheKey);
+    if (cached) {
+      markCache('hit');
+      return cached;
+    }
+    markCache('miss');
   }
 
   // Mint (or reuse) a short-lived repo-scoped Artifacts token upstream.
@@ -146,18 +177,11 @@ export async function handleGitRequest(
   const upstreamRes = await fetch(upstream.toString(), init);
 
   // Briefly edge-cache public clone bootstrapping (purge-on-push lands in M4).
-  if (op === 'read' && isPublic && subpath === 'info/refs' && c.req.method === 'GET') {
-    const cache = caches.default;
-    // v0 and v2 advertisements differ for the same URL; key on the protocol.
-    const keyUrl = new URL(upstream);
-    keyUrl.searchParams.set('forge-git-protocol', c.req.header('git-protocol') ?? '');
-    const cacheKey = new Request(keyUrl.toString(), { method: 'GET' });
-    const cached = await cache.match(cacheKey);
-    if (cached) return cached;
+  if (cacheKey && upstreamRes.status === 200) {
     const res = relay(upstreamRes);
     res.headers.set('Cache-Control', 'public, max-age=30');
     try {
-      c.executionCtx.waitUntil(cache.put(cacheKey, res.clone()));
+      c.executionCtx.waitUntil(caches.default.put(cacheKey, res.clone()).catch(() => undefined));
     } catch {
       // cache.put can race on streaming bodies; never fail a clone over it.
     }

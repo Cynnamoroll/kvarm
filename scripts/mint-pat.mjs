@@ -4,7 +4,8 @@
  *
  * Creates the user (non-admin) when the login does not exist yet, inserts a
  * PAT row with the given scopes, and writes the plaintext token to KEY=<token>
- * in a gitignored env file. Only the token prefix is printed.
+ * in a gitignored env file. Only the token prefix and PAT id (for revocation
+ * via DELETE /api/v1/user/tokens/:id) are printed.
  *
  * Idempotent: if KEY is already set in the env file, nothing is minted unless
  * --rotate is passed (the old PAT row is left in place).
@@ -123,6 +124,7 @@ console.log(
     login: row.login,
     userCreated,
     isAdmin: row.isAdmin === 1,
+    patId,
     prefix: row.prefix,
     scopes: JSON.parse(row.scopes),
     envKey: key,

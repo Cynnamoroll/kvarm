@@ -16,8 +16,8 @@
 
 import { Hono, type Context } from 'hono';
 import { escapeHtml, formatBytes, html, raw, timeAgo } from '@forge/ui';
-import { getRepo, type RepoRow } from '../db/repos';
-import { apiActor, type ApiActor } from './api';
+import type { RepoRow } from '../db/repos';
+import { clientIp, requestCredential, type ApiActor } from './api';
 import { layout } from '../web/render';
 import { repoPage } from '../render/repoShell';
 import {
@@ -32,7 +32,8 @@ import {
 import { renderMarkdown } from '../render/markdown';
 import { edgeCachedPage } from '../cache/edge';
 import * as svc from '../repos/service';
-import { authorizeRepo, type RepoRole } from '../services/authz';
+import type { RepoNeed, RepoRole } from '../services/authz';
+import { resolveRepoAccess } from '../services/access';
 
 type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const repoPages = new Hono<App>();
@@ -46,7 +47,7 @@ interface Resolved {
   role: RepoRole;
 }
 
-/** Persist refreshed session cookies (threaded by apiActor) on responses. */
+/** Persist refreshed session cookies (threaded by requestCredential) on responses. */
 function finish(c: Context<App>, res: Response): Response {
   for (const cookie of c.get('refreshCookies') ?? []) res.headers.append('Set-Cookie', cookie);
   return res;
@@ -61,17 +62,21 @@ function encodePath(path: string): string {
     .join('/');
 }
 
-/** Owner/name -> repo row + permission check. 404 when invisible. */
-async function resolveRepo(c: Context<App>): Promise<Resolved | null> {
+/**
+ * Owner/name -> repo row + permission check. 404 when invisible. A rejected
+ * Bearer token on a page is treated as an anonymous view.
+ */
+async function resolveRepo(c: Context<App>, need: RepoNeed = 'read'): Promise<Resolved | null> {
   const owner = c.req.param('owner');
   const name = c.req.param('repo');
   if (!owner || !name) return null;
-  const repo = await getRepo(c.env.DB, owner, name);
-  if (!repo) return null;
-  const viewer = await apiActor(c);
-  const decision = await authorizeRepo(c.env, repo, viewer, 'read', 'page');
-  if (!decision.ok) return null;
-  return { repo, viewer, role: decision.role };
+  const base = { owner, name, need, transport: 'page' as const, clientIp: clientIp(c) };
+  let access = await resolveRepoAccess(c.env, { ...base, credential: await requestCredential(c) });
+  if (!access.ok && access.badCredential) {
+    access = await resolveRepoAccess(c.env, { ...base, credential: { kind: 'anonymous' } });
+  }
+  if (!access.ok) return null;
+  return { repo: access.repo, viewer: access.actor, role: access.role };
 }
 
 /** Settings pages are concealed from viewers without admin on the repo. */
@@ -566,7 +571,7 @@ repoPages.get('/branches', async (c) => {
 // ---------------------------------------------------------------------------
 
 repoPages.get('/settings', async (c) => {
-  const resolved = await resolveRepo(c);
+  const resolved = await resolveRepo(c, 'admin');
   if (!resolved) return notFound(c);
   if (!canAdminister(resolved)) return notFound(c);
   const repo = resolved.repo;
@@ -603,7 +608,7 @@ repoPages.get('/settings', async (c) => {
 });
 
 repoPages.post('/settings', async (c) => {
-  const resolved = await resolveRepo(c);
+  const resolved = await resolveRepo(c, 'admin');
   if (!resolved) return notFound(c);
   if (!canAdminister(resolved)) return notFound(c);
   const form = await c.req.parseBody();
@@ -615,7 +620,7 @@ repoPages.post('/settings', async (c) => {
 });
 
 repoPages.post('/delete', async (c) => {
-  const resolved = await resolveRepo(c);
+  const resolved = await resolveRepo(c, 'admin');
   if (!resolved) return notFound(c);
   if (!canAdminister(resolved)) return notFound(c);
   await svc.deleteRepo(c.env, resolved.repo);

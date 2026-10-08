@@ -5,6 +5,7 @@
  */
 
 import type { Context } from 'hono';
+import { markCache } from '../cost/meter';
 
 /** Any app whose Variables satisfy the platform convention. */
 type AnyApp = { Bindings: Env; Variables: Record<string, unknown> };
@@ -28,11 +29,13 @@ export async function edgeCachedPage<S extends AnyApp>(
   const cache = caches.default;
   const cached = await cache.match(c.req.raw);
   if (cached) {
+    markCache('hit');
     const res = new Response(cached.body, cached);
     res.headers.set('x-forge-cache', 'hit');
     return res;
   }
 
+  markCache('miss');
   const res = await render();
   if (res.status === 200) {
     const store = new Response(res.clone().body, res);
