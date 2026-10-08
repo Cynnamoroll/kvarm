@@ -9,13 +9,16 @@ const ORIGIN = 'https://forge.test';
 const ORG = 'acme-labs';
 const FULL: Scope[] = ['read', 'write', 'api'];
 
-type Who = 'owner' | 'maint' | 'member' | 'outsider' | 'coowner';
+type Who = 'owner' | 'maint' | 'member' | 'outsider' | 'coowner' | 'twinA' | 'twinB' | 'twinM';
 const logins: Record<Who, string> = {
   owner: 'tn-owner',
   maint: 'tn-maint',
   member: 'tn-member',
   outsider: 'tn-outsider',
   coowner: 'tn-coowner',
+  twinA: 'tn-twin-a',
+  twinB: 'tn-twin-b',
+  twinM: 'tn-twin-m',
 };
 const tok = {} as Record<Who, string>;
 
@@ -324,6 +327,77 @@ describe('revocation beats warmed state', () => {
     expect(await status(`/api/v1/orgs/${ORG}/members/${logins.coowner}`, as('owner', { method: 'DELETE' }))).toBe(200);
     expect((await setRole('coowner', 'member')).status).toBe(200);
     expect(await status(`/api/v1/repos/${repo}`, as('coowner'))).toBe(404);
+  });
+
+  it('cleans an owner’s grants on self-removal so rejoining as a member revives nothing', async () => {
+    const org = 'acme-twins';
+    const secret = `${org}/secret`;
+    const notes = `${org}/notes`;
+    const member = (who: Who, role: string, by: Who) =>
+      call(`/api/v1/orgs/${org}/members/${logins[who]}`, as(by, { method: 'PUT', json: { role } }));
+    const remove = (who: Who, by: Who) => call(`/api/v1/orgs/${org}/members/${logins[who]}`, as(by, { method: 'DELETE' }));
+    const grantsOf = async (who: Who) =>
+      (
+        await env.DB.prepare(
+          `SELECT g.role FROM repo_grants g JOIN repos r ON r.id = g.repo_id JOIN users u ON u.id = g.user_id
+            WHERE r.owner_login = ? AND u.login = ? ORDER BY r.name`,
+        )
+          .bind(org, logins[who])
+          .all<{ role: string }>()
+      ).results.map((r) => r.role);
+
+    expect(await status('/api/v1/orgs', as('twinA', { method: 'POST', json: { login: org } }))).toBe(201);
+    expect((await member('twinB', 'owner', 'twinA')).status).toBe(200);
+    expect((await member('twinM', 'member', 'twinA')).status).toBe(200);
+    await seedRepo(org, 'secret', 'private');
+    await seedRepo(org, 'notes', 'private');
+    expect((await grant(secret, 'twinA', 'admin', 'twinB')).status).toBe(200);
+    expect((await grant(notes, 'twinA', 'write', 'twinB')).status).toBe(200);
+    expect((await grant(secret, 'twinB', 'admin', 'twinA')).status).toBe(200);
+    expect(await grantsOf('twinA')).toEqual(['write', 'admin']);
+
+    // A rejected removal deletes nothing.
+    const forbidden = await remove('twinA', 'twinM');
+    expect(forbidden.status).toBe(403);
+    expect(await body(forbidden)).toMatchObject({ code: 'FORBIDDEN' });
+    expect(await grantsOf('twinA')).toEqual(['write', 'admin']);
+
+    // Two owners: the acting owner may remove themselves, and their grants go with them.
+    const left = await remove('twinA', 'twinA');
+    expect(left.status).toBe(200);
+    expect(await body(left)).toEqual({ removed: true });
+    expect(await grantsOf('twinA')).toEqual([]);
+    expect(await status(`/api/v1/repos/${secret}`, as('twinA'))).toBe(404);
+    expect(await git('twinA', secret, 'read')).toBe(404);
+    expect(await git('twinA', notes, 'write')).toBe(404);
+
+    // Re-added as a plain member: no prior read/write/admin authority returns.
+    expect((await member('twinA', 'member', 'twinB')).status).toBe(200);
+    expect(await grantsOf('twinA')).toEqual([]);
+    expect(await status(`/api/v1/repos/${secret}`, as('twinA'))).toBe(404);
+    expect(await git('twinA', secret, 'read')).toBe(404);
+    expect(await git('twinA', notes, 'write')).toBe(404);
+    expect(await status(`/api/v1/repos/${secret}`, as('twinA', { method: 'PATCH', json: { description: 'x' } }))).toBe(404);
+    expect(await status(`/api/v1/repos/${secret}/grants`, as('twinA'))).toBe(404);
+    const listed = await body<{ grants: { login: string }[] }>(await call(`/api/v1/repos/${secret}/grants`, as('twinB')));
+    expect(listed.grants.map((g) => g.login)).not.toContain(logins.twinA);
+
+    // A fresh grant works normally.
+    expect((await grant(secret, 'twinA', 'read', 'twinB')).status).toBe(200);
+    expect(await status(`/api/v1/repos/${secret}`, as('twinA'))).toBe(200);
+    expect(await git('twinA', secret, 'read')).toBe(200);
+    expect(await git('twinA', secret, 'write')).toBe(403);
+    expect(await git('twinA', notes, 'read')).toBe(404);
+
+    // The survivor is now the last owner: self-removal and demotion stay rejected, grants intact.
+    const last = await remove('twinB', 'twinB');
+    expect(last.status).toBe(409);
+    expect(await body(last)).toMatchObject({ code: 'LAST_OWNER' });
+    const demote = await member('twinB', 'member', 'twinB');
+    expect(demote.status).toBe(409);
+    expect(await body(demote)).toMatchObject({ code: 'LAST_OWNER' });
+    expect(await grantsOf('twinB')).toEqual(['admin']);
+    expect((await body(await call(`/api/v1/orgs/${org}`, as('twinB')))).viewerRole).toBe('owner');
   });
 
   it('denies a warmed public read right after the repo becomes private', async () => {

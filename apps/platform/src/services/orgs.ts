@@ -255,10 +255,28 @@ export async function setMember(
 }
 
 /**
- * Removes a member (owner only). When an owner removes someone else, that
- * user's grants on the org's repos are deleted in the same batch. Grants on
- * org repos already lapse with membership (services/authz.ts); the cleanup
- * keeps a later re-invite from silently restoring old access.
+ * The removal guard, evaluated against the membership rows of `org_id`/`user_id`
+ * as they stand before anything is deleted: the actor (?3) is an owner and the
+ * target is not the last owner. Parameters: ?1 org login, ?2 target login,
+ * ?3 actor id.
+ */
+const REMOVAL_GUARD = `EXISTS (SELECT 1 FROM org_members t
+                  WHERE t.org_id = (SELECT id FROM orgs WHERE login = ?1)
+                    AND t.user_id = (SELECT id FROM users WHERE login = ?2)
+                    AND EXISTS (SELECT 1 FROM org_members a WHERE a.org_id = t.org_id AND a.user_id = ?3 AND a.role = 'owner')
+                    AND (t.role <> 'owner'
+                         OR (SELECT COUNT(*) FROM org_members c WHERE c.org_id = t.org_id AND c.role = 'owner') > 1))`;
+
+/**
+ * Removes a member (owner only, including an owner removing themselves while
+ * another owner remains). The user's grants on the org's repos are deleted in
+ * the same batch. Grants on org repos already lapse with membership
+ * (services/authz.ts); the cleanup keeps a later re-invite from silently
+ * restoring old access.
+ *
+ * Grants are deleted first, under the same guard as the membership delete, so
+ * neither statement depends on membership the other has already removed (an
+ * owner leaving would otherwise fail their own "actor is owner" check).
  */
 export async function removeMember(
   env: Env,
@@ -266,24 +284,19 @@ export async function removeMember(
   orgLogin: string,
   targetLogin: string,
 ): Promise<ServiceResult<{ removed: true }>> {
-  const [diag, del] = await env.DB.batch([
+  const [diag, , del] = await env.DB.batch([
     diagnosisSelect(env.DB, orgLogin, actor.user.id, targetLogin),
-    env.DB.prepare(
-      `DELETE FROM org_members
-        WHERE org_id = (SELECT id FROM orgs WHERE login = ?1)
-          AND user_id = (SELECT id FROM users WHERE login = ?2)
-          AND EXISTS (SELECT 1 FROM org_members a WHERE a.org_id = org_members.org_id AND a.user_id = ?3 AND a.role = 'owner')
-          AND (role <> 'owner'
-               OR (SELECT COUNT(*) FROM org_members c WHERE c.org_id = org_members.org_id AND c.role = 'owner') > 1)`,
-    ).bind(orgLogin, targetLogin, actor.user.id),
     env.DB.prepare(
       `DELETE FROM repo_grants
         WHERE user_id = (SELECT id FROM users WHERE login = ?2)
           AND repo_id IN (SELECT id FROM repos WHERE owner_login = ?1)
-          AND NOT EXISTS (SELECT 1 FROM org_members m JOIN orgs o ON o.id = m.org_id
-                           WHERE o.login = ?1 AND m.user_id = repo_grants.user_id)
-          AND EXISTS (SELECT 1 FROM org_members a JOIN orgs o ON o.id = a.org_id
-                       WHERE o.login = ?1 AND a.user_id = ?3 AND a.role = 'owner')`,
+          AND ${REMOVAL_GUARD}`,
+    ).bind(orgLogin, targetLogin, actor.user.id),
+    env.DB.prepare(
+      `DELETE FROM org_members
+        WHERE org_id = (SELECT id FROM orgs WHERE login = ?1)
+          AND user_id = (SELECT id FROM users WHERE login = ?2)
+          AND ${REMOVAL_GUARD}`,
     ).bind(orgLogin, targetLogin, actor.user.id),
   ]);
   if ((del?.meta?.changes ?? 0) === 0) {

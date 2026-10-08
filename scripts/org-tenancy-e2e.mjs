@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
  * Live validation driver for organization tenancy (VAL-ORG-001, VAL-ORG-002,
- * VAL-ACCESS-003, VAL-COST-021). Creates its own org and repos named
- * `org-tenancy-*-<ts>`, walks the role/grant matrix over REST, the repo page
- * and git, and deletes its repos at the end (orgs have no delete API and are
- * left as inert test data).
+ * VAL-ORG-003, VAL-ACCESS-003, VAL-COST-021). Creates its own orgs and repos
+ * named `org-tenancy-*-<ts>` / `org-self-rm*-<ts>`, walks the role/grant
+ * matrix and the owner self-removal lifecycle over REST, the repo page and
+ * git, and deletes its repos at the end (orgs have no delete API and are left
+ * as inert test data).
  *
  * Principals come from env vars by NAME (load apps/platform/.dev.vars.validation):
  *   FORGE_PAT_BOT (org owner, non-admin), FORGE_PAT_MAINT, FORGE_PAT_MEMBER,
@@ -32,6 +33,8 @@ const ORG = `org-tenancy-e2e-${ts}`;
 const MATRIX = `org-tenancy-matrix-${ts}`;
 const FLIP = `org-tenancy-flip-${ts}`;
 const PERSONAL = `org-tenancy-personal-${ts}`;
+const SELF_ORG = `org-self-rm-${ts}`;
+const SELF_REPO = `org-self-removal-${ts}`;
 const probeScript = fileURLToPath(new URL('./receive-pack-probe.mjs', import.meta.url));
 
 const results = [];
@@ -305,9 +308,112 @@ try {
   console.log(`# cost first denial after revoke:       ${afterRevoke.cost}`);
   console.log(`# cost warm private git info/refs:      ${warmGit.cost}`);
   console.log(`# cost git denial after revoke:         ${gitAfterRevoke.cost}`);
+
+  // --- Owner self-removal cleans grants; rejoining revives nothing (VAL-ORG-003) ---
+  // forge-bot and forge-org-member co-own SELF_ORG; forge-org-member holds an explicit
+  // admin grant on its private repo and removes themselves.
+  console.log(`# self-removal org ${SELF_ORG}; repo ${SELF_ORG}/${SELF_REPO}`);
+  const selfRepo = `${SELF_ORG}/${SELF_REPO}`;
+  const leaver = LOGIN.member;
+  check('owner creates the self-removal org', (await api('owner', 'POST', '/orgs', { login: SELF_ORG })).status, 201);
+  const coOwner = await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${leaver}`, { role: 'owner' });
+  check(`${leaver} added as second owner`, `${coOwner.status} ${coOwner.body?.member?.role}`, '200 owner');
+  const plain = await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${LOGIN.maint}`, { role: 'member' });
+  check(`${LOGIN.maint} added as plain member`, `${plain.status} ${plain.body?.member?.role}`, '200 member');
+  const mkSelf = await api('owner', 'POST', `/orgs/${SELF_ORG}/repos`, { name: SELF_REPO, visibility: 'private' });
+  check('private self-removal repo created', `${mkSelf.status} ${mkSelf.body?.repo?.visibility}`, '201 private');
+  const selfLocal = join(work, 'self');
+  git(null, ['init', '-q', '-b', 'main', selfLocal]);
+  git(null, ['remote', 'add', 'origin', `${BASE}/${selfRepo}.git`], selfLocal);
+  commit(selfLocal, 'marker.txt', `self-removal marker ${ts}\n`);
+  const sMain = await pushWithRetry('owner', selfLocal, 'HEAD:refs/heads/main');
+  const sProbe = await pushWithRetry('owner', selfLocal, `HEAD:${probeRef}`);
+  check('owner pushes main and authz-probe to the self-removal repo', `${sMain.code}/${sProbe.code}`, '0/0');
+  const ga = await api('owner', 'PUT', `/repos/${selfRepo}/grants/${leaver}`, { role: 'admin' });
+  check(`explicit admin grant to co-owner ${leaver}`, `${ga.status} ${ga.body?.grant?.role}`, '200 admin');
+  const gm = await api('owner', 'PUT', `/repos/${selfRepo}/grants/${LOGIN.maint}`, { role: 'write' });
+  check(`explicit write grant to member ${LOGIN.maint}`, `${gm.status} ${gm.body?.grant?.role}`, '200 write');
+  const twoOwners = await api('owner', 'GET', `/orgs/${SELF_ORG}/members`);
+  check(
+    'two-owner state',
+    (twoOwners.body?.members ?? []).map((m) => `${m.login}:${m.role}`).sort().join(','),
+    [`${LOGIN.maint}:member`, `${leaver}:owner`, `${LOGIN.owner}:owner`].sort().join(','),
+  );
+  check('co-owner reads the private repo before leaving', lsRemote('member', selfRepo).refs, (n) => n >= 2);
+
+  for (const who of ['outsider', 'maint']) {
+    const r = await api(who, 'DELETE', `/orgs/${SELF_ORG}/members/${LOGIN.maint}`);
+    check(`${who} cannot remove ${LOGIN.maint}`, `${r.status} ${r.body?.code}`, '403 FORBIDDEN');
+  }
+  check('rejected removals left the member write grant effective', lsRemote('maint', selfRepo).refs, (n) => n >= 2);
+
+  const selfRemove = await api('member', 'DELETE', `/orgs/${SELF_ORG}/members/${leaver}`);
+  check('co-owner removes themselves (another owner remains)', `${selfRemove.status} ${selfRemove.text}`, '200 {"removed":true}');
+  const afterSelf = await api('owner', 'GET', `/orgs/${SELF_ORG}/members`);
+  check(
+    'membership after self-removal',
+    (afterSelf.body?.members ?? []).map((m) => `${m.login}:${m.role}`).sort().join(','),
+    [`${LOGIN.maint}:member`, `${LOGIN.owner}:owner`].sort().join(','),
+  );
+  const leftGrants = async () =>
+    ((await api('owner', 'GET', `/repos/${selfRepo}/grants`)).body?.grants ?? []).map((g) => `${g.login}:${g.role}`).sort().join(',');
+  check('self-removal deleted the leaver’s explicit grant', await leftGrants(), `${LOGIN.maint}:write`);
+
+  const selfBefore = await ownerRef(selfRepo, probeRef);
+  const leaverSha = commit(selfLocal, 'leaver.txt', `must not land ${ts}\n`);
+  const deniedChecks = async (phase) => {
+    const r = await api('member', 'GET', `/repos/${selfRepo}`);
+    check(`${phase}: REST read concealed`, `${r.status} ${r.text.includes(SELF_REPO)}`, '404 false');
+    check(`${phase}: page concealed`, (await page('member', `/${selfRepo}`)).status, 404);
+    check(`${phase}: git info/refs concealed`, (await raw('member', `/${selfRepo}.git/info/refs?service=git-upload-pack`)).status, 404);
+    check(`${phase}: git ls-remote discloses no refs`, lsRemote('member', selfRepo).refs, 0);
+    const p = probe('member', selfRepo, probeRef, selfLocal, leaverSha);
+    check(`${phase}: receive-pack denied, ref unchanged`, `${p.http} accepted=${p.accepted} moved=${p.refMoved}`, (v) => v.includes('accepted=false moved=false'));
+    const pa = await api('member', 'PATCH', `/repos/${selfRepo}`, { description: 'stale admin' });
+    check(`${phase}: admin settings change denied`, pa.status, 404);
+    check(`${phase}: grant list denied`, (await api('member', 'GET', `/repos/${selfRepo}/grants`)).status, 404);
+  };
+  await deniedChecks('after self-removal');
+
+  const rejoin = await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${leaver}`, { role: 'member' });
+  check('former owner re-added as plain member', `${rejoin.status} ${rejoin.body?.member?.role}`, '200 member');
+  check('re-add revived no grant', await leftGrants(), `${LOGIN.maint}:write`);
+  await deniedChecks('rejoined as member');
+
+  const fresh = await api('owner', 'PUT', `/repos/${selfRepo}/grants/${leaver}`, { role: 'read' });
+  check('fresh read grant after rejoin', `${fresh.status} ${fresh.body?.grant?.role}`, '200 read');
+  check('fresh grant: REST read', (await api('member', 'GET', `/repos/${selfRepo}`)).status, 200);
+  check('fresh grant: git ls-remote', lsRemote('member', selfRepo).refs, (n) => n >= 2);
+  const pf = probe('member', selfRepo, probeRef, selfLocal, leaverSha);
+  check('fresh read grant: receive-pack denied, ref unchanged', `${pf.http} accepted=${pf.accepted} moved=${pf.refMoved}`, (v) => v.includes('403') && v.includes('accepted=false moved=false'));
+  check('authz-probe ref unchanged across self-removal denials', await ownerRef(selfRepo, probeRef), selfBefore);
+
+  const ordinary = await api('owner', 'DELETE', `/orgs/${SELF_ORG}/members/${LOGIN.maint}`);
+  check('owner removes a plain member', `${ordinary.status} ${ordinary.text}`, '200 {"removed":true}');
+  check('ordinary removal deleted the member’s grant', await leftGrants(), `${leaver}:read`);
+  await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${LOGIN.maint}`, { role: 'member' });
+  check('re-added plain member: REST read concealed', (await api('maint', 'GET', `/repos/${selfRepo}`)).status, 404);
+  check('re-added plain member: git ls-remote discloses no refs', lsRemote('maint', selfRepo).refs, 0);
+
+  const lastRemove = await api('owner', 'DELETE', `/orgs/${SELF_ORG}/members/${LOGIN.owner}`);
+  check('last remaining owner cannot remove themselves', `${lastRemove.status} ${lastRemove.body?.code}`, '409 LAST_OWNER');
+  const lastDemote = await api('owner', 'PUT', `/orgs/${SELF_ORG}/members/${LOGIN.owner}`, { role: 'member' });
+  check('last remaining owner cannot be demoted', `${lastDemote.status} ${lastDemote.body?.code}`, '409 LAST_OWNER');
+  const intact = await api('owner', 'GET', `/orgs/${SELF_ORG}/members`);
+  check(
+    'org intact after rejected last-owner changes',
+    (intact.body?.members ?? []).map((m) => `${m.login}:${m.role}`).sort().join(','),
+    [`${LOGIN.maint}:member`, `${leaver}:member`, `${LOGIN.owner}:owner`].sort().join(','),
+  );
+  check('grants intact after rejected last-owner changes', await leftGrants(), `${leaver}:read`);
 } finally {
   if (!KEEP) {
-    for (const [who, r] of [['maint', `${ORG}/${MATRIX}`], ['maint', `${ORG}/${FLIP}`], ['owner', `${LOGIN.owner}/${PERSONAL}`]]) {
+    for (const [who, r] of [
+      ['maint', `${ORG}/${MATRIX}`],
+      ['maint', `${ORG}/${FLIP}`],
+      ['owner', `${LOGIN.owner}/${PERSONAL}`],
+      ['owner', `${SELF_ORG}/${SELF_REPO}`],
+    ]) {
       const d = await api(who, 'DELETE', `/repos/${r}`);
       console.log(`# cleanup DELETE ${r}: ${d.status}`);
     }
