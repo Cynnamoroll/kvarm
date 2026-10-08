@@ -43,11 +43,17 @@ export interface TreeDiffOptions {
   detectRenames?: boolean;
 }
 
+export type TreeDiffTruncation = 'maxTreeReads' | 'maxChanges' | 'readError';
+
 export interface TreeDiffResult {
   /** Changed file paths, sorted by path. */
   changes: TreeChange[];
-  /** True when a budget stopped the walk early. */
+  /** True when a budget (or a failed read) stopped the walk early. */
   truncated: boolean;
+  /** What stopped the walk first; present only when truncated. */
+  truncatedReason?: TreeDiffTruncation;
+  /** Message of the failed read, for `readError`. */
+  readError?: string;
   /** readTree calls made — prune effectiveness is visible here. */
   treeReads: number;
 }
@@ -85,6 +91,8 @@ class TreeDiffWalk {
   private readonly concurrency: number;
   private treeReads = 0;
   private stopped = false;
+  private reason: TreeDiffTruncation | undefined;
+  private readError: string | undefined;
 
   constructor(
     private readonly reader: TreeReader,
@@ -102,25 +110,42 @@ class TreeDiffWalk {
       if (detectRenames && !this.stopped) changes = pairRenames(changes);
     }
     changes.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    return { changes, truncated: this.stopped, treeReads: this.treeReads };
+    const res: TreeDiffResult = { changes, truncated: this.stopped, treeReads: this.treeReads };
+    if (this.reason) res.truncatedReason = this.reason;
+    if (this.readError !== undefined) res.readError = this.readError;
+    return res;
+  }
+
+  private stop(reason: TreeDiffTruncation): void {
+    if (!this.stopped) this.reason = reason;
+    this.stopped = true;
   }
 
   private emit(change: TreeChange): void {
     if (this.changes.length >= this.maxChanges) {
-      this.stopped = true;
+      this.stop('maxChanges');
       return;
     }
     this.changes.push(change);
   }
 
-  /** Read a tree, or stop the walk when the read budget is exhausted. */
+  /**
+   * Read a tree, or stop the walk when the read budget is exhausted or the
+   * read fails (a failed read is never mistaken for an empty tree).
+   */
   private async readTree(hash: string): Promise<TreeEntry[] | null> {
     if (this.treeReads >= this.maxTreeReads) {
-      this.stopped = true;
+      this.stop('maxTreeReads');
       return null;
     }
     this.treeReads++;
-    return this.reader.readTree(hash);
+    try {
+      return await this.reader.readTree(hash);
+    } catch (err) {
+      if (!this.stopped) this.readError = err instanceof Error ? err.message : String(err);
+      this.stop('readError');
+      return null;
+    }
   }
 
   private async walk(baseHash: string, headHash: string, prefix: string): Promise<void> {

@@ -5,7 +5,7 @@
  * counting proxies, outbound `fetch` is counted through AsyncLocalStorage, and
  * response-level Cache API layers report hit/miss. The totals are emitted as
  *
- *   x-forge-cost: d1=..;rr=..;rw=..;art=..;do=..;r2a=..;r2b=..;q=..;sub=..;cache=hit|miss|none
+ *   x-forge-cost: d1=..;rr=..;rw=..;art=..;do=..;r2a=..;r2b=..;q=..;sub=..;cache=hit|miss|none|bypass
  *
  * These are work counters, not a bill: CPU, duration, storage, payload sizes
  * and background (waitUntil) work after the response are not included.
@@ -21,15 +21,15 @@
  *  - q: queue sends; sendBatch counts 1.
  *  - sub: outbound global fetch() subrequests.
  *  - cache: the first response-level cache lookup (page, info/refs, content
- *    caches). Internal metadata caches (PAT, repo row, upstream token) do not
- *    set it.
+ *    caches), or `bypass` when an admin `?nocache=1` skipped it. Internal
+ *    metadata caches (PAT, repo row, upstream token) do not set it.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 export const COST_HEADER = 'x-forge-cost';
 
-export type CacheState = 'hit' | 'miss' | 'none';
+export type CacheState = 'hit' | 'miss' | 'none' | 'bypass';
 
 export interface CostCounters {
   d1: number;
@@ -76,7 +76,7 @@ export class CostMeter {
   cache: CacheState = 'none';
 
   /** Records the outermost response-cache outcome; later lookups don't override it. */
-  markCache(state: 'hit' | 'miss'): void {
+  markCache(state: 'hit' | 'miss' | 'bypass'): void {
     if (this.cache === 'none') this.cache = state;
   }
 
@@ -135,7 +135,7 @@ function toCount(n: unknown): number {
 export function parseCostHeader(value: string | null | undefined): CostCounters | null {
   if (!value) return null;
   const m = value.match(
-    /^d1=(\d+);rr=(\d+);rw=(\d+);art=(\d+);do=(\d+);r2a=(\d+);r2b=(\d+);q=(\d+);sub=(\d+);cache=(hit|miss|none)$/,
+    /^d1=(\d+);rr=(\d+);rw=(\d+);art=(\d+);do=(\d+);r2a=(\d+);r2b=(\d+);q=(\d+);sub=(\d+);cache=(hit|miss|none|bypass)$/,
   );
   if (!m) return null;
   const n = (i: number) => Number(m[i]);
@@ -365,7 +365,7 @@ export function runWithMeter<R>(meter: CostMeter, fn: () => R): R {
 }
 
 /** Marks the response-level cache outcome on the current request's meter. */
-export function markCache(state: 'hit' | 'miss'): void {
+export function markCache(state: 'hit' | 'miss' | 'bypass'): void {
   scope.getStore()?.markCache(state);
 }
 

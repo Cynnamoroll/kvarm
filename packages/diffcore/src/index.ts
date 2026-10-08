@@ -26,6 +26,8 @@ export interface DiffLine {
   oldNo?: number;
   /** 1-based new file line number, when present. */
   newNo?: number;
+  /** The line ends its file without a newline (git's "\ No newline at end of file"). */
+  noEol?: true;
 }
 
 export interface Hunk {
@@ -53,6 +55,11 @@ export interface DiffOptions {
   nodeBudget?: number;
   /** Lines of context around changes (default 3). */
   context?: number;
+  /**
+   * Treat a missing final newline as part of the last line, like git: adding
+   * or removing it changes that line (default false).
+   */
+  eolAware?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,15 +265,41 @@ export function splitLines(text: string): string[] {
   return out;
 }
 
+/**
+ * Appended to a last line that has no trailing newline, so it never equals
+ * the same text with a newline. Text files cannot plausibly contain it.
+ */
+const NO_EOL_MARK = '\u0000\uffff\u0000noeol';
+
+/** Lines of a file; with `eolAware`, a missing final newline marks the last line. */
+function fileLines(text: string, eolAware: boolean): string[] {
+  const lines = splitLines(text);
+  if (eolAware && lines.length > 0 && !text.endsWith('\n')) {
+    lines[lines.length - 1] += NO_EOL_MARK;
+  }
+  return lines;
+}
+
+function stripMark(line: string): { text: string; noEol: boolean } {
+  return line.endsWith(NO_EOL_MARK)
+    ? { text: line.slice(0, -NO_EOL_MARK.length), noEol: true }
+    : { text: line, noEol: false };
+}
+
 export function diffOps(
   oldText: string,
   newText: string,
   opts: DiffOptions = {},
 ): { ops: LineOp[]; approximate: boolean } {
-  const budget = opts.nodeBudget ?? 400_000;
-  const a = splitLines(oldText);
-  const b = splitLines(newText);
+  const eol = opts.eolAware === true;
+  return diffLineArrays(fileLines(oldText, eol), fileLines(newText, eol), opts.nodeBudget ?? 400_000);
+}
 
+function diffLineArrays(
+  a: readonly string[],
+  b: readonly string[],
+  budget: number,
+): { ops: LineOp[]; approximate: boolean } {
   // Trim the common prefix and suffix (cheap, and keeps big near-identical
   // files far inside the budget).
   let p = 0;
@@ -316,9 +349,10 @@ function fallbackOps(a: readonly string[], b: readonly string[]): LineOp[] {
 
 export function diffToHunks(oldText: string, newText: string, opts: DiffOptions = {}): FileDiff {
   const context = opts.context ?? 3;
-  const { ops, approximate } = diffOps(oldText, newText, opts);
-  const a = splitLines(oldText);
-  const b = splitLines(newText);
+  const eol = opts.eolAware === true;
+  const a = fileLines(oldText, eol);
+  const b = fileLines(newText, eol);
+  const { ops, approximate } = diffLineArrays(a, b, opts.nodeBudget ?? 400_000);
 
   // Annotate ops with line numbers and text.
   const lines: DiffLine[] = [];
@@ -328,22 +362,28 @@ export function diffToHunks(oldText: string, newText: string, opts: DiffOptions 
   let j = 0;
   let totalAdditions = 0;
   let totalDeletions = 0;
+  const line = (type: LineOp, raw: string, nums: { oldNo?: number; newNo?: number }): DiffLine => {
+    const { text, noEol } = eol ? stripMark(raw) : { text: raw, noEol: false };
+    const out: DiffLine = { type, text, ...nums };
+    if (noEol) out.noEol = true;
+    return out;
+  };
   for (const op of ops) {
     if (op === 'eq') {
       oldNo++;
       newNo++;
-      lines.push({ type: 'eq', text: a[i] ?? '', oldNo, newNo });
+      lines.push(line('eq', a[i] ?? '', { oldNo, newNo }));
       i++;
       j++;
     } else if (op === 'del') {
       oldNo++;
       totalDeletions++;
-      lines.push({ type: 'del', text: a[i] ?? '', oldNo });
+      lines.push(line('del', a[i] ?? '', { oldNo }));
       i++;
     } else {
       newNo++;
       totalAdditions++;
-      lines.push({ type: 'ins', text: b[j] ?? '', newNo });
+      lines.push(line('ins', b[j] ?? '', { newNo }));
       j++;
     }
   }
@@ -392,4 +432,58 @@ export function diffToHunks(oldText: string, newText: string, opts: DiffOptions 
   }
 
   return { hunks, totalAdditions, totalDeletions, approximate };
+}
+
+/** git's heuristic (xdiff `buffer_is_binary`): a NUL byte in the first 8000 bytes. */
+export function isBinaryContent(bytes: Uint8Array): boolean {
+  const n = Math.min(bytes.length, 8000);
+  for (let i = 0; i < n; i++) {
+    if (bytes[i] === 0) return true;
+  }
+  return false;
+}
+
+export interface HunkLimits {
+  /** Max hunk lines kept across all hunks. */
+  maxLines: number;
+  /** Max line-text characters kept across all hunks. */
+  maxBytes: number;
+}
+
+/**
+ * Bounds the rendered output of a diff. Whole hunks are kept while they fit;
+ * the hunk that crosses a bound is cut short with its header recounted, and
+ * everything after it is dropped.
+ */
+export function limitHunks(hunks: Hunk[], limits: HunkLimits): { hunks: Hunk[]; truncated: boolean } {
+  let lines = 0;
+  let bytes = 0;
+  const out: Hunk[] = [];
+  for (const h of hunks) {
+    let keep = 0;
+    let hunkBytes = 0;
+    while (keep < h.lines.length) {
+      const len = h.lines[keep]!.text.length;
+      if (lines + keep + 1 > limits.maxLines || bytes + hunkBytes + len > limits.maxBytes) break;
+      hunkBytes += len;
+      keep++;
+    }
+    if (keep === h.lines.length) {
+      out.push(h);
+      lines += keep;
+      bytes += hunkBytes;
+      continue;
+    }
+    if (keep > 0) {
+      const kept = h.lines.slice(0, keep);
+      out.push({
+        ...h,
+        oldLines: kept.filter((l) => l.type !== 'ins').length,
+        newLines: kept.filter((l) => l.type !== 'del').length,
+        lines: kept,
+      });
+    }
+    return { hunks: out, truncated: true };
+  }
+  return { hunks: out, truncated: false };
 }

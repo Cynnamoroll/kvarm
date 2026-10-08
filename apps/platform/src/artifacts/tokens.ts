@@ -22,10 +22,16 @@ function tokenKey(artifactsName: string, scope: 'read' | 'write'): Request {
   return internalKey('gittoken', artifactsName, scope);
 }
 
+/**
+ * `handle` lets a caller that already holds (or lazily opens) the repo
+ * capability mint through it instead of opening a second one; the caller
+ * then owns its disposal.
+ */
 export async function getGitToken(
   env: Env,
   artifactsName: string,
   scope: 'read' | 'write',
+  handle?: () => Promise<ArtifactsRepo>,
 ): Promise<string> {
   const ttl = TTL_SECONDS[scope];
   // Tokens are refreshed once less than a quarter of their lifetime remains.
@@ -35,15 +41,19 @@ export async function getGitToken(
   const cached = await readCachedJson<CachedToken>(key);
   if (cached && cached.expiresAt - now > refreshMarginMs) return cached.token;
 
-  const repo = await env.ARTIFACTS.get(artifactsName);
   let minted: ArtifactsCreateTokenResult;
-  try {
-    minted = await repo.createToken(scope, ttl);
-  } finally {
+  if (handle) {
+    minted = await (await handle()).createToken(scope, ttl);
+  } else {
+    const repo = await env.ARTIFACTS.get(artifactsName);
     try {
-      repo[Symbol.dispose]();
-    } catch {
-      // disposal is best-effort
+      minted = await repo.createToken(scope, ttl);
+    } finally {
+      try {
+        repo[Symbol.dispose]();
+      } catch {
+        // disposal is best-effort
+      }
     }
   }
   const parsed = minted.expiresAt ? Date.parse(minted.expiresAt) : NaN;

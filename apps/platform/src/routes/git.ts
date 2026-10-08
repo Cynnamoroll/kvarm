@@ -24,6 +24,7 @@ import { getGitToken } from '../artifacts/tokens';
 import { gitRateLimit } from '../ratelimit';
 import { markCache } from '../cost/meter';
 import { withPrivateCacheControl } from '../cache/scope';
+import { bumpRefGeneration } from '../cache/compare';
 import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
@@ -215,6 +216,15 @@ export async function handleGitRequest(
       // cache.put can race on streaming bodies; never fail a clone over it.
     }
     return scoped(res);
+  }
+
+  if (subpath === 'git-receive-pack' && upstreamRes.ok && upstreamRes.body) {
+    // Refs may move while report-status streams, so cached compare ref
+    // resolutions are invalidated again once the reply has fully passed.
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const bump = () => bumpRefGeneration(repo.id);
+    c.executionCtx.waitUntil(bump().then(() => upstreamRes.body!.pipeTo(writable).then(bump, bump)));
+    return scoped(relay(new Response(readable, upstreamRes)));
   }
 
   return scoped(relay(upstreamRes));

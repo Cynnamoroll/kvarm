@@ -230,10 +230,18 @@ describe('x-forge-cost header', () => {
       'd1=0;rr=0;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none;x=1',
       'rr=0;d1=0;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none',
       'd1=-1;rr=0;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none',
-      'd1=0;rr=0;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=bypass',
+      'd1=0;rr=0;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=stale',
     ]) {
       expect(parseCostHeader(bad), bad).toBeNull();
     }
+  });
+
+  it('accepts the admin nocache bypass state', () => {
+    const m = new CostMeter();
+    m.markCache('bypass');
+    m.markCache('hit');
+    expect(m.header()).toMatch(/;cache=bypass$/);
+    expect(parseCostHeader(m.header())?.cache).toBe('bypass');
   });
 
   it('stamps responses whose headers are immutable', () => {

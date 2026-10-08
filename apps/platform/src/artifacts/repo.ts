@@ -26,6 +26,42 @@ export async function withRepo<T>(
   }
 }
 
+/**
+ * A repo handle opened on first use and disposed by `withLazyRepo`, so fully
+ * cached paths never pay for `ARTIFACTS.get`.
+ */
+export class LazyRepo {
+  private handle: Promise<ArtifactsRepo> | undefined;
+
+  constructor(
+    private readonly env: Env,
+    readonly artifactsName: string,
+  ) {}
+
+  get = (): Promise<ArtifactsRepo> => {
+    this.handle ??= this.env.ARTIFACTS.get(this.artifactsName);
+    return this.handle;
+  };
+
+  async dispose(): Promise<void> {
+    if (!this.handle) return;
+    try {
+      (await this.handle)[Symbol.dispose]();
+    } catch {
+      // disposal is best-effort; a failed open has nothing to release
+    }
+  }
+}
+
+export async function withLazyRepo<T>(env: Env, artifactsName: string, fn: (repo: LazyRepo) => Promise<T>): Promise<T> {
+  const repo = new LazyRepo(env, artifactsName);
+  try {
+    return await fn(repo);
+  } finally {
+    await repo.dispose();
+  }
+}
+
 /** Commit list for a ref (branch/tag/sha). Newest first, first-parent chain. */
 export function commitAt(
   env: Env,

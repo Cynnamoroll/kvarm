@@ -1,0 +1,769 @@
+/**
+ * Compare, per-file diff and commit diff routes over an in-memory Artifacts
+ * fake. Objects are real git objects (gitops builders), so tree/blob/commit
+ * hashes match what git would compute for the same content. Ref names are
+ * served through a fake protocol-v2 ls-refs endpoint, counted as subrequests.
+ */
+
+import { env as cfEnv } from 'cloudflare:workers';
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  FLUSH_PKT,
+  buildBlob,
+  buildCommit,
+  buildTree,
+  concat,
+  decode,
+  parseTree,
+  pktLine,
+  readPktLines,
+  type TreeEntry,
+} from '@forge/gitops';
+import { mintPAT, type Scope } from '../src/auth/pat';
+import { bumpRefGeneration, compareKeys } from '../src/cache/compare';
+import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { COMPARE_BUDGETS } from '../src/services/compare';
+import worker from '../src/index';
+
+const baseEnv = cfEnv as unknown as Env;
+const ORIGIN = 'https://forge.test';
+const FULL: Scope[] = ['read', 'write', 'api'];
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+// ---------------------------------------------------------------------------
+// In-memory Artifacts
+// ---------------------------------------------------------------------------
+
+interface Obj {
+  type: 'blob' | 'tree' | 'commit';
+  content: Uint8Array;
+}
+
+class FakeRepo {
+  objects = new Map<string, Obj>();
+  refs = new Map<string, string>();
+  failTrees = new Set<string>();
+  calls: string[] = [];
+}
+
+const repos = new Map<string, FakeRepo>();
+const lsRefsCalls: string[] = [];
+const originalFetch = globalThis.fetch;
+
+function entryType(mode: string): ArtifactsTreeEntryType {
+  if (mode === '40000') return 'tree';
+  if (mode === '120000') return 'symlink';
+  if (mode === '160000') return 'gitlink';
+  if (mode === '100755') return 'exec';
+  return 'blob';
+}
+
+function parseCommit(content: Uint8Array, hash: string): ArtifactsCommitMetadata {
+  const text = decode(content);
+  const head = text.slice(0, text.indexOf('\n\n'));
+  const tree = /^tree ([0-9a-f]{40})$/m.exec(head)![1]!;
+  const parents = [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!);
+  const who = { name: 't', email: 't@forge.invalid' };
+  return { hash, treeHash: tree, message: 'm', author: who, committer: who, parents, authoredAt: 0, committedAt: 0 };
+}
+
+function handle(name: string): ArtifactsRepo {
+  const r = repos.get(name);
+  if (!r) throw Object.assign(new Error('not found'), { code: 'NOT_FOUND' });
+  return {
+    async readTree(hash: string) {
+      r.calls.push(`readTree:${hash}`);
+      if (r.failTrees.has(hash)) throw new Error('Too many subrequests by single Worker invocation.');
+      const o = r.objects.get(hash);
+      if (!o || o.type !== 'tree') return null;
+      return parseTree(o.content).map((e) => ({ ...e, type: entryType(e.mode) }));
+    },
+    async readBlob(hash: string) {
+      r.calls.push(`readBlob:${hash}`);
+      const o = r.objects.get(hash);
+      return o && o.type === 'blob' ? new Blob([o.content]) : null;
+    },
+    async readCommit(hash: string) {
+      r.calls.push(`readCommit:${hash}`);
+      const o = r.objects.get(hash);
+      return o && o.type === 'commit' ? parseCommit(o.content, hash) : null;
+    },
+    async log({ ref, limit = 50 }: { ref?: string; limit?: number } = {}) {
+      r.calls.push(`log:${ref}`);
+      let sha = ref && /^[0-9a-f]{40}$/.test(ref) ? ref : r.refs.get(`refs/heads/${ref}`);
+      const out: ArtifactsCommitMetadata[] = [];
+      while (sha && out.length < limit) {
+        const o = r.objects.get(sha);
+        if (!o || o.type !== 'commit') break;
+        const c = parseCommit(o.content, sha);
+        out.push(c);
+        sha = c.parents[0];
+      }
+      return out;
+    },
+    async createToken() {
+      r.calls.push('createToken');
+      return { id: 't', plaintext: 'fake-token', scope: 'read', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+    },
+    [Symbol.dispose]() {},
+  } as unknown as ArtifactsRepo;
+}
+
+const env = {
+  ...baseEnv,
+  ARTIFACTS: { get: async (name: string) => handle(name) } as unknown as Artifacts,
+} as Env;
+
+/** ls-refs over the fake refs, honoring ref-prefix like git upload-pack v2. */
+function lsRefsResponse(repo: FakeRepo, body: Uint8Array): Response {
+  const prefixes = readPktLines(body)
+    .filter((p) => !p.flush && !p.delim && !p.responseEnd)
+    .map((p) => decode(p.data).trim())
+    .filter((l) => l.startsWith('ref-prefix '))
+    .map((l) => l.slice('ref-prefix '.length));
+  const lines = [...repo.refs]
+    .filter(([n]) => prefixes.some((p) => n.startsWith(p)))
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([n, oid]) => pktLine(`${oid} ${n}\n`));
+  return new Response(concat(...lines, FLUSH_PKT), { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+}
+
+// ---------------------------------------------------------------------------
+// Repo builder
+// ---------------------------------------------------------------------------
+
+const enc = (s: string) => new TextEncoder().encode(s);
+type Files = Record<string, string | Uint8Array | { content: string | Uint8Array; mode: string }>;
+
+async function writeTree(repo: FakeRepo, files: Files): Promise<string> {
+  const dirs = new Map<string, Files>();
+  const entries: TreeEntry[] = [];
+  for (const [path, spec] of Object.entries(files)) {
+    const slash = path.indexOf('/');
+    if (slash !== -1) {
+      const dir = path.slice(0, slash);
+      const sub = dirs.get(dir) ?? {};
+      sub[path.slice(slash + 1)] = spec;
+      dirs.set(dir, sub);
+      continue;
+    }
+    const { content, mode } =
+      typeof spec === 'string' || spec instanceof Uint8Array ? { content: spec, mode: '100644' } : spec;
+    const bytes = typeof content === 'string' ? enc(content) : content;
+    const blob = await buildBlob(bytes);
+    repo.objects.set(blob.hash, { type: 'blob', content: bytes });
+    entries.push({ mode, name: path, hash: blob.hash });
+  }
+  for (const [dir, sub] of dirs) entries.push({ mode: '40000', name: dir, hash: await writeTree(repo, sub) });
+  const tree = await buildTree(entries);
+  repo.objects.set(tree.hash, { type: 'tree', content: tree.raw.subarray(tree.raw.indexOf(0) + 1) });
+  return tree.hash;
+}
+
+let clock = 1_700_000_000;
+async function commit(repo: FakeRepo, files: Files, parents: string[] = []): Promise<{ sha: string; tree: string }> {
+  const tree = await writeTree(repo, files);
+  const who = { name: 't', email: 't@forge.invalid', time: clock++ };
+  const c = await buildCommit({ tree, parents, author: who, committer: who, message: `c${clock}` });
+  repo.objects.set(c.hash, { type: 'commit', content: c.raw.subarray(c.raw.indexOf(0) + 1) });
+  return { sha: c.hash, tree };
+}
+
+// ---------------------------------------------------------------------------
+// Principals, repos and requests
+// ---------------------------------------------------------------------------
+
+const OWNER = 'cmp-owner';
+const tok = { owner: '', outsider: '', admin: '' };
+const repoIds: Record<string, string> = {};
+
+async function seedUser(login: string, admin = false): Promise<string> {
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  )
+    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, admin ? 1 : 0, Date.now())
+    .run();
+  return id;
+}
+
+async function seedRepo(name: string, visibility: 'public' | 'private'): Promise<FakeRepo> {
+  const artifactsName = `${OWNER}--${name}`;
+  const repo = new FakeRepo();
+  repos.set(artifactsName, repo);
+  const id = crypto.randomUUID();
+  repoIds[name] = id;
+  await env.DB.prepare(
+    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
+  )
+    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
+    .run();
+  return repo;
+}
+
+interface Reply {
+  status: number;
+  text: string;
+  json: Record<string, unknown>;
+  cost: CostCounters;
+  cache: string | null;
+}
+
+async function call(path: string, token?: string): Promise<Reply> {
+  const ctx = createExecutionContext();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const res = await worker.fetch!(new Request(`${ORIGIN}${path}`, { headers }) as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+  const text = await res.text();
+  await waitOnExecutionContext(ctx);
+  const cost = parseCostHeader(res.headers.get(COST_HEADER));
+  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
+  let json: Record<string, unknown> = {};
+  try {
+    json = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    // non-JSON (e.g. the generic not-found fallback)
+  }
+  return { status: res.status, text, json, cost: cost!, cache: res.headers.get('x-forge-cache') };
+}
+
+const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}/${rest}`;
+
+interface FileJson {
+  path: string;
+  status: string;
+  oldPath?: string;
+  oldHash: string | null;
+  newHash: string | null;
+  oldMode: string | null;
+  newMode: string | null;
+  additions?: number;
+  deletions?: number;
+  binary?: boolean;
+  risk: { score: number; tags: string[] };
+}
+
+const files = (r: Reply) => r.json.files as FileJson[];
+
+// ---------------------------------------------------------------------------
+// Fixture: the contract's compare-fixture shape
+// ---------------------------------------------------------------------------
+
+const A_LINES = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`);
+const A_EDITED = A_LINES.map((l, i) => (i === 19 ? 'line 20 edited' : l));
+const fx = {} as {
+  root: { sha: string; tree: string };
+  main: { sha: string; tree: string };
+  feature: { sha: string; tree: string };
+};
+
+async function buildCompareFixture(repo: FakeRepo): Promise<void> {
+  const mainFiles: Files = {
+    'a.txt': `${A_LINES.join('\n')}\n`,
+    'keep.txt': 'keep me\n',
+  };
+  fx.root = await commit(repo, mainFiles);
+  const second: Files = {
+    ...mainFiles,
+    'gone.txt': 'one\ntwo\nthree\n',
+    'old-name.txt': 'renamed content\n',
+    'script.sh': '#!/bin/sh\necho hi\n',
+    'docs/guide.md': 'guide v1\n',
+  };
+  fx.main = await commit(repo, second, [fx.root.sha]);
+  const featureFiles: Files = {
+    'a.txt': `${A_EDITED.join('\n')}\n`,
+    'keep.txt': 'keep me\n',
+    'new.txt': 'brand\nnew\n',
+    'image.bin': new Uint8Array([0x89, 0x50, 0x00, 0x01, 0x02]),
+    'new-name.txt': 'renamed content\n',
+    'script.sh': { content: '#!/bin/sh\necho hi\n', mode: '100755' },
+    'docs/guide.md': 'guide v2\nmore\n',
+  };
+  fx.feature = await commit(repo, featureFiles, [fx.main.sha]);
+  repo.refs.set('refs/heads/main', fx.main.sha);
+  repo.refs.set('refs/heads/feature', fx.feature.sha);
+}
+
+let fixture: FakeRepo;
+
+beforeAll(async () => {
+  const ownerId = await seedUser(OWNER);
+  const outsiderId = await seedUser('cmp-outsider');
+  const adminId = await seedUser('cmp-admin', true);
+  tok.owner = (await mintPAT(env, ownerId, 'owner', FULL)).token;
+  tok.outsider = (await mintPAT(env, outsiderId, 'outsider', FULL)).token;
+  tok.admin = (await mintPAT(env, adminId, 'admin', FULL)).token;
+
+  fixture = await seedRepo('fixture', 'public');
+  await buildCompareFixture(fixture);
+
+  globalThis.fetch = countingFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = new Request(input, init);
+    const url = new URL(req.url);
+    if (url.hostname !== 'artifacts.invalid') return originalFetch(input, init);
+    const m = /^\/git\/default\/(.+)\.git\/git-upload-pack$/.exec(url.pathname);
+    const repo = m ? repos.get(m[1]!) : undefined;
+    if (!repo || req.headers.get('git-protocol') !== 'version=2') return new Response('bad', { status: 400 });
+    lsRefsCalls.push(m![1]!);
+    return lsRefsResponse(repo, new Uint8Array(await req.arrayBuffer()));
+  }) as typeof fetch);
+});
+
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+});
+
+// ---------------------------------------------------------------------------
+// Compare
+// ---------------------------------------------------------------------------
+
+describe('compare by branch names', () => {
+  it('returns the git-style changed-file list with refs, trees, stats and totals', async () => {
+    const r = await call(api('fixture', 'compare/main...feature'));
+    expect(r.status, r.text).toBe(200);
+    expect(r.json.base).toEqual({ ref: 'main', sha: fx.main.sha, tree: fx.main.tree });
+    expect(r.json.head).toEqual({ ref: 'feature', sha: fx.feature.sha, tree: fx.feature.tree });
+    expect(r.json.truncated).toBe(false);
+    expect(r.json.truncatedReason).toBeUndefined();
+    expect(r.json.statsOmitted).toBeUndefined();
+    expect(r.json.nextCursor).toBeUndefined();
+    expect(r.json.rating).toEqual({ score: 0, level: 'low', reasons: [] });
+    expect(r.cache).toBe('miss');
+
+    const byPath = Object.fromEntries(files(r).map((f) => [f.path, f]));
+    expect(files(r).map((f) => f.path)).toEqual([
+      'a.txt',
+      'docs/guide.md',
+      'gone.txt',
+      'image.bin',
+      'new-name.txt',
+      'new.txt',
+      'script.sh',
+    ]);
+    expect(byPath['keep.txt']).toBeUndefined();
+    expect(byPath['a.txt']).toMatchObject({ status: 'modified', additions: 1, deletions: 1, oldMode: '100644', newMode: '100644' });
+    expect(byPath['docs/guide.md']).toMatchObject({ status: 'modified', additions: 2, deletions: 1 });
+    expect(byPath['gone.txt']).toMatchObject({ status: 'removed', newHash: null, newMode: null, additions: 0, deletions: 3 });
+    expect(byPath['gone.txt']!.oldPath).toBeUndefined();
+    expect(byPath['new.txt']).toMatchObject({ status: 'added', oldHash: null, oldMode: null, additions: 2, deletions: 0 });
+    expect(byPath['image.bin']).toMatchObject({ status: 'added', binary: true });
+    expect(byPath['image.bin']!.additions).toBeUndefined();
+    const rename = byPath['new-name.txt']!;
+    expect(rename).toMatchObject({ status: 'renamed', oldPath: 'old-name.txt', additions: 0, deletions: 0 });
+    expect(rename.oldHash).toBe(rename.newHash);
+    expect(rename.oldMode).toBe(rename.newMode);
+    expect(byPath['script.sh']).toMatchObject({ status: 'typechange', oldMode: '100644', newMode: '100755', additions: 0, deletions: 0 });
+    expect(byPath['script.sh']!.oldHash).toBe(byPath['script.sh']!.newHash);
+    expect(byPath['a.txt']!.oldHash).toBe((await buildBlob(enc(`${A_LINES.join('\n')}\n`))).hash);
+    for (const f of files(r)) expect(f.risk).toEqual({ score: 0, tags: [] });
+
+    expect(r.json.totals).toEqual({ files: 7, additions: 1 + 2 + 0 + 2, deletions: 1 + 1 + 3 });
+    expect(Number.isInteger(r.json.treeReads)).toBe(true);
+    expect(r.json.treeReads as number).toBeGreaterThanOrEqual(2);
+  });
+
+  it('serves the repeat from the tree-pair cache with an identical body after one authority lookup', async () => {
+    const first = await call(api('fixture', 'compare/main...feature'), tok.owner);
+    const second = await call(api('fixture', 'compare/main...feature'), tok.owner);
+    expect(second.status).toBe(200);
+    expect(second.cache).toBe('hit');
+    expect(second.text).toBe(first.text);
+    expect(second.cost).toMatchObject({ art: 0, sub: 0, do: 0, cache: 'hit' });
+    expect(second.cost.d1).toBeLessThanOrEqual(1);
+    expect(second.cost.rr).toBeLessThanOrEqual(8);
+  });
+
+  it('keys the cache by tree pair: SHAs hit the branch-name entry and re-render the ref fields', async () => {
+    const byName = await call(api('fixture', 'compare/main...feature'));
+    const bySha = await call(api('fixture', `compare/${fx.main.sha}...${fx.feature.sha}`));
+    expect(bySha.status).toBe(200);
+    expect(bySha.cache).toBe('hit');
+    expect(bySha.json.base).toEqual({ ref: fx.main.sha, sha: fx.main.sha, tree: fx.main.tree });
+    expect(bySha.json.head).toEqual({ ref: fx.feature.sha, sha: fx.feature.sha, tree: fx.feature.tree });
+    for (const k of ['files', 'totals', 'rating', 'truncated', 'treeReads']) expect(bySha.json[k]).toEqual(byName.json[k]);
+  });
+
+  it('accepts ?order=path with the identical order and rejects unknown orders', async () => {
+    const plain = await call(api('fixture', 'compare/main...feature'));
+    const ordered = await call(api('fixture', 'compare/main...feature?order=path'));
+    expect(files(ordered).map((f) => f.path)).toEqual(files(plain).map((f) => f.path));
+    const paths = files(plain).map((f) => f.path);
+    expect([...paths].sort()).toEqual(paths);
+    expect((await call(api('fixture', 'compare/main...feature?order=size'))).status).toBe(400);
+  });
+
+  it('returns an empty list for identical refs', async () => {
+    const r = await call(api('fixture', 'compare/main...main'));
+    expect(r.status).toBe(200);
+    expect(r.json.files).toEqual([]);
+    expect(r.json.totals).toEqual({ files: 0, additions: 0, deletions: 0 });
+    expect(r.json.truncated).toBe(false);
+  });
+});
+
+describe('pagination', () => {
+  it('stitches limit/cursor pages to the full list with whole-comparison totals', async () => {
+    const full = await call(api('fixture', 'compare/main...feature'));
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const q = `limit=3${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      const page = await call(api('fixture', `compare/main...feature?${q}`));
+      expect(page.status, page.text).toBe(200);
+      expect(page.json.totals).toEqual(full.json.totals);
+      const got = files(page).map((f) => f.path);
+      expect(got.length).toBeLessThanOrEqual(3);
+      seen.push(...got);
+      cursor = page.json.nextCursor as string | undefined;
+      if (cursor !== undefined) expect(typeof cursor).toBe('string');
+      pages++;
+    } while (cursor && pages < 10);
+    expect(pages).toBe(3);
+    expect(seen).toEqual(files(full).map((f) => f.path));
+  });
+
+  it('rejects malformed cursors and limits', async () => {
+    expect((await call(api('fixture', 'compare/main...feature?cursor=nope'))).status).toBe(400);
+    expect((await call(api('fixture', 'compare/main...feature?limit=0'))).status).toBe(400);
+    expect((await call(api('fixture', 'compare/main...feature?limit=abc'))).status).toBe(400);
+  });
+});
+
+describe('not found and concealment', () => {
+  it('404s unknown refs and repos with an {error} body, and does not route a range without "..."', async () => {
+    for (const path of [
+      api('fixture', 'compare/main...no-such-branch'),
+      api('fixture', 'compare/no-such-branch...feature'),
+      api('fixture', `compare/main...${'f'.repeat(40)}`),
+      `/api/v1/repos/${OWNER}/no-such-repo/compare/main...feature`,
+    ]) {
+      const r = await call(path);
+      expect(r.status, path).toBe(404);
+      expect(typeof r.json.error, path).toBe('string');
+    }
+    const malformed = await call(api('fixture', 'compare/main'));
+    expect(malformed.status).toBe(404);
+    expect(malformed.cost.d1).toBe(0);
+  });
+
+  it('conceals a private repo from anonymous and outsider callers with the unknown-repo shape', async () => {
+    const secret = await seedRepo('secret', 'private');
+    const c = await commit(secret, { 'x.txt': 'secret-marker\n' });
+    secret.refs.set('refs/heads/main', c.sha);
+    const unknown = await call(`/api/v1/repos/${OWNER}/no-such-repo/compare/main...main`);
+    for (const token of [undefined, tok.outsider]) {
+      const r = await call(api('secret', 'compare/main...main'), token);
+      expect(r.status).toBe(404);
+      expect(r.text).toBe(unknown.text);
+      expect(r.cost).toMatchObject({ art: 0, sub: 0, do: 0 });
+    }
+    const owner = await call(api('secret', 'compare/main...main'), tok.owner);
+    expect(owner.status).toBe(200);
+    expect(owner.json.files).toEqual([]);
+  });
+
+  it('denies retained warm compare and file-diff bodies right after a direct D1 flip to private', async () => {
+    const flip = await seedRepo('flip', 'public');
+    const base = await commit(flip, { 'f.txt': 'flip-marker v1\n' });
+    const head = await commit(flip, { 'f.txt': 'flip-marker v2\n' }, [base.sha]);
+    flip.refs.set('refs/heads/main', base.sha);
+    flip.refs.set('refs/heads/next', head.sha);
+    const paths = [api('flip', 'compare/main...next'), api('flip', 'compare/main...next/file?path=f.txt')];
+    for (const p of paths) {
+      expect((await call(p)).status).toBe(200);
+      const warm = await call(p);
+      expect(warm.cache, p).toBe('hit');
+      expect(warm.text).toContain('f.txt');
+    }
+    await env.DB.prepare('UPDATE repos SET visibility = ? WHERE id = ?').bind('private', repoIds.flip).run();
+    const unknown = await call(`/api/v1/repos/${OWNER}/no-such-repo/compare/main...next`);
+    for (const p of paths) {
+      for (const token of [undefined, tok.outsider]) {
+        const r = await call(p, token);
+        expect(r.status, p).toBe(404);
+        expect(r.text).toBe(unknown.text);
+        expect(r.text).not.toContain('f.txt');
+        expect(r.cost).toMatchObject({ art: 0, sub: 0, do: 0, cache: 'none' });
+        expect(r.cost.d1).toBeLessThanOrEqual(1);
+      }
+      const owner = await call(p, tok.owner);
+      expect(owner.status, p).toBe(200);
+      expect(owner.cache).toBe('hit');
+      expect(owner.cost).toMatchObject({ art: 0, sub: 0, do: 0 });
+      expect(owner.cost.d1).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe('cost, cache and the admin bypass', () => {
+  it('honors ?nocache=1 only for admins: bypass writes nothing, then miss, then hit', async () => {
+    const fresh = await seedRepo('bypass', 'public');
+    const b = await commit(fresh, { 'n.txt': 'one\n' });
+    const h = await commit(fresh, { 'n.txt': 'one\ntwo\n' }, [b.sha]);
+    fresh.refs.set('refs/heads/main', b.sha);
+    fresh.refs.set('refs/heads/topic', h.sha);
+    const path = api('bypass', 'compare/main...topic');
+
+    for (const token of [undefined, tok.outsider]) {
+      const r = await call(`${path}?nocache=1`, token);
+      expect(r.status).toBe(200);
+      expect(r.cache).not.toBe('bypass');
+    }
+    // The non-admin requests above were normal ones: clear what they cached.
+    await caches.default.delete(compareKeys.treediff(b.tree, h.tree));
+
+    const bypass = await call(`${path}?nocache=1`, tok.admin);
+    expect(bypass.status).toBe(200);
+    expect(bypass.cache).toBe('bypass');
+    expect(bypass.cost.cache).toBe('bypass');
+    expect(await caches.default.match(compareKeys.treediff(b.tree, h.tree))).toBeUndefined();
+    const miss = await call(path, tok.admin);
+    expect(miss.cache).toBe('miss');
+    expect(miss.cost.cache).toBe('miss');
+    const hit = await call(path, tok.admin);
+    expect(hit.cache).toBe('hit');
+    expect(hit.text).toBe(miss.text);
+  });
+
+  it('keeps a cold bypass compare within art <= treeReads + 2 and d1 <= 2', async () => {
+    await call(api('fixture', 'compare/main...feature'));
+    const r = await call(api('fixture', 'compare/main...feature?nocache=1'), tok.admin);
+    expect(r.status).toBe(200);
+    expect(r.cache).toBe('bypass');
+    const treeReads = r.json.treeReads as number;
+    expect(Number.isInteger(treeReads) && treeReads >= 1).toBe(true);
+    expect(r.cost.art).toBeLessThanOrEqual(treeReads + 2);
+    expect(r.cost.d1).toBeLessThanOrEqual(2);
+    expect(r.cost.do).toBe(0);
+    expect(r.cost.sub).toBeLessThanOrEqual(1);
+  });
+
+  it('opens one repo handle for a fully cold compare and reads each changed tree once', async () => {
+    const cold = await seedRepo('cold', 'public');
+    const b = await commit(cold, { 'src/a.ts': 'a\n', 'src/b.ts': 'b\n', 'top.txt': 't\n' });
+    const h = await commit(cold, { 'src/a.ts': 'a2\n', 'src/b.ts': 'b\n', 'top.txt': 't\n' }, [b.sha]);
+    cold.refs.set('refs/heads/main', b.sha);
+    cold.refs.set('refs/heads/x', h.sha);
+    const r = await call(api('cold', 'compare/main...x'));
+    expect(r.status).toBe(200);
+    expect(r.json.treeReads).toBe(4);
+    // get + createToken + 2 readCommit + 4 readTree + 2 readBlob
+    expect(r.cost.art).toBe(10);
+    expect(r.cost.sub).toBe(1);
+    expect(cold.calls.filter((c) => c.startsWith('readTree')).length).toBe(4);
+  });
+
+  it('serves moved refs after a ref generation bump', async () => {
+    const moving = await seedRepo('moving', 'public');
+    const one = await commit(moving, { 'm.txt': '1\n' });
+    const two = await commit(moving, { 'm.txt': '2\n' }, [one.sha]);
+    moving.refs.set('refs/heads/main', one.sha);
+    moving.refs.set('refs/heads/tip', one.sha);
+    const path = api('moving', 'compare/main...tip');
+    expect((await call(path)).json.files).toEqual([]);
+    moving.refs.set('refs/heads/tip', two.sha);
+    await bumpRefGeneration(repoIds.moving!);
+    const after = await call(path);
+    expect((after.json.head as { sha: string }).sha).toBe(two.sha);
+    expect(files(after).map((f) => f.path)).toEqual(['m.txt']);
+  });
+});
+
+describe('budgets and truncation', () => {
+  it('omits per-file stats above the stats file limit while totals still count every file', async () => {
+    const many = await seedRepo('many', 'public');
+    const n = COMPARE_BUDGETS.statsMaxFiles + 5;
+    const before: Files = {};
+    const after: Files = {};
+    for (let i = 0; i < n; i++) {
+      before[`f${String(i).padStart(4, '0')}.txt`] = `v1 ${i}\n`;
+      after[`f${String(i).padStart(4, '0')}.txt`] = `v2 ${i}\n`;
+    }
+    const b = await commit(many, before);
+    const h = await commit(many, after, [b.sha]);
+    many.refs.set('refs/heads/main', b.sha);
+    many.refs.set('refs/heads/wide', h.sha);
+    const r = await call(api('many', 'compare/main...wide'));
+    expect(r.status).toBe(200);
+    expect(r.json.statsOmitted).toBe(true);
+    expect(r.json.truncated).toBe(false);
+    expect(files(r).length).toBe(n);
+    expect(files(r).every((f) => f.additions === undefined && f.deletions === undefined)).toBe(true);
+    expect((r.json.totals as { files: number }).files).toBe(n);
+    expect(many.calls.some((c) => c.startsWith('readBlob'))).toBe(false);
+  });
+
+  it('truncates a wide tree on the read budget with a reason instead of failing', async () => {
+    const wide = await seedRepo('widetree', 'public');
+    const dirs = Math.ceil(COMPARE_BUDGETS.maxTreeReads / 2) + 10;
+    const before: Files = {};
+    const after: Files = {};
+    for (let i = 0; i < dirs; i++) {
+      before[`d${i}/x.txt`] = `a${i}\n`;
+      after[`d${i}/x.txt`] = `b${i}\n`;
+    }
+    const b = await commit(wide, before);
+    const h = await commit(wide, after, [b.sha]);
+    wide.refs.set('refs/heads/main', b.sha);
+    wide.refs.set('refs/heads/wide', h.sha);
+    const r = await call(api('widetree', 'compare/main...wide'));
+    expect(r.status).toBe(200);
+    expect(r.json.truncated).toBe(true);
+    expect(typeof r.json.truncatedReason).toBe('string');
+    expect((r.json.truncatedReason as string).length).toBeGreaterThan(0);
+    expect(r.json.statsOmitted).toBe(true);
+    expect(files(r).length).toBeLessThan(dirs);
+    expect(r.json.treeReads).toBe(COMPARE_BUDGETS.maxTreeReads);
+    expect(r.cost.art).toBeLessThanOrEqual(COMPARE_BUDGETS.maxTreeReads + 4);
+  });
+
+  it('reports a failed tree read as truncated and does not cache it', async () => {
+    const flaky = await seedRepo('flaky', 'public');
+    const b = await commit(flaky, { 'ok.txt': '1\n', 'sub/x.txt': '1\n' });
+    const h = await commit(flaky, { 'ok.txt': '2\n', 'sub/x.txt': '2\n' }, [b.sha]);
+    flaky.refs.set('refs/heads/main', b.sha);
+    flaky.refs.set('refs/heads/next', h.sha);
+    const subHead = parseTree(flaky.objects.get(h.tree)!.content).find((e) => e.name === 'sub')!.hash;
+    flaky.failTrees.add(subHead);
+    const r = await call(api('flaky', 'compare/main...next'));
+    expect(r.status).toBe(200);
+    expect(r.json.truncated).toBe(true);
+    expect(r.json.truncatedReason).toMatch(/tree read failed/);
+    expect(files(r).map((f) => f.path)).toEqual(['ok.txt']);
+    flaky.failTrees.clear();
+    const again = await call(api('flaky', 'compare/main...next'));
+    expect(again.cache).toBe('miss');
+    expect(again.json.truncated).toBe(false);
+    expect(files(again).map((f) => f.path)).toEqual(['ok.txt', 'sub/x.txt']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-file diff
+// ---------------------------------------------------------------------------
+
+describe('per-file diff', () => {
+  it('returns git-style hunks with line numbers and totals', async () => {
+    const r = await call(api('fixture', `compare/main...feature/file?path=${encodeURIComponent('a.txt')}`));
+    expect(r.status, r.text).toBe(200);
+    expect(r.json).toMatchObject({ path: 'a.txt', status: 'modified', totalAdditions: 1, totalDeletions: 1, approximate: false });
+    const hunks = r.json.hunks as Array<{ oldStart: number; oldLines: number; newStart: number; newLines: number; lines: Array<{ type: string; text: string; oldNo?: number; newNo?: number }> }>;
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0]).toMatchObject({ oldStart: 17, oldLines: 7, newStart: 17, newLines: 7 });
+    expect(hunks[0]!.lines.find((l) => l.type === 'del')).toMatchObject({ text: 'line 20', oldNo: 20 });
+    expect(hunks[0]!.lines.find((l) => l.type === 'ins')).toMatchObject({ text: 'line 20 edited', newNo: 20 });
+  });
+
+  it('serves the repeat from the blob-pair cache after one authority lookup', async () => {
+    const path = api('fixture', 'compare/main...feature/file?path=docs%2Fguide.md');
+    const first = await call(path, tok.owner);
+    expect(first.status).toBe(200);
+    const second = await call(path, tok.owner);
+    expect(second.cache).toBe('hit');
+    expect(second.text).toBe(first.text);
+    expect(second.cost).toMatchObject({ art: 0, sub: 0, do: 0, cache: 'hit' });
+    expect(second.cost.d1).toBeLessThanOrEqual(1);
+  });
+
+  it('flags binary files without hunks or line counts', async () => {
+    const r = await call(api('fixture', 'compare/main...feature/file?path=image.bin'));
+    expect(r.status).toBe(200);
+    expect(r.json.binary).toBe(true);
+    expect(r.json.hunks).toEqual([]);
+    expect(r.json.totalAdditions).toBeUndefined();
+  });
+
+  it('shows a pure rename with no hunks', async () => {
+    const r = await call(api('fixture', 'compare/main...feature/file?path=new-name.txt'));
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ status: 'renamed', oldPath: 'old-name.txt', hunks: [], totalAdditions: 0, totalDeletions: 0 });
+  });
+
+  it('404s paths outside the change set and requires ?path', async () => {
+    const r = await call(api('fixture', 'compare/main...feature/file?path=keep.txt'));
+    expect(r.status).toBe(404);
+    expect(typeof r.json.error).toBe('string');
+    expect((await call(api('fixture', 'compare/main...feature/file?path=missing.txt'))).status).toBe(404);
+    expect((await call(api('fixture', 'compare/main...feature/file?path='))).status).toBe(400);
+  });
+
+  it('flags files above 4 MB as tooLarge with a small body', async () => {
+    const huge = await seedRepo('huge', 'public');
+    const big = 'x'.repeat(99) + '\n';
+    const b = await commit(huge, { 'big.txt': big.repeat(50_000) + 'a\n' });
+    const h = await commit(huge, { 'big.txt': big.repeat(50_000) + 'b\n' }, [b.sha]);
+    huge.refs.set('refs/heads/main', b.sha);
+    huge.refs.set('refs/heads/next', h.sha);
+    const r = await call(api('huge', 'compare/main...next/file?path=big.txt'));
+    expect(r.status).toBe(200);
+    expect(r.json.tooLarge).toBe(true);
+    expect(r.json.hunks).toEqual([]);
+    expect(r.text.length).toBeLessThan(64 * 1024);
+    const list = await call(api('huge', 'compare/main...next'));
+    expect(files(list)[0]).toMatchObject({ path: 'big.txt', tooLarge: true });
+    expect(files(list)[0]!.additions).toBeUndefined();
+  });
+
+  it('marks an over-budget diff approximate and bounds the output', async () => {
+    const heavy = await seedRepo('heavy', 'public');
+    const n = 30_000;
+    const oldText = Array.from({ length: n }, (_, i) => `row ${i}`).join('\n') + '\n';
+    const newText = Array.from({ length: n }, (_, i) => (i % 2 === 0 ? `row ${i}` : `changed ${i}`)).join('\n') + '\n';
+    const b = await commit(heavy, { 'mix.txt': oldText });
+    const h = await commit(heavy, { 'mix.txt': newText }, [b.sha]);
+    heavy.refs.set('refs/heads/main', b.sha);
+    heavy.refs.set('refs/heads/next', h.sha);
+    const r = await call(api('heavy', 'compare/main...next/file?path=mix.txt'));
+    expect(r.status).toBe(200);
+    expect(r.json.totalAdditions as number).toBeGreaterThan(0);
+    expect(r.json.totalDeletions as number).toBeGreaterThan(0);
+    const lines = (r.json.hunks as Array<{ lines: unknown[] }>).reduce((s, h) => s + h.lines.length, 0);
+    expect(lines).toBeLessThanOrEqual(COMPARE_BUDGETS.fileMaxLines);
+    expect(r.text.length).toBeLessThan(10 * 1024 * 1024);
+    if (r.json.approximate !== true) expect(r.json.truncated).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Commit diff
+// ---------------------------------------------------------------------------
+
+describe('commit diff', () => {
+  it('equals the parent...commit compare', async () => {
+    const commitDiff = await call(api('fixture', `commits/${fx.feature.sha}/diff`));
+    expect(commitDiff.status, commitDiff.text).toBe(200);
+    expect((commitDiff.json.base as { sha: string }).sha).toBe(fx.main.sha);
+    expect((commitDiff.json.head as { sha: string }).sha).toBe(fx.feature.sha);
+    const viaCompare = await call(api('fixture', `compare/${fx.main.sha}...${fx.feature.sha}`));
+    expect(commitDiff.json.files).toEqual(viaCompare.json.files);
+    expect(commitDiff.json.totals).toEqual(viaCompare.json.totals);
+  });
+
+  it('diffs a root commit against the empty tree', async () => {
+    const r = await call(api('fixture', `commits/${fx.root.sha}/diff`));
+    expect(r.status).toBe(200);
+    expect(r.json.base).toEqual({ ref: null, sha: null, tree: EMPTY_TREE });
+    expect(files(r).map((f) => [f.path, f.status])).toEqual([
+      ['a.txt', 'added'],
+      ['keep.txt', 'added'],
+    ]);
+  });
+
+  it('resolves an uncached commit and its parent with one log read', async () => {
+    const solo = await seedRepo('solo', 'public');
+    const p = await commit(solo, { 's.txt': '1\n' });
+    const c = await commit(solo, { 's.txt': '1\n2\n' }, [p.sha]);
+    const r = await call(api('solo', `commits/${c.sha}/diff`));
+    expect(r.status).toBe(200);
+    expect(solo.calls.filter((x) => x.startsWith('log') || x.startsWith('readCommit'))).toEqual([`log:${c.sha}`]);
+    expect(r.cost.sub).toBe(0);
+  });
+
+  it('404s unknown commits', async () => {
+    expect((await call(api('fixture', `commits/${'e'.repeat(40)}/diff`))).status).toBe(404);
+    expect((await call(api('fixture', 'commits/main/diff'))).status).toBe(404);
+  });
+});

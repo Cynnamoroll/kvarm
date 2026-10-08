@@ -191,7 +191,38 @@ describe('diffTrees', () => {
     const head = await nest(leafHead, 3);
     const res = await diffTrees(store, base, head, { maxTreeReads: 4 });
     expect(res.truncated).toBe(true);
+    expect(res.truncatedReason).toBe('maxTreeReads');
     expect(res.changes.length).toBe(0);
+  });
+
+  it('names the change budget as the truncation reason', async () => {
+    const { store, tree, file, blobHash } = await makeStore();
+    const [a, b] = [await blobHash('a'), await blobHash('b')];
+    const base = await tree([file('1.txt', a), file('2.txt', a)]);
+    const head = await tree([file('1.txt', b), file('2.txt', b)]);
+    const res = await diffTrees(store, base, head, { maxChanges: 1 });
+    expect(res.truncatedReason).toBe('maxChanges');
+    const full = await diffTrees(store, base, head);
+    expect(full.truncated).toBe(false);
+    expect(full.truncatedReason).toBeUndefined();
+  });
+
+  it('stops with a readError reason instead of rejecting when a tree read fails', async () => {
+    const { store, tree, file, dir, blobHash } = await makeStore();
+    const [a, b] = [await blobHash('a'), await blobHash('b')];
+    const subBase = await tree([file('x.txt', a)]);
+    const subHead = await tree([file('x.txt', b)]);
+    const base = await tree([dir('sub', subBase), file('top.txt', a)]);
+    const head = await tree([dir('sub', subHead), file('top.txt', b)]);
+    const failing: TreeReader = {
+      readTree: (hash) => (hash === subHead ? Promise.reject(new Error('Too many subrequests')) : store.readTree(hash)),
+    };
+    const res = await diffTrees(failing, base, head);
+    expect(res.truncated).toBe(true);
+    expect(res.truncatedReason).toBe('readError');
+    expect(res.readError).toContain('Too many subrequests');
+    // Nothing under the failed subtree is reported as added or removed.
+    expect(res.changes.map((c) => c.path)).toEqual(['top.txt']);
   });
 
   it('sorts output by path deterministically', async () => {
