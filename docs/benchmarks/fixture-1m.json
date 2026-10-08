@@ -1,0 +1,80 @@
+{
+  "generator": "scripts/fixture-1m.mjs",
+  "version": 1,
+  "repo": "cynthia/fixture-1m",
+  "shape": {
+    "version": 1,
+    "bench": {
+      "dirs": 25,
+      "filesPerDir": 20,
+      "linesPerFile": 2000
+    },
+    "huge": {
+      "path": "large/huge.txt",
+      "lines": 120000,
+      "editLine": 60000
+    },
+    "interleaved": {
+      "path": "large/interleaved.txt",
+      "lines": 60000,
+      "rewriteEvery": 5,
+      "moveFrom": 30000,
+      "moveCount": 5000
+    },
+    "wide": {
+      "top": 50,
+      "perTop": 100,
+      "filesPerLeaf": 5
+    }
+  },
+  "refs": {
+    "bench-base": {
+      "sha": "cc72e4a02c8f53fcca94df9cb21ef1f94f0f5792",
+      "tree": "1b0e7fee3643ce81e6b6d9451a64dd0548a287c2"
+    },
+    "bench-head": {
+      "sha": "08333c79998f410b9c40a84cc430ce9762c29ae8",
+      "tree": "4669158d06de64a366a2c6f99c629814e5505f5d"
+    },
+    "wide-base": {
+      "sha": "a08995ca00ffaa7cf77eda1cfde20adf4681437b",
+      "tree": "662c6b9c10ad3e9da5a5e39affb69eee90177f53"
+    },
+    "wide-head": {
+      "sha": "d6e8b0d42867753e4e0265baa9ee27d7e29dc678",
+      "tree": "b9c56b65425262c666882f394a1afda2c7477d88"
+    },
+    "main": {
+      "sha": "cc72e4a02c8f53fcca94df9cb21ef1f94f0f5792",
+      "tree": "1b0e7fee3643ce81e6b6d9451a64dd0548a287c2"
+    }
+  },
+  "bench": {
+    "pair": "bench-base...bench-head",
+    "files": 502,
+    "insertions": 516001,
+    "deletions": 516001,
+    "changedLines": 1032002,
+    "largest": {
+      "path": "large/huge.txt",
+      "bytes": 2880000,
+      "lines": 120000,
+      "additions": 1,
+      "deletions": 1
+    },
+    "interleaved": {
+      "path": "large/interleaved.txt",
+      "bytes": 1152000,
+      "lines": 60000,
+      "additions": 16000,
+      "deletions": 16000
+    }
+  },
+  "wide": {
+    "pair": "wide-base...wide-head",
+    "changedPaths": 25000,
+    "leafDirectories": 5000,
+    "directories": 5051,
+    "treeReadsForFullDiff": 10104
+  }
+}

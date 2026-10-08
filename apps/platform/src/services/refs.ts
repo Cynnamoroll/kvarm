@@ -15,7 +15,7 @@
 import { lsRefsRequest, parseLsRefs, pickRef, refCandidates } from '@forge/gitops';
 import type { RepoRow } from '../db/repos';
 import type { LazyRepo } from '../artifacts/repo';
-import { getGitToken } from '../artifacts/tokens';
+import { getReadCapableToken } from '../artifacts/tokens';
 import { REF_TTL_SECONDS, compareKeys, readJson, refGeneration, writeJson } from '../cache/compare';
 
 export const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -121,9 +121,13 @@ export async function readCommitAndParent(
   return parent ? { commit, parent } : null;
 }
 
+/** First-parent commits one `log` returns while looking for the base below the head. */
+export const COMMIT_CHAIN_LIMIT = 50;
+
 /**
  * Base and head commits for a compare. When neither is cached and the base is
- * the head's first parent (a one-commit branch), one `log` returns both, so a
+ * on the head's first-parent chain within COMMIT_CHAIN_LIMIT commits (a
+ * branch compared with the commit it grew from), one `log` returns both, so a
  * cold compare spends one commit read instead of two. Otherwise each commit
  * is read on its own.
  */
@@ -136,7 +140,7 @@ async function readCommitPair(ctx: ResolveContext, base: string, head: string): 
   if (baseHit || headHit) return out;
   let log: ArtifactsCommitMetadata[];
   try {
-    log = await (await ctx.artifacts.get()).log({ ref: head, limit: 2 });
+    log = await (await ctx.artifacts.get()).log({ ref: head, limit: COMMIT_CHAIN_LIMIT });
   } catch (err) {
     if (isInvalidObject(err)) out.set(head, null);
     else throw err;
@@ -149,10 +153,15 @@ async function readCommitPair(ctx: ResolveContext, base: string, head: string): 
   }
   out.set(head, { sha: head, tree: h.treeHash, parents: h.parents });
   remember(ctx, head, { tree: h.treeHash, parents: h.parents });
-  const p = log[1];
-  if (p && p.hash === base && h.parents[0] === base) {
-    out.set(base, { sha: base, tree: p.treeHash, parents: p.parents });
-    remember(ctx, base, { tree: p.treeHash, parents: p.parents });
+  for (let i = 1; i < log.length; i++) {
+    const c = log[i]!;
+    // Trust the chain only while each entry is the previous one's first parent.
+    if (c.hash !== log[i - 1]!.parents[0]) break;
+    if (c.hash === base) {
+      out.set(base, { sha: base, tree: c.treeHash, parents: c.parents });
+      remember(ctx, base, { tree: c.treeHash, parents: c.parents });
+      break;
+    }
   }
   return out;
 }
@@ -161,7 +170,7 @@ async function readCommitPair(ctx: ResolveContext, base: string, head: string): 
 async function lsRefs(ctx: ResolveContext, names: string[]): Promise<Map<string, string | null>> {
   let res: Response;
   try {
-    const token = await getGitToken(ctx.env, ctx.repo.artifacts_name, 'read', ctx.artifacts.get);
+    const token = await getReadCapableToken(ctx.env, ctx.repo.artifacts_name, ctx.artifacts.get);
     res = await fetch(`${ctx.repo.artifacts_remote}/git-upload-pack`, {
       method: 'POST',
       headers: {

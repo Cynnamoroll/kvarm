@@ -37,7 +37,7 @@ export interface TreeDiffOptions {
   maxTreeReads?: number;
   /** Max emitted changes before truncating (default 20_000). */
   maxChanges?: number;
-  /** Max concurrent subtree walks (default 8). */
+  /** Max readTree calls in flight across the whole walk (default 8). */
   concurrency?: number;
   /** Pair exact renames by blob hash (default true). */
   detectRenames?: boolean;
@@ -72,23 +72,43 @@ function isTreeMode(mode: string): boolean {
   return mode === '40000' || mode === '040000';
 }
 
-/** Run thunks through a fixed-size worker pool (starts at most `limit` at once). */
-async function runPool(thunks: Array<() => Promise<void>>, limit: number): Promise<void> {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, thunks.length) }, async () => {
-    while (next < thunks.length) {
-      const thunk = thunks[next++]!;
-      await thunk();
+/**
+ * Counting semaphore. Subtree walks start eagerly at every level and only
+ * their reads queue here, so one wide level can use the whole budget while
+ * nested fan-out never multiplies it.
+ */
+class Slots {
+  private free: number;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(limit: number) {
+    this.free = limit;
+  }
+
+  acquire(): Promise<void> {
+    if (this.free > 0) {
+      this.free--;
+      return Promise.resolve();
     }
-  });
-  await Promise.all(workers);
+    return new Promise((resolve) => this.waiting.push(resolve));
+  }
+
+  release(): void {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.free++;
+  }
+}
+
+async function runAll(thunks: Array<() => Promise<void>>): Promise<void> {
+  await Promise.all(thunks.map((t) => t()));
 }
 
 class TreeDiffWalk {
   private readonly changes: TreeChange[] = [];
   private readonly maxTreeReads: number;
   private readonly maxChanges: number;
-  private readonly concurrency: number;
+  private readonly slots: Slots;
   private treeReads = 0;
   private stopped = false;
   private reason: TreeDiffTruncation | undefined;
@@ -100,7 +120,7 @@ class TreeDiffWalk {
   ) {
     this.maxTreeReads = opts.maxTreeReads ?? DEFAULT_MAX_TREE_READS;
     this.maxChanges = opts.maxChanges ?? DEFAULT_MAX_CHANGES;
-    this.concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+    this.slots = new Slots(Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY));
   }
 
   async run(baseTreeHash: string, headTreeHash: string, detectRenames: boolean): Promise<TreeDiffResult> {
@@ -134,17 +154,21 @@ class TreeDiffWalk {
    * read fails (a failed read is never mistaken for an empty tree).
    */
   private async readTree(hash: string): Promise<TreeEntry[] | null> {
-    if (this.treeReads >= this.maxTreeReads) {
-      this.stop('maxTreeReads');
-      return null;
-    }
-    this.treeReads++;
+    await this.slots.acquire();
     try {
+      if (this.stopped) return null;
+      if (this.treeReads >= this.maxTreeReads) {
+        this.stop('maxTreeReads');
+        return null;
+      }
+      this.treeReads++;
       return await this.reader.readTree(hash);
     } catch (err) {
       if (!this.stopped) this.readError = err instanceof Error ? err.message : String(err);
       this.stop('readError');
       return null;
+    } finally {
+      this.slots.release();
     }
   }
 
@@ -197,7 +221,7 @@ class TreeDiffWalk {
         }
       }
     }
-    if (subtasks.length > 0) await runPool(subtasks, this.concurrency);
+    if (subtasks.length > 0) await runAll(subtasks);
   }
 
   /** Flatten a subtree that exists on only one side; every leaf becomes a change. */
@@ -217,7 +241,7 @@ class TreeDiffWalk {
         this.emit({ path, status: 'removed', oldMode: e.mode, newMode: null, oldHash: e.hash, newHash: null });
       }
     }
-    if (subtasks.length > 0) await runPool(subtasks, this.concurrency);
+    if (subtasks.length > 0) await runAll(subtasks);
   }
 }
 

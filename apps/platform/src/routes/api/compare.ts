@@ -45,13 +45,16 @@ function parseRange(raw: string): { base: string; head: string; file: boolean } 
   return { base, head, file };
 }
 
-function withCacheHeader(res: Response, cache: svc.CacheOutcome): Response {
+function withCacheHeader(res: Response, cache: svc.CacheOutcome, timer?: svc.PhaseTimer): Response {
   res.headers.set('x-forge-cache', cache);
+  if (timer) res.headers.set('server-timing', timer.header());
   return res;
 }
 
 async function compareContext(c: Context<App>) {
+  const timer = new svc.PhaseTimer();
   const d = await authorizeRoute(c, 'read');
+  timer.mark('auth');
   if (!d.ok) return { denied: denyJson(c, d) } as const;
   // Only a human instance admin may force a cold compute; anyone else's
   // nocache is ignored and served normally.
@@ -61,6 +64,7 @@ async function compareContext(c: Context<App>) {
     repo: d.repo,
     bypass: admin && c.req.query('nocache') === '1',
     waitUntil: (p) => c.executionCtx.waitUntil(p),
+    timer,
   };
   return { req } as const;
 }
@@ -84,7 +88,7 @@ compareApi.get('/repos/:owner/:repo/compare/*', async (c, next) => {
     if (!path) return c.json({ error: 'path is required', code: 'INVALID_PATH' }, 400);
     const res = await svc.fileDiff(ctx.req, range.base, range.head, path);
     if (!res.ok) return failJson(c, res);
-    return withCacheHeader(actorJson(c, res.value.response), res.value.cache);
+    return withCacheHeader(actorJson(c, res.value.response), res.value.cache, ctx.req.timer);
   }
 
   const res = await svc.compare(ctx.req, range.base, range.head, {
@@ -93,7 +97,7 @@ compareApi.get('/repos/:owner/:repo/compare/*', async (c, next) => {
     cursor: c.req.query('cursor'),
   });
   if (!res.ok) return failJson(c, res);
-  return withCacheHeader(actorJson(c, res.value.response), res.value.cache);
+  return withCacheHeader(actorJson(c, res.value.response), res.value.cache, ctx.req.timer);
 });
 
 compareApi.get('/repos/:owner/:repo/commits/:sha/diff', async (c) => {
@@ -105,5 +109,5 @@ compareApi.get('/repos/:owner/:repo/commits/:sha/diff', async (c) => {
     cursor: c.req.query('cursor'),
   });
   if (!res.ok) return failJson(c, res);
-  return withCacheHeader(actorJson(c, res.value.response), res.value.cache);
+  return withCacheHeader(actorJson(c, res.value.response), res.value.cache, ctx.req.timer);
 });

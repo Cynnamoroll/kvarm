@@ -20,6 +20,7 @@ import {
   readPktLines,
   type TreeEntry,
 } from '@forge/gitops';
+import { getGitToken } from '../src/artifacts/tokens';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { bumpRefGeneration, compareKeys } from '../src/cache/compare';
 import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
@@ -102,9 +103,9 @@ function handle(name: string): ArtifactsRepo {
       }
       return out;
     },
-    async createToken() {
+    async createToken(scope: 'read' | 'write' = 'write', ttl = 86_400) {
       r.calls.push('createToken');
-      return { id: 't', plaintext: 'fake-token', scope: 'read', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+      return { id: 't', plaintext: 'fake-token', scope, expiresAt: new Date(Date.now() + ttl * 1000).toISOString() };
     },
     [Symbol.dispose]() {},
   } as unknown as ArtifactsRepo;
@@ -209,6 +210,7 @@ interface Reply {
   json: Record<string, unknown>;
   cost: CostCounters;
   cache: string | null;
+  timing: string | null;
 }
 
 async function call(path: string, token?: string): Promise<Reply> {
@@ -225,7 +227,7 @@ async function call(path: string, token?: string): Promise<Reply> {
   } catch {
     // non-JSON (e.g. the generic not-found fallback)
   }
-  return { status: res.status, text, json, cost: cost!, cache: res.headers.get('x-forge-cache') };
+  return { status: res.status, text, json, cost: cost!, cache: res.headers.get('x-forge-cache'), timing: res.headers.get('server-timing') };
 }
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}/${rest}`;
@@ -524,6 +526,7 @@ describe('cost, cache and the admin bypass', () => {
     const bypass = await call(`${path}?nocache=1`, tok.admin);
     expect(bypass.status).toBe(200);
     expect(bypass.cache).toBe('bypass');
+    expect(bypass.timing).toMatch(/^auth;dur=\d+, refs;dur=\d+, diff;dur=\d+$/);
     expect(bypass.cost.cache).toBe('bypass');
     expect(await caches.default.match(compareKeys.treediff(b.tree, h.tree))).toBeUndefined();
     const miss = await call(path, tok.admin);
@@ -567,7 +570,7 @@ describe('cost, cache and the admin bypass', () => {
     expect(cold.calls.filter((c) => c.startsWith('log') || c.startsWith('readCommit'))).toEqual([`log:${h.sha}`]);
   });
 
-  it('reads base and head separately when the base is not the head parent', async () => {
+  it('reads an ancestor base from the head log and a diverged base on its own', async () => {
     const apart = await seedRepo('apart', 'public');
     const one = await commit(apart, { 'p.txt': '1\n' });
     const two = await commit(apart, { 'p.txt': '2\n' }, [one.sha]);
@@ -578,13 +581,64 @@ describe('cost, cache and the admin bypass', () => {
     expect(r.status).toBe(200);
     expect((r.json.base as { tree: string }).tree).toBe(one.tree);
     expect((r.json.head as { tree: string }).tree).toBe(three.tree);
-    expect(apart.calls.filter((c) => c.startsWith('log') || c.startsWith('readCommit')).sort()).toEqual(
-      [`log:${three.sha}`, `readCommit:${one.sha}`].sort(),
-    );
+    const commitReads = (from: number) => apart.calls.slice(from).filter((c) => c.startsWith('log') || c.startsWith('readCommit'));
+    expect(commitReads(0)).toEqual([`log:${three.sha}`]);
+
+    // A base off the head's first-parent chain costs its own readCommit.
+    const four = await commit(apart, { 'p.txt': '4\n' }, [one.sha]);
+    const five = await commit(apart, { 'p.txt': '5\n' }, [two.sha]);
+    apart.refs.set('refs/heads/other', four.sha);
+    apart.refs.set('refs/heads/side', five.sha);
+    const mark = apart.calls.length;
+    const diverged = await call(api('apart', 'compare/other...side'));
+    expect((diverged.json.base as { tree: string }).tree).toBe(four.tree);
+    expect((diverged.json.head as { tree: string }).tree).toBe(five.tree);
+    expect(commitReads(mark).sort()).toEqual([`log:${five.sha}`, `readCommit:${four.sha}`].sort());
+
     // The reverse direction (base is the child) still resolves correctly.
     const back = await call(api('apart', 'compare/tip...main'));
     expect((back.json.base as { sha: string }).sha).toBe(three.sha);
     expect((back.json.head as { sha: string }).sha).toBe(one.sha);
+  });
+
+  it('keeps a first-ever compare within +3 when the base is not the head parent and the read token is cold', async () => {
+    const edge = await seedRepo('edge', 'public');
+    const one = await commit(edge, { 'e.txt': '1\n', 'keep.txt': 'k\n' });
+    const two = await commit(edge, { 'e.txt': '2\n', 'keep.txt': 'k\n' }, [one.sha]);
+    const three = await commit(edge, { 'e.txt': '3\n', 'keep.txt': 'k\n' }, [one.sha]);
+    edge.refs.set('refs/heads/main', two.sha);
+    edge.refs.set('refs/heads/tip', three.sha);
+    // A push through the git gate warms only the write token; the read token stays cold.
+    await getGitToken(env, `${OWNER}--edge`, 'write');
+    edge.calls.length = 0;
+    const r = await call(api('edge', 'compare/main...tip'));
+    expect(r.status).toBe(200);
+    expect((r.json.base as { sha: string; tree: string })).toMatchObject({ sha: two.sha, tree: two.tree });
+    expect((r.json.head as { sha: string; tree: string })).toMatchObject({ sha: three.sha, tree: three.tree });
+    expect(files(r).map((f) => [f.path, f.additions, f.deletions])).toEqual([['e.txt', 1, 1]]);
+    const treeReads = r.json.treeReads as number;
+    const blobReads = r.json.blobReads as number;
+    expect(r.cost.art).toBe(1 + edge.calls.length);
+    expect(r.cost.art).toBeLessThanOrEqual(treeReads + blobReads + 3);
+    expect(r.cost.d1).toBeLessThanOrEqual(2);
+    expect(edge.calls).not.toContain('createToken');
+  });
+
+  it('keeps a first-ever compare within +3 with no cached token when the base is an older ancestor', async () => {
+    const deep = await seedRepo('deep', 'public');
+    const one = await commit(deep, { 'd.txt': '1\n', 'keep.txt': 'k\n' });
+    const two = await commit(deep, { 'd.txt': '2\n', 'keep.txt': 'k\n' }, [one.sha]);
+    const three = await commit(deep, { 'd.txt': '3\n', 'keep.txt': 'k\n' }, [two.sha]);
+    deep.refs.set('refs/heads/main', one.sha);
+    deep.refs.set('refs/heads/tip', three.sha);
+    const r = await call(api('deep', 'compare/main...tip'));
+    expect(r.status).toBe(200);
+    expect((r.json.base as { sha: string; tree: string })).toMatchObject({ sha: one.sha, tree: one.tree });
+    expect((r.json.head as { sha: string; tree: string })).toMatchObject({ sha: three.sha, tree: three.tree });
+    expect(deep.calls).toContain('createToken');
+    expect(deep.calls.filter((c) => c.startsWith('log') || c.startsWith('readCommit'))).toEqual([`log:${three.sha}`]);
+    expect(r.cost.art).toBe(1 + deep.calls.length);
+    expect(r.cost.art).toBeLessThanOrEqual((r.json.treeReads as number) + (r.json.blobReads as number) + 3);
   });
 
   it('reports treeReads and blobReads that match the fake binding and the meter', async () => {

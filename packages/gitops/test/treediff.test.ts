@@ -235,3 +235,68 @@ describe('diffTrees', () => {
     expect(res.changes.map((c) => c.path)).toEqual(['a.txt', 'm.txt', 'z.txt']);
   });
 });
+
+describe('diffTrees read concurrency', () => {
+  /** Two-level trees: `outer` dirs each holding `inner` dirs with one changed file. */
+  async function nested(outer: number, inner: number) {
+    const { store, tree, file, dir, blobHash } = await makeStore();
+    const [a, b] = [await blobHash('a'), await blobHash('b')];
+    const side = async (h: string) => {
+      const outers: TreeEntry[] = [];
+      for (let i = 0; i < outer; i++) {
+        const inners: TreeEntry[] = [];
+        for (let j = 0; j < inner; j++) inners.push(dir(`s${String(j).padStart(3, '0')}`, await tree([file('x.txt', h)])));
+        outers.push(dir(`t${String(i).padStart(3, '0')}`, await tree(inners)));
+      }
+      return tree(outers);
+    };
+    return { store, base: await side(a), head: await side(b) };
+  }
+
+  /** Delays every read so concurrent calls overlap, and records the peak in flight. */
+  function slow(store: TreeReader) {
+    const stats = { inFlight: 0, peak: 0 };
+    const reader: TreeReader = {
+      async readTree(hash) {
+        stats.inFlight++;
+        stats.peak = Math.max(stats.peak, stats.inFlight);
+        await new Promise((r) => setTimeout(r, 2));
+        try {
+          return await store.readTree(hash);
+        } finally {
+          stats.inFlight--;
+        }
+      },
+    };
+    return { reader, stats };
+  }
+
+  it('never has more than `concurrency` reads in flight across nested levels', async () => {
+    const { store, base, head } = await nested(12, 12);
+    const { reader, stats } = slow(store);
+    const res = await diffTrees(reader, base, head, { concurrency: 8 });
+    expect(res.truncated).toBe(false);
+    expect(res.changes.length).toBe(144);
+    expect(stats.peak).toBeLessThanOrEqual(8);
+  });
+
+  it('uses the whole concurrency budget for one wide level', async () => {
+    const { store, base, head } = await nested(40, 1);
+    const { reader, stats } = slow(store);
+    const res = await diffTrees(reader, base, head, { concurrency: 64 });
+    expect(res.changes.length).toBe(40);
+    // 40 changed dirs x 2 sides: one round of reads, not several.
+    expect(stats.peak).toBe(64);
+  });
+
+  it('stops reading at the read budget with concurrent reads in flight', async () => {
+    const { store, base, head } = await nested(30, 10);
+    const { reader, stats } = slow(store);
+    const res = await diffTrees(reader, base, head, { concurrency: 16, maxTreeReads: 100 });
+    expect(res.truncated).toBe(true);
+    expect(res.truncatedReason).toBe('maxTreeReads');
+    expect(res.treeReads).toBe(100);
+    expect(store.reads).toBe(100);
+    expect(stats.peak).toBeLessThanOrEqual(16);
+  });
+});

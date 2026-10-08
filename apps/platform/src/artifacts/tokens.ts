@@ -62,6 +62,30 @@ export async function getGitToken(
   return minted.plaintext;
 }
 
+/**
+ * A token that can read the repo over the git protocol. Write tokens are
+ * read-capable (Artifacts serves upload-pack to them), so a copy warmed by a
+ * push is reused before minting a read token.
+ */
+export async function getReadCapableToken(
+  env: Env,
+  artifactsName: string,
+  handle?: () => Promise<ArtifactsRepo>,
+): Promise<string> {
+  const now = Date.now();
+  const [read, write] = await Promise.all([
+    readCachedJson<CachedToken>(tokenKey(artifactsName, 'read')),
+    readCachedJson<CachedToken>(tokenKey(artifactsName, 'write')),
+  ]);
+  for (const [cached, scope] of [
+    [read, 'read'],
+    [write, 'write'],
+  ] as const) {
+    if (cached && cached.expiresAt - now > (TTL_SECONDS[scope] * 1000) / 4) return cached.token;
+  }
+  return getGitToken(env, artifactsName, 'read', handle);
+}
+
 /** Drops this colo's token copies, e.g. when the repo is deleted. */
 export async function purgeGitTokens(artifactsName: string): Promise<void> {
   await Promise.all([deleteCached(tokenKey(artifactsName, 'read')), deleteCached(tokenKey(artifactsName, 'write'))]);

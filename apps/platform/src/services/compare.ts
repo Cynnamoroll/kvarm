@@ -38,7 +38,7 @@ import {
 export const COMPARE_BUDGETS = {
   maxTreeReads: 2_000,
   maxChanges: 20_000,
-  treeConcurrency: 16,
+  treeConcurrency: 64,
   statsMaxFiles: 300,
   /** Per-file size cap for line counts and file diffs (pinned 4 MB, architecture §9). */
   maxBlobBytes: 4 * 1024 * 1024,
@@ -118,11 +118,31 @@ export interface FileDiffResponse extends FileDiffBody {
   oldPath?: string;
 }
 
+/**
+ * Wall-clock phases for the `server-timing` header. The Workers clock only
+ * advances across I/O, so CPU-only work (diffing, JSON) shows as 0.
+ */
+export class PhaseTimer {
+  private last = Date.now();
+  private readonly parts: string[] = [];
+
+  mark(name: string): void {
+    const now = Date.now();
+    this.parts.push(`${name};dur=${now - this.last}`);
+    this.last = now;
+  }
+
+  header(): string {
+    return this.parts.join(', ');
+  }
+}
+
 export interface CompareRequest {
   env: Env;
   repo: RepoRow;
   bypass: boolean;
   waitUntil(p: Promise<unknown>): void;
+  timer?: PhaseTimer;
 }
 
 export interface PageOptions {
@@ -532,6 +552,9 @@ function render(
 }
 
 function resolveContext(req: CompareRequest, artifacts: LazyRepo): Ctx {
+  // A bypass always computes, so open the repo handle while refs resolve.
+  // Without bypass a cached body may need no handle at all (warm art=0).
+  if (req.bypass) artifacts.get().catch(() => undefined);
   return { env: req.env, repo: req.repo, artifacts, bypass: req.bypass, waitUntil: req.waitUntil };
 }
 
@@ -582,8 +605,10 @@ export function compare(req: CompareRequest, base: string, head: string, page: P
     withLazyRepo(req.env, req.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveContext(req, artifacts);
       const pair = await resolvePair(ctx, base, head);
+      req.timer?.mark('refs');
       if (!pair.ok) return pair;
       const { body, cache } = await loadCompareBody(ctx, pair.value.base.tree, pair.value.head.tree);
+      req.timer?.mark('diff');
       markOutcome(cache);
       const out = render(body, pair.value.base, pair.value.head, page);
       return out.ok ? { ok: true, value: { response: out.value, cache } } : out;
@@ -598,12 +623,14 @@ export function commitDiff(req: CompareRequest, sha: string, page: PageOptions):
       const ctx = resolveContext(req, artifacts);
       if (!isFullSha(sha)) return fail(404, 'commit not found (a full 40-hex sha is required)', 'COMMIT_NOT_FOUND');
       const found = await readCommitAndParent(ctx, sha);
+      req.timer?.mark('refs');
       if (!found) return fail(404, `commit not found: ${sha}`, 'COMMIT_NOT_FOUND');
       const head: RefView = { ref: sha, sha, tree: found.commit.tree };
       const base: RefView = found.parent
         ? { ref: found.parent.sha, sha: found.parent.sha, tree: found.parent.tree }
         : { ref: null, sha: null, tree: EMPTY_TREE };
       const { body, cache } = await loadCompareBody(ctx, base.tree, head.tree);
+      req.timer?.mark('diff');
       markOutcome(cache);
       const out = render(body, base, head, page);
       return out.ok ? { ok: true, value: { response: out.value, cache } } : out;
@@ -676,9 +703,11 @@ export function fileDiff(req: CompareRequest, base: string, head: string, path: 
     withLazyRepo(req.env, req.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveContext(req, artifacts);
       const pair = await resolvePair(ctx, base, head);
+      req.timer?.mark('refs');
       if (!pair.ok) return pair;
       const { base: b, head: h } = pair.value;
       const compareBody = await loadCompareBody(ctx, b.tree, h.tree);
+      req.timer?.mark('diff');
       const change = await findChange(ctx, compareBody.body, b.tree, h.tree, path);
       if (!change) return fail(404, 'path is not changed between base and head', 'PATH_NOT_CHANGED');
 
@@ -697,6 +726,7 @@ export function fileDiff(req: CompareRequest, base: string, head: string, path: 
       if (!body) {
         body = await computeFileDiff(ctx, change);
         if (!ctx.bypass && !literal) ctx.waitUntil(writeJson(key, JSON.stringify(body)));
+        req.timer?.mark('file');
       } else if (cache !== 'hit') {
         // Flags already known from the compare body: no blob read happened.
         cache = compareBody.cache;
