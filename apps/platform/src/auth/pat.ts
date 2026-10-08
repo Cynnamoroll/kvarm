@@ -8,6 +8,7 @@
 import { sha256Hex } from '@forge/gitops';
 import { toUserRow, type UserRow } from '../db/users';
 import { deleteCached, internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
+import type { AgentGrant } from './agentTokens';
 
 export type Scope = 'read' | 'write' | 'api' | 'ci';
 
@@ -29,6 +30,11 @@ export interface PATInfo {
   user: UserRow;
   expiresAt: number | null;
   lastUsedAt: number | null;
+  /**
+   * Set for agent tokens (auth/agentTokens.ts). `user` is then the minting
+   * human, whose current role on the repo caps the token.
+   */
+  agent?: AgentGrant;
 }
 
 /** write implies read for git operations. */
@@ -151,24 +157,38 @@ export function patNeedsStamp(pat: PATInfo | null | undefined, now: number): boo
 // Cache API copy of verification results, keyed by token hash
 // ---------------------------------------------------------------------------
 
-type PatCacheEntry = { valid: true; pat: PATInfo } | { valid: false };
+type PatCacheEntry = { valid: true; pat: PATInfo } | { valid: true; seen: true } | { valid: false };
+
+/**
+ * A cached verification result: the PAT, 'invalid' for a cached rejection,
+ * 'seen' for a recently valid agent token (which only exempts it from the
+ * preauth throttle; authorization still reads D1), or undefined on a miss.
+ */
+export type PatCacheResult = PATInfo | 'invalid' | 'seen' | undefined;
 
 export function patCacheKey(hash: string): Request {
   return internalKey('pat', hash);
 }
 
-/** Cached verification: the PAT, 'invalid' for a cached rejection, or undefined on a miss. */
-export async function readPatCache(hash: string, now: number): Promise<PATInfo | 'invalid' | undefined> {
+export async function readPatCache(hash: string, now: number): Promise<PatCacheResult> {
   const entry = await readCachedJson<PatCacheEntry>(patCacheKey(hash));
   if (!entry) return undefined;
   if (!entry.valid) return 'invalid';
+  if ('seen' in entry) return 'seen';
+  if (entry.pat.agent) return undefined;
   if (entry.pat.expiresAt !== null && entry.pat.expiresAt < now) return 'invalid';
   return entry.pat;
 }
 
+/** Agent tokens never get a reusable positive entry; their checks always go to D1. */
 export async function writePatCache(hash: string, pat: PATInfo | null, now: number): Promise<void> {
   if (!pat) {
     await writeCachedJson(patCacheKey(hash), { valid: false } satisfies PatCacheEntry, PAT_CACHE_TTL_SECONDS);
+    return;
+  }
+  if (pat.agent) {
+    const ttl = pat.expiresAt === null ? PAT_CACHE_TTL_SECONDS : Math.min(PAT_CACHE_TTL_SECONDS, (pat.expiresAt - now) / 1000);
+    await writeCachedJson(patCacheKey(hash), { valid: true, seen: true } satisfies PatCacheEntry, ttl);
     return;
   }
   const ttl =

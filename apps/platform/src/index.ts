@@ -3,6 +3,7 @@ import { GIT_PATH_RE, handleGitRequest } from './routes/git';
 import { authRoutes } from './routes/auth';
 import { api } from './routes/api';
 import { tenancyApi } from './routes/api/tenancy';
+import { agentsApi } from './routes/api/agents';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
@@ -40,6 +41,7 @@ app.use('/assets/*', async (c, next) => {
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/api/v1', tenancyApi);
+app.route('/api/v1', agentsApi);
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.

@@ -24,7 +24,8 @@ import { getGitToken } from '../artifacts/tokens';
 import { gitRateLimit } from '../ratelimit';
 import { markCache } from '../cost/meter';
 import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
-import type { Actor } from '../services/authz';
+import { credentialMayUpdateRef, type Actor } from '../services/authz';
+import { gateReceivePack } from '../services/receivePackGate';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -64,6 +65,12 @@ function relay(upstream: Response): Response {
     if (v) headers.set(h, v);
   }
   return new Response(upstream.body, { status: upstream.status, headers });
+}
+
+/** Agent tokens get only the request shapes git itself sends. */
+function agentMethodAllowed(subpath: string, method: string): boolean {
+  if (subpath === 'git-upload-pack' || subpath === 'git-receive-pack') return method === 'POST';
+  return method === 'GET' || method === 'HEAD';
 }
 
 function operation(subpath: string, service: string | null): 'read' | 'write' {
@@ -131,6 +138,22 @@ export async function handleGitRequest(
   const identity = actor?.patId ?? `ip:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`;
   if (!(await gitRateLimit(env, op, identity))) return rateLimited();
 
+  // Agent tokens are confined to their granted refs: the push command list is
+  // checked before any upstream token mint or byte of the pack is forwarded.
+  let pushBody: ReadableStream<Uint8Array> | null = null;
+  if (actor?.agent) {
+    if (!agentMethodAllowed(subpath, c.req.method)) {
+      return new Response('method not allowed\n', { status: 405 });
+    }
+    if (subpath === 'git-receive-pack') {
+      const gate = await gateReceivePack(c.req.raw, (cmd) =>
+        credentialMayUpdateRef(actor, cmd.ref) ? null : 'ref outside agent token grant',
+      );
+      if (!gate.ok) return gate.response;
+      pushBody = gate.body;
+    }
+  }
+
   // Warm public advertisements are served before any token mint or upstream
   // fetch; authorization above already ran on the current repo state.
   const cacheKey =
@@ -172,7 +195,7 @@ export async function handleGitRequest(
 
   const init: RequestInit = { method: c.req.method, headers };
   if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
-    init.body = c.req.raw.body;
+    init.body = pushBody ?? c.req.raw.body;
   }
   const upstreamRes = await fetch(upstream.toString(), init);
 

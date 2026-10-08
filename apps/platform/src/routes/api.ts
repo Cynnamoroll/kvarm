@@ -12,6 +12,7 @@ import { mintPAT, revokePAT, scopesAllow, SCOPES, type Scope } from '../auth/pat
 import * as svc from '../repos/service';
 import { patActor, type Actor, type RepoNeed } from '../services/authz';
 import {
+  AGENT_FORBIDDEN,
   resolvePAT,
   resolveRepoAccess,
   type AccessDenied,
@@ -51,8 +52,11 @@ export async function requestCredential(c: Context<App>): Promise<Credential> {
 type ActorResult = { ok: true; actor: ApiActor | null } | AccessDenied;
 
 /**
- * Resolves the API actor with authoritative PAT verification. Non-api PATs
- * act as anonymous; unknown, revoked or expired PATs are rejected.
+ * Resolves the human API actor with authoritative PAT verification. Non-api
+ * PATs act as anonymous; unknown, revoked or expired PATs are rejected.
+ * Agent tokens are refused here: account-level routes (user, tokens, orgs,
+ * repo creation, agent credentials) are human-only, and agents reach repo
+ * routes only through authorizeRoute.
  */
 export async function apiActor(c: Context<App>): Promise<ActorResult> {
   const cred = await requestCredential(c);
@@ -60,6 +64,7 @@ export async function apiActor(c: Context<App>): Promise<ActorResult> {
   if (cred.kind === 'session') return { ok: true, actor: cred.actor };
   const res = await resolvePAT(c.env, cred.token, clientIp(c));
   if (!res.ok) return res;
+  if (res.pat.agent) return AGENT_FORBIDDEN;
   return { ok: true, actor: scopesAllow(res.pat.scopes, 'api') ? patActor(res.pat) : null };
 }
 
@@ -76,7 +81,7 @@ export function actorJson(c: Context<App>, data: unknown, status = 200): Respons
 export async function authorizeRoute(
   c: Context<App>,
   need: RepoNeed,
-  opts: { requireActor?: boolean } = {},
+  opts: { requireActor?: boolean; allowAgent?: boolean } = {},
 ): Promise<RepoAccess> {
   return resolveRepoAccess(c.env, {
     owner: c.req.param('owner') ?? '',
@@ -86,6 +91,7 @@ export async function authorizeRoute(
     credential: await requestCredential(c),
     clientIp: clientIp(c),
     requireActor: opts.requireActor,
+    allowAgent: opts.allowAgent,
   });
 }
 

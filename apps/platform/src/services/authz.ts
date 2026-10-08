@@ -13,6 +13,8 @@
 import type { RepoRow } from '../db/repos';
 import type { UserRow } from '../db/users';
 import type { PATInfo, Scope } from '../auth/pat';
+import type { AgentGrant } from '../auth/agentTokens';
+import { refMatchesAny } from '@forge/gitops';
 
 export type RepoRole = 'none' | 'read' | 'write' | 'admin';
 export type Transport = 'git' | 'api' | 'page';
@@ -48,6 +50,28 @@ export interface Actor {
   patId?: string;
   /** PAT scopes; null for browser sessions, which carry the user's full authority. */
   scopes: Scope[] | null;
+  /**
+   * Present when the credential is an agent token. `user` is then the minting
+   * human: the agent acts with at most that user's current role, further
+   * capped to the token's single repo, role and ref patterns. Never treat an
+   * agent actor as the human for approvals, account or credential management.
+   */
+  agent?: AgentGrant;
+}
+
+export function isAgentActor(actor: Actor | null | undefined): boolean {
+  return actor?.agent !== undefined;
+}
+
+/**
+ * Ref-level ceiling of the credential. Humans are limited only by their repo
+ * role (and, later, protected-ref policy); agent tokens may touch only refs
+ * that match one of their granted patterns.
+ */
+export function credentialMayUpdateRef(actor: Actor | null, ref: string): boolean {
+  if (!actor) return false;
+  if (!actor.agent) return true;
+  return actor.agent.role === 'write' && refMatchesAny(actor.agent.refs, ref);
 }
 
 export type AuthzDenyCode = 'UNAUTHENTICATED' | 'NOT_FOUND' | 'INSUFFICIENT_SCOPE' | 'FORBIDDEN';
@@ -57,7 +81,9 @@ export type AuthzDecision =
   | { ok: false; status: 401 | 403 | 404; error: string; code: AuthzDenyCode };
 
 export function patActor(pat: PATInfo): Actor {
-  return { user: pat.user, via: 'pat', patId: pat.id, scopes: pat.scopes };
+  const actor: Actor = { user: pat.user, via: 'pat', patId: pat.id, scopes: pat.scopes };
+  if (pat.agent) actor.agent = pat.agent;
+  return actor;
 }
 
 const RANK: Record<RepoRole, number> = { none: 0, read: 1, write: 2, admin: 3 };
@@ -110,10 +136,19 @@ export function effectiveRole(
   transport: Transport,
   facts: AccessFacts = NO_FACTS,
 ): { role: RepoRole; uncapped: RepoRole } {
-  const own = repoRole(repo, actor, facts);
+  // An agent's minter role counts only on the token's own repo, so other repos
+  // the minter can see stay concealed from the agent.
+  const own = actor?.agent && actor.agent.repoId !== repo.id ? 'none' : repoRole(repo, actor, facts);
   const publicRole: RepoRole = repo.visibility === 'public' ? 'read' : 'none';
-  const capped = actor ? minRole(own, scopeCeiling(actor.scopes, transport)) : 'none';
+  const capped = actor ? minRole(own, credentialCeiling(actor, transport)) : 'none';
   return { role: maxRole(capped, publicRole), uncapped: maxRole(own, publicRole) };
+}
+
+function credentialCeiling(actor: Actor, transport: Transport): RepoRole {
+  const ceiling = scopeCeiling(actor.scopes, transport);
+  if (!actor.agent) return ceiling;
+  if (transport === 'page') return 'none';
+  return minRole(ceiling, actor.agent.role);
 }
 
 function concealed(actor: Actor | null, transport: Transport): AuthzDecision {

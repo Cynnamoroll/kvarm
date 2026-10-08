@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 
 export * from './treediff';
+export * from './refUpdates';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
