@@ -1,36 +1,51 @@
-# Forge — aesthetic inspiration
+# Veyr-9 — aesthetic inspiration
 
-Reference material for a collaborative paper-design session, **not a UI specification**. Borrow the visual language, not the source application's information architecture or implied data meanings.
+Reference material for a collaborative paper-design session, **not a UI specification**. Borrow the visual language, not the source images' information architecture or implied data meanings.
 
-Forge is a git provider on Cloudflare Artifacts for agentic development: large diffs, agent workspaces, change sets, competing candidates, merge queues, MCP activity, snapshots, and commit attribution.
+Veyr-9 is the working platform name; Nexus is the coordination concept. Names are provisional; this is not a trademark-clearance claim.
 
 ## Sources
 
-Both posts are by **Brooklyn! (@imbabybrooklyn, Nous Research)**, dated **2026-10-06**. Text and source metadata below are supplied context; observations are from the four attached still images. The video has not been inspected for motion.
+The local archive contains five supplied still images and one supplied video. The still-image observations below describe only visible cues; the video has not been viewed for motion.
 
-| Source URL | Author | Date | Post text | Local media |
-| --- | --- | --- | --- | --- |
-| https://x.com/imbabybrooklyn/status/2107553909162356906 | Brooklyn! (@imbabybrooklyn) | 2026-10-06 | "/ˈfæʃ(ɪ)ə/ n. A sheath of connective tissue that encloses muscles and organs, binding everything in place" | `post-2107553909162356906-video-1080p.mp4` (22s); `post-2107553909162356906-poster.jpg` |
-| https://x.com/imbabybrooklyn/status/2107568622013173808 | Brooklyn! (@imbabybrooklyn) | 2026-10-06 | "She's so pretty. I'm pretty sure I've figured out how to make a hyper intelligent, focused, agentic environment" | `post-2107568622013173808-photo1.jpg`; `post-2107568622013173808-photo2.jpg`; `post-2107568622013173808-photo3.jpg` |
+| Local media | Visible subject |
+| --- | --- |
+| [bio-scan-orbital.jpg](bio-scan-orbital.jpg) | Luminous biological scan with orbital arcs |
+| [orbital-event-map.jpg](orbital-event-map.jpg) | Orbital node field beside a compact event log |
+| [temporal-flow-dashboard.jpg](temporal-flow-dashboard.jpg) | Wide temporal relationship map and instrument strip |
+| [temporal-flow-detail.jpg](temporal-flow-detail.jpg) | Close-up of the temporal relationship field |
+| [catalog-depth-map.jpg](catalog-depth-map.jpg) | Perspective catalog plot |
+| [post-2107553909162356906-poster.jpg](post-2107553909162356906-poster.jpg) | Existing still with query, catalog, and ownership panels |
+| [post-2107553909162356906-video-1080p.mp4](post-2107553909162356906-video-1080p.mp4) | Existing local video; SHA-256 matches the supplied video, so no duplicate was saved. Not viewed for motion. |
 
-### Additional reference: @imbabybrooklyn (2108010039223185503)
-
-- Source: https://x.com/imbabybrooklyn/status/2108010039223185503
-- For the later collaborative paper UI session only.
-- Image not yet retrieved; X connector reconnection pending.
-
-All filenames above are relative to `/Users/cyn/git/planning/aesthetic/`. The second post quotes the first.
+All filenames above are relative to `/Users/cyn/git/planning/aesthetic/`.
 
 ## Visual observations
 
 Colors are approximate visual estimates, not sampled design tokens. Text sizes describe the supplied image scale, not proposed CSS sizes. Small labels are sometimes too faint to read confidently.
 
-### Photo 1 — panoramic connection map and instrument strip
+### Bio scan — orbital biology image
 
-`post-2107568622013173808-photo1.jpg`
+[bio-scan-orbital.jpg](bio-scan-orbital.jpg)
+
+- **Field:** a near-black ground frames a luminous biological subject, with blue and cyan light, magenta-violet areas, and warm orange-pink highlights.
+- **Geometry:** fine wireframe orbit arcs loop around the subject. Hairline rectangular callouts and small uppercase monospace section labels sit over the image.
+- **Use as reference:** the bright scan can inspire a focused focal point surrounded by precise, quiet annotation. The image does not establish any data or status semantics.
+
+### Orbital event map — node field and log
+
+[orbital-event-map.jpg](orbital-event-map.jpg)
+
+- **Layout:** a near-black, wide composition pairs a dense orbital node-and-thread field on the left with a narrow event-log column on the right.
+- **Geometry and light:** faint orbital arcs and fine connections surround clustered pale nodes; a muted red glow accents part of the field. Small monospace labels remain subordinate to the visualization.
+- **Use as reference:** combine a relational overview with a compact textual stream, keeping the linework delicate and the annotations legible.
+
+### Temporal flow dashboard — panoramic connection map and instrument strip
+
+[temporal-flow-dashboard.jpg](temporal-flow-dashboard.jpg)
 
 - **Layout:** a nearly full-width relationship visualization occupies roughly the upper two-thirds. A small issue-like ledger sits at upper left. Red ring nodes step diagonally upward from the left; teal ring nodes form a vertical cluster near the center. Hundreds of fine connections converge toward a bowed, slanted date ribbon, then fan outward to the right.
-- **Lower strip:** five adjoining instrument panels: catalog, owners, arrivals, a dotted globe-like graphic, and stream. The catalog previews the spike plot enlarged in photo 3; owners is a tiny list; arrivals is a sparse starfield; stream resembles timestamped terminal output.
+- **Lower strip:** five adjoining instrument panels: catalog, owners, arrivals, a dotted globe-like graphic, and stream. The catalog previews the spike plot enlarged in the [catalog depth map](catalog-depth-map.jpg); owners is a tiny list; arrivals is a sparse starfield; stream resembles timestamped terminal output.
 - **Palette:** near-black `#080A09`, charcoal panel fill `#0E1110`, hairlines `#242827`, subdued gray `#707974`, off-white `#C5CCC8`, teal `#28B79C`, and vermilion `#DA4437`. Thin red and teal traces carry almost all the chromatic energy.
 - **Typography:** narrow, technical monospaced text, mostly regular/light weight; tiny identifiers, timestamps, and ledger rows (roughly 5–9 image pixels). Uppercase section labels are widely tracked. There is no oversized headline competing with the data.
 - **Density:** very high relationship density above, with deliberate black negative space around node groups. The bottom tiles turn that complex field into bounded, local readings.
@@ -39,9 +54,9 @@ Colors are approximate visual estimates, not sampled design tokens. Text sizes d
 - **Motion cues:** the fan of traces and tilted date band imply flow and navigation through time; the globe and arrivals field suggest live instruments. These are still-image cues, not verified animation behavior.
 - **Notable pattern:** one large connective overview plus small, specialized readouts. Relationships are the hero; individual objects remain addressable through IDs.
 
-### Photo 2 — close-up of the connective field
+### Temporal flow detail — close-up of the connective field
 
-`post-2107568622013173808-photo2.jpg`
+[temporal-flow-detail.jpg](temporal-flow-detail.jpg)
 
 - **Layout:** cropped into the main map. Red ID nodes climb diagonally across the left; teal owner/device-like labels and ring nodes stack toward the right. A dark, curved date rail cuts down the far-right edge.
 - **Connections:** long, almost horizontal red traces meet a tightly interwoven bundle of teal and gray threads. The composition is asymmetrical: open black space at left, dense crossings near the temporal boundary.
@@ -53,9 +68,9 @@ Colors are approximate visual estimates, not sampled design tokens. Text sizes d
 - **Motion cues:** the skewed rail and long traces create a sense of scrubbing or looking obliquely through a time slice. Subtle scanline-like texture adds an analog-monitor feeling.
 - **Notable pattern:** identity and connectivity share a single visual plane. This suggests provenance without relying on profile portraits, cards, or chat bubbles.
 
-### Photo 3 — catalog as a spatial instrument
+### Catalog depth map — catalog as a spatial instrument
 
-`post-2107568622013173808-photo3.jpg`
+[catalog-depth-map.jpg](catalog-depth-map.jpg)
 
 - **Layout:** one large framed panel, titled `CATALOG` at upper left after a teal square. A perspective trapezoid occupies the lower-middle area, containing a cloud of tiny gray square points and upright red/teal stems capped by circles.
 - **Axes/readings:** visible labels include `7d`, `30d`, `90d`, `desktop`, and `tui`; a large, very faint `1,201` appears at bottom left. These imply temporal and environment groupings, but the plot's precise semantics should not be assumed.
@@ -69,7 +84,7 @@ Colors are approximate visual estimates, not sampled design tokens. Text sizes d
 
 ### Video poster — query, catalog, and ownership
 
-`post-2107553909162356906-poster.jpg`
+[post-2107553909162356906-poster.jpg](post-2107553909162356906-poster.jpg)
 
 - **Layout:** a thin top ruler sits above a framed command/query row reading `› is:issue is:open`. Beneath it, a wide catalog plot occupies about three-quarters of the panel; a narrow `OWNERS` list occupies the right quarter.
 - **Catalog:** another perspective point cloud with red and teal stems, gray/white endpoints, age labels, and `desktop`/`tui` annotations. It is angled differently from photo 3 and appears more compact.
@@ -79,24 +94,24 @@ Colors are approximate visual estimates, not sampled design tokens. Text sizes d
 - **Density:** compact and information-rich, but cleanly partitioned. The command row gives the scene an explicit scope; the adjacent owners list explains one aspect of the plotted field.
 - **Borders/lines:** subtle rounded outer frame, straight vertical divider, restrained horizontal rules. No raised cards, chunky shadows, or filled toolbar buttons.
 - **Iconography:** prompt chevron, teal heading squares, white/teal dot rows, plot endpoints. Repeated geometry forms a consistent vocabulary.
-- **Motion cues:** the poster belongs to a 22-second video, but transitions, timing, camera movement, and interaction are unverified. Do not treat the differing plot angles across images as evidence of a particular animation.
+- **Motion cues:** the associated video was not viewed; transitions, timing, camera movement, and interaction are unverified. Do not treat the differing plot angles across images as evidence of a particular animation.
 - **Notable pattern:** textual query → scoped visual field → compact ownership readout. The interface feels operable, not merely cinematic.
 
 ## Core aesthetic
 
-- **Connective tissue:** the “fascia” metaphor is literal in the visual language—threads bind issues, people/devices, time, and activity into a coherent whole. For Forge, connect code, agent, session, candidate, checks, and merge outcome.
+- **Connective tissue:** fine threads bind nodes, time, and activity into a coherent whole. For Veyr-9, this could connect code, agent, session, candidate, checks, and merge outcome.
 - **Intelligence through relationships:** many small signals coexist in one organized field; sophistication comes from visible connections, not a large “AI” badge.
 - **Focused darkness:** near-black surfaces and subdued chrome recede, leaving selected nodes and meaningful traces in relief.
-- **Restricted signal palette:** teal, red, and neutral light points feel purposeful. Their source meanings are unknown; Forge needs its own explicit semantics.
+- **Restricted signal palette:** teal, red, and neutral light points feel purposeful. Their source meanings are unknown; Veyr-9 needs its own explicit semantics.
 - **Instrument-panel precision:** mono labels, stable alignment, thin rules, small totals, and specialized readouts evoke a workstation measuring ongoing work.
 - **Agentic rather than conversational:** owners, temporal rails, commands, and streams suggest multiple actors progressing independently, not one chatbot dominating a page.
 - **Controlled futurism:** perspective, fine threads, and monitor texture supply atmosphere without giant gradients, glass cards, or oversized marketing typography.
 
-## Adapting to Forge
+## Adapting to Veyr-9
 
 Ideas to sketch and debate—not commitments to implement the screenshots literally.
 
-| Forge surface | Possible translation |
+| Veyr-9 surface | Possible translation |
 | --- | --- |
 | **Repo tree** | A compact mono file ledger with fine separators, understated directory glyphs, and a visible path spine. A selected file could expose its last agent/session and change-set membership in an adjacent detail rail. Keep filenames readable; do not turn the tree into a spatial graph. |
 | **1M-LOC compare/diff** | Treat the diff as the main instrument: aligned gutters, crisp code, restrained addition/deletion tint, and a small change-distribution overview. A thin side rail can mark hunks, unresolved threads, and check-linked locations. Show loaded/windowed versus total scope honestly. |
@@ -116,7 +131,7 @@ Ideas to sketch and debate—not commitments to implement the screenshots litera
 - **Red/teal ambiguity:** reserve clear meanings for diff additions/deletions and operational results; use signs, words, and symbols in addition to hue. Teal should not simultaneously mean “agent,” “passed,” and “selected” without differentiation.
 - **Motion restraint:** if useful, a short selection/focus transition can communicate a relationship. Avoid perpetual particles, spinning graphs, or scanline animation; honor reduced motion. Decorative texture must not interfere with code reading.
 - **Stable operating surface:** retain selections and scroll position during activity updates. Explicit refresh or a restrained “new events” indicator is preferable to a feed that constantly rearranges under the user.
-- **Atmosphere at the edges:** thin connective motifs belong in overviews and provenance, not behind source code. Forge should feel like a precise control room while remaining a fast git tool.
+- **Atmosphere at the edges:** thin connective motifs belong in overviews and provenance, not behind source code. Veyr-9 should feel like a precise control room while remaining a fast git tool.
 
 ## Open questions for the paper session
 
