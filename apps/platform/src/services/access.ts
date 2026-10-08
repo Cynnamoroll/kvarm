@@ -1,21 +1,22 @@
 /**
- * Credential + repository resolution with cost-aware caching, in front of the
- * shared policy in services/authz.ts.
+ * Credential + repository resolution in front of the shared policy in
+ * services/authz.ts. Every transport (git gate, REST, pages, and later
+ * compare, snapshots and MCP) must authorize repo responses through
+ * resolveRepoAccess, before any cached body is read or upstream work starts.
  *
- * Cache use is deliberately asymmetric (architecture §10, §11.1):
- *  - Public repo reads may be decided from Cache API copies of the PAT and
- *    repo row (0 D1 when warm). Public content is readable anonymously, so a
- *    stale credential there discloses nothing.
- *  - Everything else (private repos, writes, routes that need an actor) is
- *    decided on an authoritative D1 read of the PAT, the repo row and the
- *    caller's org membership and repo grant, issued as a single batch.
- *    Revoked or expired PATs, removed members and revoked grants therefore
- *    fail on the next such request in every colo, not only where a cache
- *    entry was deleted. Membership and grants are never cached. A repo made
- *    private stops taking the public path once its cached row is purged
- *    (same colo, at update time) or expires (other colos, REPO_CACHE_TTL).
- *  - Uncached PAT lookups pass a per-IP preauth throttle first, and rejected
- *    hashes are cached, so unknown tokens cannot amplify into D1 reads.
+ * Every repo decision, public or private, read or write, is made on one
+ * authoritative D1 batch (architecture §10, §11.1): the credential, the
+ * repo's current row (visibility included) and the caller's org membership
+ * and repo grant. Repo rows, memberships and grants are never cached, so a
+ * visibility flip, revocation or removal applies to the next request in every
+ * colo, not only where a cache entry was purged. Immutable payload caches
+ * (pages, info/refs, content keyed by SHA) stay valid because they are only
+ * consulted after this decision.
+ *
+ * The Cache API copy of a PAT never authorizes on its own. It only names
+ * whose facts to read, throttles last_used_at stamps, and short-circuits
+ * cached rejections; uncached PAT lookups pass a per-IP preauth throttle
+ * first, so unknown tokens cannot amplify into D1 reads.
  */
 
 import {
@@ -34,7 +35,6 @@ import {
 import { agentFromRow, agentTokenSelect, agentTokenStamp, isAgentToken, type AgentTokenRow } from '../auth/agentTokens';
 import { PAT_STAMP_INTERVAL_MS } from '../auth/pat';
 import type { RepoRow } from '../db/repos';
-import { readRepoCache, writeRepoCache } from '../cache/repos';
 import { branchRulesSelect, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
 import { preauthAllowed } from '../ratelimit';
 import {
@@ -110,10 +110,7 @@ export interface RepoAccessRequest {
    * act on an account (forks, grants, settings) are human-only.
    */
   allowAgent?: boolean;
-  /**
-   * Also read the repo's branch rules in the authoritative batch (git pushes).
-   * Only honored for `write`/`admin`, which never take the cached path.
-   */
+  /** Also read the repo's branch rules in the authoritative batch (git pushes; `write`/`admin` only). */
   branchRules?: boolean;
 }
 
@@ -220,8 +217,8 @@ function splitFacts(row: RepoFactsRow | RepoRow | undefined): {
 /**
  * One D1 round trip: optional throttled last_used_at stamp, the PAT join and
  * the repo row with the caller's membership and grant. Refreshes the Cache
- * API copies of the PAT and repo row with what it read; membership and grants
- * are never cached.
+ * API copy of the PAT with what it read; repo rows, membership and grants are
+ * never cached.
  */
 async function authoritativeLookup(
   env: Env,
@@ -264,10 +261,7 @@ async function authoritativeLookup(
     : patFromRow(row as PatRow | undefined, opts.now);
   const { repo, facts, userId } =
     repoIndex >= 0 ? splitFacts(results[repoIndex]?.results?.[0] as RepoFactsRow | undefined) : splitFacts(undefined);
-  await Promise.all([
-    opts.hash ? writePatCache(opts.hash, pat, opts.now) : undefined,
-    repo ? writeRepoCache(repo) : undefined,
-  ]);
+  if (opts.hash) await writePatCache(opts.hash, pat, opts.now);
   const out: Authoritative = { pat, repo, facts, factsUserId: userId };
   if (rulesIndex >= 0) {
     out.branchRules = ((results[rulesIndex]?.results ?? []) as unknown as BranchRuleRow[]).map(ruleFromRow);
@@ -333,25 +327,10 @@ export async function resolveRepoAccess(env: Env, req: RepoAccessRequest): Promi
     hash = await patHash(cred.token);
   }
 
-  const [cachedEntry, cachedRepo] = await Promise.all([
-    hash ? readPatCache(hash, now) : Promise.resolve(undefined),
-    readRepoCache(req.owner, req.name),
-  ]);
+  const cachedEntry = hash ? await readPatCache(hash, now) : undefined;
   if (cachedEntry === 'invalid') return BAD_CREDENTIAL;
   // Agent tokens never resolve from cache ('seen' only skips the preauth throttle).
   const cachedPat = cachedEntry === 'seen' ? undefined : cachedEntry;
-
-  // Public metadata reads: decided entirely from warm caches.
-  if (req.need === 'read' && !req.requireActor && cachedRepo?.visibility === 'public' && (!hash || cachedPat)) {
-    const actor = cred.kind === 'session' ? cred.actor : actorFor(req.transport, cachedPat);
-    return decide(env, cachedRepo, actor, req);
-  }
-
-  // Anonymous callers never gain access to a repo cached as private; deny
-  // (fail closed) without a D1 read.
-  if (cred.kind === 'anonymous' && cachedRepo?.visibility === 'private') {
-    return decide(env, cachedRepo, null, req);
-  }
 
   if (hash && !cachedEntry && !(await preauthAllowed(env, req.clientIp))) return RATE_LIMITED;
 

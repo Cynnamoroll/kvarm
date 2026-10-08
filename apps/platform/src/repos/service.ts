@@ -12,7 +12,6 @@ import {
   isValidRepoName,
   type RepoRow,
 } from '../db/repos';
-import { purgeRepoCache } from '../cache/repos';
 import { purgeGitTokens } from '../artifacts/tokens';
 
 export type ServiceResult<T> =
@@ -152,7 +151,7 @@ export async function deleteRepo(
     return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}` };
   }
   await deleteRepoRow(env.DB, repo.id);
-  await Promise.all([purgeRepoCache(repo.owner_login, repo.name), purgeGitTokens(repo.artifacts_name)]);
+  await purgeGitTokens(repo.artifacts_name);
   return { ok: true, value: { deleted: true } };
 }
 
@@ -173,6 +172,5 @@ export async function updateRepo(
   }
   stmts.push(env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repo.id));
   const results = await env.DB.batch<RepoRow>(stmts);
-  await purgeRepoCache(repo.owner_login, repo.name);
   return results[results.length - 1]?.results?.[0] ?? repo;
 }

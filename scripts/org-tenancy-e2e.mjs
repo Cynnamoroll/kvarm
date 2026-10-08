@@ -284,7 +284,7 @@ try {
   const flipRepo = `${ORG}/${FLIP}`;
   await api('outsider', 'GET', `/repos/${flipRepo}`);
   const warmPublic = await api('outsider', 'GET', `/repos/${flipRepo}`);
-  check('warm public read by unrelated principal', `${warmPublic.status} d1=${costField(warmPublic.cost, 'd1')}`, '200 d1=0');
+  check('warm public read by unrelated principal runs the authority lookup', `${warmPublic.status} d1=${costField(warmPublic.cost, 'd1')}`, '200 d1=1');
   check('unrelated principal git read of public repo', lsRemote('outsider', flipRepo).refs, (n) => n >= 1);
   const vis = await api('maint', 'PATCH', `/repos/${flipRepo}`, { visibility: 'private' });
   check('maintainer makes the public repo private', `${vis.status} ${vis.body?.repo?.visibility}`, '200 private');

@@ -330,7 +330,7 @@ describe('revocation beats warmed state', () => {
     const repo = `${ORG}/flip`;
     expect(await status(`/api/v1/repos/${repo}`, as('outsider'))).toBe(200);
     const warm = await call(`/api/v1/repos/${repo}`, as('outsider'));
-    expect(await costOf(warm)).toMatchObject({ d1: 0 });
+    expect(await costOf(warm)).toMatchObject({ d1: 1, rw: 0, do: 0 });
     expect(await git('outsider', repo, 'read')).toBe(200);
     expect(await status(`/api/v1/repos/${repo}`, as('maint', { method: 'PATCH', json: { visibility: 'private' } }))).toBe(200);
     expect(await status(`/api/v1/repos/${repo}`, as('outsider'))).toBe(404);

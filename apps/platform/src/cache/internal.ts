@@ -1,6 +1,6 @@
 /**
  * Small JSON entries in the Cache API under synthetic `https://forge.internal`
- * keys: PAT metadata, repo rows and upstream Artifacts tokens. The Cache API
+ * keys: PAT metadata and upstream Artifacts tokens. The Cache API
  * is per colo, so deletes are local; callers that need authoritative answers
  * (revocation, private access) must still check D1.
  */

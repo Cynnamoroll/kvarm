@@ -90,7 +90,7 @@ describe('x-forge-cost on every surface', () => {
 });
 
 describe('warm authenticated public metadata read', () => {
-  it('pays D1 once, then serves PAT verification and the repo row from cache', async () => {
+  it('pays one D1 authority lookup per request and writes only on the first use', async () => {
     const { token } = await freshToken();
     const cold = await call(`/api/v1/repos/${OWNER}/open`, { headers: bearer(token) });
     expect(cold.status).toBe(200);
@@ -99,14 +99,16 @@ describe('warm authenticated public metadata read', () => {
     expect(coldCost.rw).toBe(1); // first use stamps last_used_at
     const warm = await call(`/api/v1/repos/${OWNER}/open`, { headers: bearer(token) });
     expect(warm.status).toBe(200);
-    expect(await costOf(warm)).toMatchObject({ d1: 0, rr: 0, rw: 0, do: 0, art: 0 });
+    const warmCost = await costOf(warm);
+    expect(warmCost).toMatchObject({ d1: 1, rw: 0, do: 0, art: 0 });
+    expect(warmCost.rr).toBeLessThanOrEqual(8);
   });
 
-  it('serves warm anonymous public reads with zero D1', async () => {
+  it('runs the authority lookup on warm anonymous public reads', async () => {
     await call(`/api/v1/repos/${OWNER}/open`).then((r) => r.body?.cancel());
     const warm = await call(`/api/v1/repos/${OWNER}/open`);
     expect(warm.status).toBe(200);
-    expect(await costOf(warm)).toMatchObject({ d1: 0, do: 0 });
+    expect(await costOf(warm)).toMatchObject({ d1: 1, rw: 0, do: 0 });
   });
 });
 
@@ -146,11 +148,13 @@ describe('private reads stay authoritative and bounded', () => {
     expect(cost.rr).toBeLessThanOrEqual(8);
   });
 
-  it('denies anonymous reads of a cached private repo without touching D1', async () => {
+  it('denies anonymous reads of a private repo with one bounded lookup and no other work', async () => {
     await call(`/api/v1/repos/${OWNER}/secret`).then((r) => r.body?.cancel());
     const res = await call(`/api/v1/repos/${OWNER}/secret`);
     expect(res.status).toBe(404);
-    expect(await costOf(res)).toMatchObject({ d1: 0 });
+    const cost = await costOf(res);
+    expect(cost).toMatchObject({ d1: 1, rw: 0, art: 0, do: 0, sub: 0 });
+    expect(cost.rr).toBeLessThanOrEqual(8);
   });
 });
 
@@ -241,8 +245,8 @@ describe('failed-auth amplification', () => {
   });
 });
 
-describe('repo row cache', () => {
-  it('purges on PATCH so a visibility change applies to the next request', async () => {
+describe('visibility update', () => {
+  it('applies a PATCH to the very next anonymous request', async () => {
     const owner = await freshToken();
     for (let i = 0; i < 2; i++) {
       const res = await call(`/api/v1/repos/${OWNER}/flip`);
@@ -278,13 +282,12 @@ describe('git gate', () => {
         new Response(body, { headers: { 'content-type': 'application/x-git-upload-pack-advertisement', 'cache-control': 'public, max-age=30' } }),
       );
     }
-    // Warm the repo row first so the measured requests are fully warm.
-    await call(`/api/v1/repos/${OWNER}/open`).then((r) => r.body?.cancel());
-
     const plain = await call(`/${OWNER}/open.git/info/refs${search}`);
     expect(plain.status).toBe(200);
     expect(await plain.clone().text()).toBe(v0);
-    expect(await costOf(plain)).toEqual({ d1: 0, rr: 0, rw: 0, art: 0, do: 0, r2a: 0, r2b: 0, q: 0, sub: 0, cache: 'hit' });
+    const plainCost = await costOf(plain);
+    expect(plainCost).toEqual({ d1: 1, rr: plainCost.rr, rw: 0, art: 0, do: 0, r2a: 0, r2b: 0, q: 0, sub: 0, cache: 'hit' });
+    expect(plainCost.rr).toBeLessThanOrEqual(8);
 
     const proto2 = await call(`/${OWNER}/open.git/info/refs${search}`, { headers: { 'Git-Protocol': 'version=2' } });
     expect(await proto2.clone().text()).toBe(v2);

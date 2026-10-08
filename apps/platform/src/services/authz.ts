@@ -23,7 +23,7 @@ export type OrgRole = 'owner' | 'maintainer' | 'member';
 
 /**
  * Mutable access facts for one actor and repo, read authoritatively from D1
- * (services/access.ts) whenever the decision is not a public read.
+ * (services/access.ts) together with the repo row on every decision.
  */
 export interface AccessFacts {
   /** The repo is owned by an organization rather than a personal account. */
@@ -160,10 +160,7 @@ function concealed(actor: Actor | null, transport: Transport): AuthzDecision {
   return { ok: false, status: 404, error: 'not found', code: 'NOT_FOUND' };
 }
 
-/**
- * `facts` must come from an authoritative read unless the request is a read of
- * a public repo, where visibility alone already decides the outcome.
- */
+/** `repo` and `facts` must come from the same authoritative D1 read, never a cache. */
 export async function authorizeRepo(
   _env: Env,
   repo: RepoRow | null,
