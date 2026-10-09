@@ -23,6 +23,11 @@ export default defineConfig({
             miniflare: {
               bindings: {
                 TEST_MIGRATIONS: await readD1Migrations(`${platformDir}migrations`),
+                // Opt-in live check of server-side git writes against a real Artifacts
+                // remote (apps/platform/test/gitwriteLive.test.ts); empty in the gate.
+                LIVE_GITWRITE_REMOTE: process.env.LIVE_GITWRITE_REMOTE ?? '',
+                LIVE_GITWRITE_NAME: process.env.LIVE_GITWRITE_NAME ?? '',
+                LIVE_GITWRITE_TOKEN: process.env.LIVE_GITWRITE_TOKEN ?? '',
               },
             },
           })),

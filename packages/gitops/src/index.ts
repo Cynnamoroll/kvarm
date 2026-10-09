@@ -18,6 +18,9 @@ export * from './refUpdates';
 export * from './lsRefs';
 export * from './reportStatus';
 export * from './tar';
+export * from './pack';
+export * from './receivePack';
+export * from './mergebase';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
