@@ -318,6 +318,27 @@ describe('prepareMerge + publishMerge', () => {
     });
   });
 
+  it('many individually permitted merged blobs over the aggregate budget are MERGE_TOO_LARGE, with nothing to publish', async () => {
+    const store = new Store();
+    const files = (edit: (lines: string[]) => string[]) => {
+      const out: Record<string, string> = {};
+      for (let i = 0; i < 20; i++) {
+        const lines = Array.from({ length: 2048 }, (_, k) => `file ${i} line ${String(k).padStart(6, '0')}`);
+        out[`big/f${i}.txt`] = `${edit(lines).join('\n')}\n`;
+      }
+      return out;
+    };
+    const base = await store.commit([], files((l) => l));
+    const head = await store.commit([base], files((l) => ['HEAD', ...l.slice(1)]), 'feature');
+    const main = await store.commit([base], files((l) => [...l.slice(0, -1), 'MAIN']), 'main moves');
+
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' })).toMatchObject({ ok: true, value: { kind: 'merge' } });
+    const r = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxMergedBytes: 256 * 1024 } });
+    expect(r).toMatchObject({ ok: false, status: 422, code: 'MERGE_TOO_LARGE', error: 'merge exceeds the maxMergedBytes budget' });
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head, budgets: { maxMergedBytes: 256 * 1024 } });
+    expect(m).toMatchObject({ status: 'unknown', unknownReason: 'maxMergedBytes', mergeable: false, treeSha: null });
+  });
+
   it('failing or pending required checks on the prepared tree block publication; nothing is pushed', async () => {
     const store = new Store();
     const { head, main } = await divergent(store);

@@ -177,6 +177,55 @@ describe('merge3', () => {
     expect(await merge3(store, b, o, t, { maxBlobReads: 2 })).toMatchObject({ truncated: true, truncatedReason: 'maxBlobReads' });
   });
 
+  /** `count` files of `size` bytes edited on their first line by ours and their last line by theirs. */
+  async function manyDivergentFiles(store: MemStore, count: number, size: number) {
+    const body = Array.from({ length: Math.ceil(size / 16) }, (_, i) => `line ${String(i).padStart(9, '0')}`);
+    const b: Spec = {};
+    const o: Spec = {};
+    const t: Spec = {};
+    for (let i = 0; i < count; i++) {
+      const lines = body.map((l) => `${i}:${l}`);
+      b[`big/f${i}.txt`] = `${lines.join('\n')}\n`;
+      o[`big/f${i}.txt`] = `${['OURS', ...lines.slice(1)].join('\n')}\n`;
+      t[`big/f${i}.txt`] = `${[...lines.slice(0, -1), 'THEIRS'].join('\n')}\n`;
+    }
+    return { b: await writeTree(store, b), o: await writeTree(store, o), t: await writeTree(store, t) };
+  }
+
+  it('truncates with maxMergedBytes once many individually permitted merged blobs would exceed the aggregate budget', async () => {
+    const store = new MemStore();
+    const { b, o, t } = await manyDivergentFiles(store, 12, 64 * 1024);
+    const roomy = await merge3(store, b, o, t, { maxMergedBytes: 64 * 1024 * 1024 });
+    expect(roomy).toMatchObject({ clean: true, truncated: false });
+    const retained = roomy.objects.reduce((n, x) => n + x.raw.length + x.store.length, 0);
+    expect(retained).toBeGreaterThan(12 * 64 * 1024);
+
+    // Every blob is far under maxBlobBytes and within the read budget; only the total is too large.
+    const r = await merge3(store, b, o, t, { maxMergedBytes: 4 * 64 * 1024, maxBlobBytes: 1024 * 1024 });
+    expect(r).toMatchObject({ clean: false, truncated: true, truncatedReason: 'maxMergedBytes', treeHash: null, objects: [] });
+    expect(r.blobReads).toBeLessThan(36);
+  });
+
+  it('runs one content merge at a time, so at most three source blobs are in flight', async () => {
+    const store = new MemStore();
+    const { b, o, t } = await manyDivergentFiles(store, 10, 256);
+    let inFlight = 0;
+    let peak = 0;
+    const slow: MergeReader = {
+      readTree: (h) => store.readTree(h),
+      readBlob: async (h) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        inFlight--;
+        return store.readBlob(h);
+      },
+    };
+    const r = await merge3(slow, b, o, t);
+    expect(r).toMatchObject({ clean: true, blobReads: 30 });
+    expect(peak).toBeLessThanOrEqual(3);
+  });
+
   it('a reader refusing an oversized blob truncates with maxBlobBytes; other read failures are readError', async () => {
     const store = new MemStore();
     const b = await writeTree(store, base);

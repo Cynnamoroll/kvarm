@@ -11,7 +11,8 @@
  *    to the new path. Added paths are placed, colliding adds conflict, and
  *    an add inside a directory the other side renamed away (the majority
  *    target of its exact renames) is a `rename` conflict, like git's
- *    default `merge.directoryRenames=conflict`.
+ *    default `merge.directoryRenames=conflict`; with no majority the
+ *    directory itself is a `rename` conflict (git's directory rename split).
  * 3. The merged tree is rebuilt from the base along edited paths only;
  *    untouched subtrees keep their hashes. A path that must be both a file
  *    and a directory is a `file-directory` conflict.
@@ -23,8 +24,10 @@
  * same tree git writes). Several merge bases (criss-cross) are the caller's
  * concern: pass one base tree.
  *
- * Budgeted: tree reads, blob reads, blob size and diff work are bounded,
- * and a spent budget or a missing object returns `truncated` with no tree.
+ * Budgeted: tree reads, blob reads, blob size, diff work and the total size
+ * of the objects the merge creates are bounded, and content merges run one
+ * at a time by default so source bytes in memory stay bounded too. A spent
+ * budget or a missing object returns `truncated` with no tree.
  */
 
 import { buildBlob, buildTree, type GitObject, type TreeEntry } from './index';
@@ -80,9 +83,17 @@ export interface Merge3Options {
   nodeBudget?: number;
   /** Reads in flight (default 8). */
   concurrency?: number;
+  /**
+   * Max bytes (raw plus compressed) of all objects the merge creates and
+   * returns (default 16 MiB). Each object's worst case is reserved before it
+   * is built.
+   */
+  maxMergedBytes?: number;
+  /** Content merges (source reads, line merge, blob build) in progress at once (default 1). */
+  contentConcurrency?: number;
 }
 
-export type Merge3Truncation = TreeDiffTruncation | 'maxBlobReads' | 'maxBlobBytes' | 'diffBudget' | 'missingObject';
+export type Merge3Truncation = TreeDiffTruncation | 'maxBlobReads' | 'maxBlobBytes' | 'maxMergedBytes' | 'diffBudget' | 'missingObject';
 
 export interface Merge3Result {
   /** No conflicts and not truncated. */
@@ -108,7 +119,12 @@ const DEFAULTS = {
   maxBlobBytes: 4 * 1024 * 1024,
   nodeBudget: 400_000,
   concurrency: 8,
+  maxMergedBytes: 16 * 1024 * 1024,
+  contentConcurrency: 1,
 };
+
+/** Upper bound of an object's raw plus deflated size (deflate's stored-block overhead included). */
+const objectBound = (contentBytes: number) => 2 * (contentBytes + 32) + (contentBytes >> 10) + 64;
 
 interface Entry {
   mode: string;
@@ -230,12 +246,28 @@ class Merge {
   private readonly conflicts: MergeConflict[] = [];
   private readonly objects: GitObject[] = [];
   private readonly tasks: ContentTask[] = [];
+  private readonly contentLimiter: Limiter;
+  /** Bytes reserved or held by `objects`. */
+  private retained = 0;
 
   constructor(
     private readonly reader: MergeReader,
     private readonly opts: typeof DEFAULTS,
   ) {
     this.limiter = new Limiter(Math.max(1, opts.concurrency));
+    this.contentLimiter = new Limiter(Math.max(1, opts.contentConcurrency));
+  }
+
+  /** Reserves `bound` bytes for an object about to be built, or stops the merge. */
+  private reserve(bound: number, detail: string): void {
+    if (this.retained + bound > this.opts.maxMergedBytes) throw new Stop('maxMergedBytes', detail);
+    this.retained += bound;
+  }
+
+  /** Keeps a built object, replacing its reservation with its actual size. */
+  private keep(obj: GitObject, reserved: number): void {
+    this.retained += obj.raw.length + obj.store.length - reserved;
+    this.objects.push(obj);
   }
 
   result(partial: Partial<Merge3Result>): Merge3Result {
@@ -387,15 +419,17 @@ class Merge {
     }
 
     await this.placeAdds(ours, theirs, oursTree, theirsTree, consumed);
-    await Promise.all(this.tasks.map((t) => this.contentMerge(t)));
+    await Promise.all(this.tasks.map((t) => this.contentLimiter.run(() => this.contentMerge(t))));
 
     const root = await this.build(baseTree, this.editTree(), '');
     const conflicts = this.conflicts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
     if (conflicts.length > 0) return this.result({ conflicts });
     let treeHash = root;
     if (treeHash === null) {
+      const bound = objectBound(0);
+      this.reserve(bound, '');
       const empty = await buildTree([]);
-      this.objects.push(empty);
+      this.keep(empty, bound);
       treeHash = empty.hash;
     }
     return this.result({ clean: true, treeHash, objects: this.objects });
@@ -439,13 +473,16 @@ class Merge {
   /**
    * For each directory that `renamer` removed and whose exact renames mostly
    * went to one new directory, where the other side's additions under it
-   * would move. Only directories above `added` paths are considered.
+   * would move. Like merge-ort, only directories that directly contain an
+   * `added` path are considered, and one whose renames tie between
+   * destinations is a `rename` conflict on the directory (git's
+   * "directory rename split").
    */
   private async dirRenames(renamer: SideOps, renamerTree: string, added: string[]): Promise<Map<string, string>> {
     const moves = new Map<string, string>();
     if (added.length === 0 || renamer.renames.length === 0) return moves;
     const relevant = new Set<string>();
-    for (const q of added) for (let d = dirname(q); d !== ''; d = dirname(d)) relevant.add(d);
+    for (const q of added) if (dirname(q) !== '') relevant.add(dirname(q));
 
     const counts = new Map<string, Map<string, number>>();
     for (const [from, to] of renamer.renames) {
@@ -460,7 +497,10 @@ class Merge {
     for (const [dir, targets] of counts) {
       if (await this.dirExists(renamerTree, dir)) continue;
       const ranked = [...targets].sort((a, b) => b[1] - a[1]);
-      if (ranked.length > 1 && ranked[0]![1] === ranked[1]![1]) continue;
+      if (ranked.length > 1 && ranked[0]![1] === ranked[1]![1]) {
+        this.conflict({ path: dir, kind: 'rename' });
+        continue;
+      }
       renamedTo.set(dir, ranked[0]![0]);
     }
     for (const q of added) {
@@ -523,8 +563,10 @@ class Merge {
         this.conflict({ path: place, kind: 'content', base: b, ours: o, theirs: th, hunks: merged.conflicts });
         return void set(o);
       }
+      const bound = objectBound(merged.merged.length);
+      this.reserve(bound, place);
       const blob = await buildBlob(merged.merged);
-      this.objects.push(blob);
+      this.keep(blob, bound);
       hash = blob.hash;
     }
     if (!modeClean) {
@@ -576,8 +618,12 @@ class Merge {
       }),
     );
     if (entries.size === 0) return null;
+    let size = 0;
+    for (const e of entries.values()) size += e.name.length * 3 + 28;
+    const bound = objectBound(size);
+    this.reserve(bound, prefix);
     const tree = await buildTree([...entries.values()]);
-    this.objects.push(tree);
+    this.keep(tree, bound);
     return tree.hash;
   }
 }

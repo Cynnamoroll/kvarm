@@ -47,6 +47,12 @@ export class FakeRepo {
   materialized = 0;
   /** When set, receive-pack answers with this HTTP status and applies nothing. */
   receivePackStatus: number | null = null;
+  /**
+   * Awaited at a call, to interleave other work deterministically: before
+   * readTree/readBlob/readCommit and before receive-pack applies anything,
+   * and after ls-refs has read the refs it answers with (`lsRefs`).
+   */
+  hook: ((call: string) => Promise<void>) | null = null;
 
   count(prefix: string): number {
     return this.calls.filter((c) => c.startsWith(prefix)).length;
@@ -138,12 +144,14 @@ function handle(name: string): ArtifactsRepo {
   return {
     async readTree(hash: string) {
       r.calls.push(`readTree:${hash}`);
+      await r.hook?.(`readTree:${hash}`);
       const o = r.objects.get(hash);
       if (!o || o.type !== 'tree') return null;
       return parseTree(o.content).map((e) => ({ ...e, type: entryType(e.mode) }));
     },
     async readBlob(hash: string) {
       r.calls.push(`readBlob:${hash}`);
+      await r.hook?.(`readBlob:${hash}`);
       if (r.failBlobOnce.delete(hash)) throw new Error('simulated transient readBlob failure');
       if (r.memoryLimit.has(hash)) {
         throw Object.assign(new Error('object cannot be buffered safely'), { name: 'ArtifactsError', code: 'MEMORY_LIMIT' });
@@ -153,6 +161,7 @@ function handle(name: string): ArtifactsRepo {
     },
     async readCommit(hash: string) {
       r.calls.push(`readCommit:${hash}`);
+      await r.hook?.(`readCommit:${hash}`);
       const o = r.objects.get(hash);
       return o && o.type === 'commit' ? parseCommit(o.content, hash) : null;
     },
@@ -235,7 +244,9 @@ export function readPack(pack: Uint8Array): Array<{ type: Obj['type']; content: 
 async function receivePack(repo: FakeRepo, body: Uint8Array): Promise<Response> {
   const parsed = parseReceivePackCommands(body);
   if (parsed.status !== 'done') return new Response('bad request', { status: 400 });
-  repo.calls.push(`receivePack:${parsed.commands.map((c) => `${c.ref}:${c.oldOid}->${c.newOid}`).join(',')}`);
+  const call = `receivePack:${parsed.commands.map((c) => `${c.ref}:${c.oldOid}->${c.newOid}`).join(',')}`;
+  repo.calls.push(call);
+  await repo.hook?.(call);
   if (repo.receivePackStatus !== null) return new Response('unavailable', { status: repo.receivePackStatus });
   const stale = parsed.commands.filter((c) => (repo.refs.get(c.ref) ?? ZERO) !== c.oldOid);
   const results = parsed.commands.map((c) => ({ ref: c.ref, ok: stale.length === 0, ...(stale.includes(c) ? { reason: 'stale ref' } : {}) }));
@@ -272,7 +283,9 @@ export function installFakeGitRemote(): void {
     const repo = m ? fakeRepos.get(m[1]!) : undefined;
     if (!repo || req.headers.get('git-protocol') !== 'version=2') return new Response('bad', { status: 400 });
     lsRefsCalls.push(m![1]!);
-    return lsRefsResponse(repo, new Uint8Array(await req.arrayBuffer()));
+    const res = lsRefsResponse(repo, new Uint8Array(await req.arrayBuffer()));
+    await repo.hook?.('lsRefs');
+    return res;
   }) as typeof fetch);
 }
 

@@ -519,6 +519,8 @@ export function createChange(cx: ChangeContext, input: unknown): Promise<Service
     const p = parsed.value;
     const denied = agentMergeDenial(cx.actor, p.base, p.mergePolicy);
     if (denied) return denied;
+    // Push events at or after this instant are newer than the head ls-refs reports.
+    const observedAt = Date.now() - 1;
     const resolved = await withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx(cx, artifacts);
       const tips = await lsRefs(ctx, [branchRef(p.base), branchRef(p.head)]);
@@ -539,11 +541,19 @@ export function createChange(cx: ChangeContext, input: unknown): Promise<Service
     const now = Date.now();
     const id = crypto.randomUUID();
     const agentMeta = cx.actor?.agent ? JSON.stringify({ agentId: cx.actor.agent.agentId, agentName: cx.actor.agent.agentName }) : null;
+    // The head watermark is tied to the ref position: a push ingested since the
+    // observation (newer event) is adopted outright; the push that produced the
+    // observed head lends its event time; otherwise the observation time, so a
+    // push racing this create and delivered later is still newer.
+    const newerPush = `f.repo_id = ?2 AND f.ref = ?16 AND f.event_at > ?17 AND f.sha != '${ZERO_SHA}'`;
     const [, read] = await cx.env.DB.batch([
       cx.env.DB.prepare(
         `INSERT INTO change_sets (id, repo_id, number, title, body, base_ref, head_ref, head_sha, base_sha, state, author_id,
            agent_meta, merge_policy, risk_score, risk_level, risk_reasons, kind, created_at, updated_at, head_event_at)
-         SELECT ?1, ?2, COALESCE(MAX(number), 0) + 1, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?10, ?11, ?12, ?13, ?14, 'change', ?15, ?15, ?15
+         SELECT ?1, ?2, COALESCE(MAX(number), 0) + 1, ?3, ?4, ?5, ?6,
+                COALESCE((SELECT f.sha FROM repo_refs f WHERE ${newerPush}), ?7),
+                ?8, 'open', ?9, ?10, ?11, ?12, ?13, ?14, 'change', ?15, ?15,
+                COALESCE((SELECT f.event_at FROM repo_refs f WHERE (${newerPush}) OR (f.repo_id = ?2 AND f.ref = ?16 AND f.sha = ?7)), ?17)
            FROM change_sets WHERE repo_id = ?2`,
       ).bind(
         id,
@@ -561,6 +571,8 @@ export function createChange(cx: ChangeContext, input: unknown): Promise<Service
         rating.level,
         JSON.stringify(rating.reasons),
         now,
+        branchRef(p.head),
+        observedAt,
       ),
       cx.env.DB.prepare(`${CHANGE_SELECT} WHERE c.id = ?`).bind(id),
     ]);
@@ -607,7 +619,8 @@ function parsePatch(input: unknown): ServiceResult<Patch> {
 /**
  * PATCH changes/:number. One batch: a guarded UPDATE that never touches a
  * merged change, then the read-back. Changing the policy to `auto` (or
- * reopening an `auto` change) merges it right away when it is mergeable.
+ * reopening an `auto` change) merges it right away when it is mergeable;
+ * an agent token must be allowed to update the base for either.
  */
 export function updateChange(cx: ChangeContext, rawNumber: string, input: unknown): Promise<ServiceResult<ChangeView>> {
   return guarded(async () => {
@@ -624,15 +637,16 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
     };
     if (p.title !== undefined) set('title', p.title);
     if (p.body !== undefined) set('body', p.body);
-    if (p.mergePolicy !== undefined) {
-      if (p.mergePolicy === 'auto' && cx.actor?.agent) {
-        const current = await readChange(cx.env, cx.repo.id, number);
-        if (!current) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
-        const denied = agentMergeDenial(cx.actor, current.base_ref, 'auto');
+    if (cx.actor?.agent && (p.mergePolicy === 'auto' || p.state === 'open')) {
+      // Setting auto or reopening an auto change publishes to the base: the agent's ref ceiling applies.
+      const current = await readChange(cx.env, cx.repo.id, number);
+      if (!current) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+      if ((p.mergePolicy ?? current.merge_policy) === 'auto' && (p.state ?? current.state) === 'open') {
+        const denied = agentMergeDenial(cx.actor, current.base_ref, p.mergePolicy === 'auto' ? 'auto' : 'merge');
         if (denied) return denied;
       }
-      set('merge_policy', p.mergePolicy);
     }
+    if (p.mergePolicy !== undefined) set('merge_policy', p.mergePolicy);
     if (p.state !== undefined) set('state', p.state);
     set('updated_at', Date.now());
     const [, read] = await cx.env.DB.batch([
@@ -709,17 +723,40 @@ export const defaultMergeDeps: MergeDeps = {
 
 const RETRYABLE: ReadonlySet<MergeErrorCode | string> = new Set(['STALE_TARGET']);
 
+/** `explicit`: a merge call (review or auto policy). `auto`: the auto policy acting on its own. */
+type MergeMode = 'explicit' | 'auto';
+
+/** Why the change, as it is now, may not be merged at `headSha` (null: it may). */
+function mergeRefusal(row: ChangeRow | null, mode: MergeMode, headSha?: string): Fail | null {
+  if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+  if (row.state === 'merged') return fail(409, 'the change is already merged', 'ALREADY_MERGED');
+  if (row.state === 'closed') return fail(409, 'a closed change cannot be merged; reopen it first', 'CHANGE_CLOSED');
+  if (row.merge_policy === 'draft') {
+    return fail(409, 'the change is a draft (mergePolicy draft) and never merges; set mergePolicy to review or auto', 'DRAFT');
+  }
+  if (mode === 'auto' && (row.merge_policy !== 'auto' || row.state !== 'open')) {
+    return fail(409, 'the change no longer has mergePolicy auto', 'NOT_AUTO');
+  }
+  if (headSha !== undefined && row.head_sha !== headSha) {
+    return fail(409, "the change's head moved while the merge was prepared; merge again to merge the new head", 'HEAD_MOVED');
+  }
+  return null;
+}
+
 /**
  * Merges an open change's recorded head into its base branch: plan against
  * the base tip read fresh, check branch rules against the checks-gate answer
- * for the exact merge tree, publish one ref with the tip as expected old
- * value, then mark the change merged. A moved base re-plans once.
+ * for the exact merge tree, re-read the change (state, policy and head must
+ * still allow this merge), publish one ref with the tip as expected old
+ * value, then mark the change merged only while its head is still the
+ * published one and it is not a draft. A moved base re-plans once.
  */
 async function performMerge(
   cx: ChangeContext,
   row: ChangeRow,
   author: { name: string; email: string } | undefined,
   deps: MergeDeps,
+  mode: MergeMode,
 ): Promise<ServiceResult<MergeOutcome>> {
   if (!row.head_sha) return fail(409, 'the change has no head commit', 'NO_HEAD');
   const headSha = row.head_sha;
@@ -747,6 +784,8 @@ async function performMerge(
       const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null);
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
+      const changed = mergeRefusal(await readChange(cx.env, cx.repo.id, row.number), mode, headSha);
+      if (changed) return changed;
       const published = await publishMerge({ pusher, gate }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);
       let ok = published.ok;
       if (!published.ok && published.code === 'PUBLISH_UNKNOWN') {
@@ -761,13 +800,21 @@ async function performMerge(
       }
       const pv = prepared.value;
       const mergedAt = Date.now();
-      const [, read] = await cx.env.DB.batch([
+      const [update, read] = await cx.env.DB.batch([
         cx.env.DB.prepare(
           `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5
-            WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted')`,
-        ).bind(cx.repo.id, row.number, pv.mergeCommit, mergedAt, pv.targetSha),
+            WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft'`,
+        ).bind(cx.repo.id, row.number, pv.mergeCommit, mergedAt, pv.targetSha, headSha),
         changeSelect(cx.env.DB, cx.repo.id, row.number),
       ]);
+      if (!update?.meta.changes) {
+        console.warn(JSON.stringify({ mergeNotRecorded: { repo: cx.repo.id, number: row.number, mergeCommit: pv.mergeCommit, headSha } }));
+        return fail(
+          409,
+          `the change was updated while it merged (head, policy or state); ${targetRef} now points at ${pv.mergeCommit}, which merged head ${headSha}, and the change was not marked merged`,
+          'CHANGE_UPDATED_DURING_MERGE',
+        );
+      }
       const merged = (read?.results as ChangeRow[] | undefined)?.[0] ?? row;
       return {
         ok: true,
@@ -803,28 +850,29 @@ export function mergeChange(cx: ChangeContext, rawNumber: string, deps: MergeDep
   return guarded(async () => {
     const number = parseNumber(rawNumber);
     const row = number === null ? null : await readChange(cx.env, cx.repo.id, number);
-    if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
-    if (row.state === 'merged') return fail(409, 'the change is already merged', 'ALREADY_MERGED');
-    if (row.state === 'closed') return fail(409, 'a closed change cannot be merged; reopen it first', 'CHANGE_CLOSED');
-    if (row.merge_policy === 'draft') {
-      return fail(409, 'the change is a draft (mergePolicy draft) and never merges; set mergePolicy to review or auto', 'DRAFT');
-    }
+    const refused = mergeRefusal(row, 'explicit');
+    if (refused || !row) return refused ?? fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const denied = agentMergeDenial(cx.actor, row.base_ref, 'merge');
     if (denied) return denied;
-    return performMerge(cx, row, mergeAuthor(cx.actor), deps);
+    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit');
   });
 }
 
 /**
  * Merges an open `auto` change when it is mergeable now. Returns the merged
  * row, or null when it stays open (not mergeable yet, checks pending or
- * failed, conflicts); a refusal is logged, never an error for the caller.
+ * failed, conflicts, or a caller's agent token that may not update the
+ * base); a refusal is logged, never an error for the caller.
  */
 export async function autoMerge(cx: ChangeContext, row: ChangeRow, deps: MergeDeps = defaultMergeDeps): Promise<ChangeRow | null> {
   if (row.merge_policy !== 'auto' || row.state !== 'open') return null;
+  if (agentMergeDenial(cx.actor, row.base_ref, 'merge')) {
+    console.log(JSON.stringify({ autoMerge: { repo: cx.repo.id, number: row.number, ok: false, code: 'AGENT_REF_FORBIDDEN' } }));
+    return null;
+  }
   let r: ServiceResult<MergeOutcome>;
   try {
-    r = await guarded(() => performMerge(cx, row, undefined, deps));
+    r = await guarded(() => performMerge(cx, row, undefined, deps, 'auto'));
   } catch (err) {
     console.warn(JSON.stringify({ autoMerge: { repo: cx.repo.id, number: row.number, error: String(err).slice(0, 200) } }));
     return null;
@@ -874,33 +922,44 @@ async function repoWithRules(env: Env, repoId: string): Promise<{ repo: RepoRow;
   return { repo: row, rules: ((rules?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow) };
 }
 
+/** Open `auto` changes attempted per mergeReadyAutoChanges call. */
+export const AUTO_MERGE_PAGE = 20;
+
+export interface AutoMergePass {
+  merged: number[];
+  /** Pass as `after` to continue with the changes numbered above it; null when none remain. */
+  next: number | null;
+}
+
 /**
- * Attempts the merge of every open `auto` change in the repo, or only the
- * given numbers. The checks-gate producers call this when a check run
- * completes; push processing calls it when an `auto` change's head moves.
+ * Attempts the merge of the open `auto` changes in the repo, or only the
+ * given numbers, in number order and at most AUTO_MERGE_PAGE per call. The
+ * checks-gate producers call this when a check run completes; push
+ * processing calls it when an `auto` change's head moves.
  */
 export async function mergeReadyAutoChanges(
   env: Env,
   repoId: string,
   numbers: number[] | null,
   waitUntil: (p: Promise<unknown>) => void,
-  deps: MergeDeps = defaultMergeDeps,
-): Promise<number[]> {
+  opts: { after?: number; deps?: MergeDeps } = {},
+): Promise<AutoMergePass> {
   const ctxRows = await repoWithRules(env, repoId);
-  if (!ctxRows) return [];
-  const { results } = await env.DB.prepare(
-    `${CHANGE_SELECT} WHERE c.repo_id = ? AND c.state = 'open' AND c.merge_policy = 'auto' ORDER BY c.number LIMIT 20`,
-  )
-    .bind(repoId)
-    .all<ChangeRow>();
+  if (!ctxRows) return { merged: [], next: null };
+  const after = opts.after ?? 0;
+  const where = `c.repo_id = ?1 AND c.state = 'open' AND c.merge_policy = 'auto' AND c.number > ?2`;
+  const page = `ORDER BY c.number LIMIT ${AUTO_MERGE_PAGE}`;
+  const stmt = numbers
+    ? env.DB.prepare(`${CHANGE_SELECT} WHERE ${where} AND c.number IN (SELECT value FROM json_each(?3)) ${page}`).bind(repoId, after, JSON.stringify(numbers))
+    : env.DB.prepare(`${CHANGE_SELECT} WHERE ${where} ${page}`).bind(repoId, after);
+  const rows = (await stmt.all<ChangeRow>()).results ?? [];
   const merged: number[] = [];
   const cx: ChangeContext = { env, repo: ctxRows.repo, actor: null, branchRules: ctxRows.rules, waitUntil };
-  for (const row of results ?? []) {
-    if (numbers && !numbers.includes(row.number)) continue;
-    const done = await autoMerge(cx, row, deps);
+  for (const row of rows) {
+    const done = await autoMerge(cx, row, opts.deps);
     if (done?.state === 'merged') merged.push(row.number);
   }
-  return merged;
+  return { merged, next: rows.length === AUTO_MERGE_PAGE ? rows[rows.length - 1]!.number : null };
 }
 
 /**
@@ -922,7 +981,13 @@ export async function onHeadPushed(
     for (const hook of HEAD_MOVED_HOOKS) await hook({ env, repoId, change, headSha: after });
   }
   const auto = moved.filter((c) => c.policy === 'auto').map((c) => c.number);
-  const merged = auto.length > 0 ? await mergeReadyAutoChanges(env, repoId, auto, waitUntil) : [];
+  const merged: number[] = [];
+  // The moved changes are a finite set from the ingest batch; each pass is one bounded page of them.
+  for (let after: number | null = 0; auto.length > 0 && after !== null; ) {
+    const pass: AutoMergePass = await mergeReadyAutoChanges(env, repoId, auto, waitUntil, { after });
+    merged.push(...pass.merged);
+    after = pass.next;
+  }
   const parts = [`heads ${moved.map((c) => `#${c.number}`).join(',')}`];
   if (auto.length > 0) parts.push(`auto-merged ${merged.length ? merged.map((n) => `#${n}`).join(',') : 'none'}`);
   return { state: 'done', detail: parts.join('; ') };

@@ -47,6 +47,9 @@ export const MERGE_BUDGETS = {
   maxBlobBytes: 4 * 1024 * 1024,
   nodeBudget: 400_000,
   concurrency: 8,
+  /** Raw plus compressed bytes of the objects a merge creates, held until publication. */
+  maxMergedBytes: 16 * 1024 * 1024,
+  contentConcurrency: 1,
 };
 
 export type MergeBudgets = Partial<typeof MERGE_BUDGETS>;
@@ -236,6 +239,8 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
     maxBlobBytes: b.maxBlobBytes,
     nodeBudget: b.nodeBudget,
     concurrency: b.concurrency,
+    maxMergedBytes: b.maxMergedBytes,
+    contentConcurrency: b.contentConcurrency,
   });
   const mergeWork = { commitReads: commits.reads, treeReads: m.treeReads, blobReads: m.blobReads };
   if (m.truncated) return { ...unknown(m.truncatedReason ?? 'readError', { mergeBase: base }), work: mergeWork };

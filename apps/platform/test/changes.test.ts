@@ -12,6 +12,7 @@ import { decode } from '@forge/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
+import { mergeReadyAutoChanges } from '../src/services/changes';
 import {
   FakeRepo,
   commit,
@@ -381,6 +382,48 @@ describe('authorization', () => {
     expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
     expect((await get('agent', 1)).json.state).toBe('open');
   });
+
+  async function workspaceAgentToken(repo: string, name: string): Promise<string> {
+    const agent = await call('POST', '/api/v1/agents', tok.owner, { name });
+    expect(agent.status).toBe(201);
+    const minted = await call('POST', `/api/v1/agents/${agent.json.agent.id}/tokens`, tok.owner, {
+      repo: `${OWNER}/${repo}`,
+      role: 'write',
+      refs: ['refs/heads/agents/*'],
+    });
+    expect(minted.status).toBe(201);
+    return minted.json.token as string;
+  }
+
+  it('a workspace-scoped agent cannot publish to the base by reopening a closed auto change', async () => {
+    const repo = await seedRepo('agent-reopen');
+    const { main } = await linear(repo);
+    const t = await workspaceAgentToken('agent-reopen', 'cr-agent-reopen');
+    await create('agent-reopen', { title: 'x', base: 'main', head: 'feature' });
+    expect((await patch('agent-reopen', 1, { mergePolicy: 'auto', state: 'closed' })).json).toMatchObject({ state: 'closed', mergePolicy: 'auto' });
+
+    const reopened = await patch('agent-reopen', 1, { state: 'open' }, t);
+    expect([reopened.status, reopened.json.code]).toEqual([403, 'AGENT_REF_FORBIDDEN']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('agent-reopen', 1)).json).toMatchObject({ state: 'closed', mergePolicy: 'auto', mergeCommit: null });
+    expect(repo.count('receivePack:')).toBe(0);
+  });
+
+  it('no other agent edit of an open auto change publishes to a base the agent may not update', async () => {
+    const repo = await seedRepo('agent-implicit');
+    const { root, main } = await conflicting(repo);
+    const t = await workspaceAgentToken('agent-implicit', 'cr-agent-implicit');
+    expect((await create('agent-implicit', { title: 'x', base: 'main', head: 'feature', mergePolicy: 'auto' })).json.state).toBe('open');
+    // The base moves back so the change is mergeable, with no push to its head.
+    repo.refs.set('refs/heads/main', root.sha);
+
+    const edited = await patch('agent-implicit', 1, { title: 'renamed by agent' }, t);
+    expect(edited.status).toBe(200);
+    expect(edited.json).toMatchObject({ title: 'renamed by agent', state: 'open' });
+    expect(repo.refs.get('refs/heads/main')).toBe(root.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(main.sha).not.toBe(root.sha);
+  });
 });
 
 describe('detail: rating, mergeability, checks', () => {
@@ -467,6 +510,41 @@ describe('detail: rating, mergeability, checks', () => {
     expect(checks.json.checks).toHaveLength(100);
     expect(checks.cost.d1).toBeLessThanOrEqual(2);
     expect((await list('cost')).cost.d1).toBeLessThanOrEqual(2);
+  });
+
+  it('detail rows read stay bounded as check history grows (newest-check index)', async () => {
+    const repo = await seedRepo('cost-rows');
+    await linear(repo);
+    await create('cost-rows', { title: 'rows', base: 'main', head: 'feature' });
+    const change = (await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ?').bind(repoIds['cost-rows']).first<{ id: string; head_sha: string }>())!;
+    let n = 0;
+    const addRuns = async (count: number) => {
+      for (let done = 0; done < count; done += 250) {
+        await env.DB.batch(
+          Array.from({ length: Math.min(250, count - done) }, () => {
+            n++;
+            return env.DB.prepare(
+              `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, created_at)
+               VALUES (?, ?, ?, ?, ?, 'success', 'success', ?)`,
+            ).bind(crypto.randomUUID(), repoIds['cost-rows'], change.id, change.head_sha, `check-${n}`, 1_790_000_000_000 + n);
+          }),
+        );
+      }
+    };
+    await addRuns(150);
+    await get('cost-rows', 1);
+    const short = await get('cost-rows', 1);
+    const shortChecks = await call('GET', path('cost-rows', '/1/checks'), tok.owner);
+    await addRuns(1_500);
+    const long = await get('cost-rows', 1);
+    const longChecks = await call('GET', path('cost-rows', '/1/checks'), tok.owner);
+    expect(long.json.checks).toHaveLength(100);
+    expect(long.json.checks[0].name).toBe('check-1650');
+    expect(longChecks.json.checks[99].name).toBe('check-1551');
+    // Ten times the history reads the same rows: the newest 100 come straight off the index.
+    expect(long.cost.rr).toBe(short.cost.rr);
+    expect(longChecks.cost.rr).toBe(shortChecks.cost.rr);
+    expect(longChecks.cost.rr).toBeLessThan(150);
   });
 });
 
@@ -600,6 +678,92 @@ describe('merge', () => {
     expect(c.parents).toEqual([moved.sha, feature.sha]);
     expect(treeNames(repo, c.tree)).toEqual({ 'README.md': 'readme\n', 'a.txt': 'A\n', 'b.txt': 'B\n', 'c.txt': 'C\n' });
   });
+
+  /** Runs `fn` once, at the first fake Artifacts call that starts with `prefix`. */
+  function interleave(repo: FakeRepo, prefix: string, fn: () => Promise<void>) {
+    repo.hook = async (c) => {
+      if (!c.startsWith(prefix)) return;
+      repo.hook = null;
+      await fn();
+    };
+  }
+
+  it('a draft PATCH that lands while the merge is prepared stops publication', async () => {
+    const repo = await seedRepo('race-draft');
+    const { main } = await divergent(repo);
+    await create('race-draft', { title: 'x', base: 'main', head: 'feature' });
+    interleave(repo, 'lsRefs', async () => {
+      expect((await patch('race-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await merge('race-draft', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'DRAFT']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect((await get('race-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null });
+  });
+
+  it('a head refresh that lands while the merge is prepared stops publication of the old head', async () => {
+    const repo = await seedRepo('race-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    interleave(repo, 'lsRefs', async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await merge('race-head', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'HEAD_MOVED']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect((await get('race-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha });
+
+    const again = await merge('race-head', 1);
+    expect(again.json).toMatchObject({ state: 'merged', headSha: c2.sha });
+    expect(commitOf(repo, again.json.mergeCommit).parents).toEqual([main.sha, c2.sha]);
+  });
+
+  it('a head refresh during publication leaves the change open on its new head, not merged', async () => {
+    const repo = await seedRepo('race-publish-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-publish-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    interleave(repo, 'receivePack:', async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-publish-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await merge('race-publish-head', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'CHANGE_UPDATED_DURING_MERGE']);
+    // The old head was published; the change records neither it nor its new head as merged.
+    const published = repo.refs.get('refs/heads/main')!;
+    expect(commitOf(repo, published).parents).toEqual([main.sha, feature.sha]);
+    expect((await get('race-publish-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha, mergeCommit: null });
+  });
+
+  it('a draft PATCH during publication is never recorded as merged', async () => {
+    const repo = await seedRepo('race-publish-draft');
+    await divergent(repo);
+    await create('race-publish-draft', { title: 'x', base: 'main', head: 'feature' });
+    interleave(repo, 'receivePack:', async () => {
+      expect((await patch('race-publish-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await merge('race-publish-draft', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'CHANGE_UPDATED_DURING_MERGE']);
+    expect((await get('race-publish-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null, mergedAt: null });
+  });
+
+  it('an auto merge stops when the change leaves auto while it is prepared', async () => {
+    const repo = await seedRepo('race-auto');
+    const { main } = await divergent(repo);
+    await create('race-auto', { title: 'x', base: 'main', head: 'feature' });
+    // PATCH to auto triggers the merge; a second PATCH back to review lands during its preparation.
+    interleave(repo, 'lsRefs', async () => {
+      expect((await patch('race-auto', 1, { mergePolicy: 'review' })).status).toBe(200);
+    });
+    const r = await patch('race-auto', 1, { mergePolicy: 'auto' });
+    expect(r.status).toBe(200);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-auto', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'review', mergeCommit: null });
+  });
 });
 
 describe('head refresh on push', () => {
@@ -653,6 +817,99 @@ describe('head refresh on push', () => {
     expect((await get('refresh-auto', 1)).json).toMatchObject({ state: 'merged', headSha: resolved.sha, mergeCommit: resolved.sha });
     expect(repo.refs.get('refs/heads/main')).toBe(resolved.sha);
     expect(await effectDetail('refresh-auto', 'change-hooks')).toMatchObject({ state: 'done', detail: 'heads #1; auto-merged #1' });
+  });
+
+  it('a push that lands while the change is created and is delivered before the insert is adopted', async () => {
+    const repo = await seedRepo('race-create-before');
+    const { feature } = await linear(repo);
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.hook = async (c) => {
+      if (c !== 'lsRefs') return;
+      repo.hook = null;
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-create-before', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    };
+    const r = await create('race-create-before', { title: 'x', base: 'main', head: 'feature' });
+    expect(r.status).toBe(201);
+    expect(r.json.headSha).toBe(c2.sha);
+    expect((await get('race-create-before', 1)).json.headSha).toBe(c2.sha);
+  });
+
+  it('a push that lands while the change is created and is delivered after the insert refreshes the head', async () => {
+    const repo = await seedRepo('race-create-after');
+    const { feature } = await linear(repo);
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    let pushedAt = 0;
+    repo.hook = async (c) => {
+      if (c !== 'lsRefs') return;
+      repo.hook = null;
+      repo.refs.set('refs/heads/feature', c2.sha);
+      pushedAt = Date.now();
+    };
+    const r = await create('race-create-after', { title: 'x', base: 'main', head: 'feature' });
+    expect(r.json.headSha).toBe(feature.sha);
+    await deliver(pushBody('race-create-after', 'refs/heads/feature', feature.sha, c2.sha, pushedAt));
+    expect((await get('race-create-after', 1)).json.headSha).toBe(c2.sha);
+    // The push that put the observed head there, delivered late, still never rolls it back.
+    await deliver(pushBody('race-create-after', 'refs/heads/feature', '0'.repeat(40), feature.sha, pushedAt - 60_000));
+    expect((await get('race-create-after', 1)).json.headSha).toBe(c2.sha);
+  });
+
+  it('a change created after its head push was ingested keeps that push as its watermark', async () => {
+    const repo = await seedRepo('race-create-ingested');
+    const { feature } = await linear(repo);
+    const pushedAt = Date.now() - 30_000;
+    await deliver(pushBody('race-create-ingested', 'refs/heads/feature', '0'.repeat(40), feature.sha, pushedAt));
+    expect((await create('race-create-ingested', { title: 'x', base: 'main', head: 'feature' })).json.headSha).toBe(feature.sha);
+    const row = await env.DB.prepare('SELECT head_event_at FROM change_sets WHERE repo_id = ?').bind(repoIds['race-create-ingested']).first<{ head_event_at: number }>();
+    expect(row?.head_event_at).toBe(pushedAt);
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', c2.sha);
+    await deliver(pushBody('race-create-ingested', 'refs/heads/feature', feature.sha, c2.sha, pushedAt + 1));
+    expect((await get('race-create-ingested', 1)).json.headSha).toBe(c2.sha);
+  });
+});
+
+describe('auto-merge selection', () => {
+  /** Twenty older open auto changes (#1-#20) on their own branches, all conflicting with main. */
+  async function seedStuckAutoChanges(repo: string, headSha: string) {
+    await env.DB.batch(
+      Array.from({ length: 20 }, (_, i) =>
+        env.DB.prepare(
+          `INSERT INTO change_sets (id, repo_id, number, title, base_ref, head_ref, head_sha, state, merge_policy, kind, created_at, updated_at, head_event_at)
+           VALUES (?, ?, ?, ?, 'main', ?, ?, 'open', 'auto', 'change', ?, ?, ?)`,
+        ).bind(crypto.randomUUID(), repoIds[repo], i + 1, `stuck ${i + 1}`, `stuck-${i + 1}`, headSha, Date.now(), Date.now(), Date.now()),
+      ),
+    );
+  }
+
+  it('a push merges its ready auto change even behind twenty older unmergeable auto changes', async () => {
+    const repo = await seedRepo('auto-many');
+    const { main, feature } = await conflicting(repo);
+    await seedStuckAutoChanges('auto-many', feature.sha);
+    const created = await create('auto-many', { title: 'mine', base: 'main', head: 'feature', mergePolicy: 'auto' });
+    expect(created.json).toMatchObject({ number: 21, state: 'open' });
+
+    const resolved = await commit(repo, { 'README.md': 'resolved\n' }, [feature.sha, main.sha]);
+    repo.refs.set('refs/heads/feature', resolved.sha);
+    await deliver(pushBody('auto-many', 'refs/heads/feature', feature.sha, resolved.sha, Date.now() + 5_000));
+    expect((await get('auto-many', 21)).json).toMatchObject({ state: 'merged', mergeCommit: resolved.sha });
+    expect(await effectDetail('auto-many', 'change-hooks')).toMatchObject({ state: 'done', detail: 'heads #21; auto-merged #21' });
+    expect((await get('auto-many', 1)).json.state).toBe('open');
+  });
+
+  it('processing every auto change is bounded per call and reports where to continue', async () => {
+    const repo = await seedRepo('auto-all');
+    const { root, feature } = await conflicting(repo);
+    await seedStuckAutoChanges('auto-all', feature.sha);
+    await create('auto-all', { title: 'mine', base: 'main', head: 'feature', mergePolicy: 'auto' });
+    const r21 = await commit(repo, { 'README.md': 'one\n', 'mine.txt': 'mine\n' }, [root.sha]);
+    await env.DB.prepare('UPDATE change_sets SET head_sha = ? WHERE repo_id = ? AND number = 21').bind(r21.sha, repoIds['auto-all']).run();
+
+    const repoId = repoIds['auto-all']!;
+    const first = await mergeReadyAutoChanges(env, repoId, null, () => {});
+    expect(first).toEqual({ merged: [], next: 20 });
+    expect(await mergeReadyAutoChanges(env, repoId, null, () => {}, { after: first.next! })).toEqual({ merged: [21], next: null });
   });
 });
 
