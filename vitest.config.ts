@@ -28,6 +28,8 @@ export default defineConfig({
                 LIVE_GITWRITE_REMOTE: process.env.LIVE_GITWRITE_REMOTE ?? '',
                 LIVE_GITWRITE_NAME: process.env.LIVE_GITWRITE_NAME ?? '',
                 LIVE_GITWRITE_TOKEN: process.env.LIVE_GITWRITE_TOKEN ?? '',
+                // Selects the live merge publication check (apps/platform/test/mergeLive.test.ts).
+                LIVE_MERGE: process.env.LIVE_MERGE ?? '',
               },
             },
           })),

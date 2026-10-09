@@ -163,6 +163,29 @@ describe('diffTrees', () => {
     ]);
   });
 
+  it('with leavesOnly, splits tree/blob transitions into leaf removals and additions', async () => {
+    const { store, tree, file, dir, blobHash } = await makeStore();
+    const a = await blobHash('x');
+    const b = await blobHash('y');
+    const inner = await tree([file('inner.txt', a), dir('deep', await tree([file('z.txt', b)]))]);
+    const base = await tree([dir('thing', inner), file('other', b)]);
+    const head = await tree([file('thing', a), dir('other', await tree([file('o.txt', b)]))]);
+    const res = await diffTrees(store, base, head, { leavesOnly: true, detectRenames: false });
+    expect(res.changes).toEqual([
+      { path: 'other', status: 'removed', oldMode: '100644', newMode: null, oldHash: b, newHash: null },
+      { path: 'other/o.txt', status: 'added', oldMode: null, newMode: '100644', oldHash: null, newHash: b },
+      { path: 'thing', status: 'added', oldMode: null, newMode: '100644', oldHash: null, newHash: a },
+      { path: 'thing/deep/z.txt', status: 'removed', oldMode: '100644', newMode: null, oldHash: b, newHash: null },
+      { path: 'thing/inner.txt', status: 'removed', oldMode: '100644', newMode: null, oldHash: a, newHash: null },
+    ]);
+    // The expanded leaves take part in exact rename pairing.
+    const paired = await diffTrees(store, base, head, { leavesOnly: true });
+    expect(paired.changes.filter((c) => c.status === 'renamed').map((c) => `${c.oldPath}->${c.path}`)).toEqual([
+      'other->other/o.txt',
+      'thing/inner.txt->thing',
+    ]);
+  });
+
   it('truncates on the change budget and reports it', async () => {
     const { store, tree, file, blobHash } = await makeStore();
     const a = await blobHash('a');

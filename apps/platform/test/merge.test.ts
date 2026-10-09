@@ -1,0 +1,388 @@
+/**
+ * Merge service (architecture §4 services/merge.ts, invariant 5, §0.3):
+ * mergeability over commits and trees, fast-forward and three-way merge
+ * commits, the checks-gate as the only source of required checks, and
+ * publication of exactly one ref through GitPusher where only a confirmed
+ * `ok` counts.
+ */
+
+import { env as cfEnv } from 'cloudflare:workers';
+import { describe, expect, it } from 'vitest';
+import {
+  BlobTooLargeError,
+  concat,
+  decode,
+  encode,
+  pktLine,
+  ZERO_OID,
+  type FetchLike,
+  type GitObject,
+  type PackInput,
+  type RefCommand,
+  type RefUpdateResult,
+} from '@forge/gitops';
+import { internalKey, writeCachedJson } from '../src/cache/internal';
+import { withLazyRepo, type LazyRepo } from '../src/artifacts/repo';
+import type { RepoRow } from '../src/db/repos';
+import { checksGate, type ChecksProducer, type RequiredCheck } from '../src/services/checksGate';
+import { artifactsPusher, type GitPusher } from '../src/services/gitwrite';
+import {
+  FORGE_COMMITTER,
+  artifactsMergeSources,
+  computeMergeability,
+  prepareMerge,
+  publishMerge,
+  type MergeAttributionHook,
+} from '../src/services/merge';
+import { MemGit as Store } from './helpers/memGit';
+import { FakeRepo, commit as fakeCommit, fakeArtifacts, fakeRepos, writeTree as fakeWriteTree } from './helpers/fakeArtifacts';
+
+const baseEnv = cfEnv as unknown as Env;
+const REPO = { id: 'repo-merge-test' };
+
+/** A one-ref CAS remote over a Store: objects land only on a confirmed update. */
+class FakePusher implements GitPusher {
+  readonly refs = new Map<string, string>();
+  readonly calls: Array<{ command: RefCommand; objects: readonly PackInput[] }> = [];
+
+  constructor(private readonly store: Store) {}
+
+  async listRefs() {
+    return new Map(this.refs);
+  }
+
+  async updateRef(command: RefCommand, objects: readonly PackInput[] = []): Promise<RefUpdateResult> {
+    this.calls.push({ command, objects });
+    if ((this.refs.get(command.ref) ?? ZERO_OID) !== command.oldOid) return { status: 'stale', reason: 'stale ref', httpStatus: 200 };
+    for (const o of objects) this.store.add(o as GitObject);
+    this.refs.set(command.ref, command.newOid);
+    return { status: 'ok', httpStatus: 200 };
+  }
+}
+
+function producer(checks: Array<Omit<RequiredCheck, 'producer'>>, seen: unknown[] = []): ChecksProducer {
+  return {
+    name: 'fake-ci',
+    async requiredChecksFor(repo, treeSha, configId) {
+      seen.push({ repo: repo.id, treeSha, configId });
+      return checks;
+    },
+  };
+}
+
+/** main: README + src/a.txt; feature edits a.txt; main moves on with README. */
+async function divergent(store: Store) {
+  const base = await store.commit([], { 'README.md': 'hello\n', 'src/a.txt': 'a1\na2\na3\n' });
+  const head = await store.commit([base], { 'README.md': 'hello\n', 'src/a.txt': 'a1\nA2\na3\n' }, 'feature');
+  const main = await store.commit([base], { 'README.md': 'hello world\n', 'src/a.txt': 'a1\na2\na3\n' }, 'main moves');
+  const mergedTree = await new Store().tree({ 'README.md': 'hello world\n', 'src/a.txt': 'a1\nA2\na3\n' });
+  return { base, head, main, mergedTree };
+}
+
+describe('checksGate', () => {
+  it('with no producers the required set is empty and its state is success', async () => {
+    const gate = checksGate([]);
+    expect(await gate.requiredChecksFor(REPO, 'a'.repeat(40), null)).toEqual({
+      treeSha: 'a'.repeat(40),
+      configId: null,
+      required: [],
+      state: 'success',
+    });
+  });
+
+  it('rolls producer checks up: any failure fails, else any pending is pending', async () => {
+    const seen: unknown[] = [];
+    const gate = checksGate([
+      producer([{ name: 'unit', state: 'success' }], seen),
+      producer([
+        { name: 'lint', state: 'pending' },
+        { name: 'e2e', state: 'failure' },
+      ]),
+    ]);
+    const r = await gate.requiredChecksFor(REPO, 'b'.repeat(40), 'cfg-1');
+    expect(r.state).toBe('failure');
+    expect(r.required.map((c) => `${c.producer}:${c.name}:${c.state}`)).toEqual(['fake-ci:unit:success', 'fake-ci:lint:pending', 'fake-ci:e2e:failure']);
+    expect(seen).toEqual([{ repo: REPO.id, treeSha: 'b'.repeat(40), configId: 'cfg-1' }]);
+    expect((await checksGate([producer([{ name: 'lint', state: 'pending' }])]).requiredChecksFor(REPO, 'c'.repeat(40), null)).state).toBe('pending');
+  });
+});
+
+describe('computeMergeability', () => {
+  it('fast-forward when the target is an ancestor of the head; checks are asked about the head tree', async () => {
+    const store = new Store();
+    const base = await store.commit([], { 'README.md': 'v1\n' });
+    const head = await store.commit([base], { 'README.md': 'v2\n' });
+    const seen: unknown[] = [];
+    const m = await computeMergeability(store, checksGate([producer([], seen)]), { repo: REPO, targetSha: base, headSha: head, configId: 'cfg' });
+    const headTree = (await store.readCommit(head))!.treeHash;
+    expect(m).toMatchObject({
+      status: 'fast-forward',
+      fastForward: true,
+      mergeBase: base,
+      treeSha: headTree,
+      conflicts: [],
+      mergeable: true,
+      checks: { treeSha: headTree, configId: 'cfg', required: [], state: 'success' },
+    });
+    expect(seen).toEqual([{ repo: REPO.id, treeSha: headTree, configId: 'cfg' }]);
+  });
+
+  it('clean three-way merge reports the merged tree it would publish', async () => {
+    const store = new Store();
+    const { head, main, base, mergedTree } = await divergent(store);
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({ status: 'clean', fastForward: false, mergeBase: base, treeSha: mergedTree, mergeable: true });
+    expect(m.checks).toMatchObject({ treeSha: mergedTree, required: [], state: 'success' });
+    expect(m.work.commitReads).toBeGreaterThan(0);
+    expect(m.work.blobReads).toBe(0);
+  });
+
+  it('conflicts are listed and not mergeable; no checks are asked for a tree that does not exist', async () => {
+    const store = new Store();
+    const base = await store.commit([], { 'a.txt': 'one\n' });
+    const head = await store.commit([base], { 'a.txt': 'two\n' });
+    const main = await store.commit([base], { 'a.txt': 'three\n' });
+    const seen: unknown[] = [];
+    const m = await computeMergeability(store, checksGate([producer([], seen)]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({ status: 'conflicts', mergeable: false, treeSha: null, checks: null });
+    expect(m.conflicts).toMatchObject([{ path: 'a.txt', kind: 'content', hunks: 1 }]);
+    expect(seen).toEqual([]);
+  });
+
+  it('up-to-date, unrelated and unreadable histories are not mergeable', async () => {
+    const store = new Store();
+    const base = await store.commit([], { 'a.txt': '1\n' });
+    const main = await store.commit([base], { 'a.txt': '2\n' });
+    const other = await store.commit([], { 'b.txt': '1\n' });
+    const gate = checksGate([]);
+    expect(await computeMergeability(store, gate, { repo: REPO, targetSha: main, headSha: base })).toMatchObject({ status: 'up-to-date', mergeable: false });
+    expect(await computeMergeability(store, gate, { repo: REPO, targetSha: main, headSha: other })).toMatchObject({ status: 'unrelated', mergeable: false });
+    expect(await computeMergeability(store, gate, { repo: REPO, targetSha: main, headSha: 'f'.repeat(40) })).toMatchObject({
+      status: 'unknown',
+      unknownReason: 'missingCommit',
+      mergeable: false,
+    });
+  });
+
+  it('a failing or pending required check makes a clean merge not mergeable; the state is reported', async () => {
+    const store = new Store();
+    const { head, main } = await divergent(store);
+    const failing = await computeMergeability(store, checksGate([producer([{ name: 'ci', state: 'failure' }])]), { repo: REPO, targetSha: main, headSha: head });
+    expect(failing).toMatchObject({ status: 'clean', mergeable: false, checks: { state: 'failure' } });
+    const pending = await computeMergeability(store, checksGate([producer([{ name: 'ci', state: 'pending' }])]), { repo: REPO, targetSha: main, headSha: head });
+    expect(pending).toMatchObject({ status: 'clean', mergeable: false, checks: { state: 'pending' } });
+  });
+});
+
+describe('artifactsMergeSources', () => {
+  function sources(handle: Partial<ArtifactsRepo>, maxBlobBytes?: number) {
+    const ctx = {
+      env: baseEnv,
+      repo: { id: crypto.randomUUID() } as RepoRow,
+      artifacts: { get: async () => handle as ArtifactsRepo } as unknown as LazyRepo,
+      bypass: true,
+      waitUntil: () => {},
+    };
+    return artifactsMergeSources(ctx, maxBlobBytes);
+  }
+
+  it('normalizes tree modes to git canonical form and maps invalid objects to null', async () => {
+    const s = sources({
+      readTree: (async (hash: string) => {
+        if (hash === 'bad') throw Object.assign(new Error('no such tree'), { code: 'NOT_FOUND' });
+        return [
+          { mode: '040000', name: 'src', hash: 'a'.repeat(40), type: 'tree' },
+          { mode: '100755', name: 'run.sh', hash: 'b'.repeat(40), type: 'blob' },
+        ];
+      }) as unknown as ArtifactsRepo['readTree'],
+    });
+    expect(await s.readTree('t'.repeat(40))).toEqual([
+      { mode: '40000', name: 'src', hash: 'a'.repeat(40) },
+      { mode: '100755', name: 'run.sh', hash: 'b'.repeat(40) },
+    ]);
+    expect(await s.readTree('bad')).toBeNull();
+    expect(await s.readTree('4b825dc642cb6eb9a060e54bf8d69288fbee4904')).toEqual([]);
+  });
+
+  it('refuses blobs over the byte budget by size, and on MEMORY_LIMIT', async () => {
+    const s = sources(
+      {
+        readBlob: (async (hash: string) => {
+          if (hash === 'huge') throw Object.assign(new Error('too big'), { code: 'MEMORY_LIMIT' });
+          if (hash === 'gone') return null;
+          return new Blob([hash === 'big' ? 'x'.repeat(9) : 'small']);
+        }) as unknown as ArtifactsRepo['readBlob'],
+      },
+      8,
+    );
+    expect(decode((await s.readBlob('ok'))!)).toBe('small');
+    expect(await s.readBlob('gone')).toBeNull();
+    await expect(s.readBlob('big')).rejects.toBeInstanceOf(BlobTooLargeError);
+    await expect(s.readBlob('huge')).rejects.toBeInstanceOf(BlobTooLargeError);
+  });
+
+  it('prepares a three-way merge over the Artifacts binding with bounded reads', async () => {
+    const name = `merge-owner--fake-${crypto.randomUUID().slice(0, 8)}`;
+    const fake = new FakeRepo();
+    fakeRepos.set(name, fake);
+    const files = { 'README.md': 'hello\n', 'src/a.txt': 'a1\na2\na3\na4\na5\n', 'docs/x.md': 'x\n' };
+    const base = await fakeCommit(fake, files);
+    const head = await fakeCommit(fake, { ...files, 'src/a.txt': 'a1\nA2\na3\na4\na5\n' }, [base.sha]);
+    const main = await fakeCommit(fake, { ...files, 'README.md': 'bye\n', 'src/a.txt': 'a1\na2\na3\na4\nA5\n' }, [base.sha]);
+    const env = { ...baseEnv, ARTIFACTS: fakeArtifacts } as Env;
+    const repo = { id: crypto.randomUUID(), artifacts_name: name } as RepoRow;
+
+    const prepared = await withLazyRepo(env, name, (artifacts) =>
+      prepareMerge(artifactsMergeSources({ env, repo, artifacts, bypass: true, waitUntil: () => {} }), {
+        targetSha: main.sha,
+        headSha: head.sha,
+        message: 'm',
+      }),
+    );
+    const expectedTree = await fakeWriteTree(new FakeRepo(), { ...files, 'README.md': 'bye\n', 'src/a.txt': 'a1\nA2\na3\na4\nA5\n' });
+    expect(prepared).toMatchObject({ ok: true, value: { kind: 'merge', treeSha: expectedTree, mergeBase: base.sha } });
+    // 3 commits; the 3 roots and 3 src/ trees, each read once (docs/ is never opened); 3 blobs for the one content merge.
+    expect(fake.count('readCommit')).toBe(3);
+    expect(fake.count('readTree')).toBe(6);
+    expect(fake.count('readBlob')).toBe(3);
+    expect(prepared.ok && prepared.value.work).toMatchObject({ commitReads: 3, blobReads: 3 });
+    fakeRepos.delete(name);
+  });
+});
+
+describe('prepareMerge + publishMerge', () => {
+  const target = { repo: REPO, ref: 'refs/heads/main' };
+
+  it('fast-forward moves the ref to the head with no objects; mergeCommit is the head sha', async () => {
+    const store = new Store();
+    const base = await store.commit([], { 'README.md': 'v1\n' });
+    const head = await store.commit([base], { 'README.md': 'v2\n' });
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', base);
+    const hooked: unknown[] = [];
+    const hook: MergeAttributionHook = async (m) => void hooked.push(m);
+
+    const prepared = await prepareMerge(store, { targetSha: base, headSha: head, message: 'Merge change 1' });
+    expect(prepared).toMatchObject({ ok: true, value: { kind: 'fast-forward', mergeCommit: head, targetSha: base, headSha: head, objects: [] } });
+    if (!prepared.ok) return;
+    const r = await publishMerge({ pusher, gate: checksGate([]), attribution: hook }, target, prepared.value);
+    expect(r).toEqual({ ok: true, value: { kind: 'fast-forward', ref: 'refs/heads/main', mergeCommit: head, treeSha: prepared.value.treeSha, previous: base } });
+    expect(pusher.calls).toEqual([{ command: { ref: 'refs/heads/main', oldOid: base, newOid: head }, objects: [] }]);
+    expect(pusher.refs.get('refs/heads/main')).toBe(head);
+    expect(hooked).toEqual([{ repo: REPO, ref: 'refs/heads/main', kind: 'fast-forward', mergeCommit: head, targetSha: base, headSha: head }]);
+  });
+
+  it('three-way merge publishes a two-parent commit by the Forge committer with the objects it needs', async () => {
+    const store = new Store();
+    const { head, main, mergedTree } = await divergent(store);
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', main);
+    const author = { name: 'Cynthia', email: 'cynthia@example.test' };
+
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'Merge change 2: feature', author, now: 1_790_100_000 });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.value).toMatchObject({ kind: 'merge', treeSha: mergedTree, targetSha: main, headSha: head });
+    const commitObj = prepared.value.objects.find((o) => o.hash === prepared.value.mergeCommit)!;
+    const text = decode(commitObj.raw.subarray(commitObj.raw.indexOf(0) + 1));
+    expect(text).toBe(
+      `tree ${mergedTree}\nparent ${main}\nparent ${head}\n` +
+        `author Cynthia <cynthia@example.test> 1790100000 +0000\n` +
+        `committer ${FORGE_COMMITTER.name} <${FORGE_COMMITTER.email}> 1790100000 +0000\n\nMerge change 2: feature\n`,
+    );
+
+    const r = await publishMerge({ pusher, gate: checksGate([]) }, target, prepared.value);
+    expect(r).toMatchObject({ ok: true, value: { kind: 'merge', mergeCommit: prepared.value.mergeCommit, treeSha: mergedTree, previous: main } });
+    expect(pusher.calls).toHaveLength(1);
+    expect(pusher.calls[0]!.command).toEqual({ ref: 'refs/heads/main', oldOid: main, newOid: prepared.value.mergeCommit });
+    // The pushed objects (merge commit, merged blob, rebuilt trees) plus what the remote had close the graph.
+    expect(await store.readCommit(prepared.value.mergeCommit)).toEqual({ treeHash: mergedTree, parents: [main, head] });
+    const root = (await store.readTree(mergedTree))!;
+    const src = (await store.readTree(root.find((e) => e.name === 'src')!.hash))!;
+    expect(decode((await store.readBlob(src.find((e) => e.name === 'a.txt')!.hash))!)).toBe('a1\nA2\na3\n');
+  });
+
+  it('conflicts and up-to-date heads are refused at prepare time with a code', async () => {
+    const store = new Store();
+    const base = await store.commit([], { 'a.txt': 'one\n' });
+    const head = await store.commit([base], { 'a.txt': 'two\n' });
+    const main = await store.commit([base], { 'a.txt': 'three\n' });
+    const conflict = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    expect(conflict).toMatchObject({ ok: false, status: 409, code: 'MERGE_CONFLICT', conflicts: [{ path: 'a.txt', kind: 'content' }] });
+    expect(await prepareMerge(store, { targetSha: main, headSha: base, message: 'm' })).toMatchObject({ ok: false, status: 409, code: 'UP_TO_DATE' });
+    expect(await prepareMerge(store, { targetSha: main, headSha: 'e'.repeat(40), message: 'm' })).toMatchObject({ ok: false, status: 503, code: 'MERGE_READ_FAILED' });
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxCommitReads: 1 } })).toMatchObject({
+      ok: false,
+      status: 422,
+      code: 'MERGE_TOO_LARGE',
+    });
+  });
+
+  it('failing or pending required checks on the prepared tree block publication; nothing is pushed', async () => {
+    const store = new Store();
+    const { head, main } = await divergent(store);
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', main);
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    if (!prepared.ok) throw new Error('prepare failed');
+    const seen: unknown[] = [];
+    const failing = await publishMerge({ pusher, gate: checksGate([producer([{ name: 'ci', state: 'failure' }], seen)]) }, { ...target, configId: 'cfg-9' }, prepared.value);
+    expect(failing).toMatchObject({ ok: false, status: 409, code: 'REQUIRED_CHECKS_FAILED', checks: { state: 'failure' } });
+    expect(seen).toEqual([{ repo: REPO.id, treeSha: prepared.value.treeSha, configId: 'cfg-9' }]);
+    const pending = await publishMerge({ pusher, gate: checksGate([producer([{ name: 'ci', state: 'pending' }])]) }, target, prepared.value);
+    expect(pending).toMatchObject({ ok: false, status: 409, code: 'REQUIRED_CHECKS_PENDING' });
+    expect(pusher.calls).toEqual([]);
+    expect(pusher.refs.get('refs/heads/main')).toBe(main);
+  });
+
+  it('a target that moved since prepare is a stale outcome (re-plan), and the hook does not run', async () => {
+    const store = new Store();
+    const { head, main } = await divergent(store);
+    const pusher = new FakePusher(store);
+    const moved = await store.commit([main], { 'README.md': 'moved\n', 'src/a.txt': 'a1\na2\na3\n' });
+    pusher.refs.set('refs/heads/main', moved);
+    const hooked: unknown[] = [];
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    if (!prepared.ok) throw new Error('prepare failed');
+    const r = await publishMerge({ pusher, gate: checksGate([]), attribution: async (m) => void hooked.push(m) }, target, prepared.value);
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'STALE_TARGET' });
+    expect(pusher.refs.get('refs/heads/main')).toBe(moved);
+    expect(hooked).toEqual([]);
+  });
+
+  it('report-status ng on HTTP 200 through the real GitPusher is a failure, not a merge', async () => {
+    const store = new Store();
+    const { head, main } = await divergent(store);
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    if (!prepared.ok) throw new Error('prepare failed');
+    const repo = { id: crypto.randomUUID(), artifacts_name: 'merge-owner--ng', artifacts_remote: 'https://artifacts.invalid/git/default/merge-owner--ng.git' };
+    await writeCachedJson(internalKey('gittoken', repo.artifacts_name, 'write'), { token: 'w', expiresAt: Date.now() + 86_400_000 }, 86_400);
+    const fetch: FetchLike = async () =>
+      new Response(concat(pktLine('unpack ok\n'), pktLine('ng refs/heads/main pre-receive hook declined\n'), encode('0000')), { status: 200 });
+    const pusher = artifactsPusher(baseEnv, repo as Pick<RepoRow, 'id' | 'artifacts_name' | 'artifacts_remote'>, { fetch });
+    const r = await publishMerge({ pusher, gate: checksGate([]) }, target, prepared.value);
+    expect(r).toMatchObject({ ok: false, status: 502, code: 'PUBLISH_REJECTED', error: expect.stringContaining('pre-receive hook declined') });
+  });
+
+  it('an attribution hook failure does not undo or fail a published merge', async () => {
+    const store = new Store();
+    const { head, main } = await divergent(store);
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', main);
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    if (!prepared.ok) throw new Error('prepare failed');
+    const r = await publishMerge(
+      {
+        pusher,
+        gate: checksGate([]),
+        attribution: async () => {
+          throw new Error('notes unavailable');
+        },
+      },
+      target,
+      prepared.value,
+    );
+    expect(r.ok).toBe(true);
+    expect(pusher.refs.get('refs/heads/main')).toBe(prepared.value.mergeCommit);
+  });
+});

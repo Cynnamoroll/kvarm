@@ -7,6 +7,7 @@ declare global {
       LIVE_GITWRITE_REMOTE: string;
       LIVE_GITWRITE_NAME: string;
       LIVE_GITWRITE_TOKEN: string;
+      LIVE_MERGE: string;
     }
   }
 }

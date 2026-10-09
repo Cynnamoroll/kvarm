@@ -21,6 +21,7 @@ export * from './tar';
 export * from './pack';
 export * from './receivePack';
 export * from './mergebase';
+export * from './merge3';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

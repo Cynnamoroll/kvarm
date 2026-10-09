@@ -41,6 +41,12 @@ export interface TreeDiffOptions {
   concurrency?: number;
   /** Pair exact renames by blob hash (default true). */
   detectRenames?: boolean;
+  /**
+   * Report a directory that became a file (or the reverse) as the removed
+   * and added leaves on each side instead of one `typechange` (default
+   * false). Every change is then a leaf, which is what a merge needs.
+   */
+  leavesOnly?: boolean;
 }
 
 export type TreeDiffTruncation = 'maxTreeReads' | 'maxChanges' | 'readError';
@@ -109,6 +115,7 @@ class TreeDiffWalk {
   private readonly maxTreeReads: number;
   private readonly maxChanges: number;
   private readonly slots: Slots;
+  private readonly leavesOnly: boolean;
   private treeReads = 0;
   private stopped = false;
   private reason: TreeDiffTruncation | undefined;
@@ -121,6 +128,7 @@ class TreeDiffWalk {
     this.maxTreeReads = opts.maxTreeReads ?? DEFAULT_MAX_TREE_READS;
     this.maxChanges = opts.maxChanges ?? DEFAULT_MAX_CHANGES;
     this.slots = new Slots(Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY));
+    this.leavesOnly = opts.leavesOnly === true;
   }
 
   async run(baseTreeHash: string, headTreeHash: string, detectRenames: boolean): Promise<TreeDiffResult> {
@@ -203,6 +211,14 @@ class TreeDiffWalk {
           subtasks.push(() => this.walk(b.hash, h.hash, `${path}/`));
         } else if (!isTreeMode(b.mode) && !isTreeMode(h.mode)) {
           this.emit({ path, status: 'modified', oldMode: b.mode, newMode: h.mode, oldHash: b.hash, newHash: h.hash });
+        } else if (this.leavesOnly) {
+          if (isTreeMode(b.mode)) {
+            subtasks.push(() => this.collectSide(b.hash, `${path}/`, 'removed'));
+            this.emit({ path, status: 'added', oldMode: null, newMode: h.mode, oldHash: null, newHash: h.hash });
+          } else {
+            this.emit({ path, status: 'removed', oldMode: b.mode, newMode: null, oldHash: b.hash, newHash: null });
+            subtasks.push(() => this.collectSide(h.hash, `${path}/`, 'added'));
+          }
         } else {
           // Directory became a file (or vice versa).
           this.emit({ path, status: 'typechange', oldMode: b.mode, newMode: h.mode, oldHash: b.hash, newHash: h.hash });
