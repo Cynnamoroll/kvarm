@@ -24,6 +24,7 @@ export * from './mergebase';
 export * from './merge3';
 export * from './compose';
 export * from './notes';
+export * from './resolve';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

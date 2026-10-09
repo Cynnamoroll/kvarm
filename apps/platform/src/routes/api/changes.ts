@@ -15,6 +15,7 @@
  *   POST  changes/:number/enqueue       {headSha?, mergePolicy?, attribution?} → 201 new | 200 already queued
  *   DELETE changes/:number/enqueue
  *   GET   queue?limit=&cursor=&base=
+ *   GET   tasks?status=&kind=&limit=&cursor=   agent tasks (resolve-conflict)
  */
 
 import { Hono, type Context } from 'hono';
@@ -22,6 +23,7 @@ import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
 import * as svc from '../../services/changes';
 import * as queue from '../../services/queue';
+import * as tasks from '../../services/tasks';
 
 export const changesApi = new Hono<App>();
 
@@ -128,6 +130,19 @@ changesApi.get('/repos/:owner/:repo/queue', async (c) => {
   const rd = await readContext(c);
   if ('denied' in rd) return rd.denied;
   const r = await queue.listQueue(c.env, rd.cx.repo, { limit: c.req.query('limit'), cursor: c.req.query('cursor'), base: c.req.query('base') });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+changesApi.get('/repos/:owner/:repo/tasks', async (c) => {
+  const rd = await readContext(c);
+  if ('denied' in rd) return rd.denied;
+  const r = await tasks.listTasks(c.env, rd.cx.repo, {
+    status: c.req.query('status'),
+    kind: c.req.query('kind'),
+    limit: c.req.query('limit'),
+    cursor: c.req.query('cursor'),
+  });
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

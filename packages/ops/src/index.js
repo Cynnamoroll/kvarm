@@ -498,6 +498,24 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, query('base', 'string', 'Only this target branch'), LIMIT(100), CURSOR],
   }),
 
+  // --- tasks: work Forge dispatches to agents --------------------------------
+  define({
+    name: 'list_tasks',
+    command: ['task', 'list'],
+    family: 'tasks',
+    description:
+      'Agent tasks of a repository, newest first: resolve-conflict tasks name the conflicted change, its head and base commits and the conflicting paths (lockfiles marked needsRegeneration).',
+    method: 'GET',
+    path: '/repos/{repo}/tasks',
+    params: [
+      REPO,
+      query('status', 'string', 'Task status (default open)', { enum: ['open', 'claimed', 'completed', 'obsolete', 'all'] }),
+      query('kind', 'string', 'Only tasks of this kind, e.g. resolve-conflict'),
+      LIMIT(100),
+      CURSOR,
+    ],
+  }),
+
   // --- nexus: intents, forecast, overlap ------------------------------------
   define({
     name: 'get_intent',

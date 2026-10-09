@@ -131,7 +131,7 @@ export interface Ingested {
   /** True when a newer event of the same ref already holds the ref position. */
   superseded: boolean;
   done: Set<string>;
-  /** Open change requests whose head is the pushed branch, after the head refresh. */
+  /** Live (open or conflicted) change requests whose head is the pushed branch, after the head refresh. */
   changes: ChangeOnRef[];
   /** Event time as first persisted (orders reconciliations of one ref). */
   eventAt: number;
@@ -214,9 +214,9 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
       .prepare(
         `SELECT r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,
            (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done,
-           (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'policy', c.merge_policy, 'headSha', c.head_sha,
+           (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'state', c.state, 'policy', c.merge_policy, 'headSha', c.head_sha,
                      'queuedHead', (SELECT q.head_sha FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)))
-              FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state = 'open') AS changes,
+              FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state IN ('open', 'conflicted')) AS changes,
            (SELECT json_object('id', w.id, 'status', w.status, 'baseSha', w.base_sha)
               FROM workspaces w WHERE w.repo_id = r.id AND w.ref = ?5) AS workspace
          FROM repos r
@@ -251,7 +251,7 @@ export interface EffectContext {
   repoId: string;
   defaultBranch: string;
   superseded: boolean;
-  /** Open change requests whose head is the pushed branch (from the ingest batch). */
+  /** Live (open or conflicted) change requests whose head is the pushed branch (from the ingest batch). */
   changes: ChangeOnRef[];
   eventAt: number;
   workspace: PushedWorkspace | null;

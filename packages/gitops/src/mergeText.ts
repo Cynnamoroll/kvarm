@@ -38,12 +38,22 @@ export interface MergeTextOptions {
    * (`git merge-file`'s level). Merges (`merge-tree`, `merge`) leave this off.
    */
   simplifyNonAlnum?: boolean;
+  /**
+   * Called for each conflicting hunk with its records on both sides (lines
+   * as byte strings, one char per byte, `\n` included). Returning a side
+   * takes that side's lines for the hunk; null keeps the conflict. Hunks are
+   * offered before nearby conflicts are joined, so one resolvable hunk next
+   * to a real conflict is decided on its own lines.
+   */
+  resolveHunk?: (ours: readonly string[], theirs: readonly string[]) => 'ours' | 'theirs' | null;
 }
 
 export interface MergeTextResult {
   clean: boolean;
   /** Conflict hunks in `merged`. */
   conflicts: number;
+  /** Conflicting hunks `resolveHunk` decided (0 without a resolver). */
+  resolved: number;
   /** The merged bytes; conflict hunks carry git-style markers. */
   merged: Uint8Array;
 }
@@ -411,10 +421,21 @@ export function mergeText(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array
   if (!s1) return null;
   const s2 = diffScript(b, t, budget);
   if (!s2) return null;
-  if (s1.length === 0) return { clean: true, conflicts: 0, merged: theirs.slice() };
-  if (s2.length === 0) return { clean: true, conflicts: 0, merged: ours.slice() };
+  if (s1.length === 0) return { clean: true, conflicts: 0, resolved: 0, merged: theirs.slice() };
+  if (s2.length === 0) return { clean: true, conflicts: 0, resolved: 0, merged: ours.slice() };
 
-  const list = simplify(refine(regions(o, t, b.length, s1, s2), o, t, budget), o, opts.simplifyNonAlnum === true);
+  let resolved = 0;
+  const refined = refine(regions(o, t, b.length, s1, s2), o, t, budget);
+  if (opts.resolveHunk) {
+    for (const m of refined) {
+      if (m.mode !== 0) continue;
+      const side = opts.resolveHunk(o.slice(m.i1, m.i1 + m.chg1), t.slice(m.i2, m.i2 + m.chg2));
+      if (side === null) continue;
+      m.mode = side === 'ours' ? 1 : 2;
+      resolved++;
+    }
+  }
+  const list = simplify(refined, o, opts.simplifyNonAlnum === true);
 
   const marker = opts.markerSize ?? DEFAULT_MARKER_SIZE;
   const label = (ch: string, name: string | undefined) => ch.repeat(marker) + (name ? ` ${name}` : '');
@@ -442,5 +463,5 @@ export function mergeText(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array
     i = m.i1 + m.chg1;
   }
   copyRecords(out, o, i, o.length - i, false, false);
-  return { clean: conflicts === 0, conflicts, merged: stringBytes(out.join('')) };
+  return { clean: conflicts === 0, conflicts, resolved, merged: stringBytes(out.join('')) };
 }

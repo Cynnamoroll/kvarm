@@ -14,21 +14,31 @@
  *
  * Criss-cross histories (several merge bases) are refused as
  * `MULTIPLE_MERGE_BASES` rather than merged against an arbitrary base.
+ *
+ * Three-way merges run gitops' deterministic resolution stage (resolve.ts):
+ * besides what git merges, a hunk whose two sides differ only in whitespace
+ * takes the target's variant; lockfile conflicts are never resolved and are
+ * marked `needsRegeneration`. Paths both sides changed that merged anyway
+ * are listed in `resolved` with their rule.
  */
 
 import {
   BlobTooLargeError,
   buildCommit,
+  classifyConflicts,
+  deterministicResolver,
   merge3,
   mergeBase,
+  type ClassifiedConflict,
   type CommitInfo,
   type CommitReader,
   type GitIdent,
   type GitObject,
-  type MergeConflict,
   type MergeReader,
+  type MergeResolution,
   type TreeEntry,
 } from '@forge/gitops';
+import { isLockfilePath } from '@forge/review';
 import type { ChecksGate, ChecksRepo, RequiredChecks } from './checksGate';
 import type { GitPusher } from './gitwrite';
 import { EMPTY_TREE, RefStoreUnavailable, readCommitInfo, type ResolveContext } from './refs';
@@ -56,6 +66,11 @@ export const MERGE_BUDGETS = {
 
 export type MergeBudgets = Partial<typeof MERGE_BUDGETS>;
 
+const RESOLVE = { isLockfile: isLockfilePath };
+const resolver = deterministicResolver(RESOLVE);
+
+export type MergeConflict = ClassifiedConflict;
+
 export interface MergeSources extends CommitReader, MergeReader {}
 
 export type MergeStatus = 'fast-forward' | 'clean' | 'conflicts' | 'up-to-date' | 'unrelated' | 'unknown';
@@ -75,6 +90,8 @@ export interface Mergeability {
   /** The tree publication would produce (the head tree for a fast-forward); null unless fast-forward or clean. */
   treeSha: string | null;
   conflicts: MergeConflict[];
+  /** Paths both sides changed that merged cleanly, with the rule that merged each (three-way merges only). */
+  resolved: MergeResolution[];
   /** For `unknown`: the budget or read failure that stopped planning, or `criss-cross`. */
   unknownReason?: string;
   /** Required checks for `treeSha`; null when there is no tree to check. */
@@ -102,6 +119,7 @@ export interface PreparedMerge {
   mergeCommit: string;
   /** Objects the remote may lack: the merge commit, merged blobs and rebuilt trees. */
   objects: GitObject[];
+  resolved: MergeResolution[];
   work: MergeWork;
 }
 
@@ -180,6 +198,7 @@ interface MergePlan {
   mergeBase: string | null;
   treeSha: string | null;
   conflicts: MergeConflict[];
+  resolved: MergeResolution[];
   objects: GitObject[];
   unknownReason?: string;
   work: MergeWork;
@@ -214,6 +233,7 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
     mergeBase: null,
     treeSha: null,
     conflicts: [],
+    resolved: [],
     objects: [],
     unknownReason: reason,
     work: work(),
@@ -222,7 +242,7 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
 
   const mb = await mergeBase(commits, targetSha, headSha, { maxCommitReads: b.maxCommitReads, concurrency: b.concurrency });
   if (mb.truncated) return unknown(mb.truncatedReason ?? 'readError');
-  const none = { treeSha: null, conflicts: [], objects: [] };
+  const none = { treeSha: null, conflicts: [], resolved: [], objects: [] };
   if (mb.bases.includes(headSha)) return { status: 'up-to-date', mergeBase: headSha, ...none, work: work() };
   if (mb.bases.length === 0) return { status: 'unrelated', mergeBase: null, ...none, work: work() };
   if (mb.bases.length > 1) return unknown('criss-cross');
@@ -238,7 +258,7 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
   if (!baseCommit || !targetCommit || !headCommit) return unknown('missingCommit', { mergeBase: base });
 
   if (base === targetSha) {
-    return { status: 'fast-forward', mergeBase: base, treeSha: headCommit.treeHash, conflicts: [], objects: [], work: work() };
+    return { status: 'fast-forward', mergeBase: base, treeSha: headCommit.treeHash, conflicts: [], resolved: [], objects: [], work: work() };
   }
 
   const m = await merge3(sources, baseCommit.treeHash, targetCommit.treeHash, headCommit.treeHash, {
@@ -250,11 +270,14 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
     concurrency: b.concurrency,
     maxMergedBytes: b.maxMergedBytes,
     contentConcurrency: b.contentConcurrency,
+    resolver,
   });
   const mergeWork = { commitReads: commits.reads, treeReads: m.treeReads, blobReads: m.blobReads };
   if (m.truncated) return { ...unknown(m.truncatedReason ?? 'readError', { mergeBase: base }), work: mergeWork };
-  if (!m.clean) return { status: 'conflicts', mergeBase: base, treeSha: null, conflicts: m.conflicts, objects: [], work: mergeWork };
-  return { status: 'clean', mergeBase: base, treeSha: m.treeHash, conflicts: [], objects: m.objects, work: mergeWork };
+  if (!m.clean) {
+    return { status: 'conflicts', mergeBase: base, treeSha: null, conflicts: classifyConflicts(m.conflicts, RESOLVE), resolved: [], objects: [], work: mergeWork };
+  }
+  return { status: 'clean', mergeBase: base, treeSha: m.treeHash, conflicts: [], resolved: m.resolved, objects: m.objects, work: mergeWork };
 }
 
 export async function computeMergeability(sources: MergeSources, gate: ChecksGate, input: MergeabilityInput): Promise<Mergeability> {
@@ -268,6 +291,7 @@ export async function computeMergeability(sources: MergeSources, gate: ChecksGat
     mergeBase: p.mergeBase,
     treeSha: p.treeSha,
     conflicts: p.conflicts,
+    resolved: p.resolved,
     ...(p.unknownReason !== undefined ? { unknownReason: p.unknownReason } : {}),
     checks,
     mergeable: (p.status === 'fast-forward' || p.status === 'clean') && checks?.state === 'success',
@@ -297,7 +321,7 @@ function planFailure(p: MergePlan): MergeResult<never> {
 export async function prepareMerge(sources: MergeSources, input: PrepareInput): Promise<MergeResult<PreparedMerge>> {
   const p = await plan(sources, input.targetSha, input.headSha, input.budgets);
   if ((p.status !== 'fast-forward' && p.status !== 'clean') || !p.treeSha || !p.mergeBase) return planFailure(p);
-  const common = { targetSha: input.targetSha, headSha: input.headSha, mergeBase: p.mergeBase, treeSha: p.treeSha, work: p.work };
+  const common = { targetSha: input.targetSha, headSha: input.headSha, mergeBase: p.mergeBase, treeSha: p.treeSha, resolved: p.resolved, work: p.work };
   if (p.status === 'fast-forward') {
     return { ok: true, value: { kind: 'fast-forward', ...common, mergeCommit: input.headSha, objects: [] } };
   }

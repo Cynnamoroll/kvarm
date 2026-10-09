@@ -64,6 +64,7 @@ import {
   type MergePolicy,
 } from './changes';
 import type { ChecksGate, RequiredChecks } from './checksGate';
+import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
 import { artifactsMergeSources, prepareMerge, type MergeSources, type PreparedMerge } from './merge';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
@@ -435,6 +436,9 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
 function refusal(row: EnqueueReadRow, input: EnqueueInput): QueueFail {
   if (row.c_state === 'merged') return fail(409, 'the change is already merged', 'ALREADY_MERGED');
   if (row.c_state === 'closed') return fail(409, 'a closed change cannot be enqueued; reopen it first', 'CHANGE_CLOSED');
+  if (row.c_state === 'conflicted') {
+    return fail(409, 'the change has merge conflicts with its base; push a resolution (see GET tasks) and enqueue again', 'MERGE_CONFLICT');
+  }
   if (row.c_state !== 'open') return fail(409, `a ${row.c_state} change cannot be enqueued`, 'CHANGE_NOT_OPEN');
   if (row.c_policy === 'draft') {
     return fail(409, 'the change is a draft (mergePolicy draft) and cannot be enqueued; set mergePolicy to review or auto', 'DRAFT');
@@ -861,6 +865,11 @@ async function trainPass(
       if (p.code === 'MERGE_READ_FAILED') throw new RefStoreUnavailable(p.error);
       if (base === target) {
         exit(p.code, p.error);
+        if (p.code === 'MERGE_CONFLICT' && p.conflicts) {
+          // Conflicts with the real base: the change becomes conflicted and its resolve-conflict task is dispatched.
+          const record = conflictRecord({ status: 'conflicts', headSha: plan.headSha, targetSha: target, conflicts: p.conflicts });
+          push(null, ...markConflictedStatements(db, e.change_set_id, record, now));
+        }
         continue;
       }
       // It conflicts only with candidates ahead of it: wait until they publish, then compose on the real base.

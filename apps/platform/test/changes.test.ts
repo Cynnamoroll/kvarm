@@ -414,9 +414,10 @@ describe('authorization', () => {
     const repo = await seedRepo('agent-implicit');
     const { root, main } = await conflicting(repo);
     const t = await workspaceAgentToken('agent-implicit', 'cr-agent-implicit');
-    expect((await create('agent-implicit', { title: 'x', base: 'main', head: 'feature', mergePolicy: 'auto' })).json.state).toBe('open');
-    // The base moves back so the change is mergeable, with no push to its head.
+    expect((await create('agent-implicit', { title: 'x', base: 'main', head: 'feature', mergePolicy: 'auto' })).json.state).toBe('conflicted');
+    // The base moves back so the change is mergeable, with no push to its head; a read reopens it.
     repo.refs.set('refs/heads/main', root.sha);
+    expect((await get('agent-implicit', 1)).json.state).toBe('open');
 
     const edited = await patch('agent-implicit', 1, { title: 'renamed by agent' }, t);
     expect(edited.status).toBe(200);
@@ -485,7 +486,7 @@ describe('detail: rating, mergeability, checks', () => {
     const refused = await merge('conflicted', 1);
     expect([refused.status, refused.json.code]).toEqual([409, 'MERGE_CONFLICT']);
     expect(refused.json.conflicts).toEqual([{ path: 'README.md', kind: expect.any(String) }]);
-    expect((await get('conflicted', 1)).json.state).toBe('open');
+    expect((await get('conflicted', 1)).json).toMatchObject({ state: 'conflicted', conflicts: [{ path: 'README.md', kind: expect.any(String) }] });
   });
 
   it('detail D1 cost stays constant as check runs accumulate', async () => {
@@ -907,7 +908,7 @@ describe('head refresh on push', () => {
     const { main, feature } = await conflicting(repo);
     const created = Date.now();
     const r = await create('refresh-auto', { title: 'x', base: 'main', head: 'feature', mergePolicy: 'auto' });
-    expect(r.json.state).toBe('open');
+    expect(r.json.state).toBe('conflicted');
     expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
 
     // Resolve by merging main into feature.
@@ -988,7 +989,7 @@ describe('auto-merge selection', () => {
     const { main, feature } = await conflicting(repo);
     await seedStuckAutoChanges('auto-many', feature.sha);
     const created = await create('auto-many', { title: 'mine', base: 'main', head: 'feature', mergePolicy: 'auto' });
-    expect(created.json).toMatchObject({ number: 21, state: 'open' });
+    expect(created.json).toMatchObject({ number: 21, state: 'conflicted' });
 
     const resolved = await commit(repo, { 'README.md': 'resolved\n' }, [feature.sha, main.sha]);
     repo.refs.set('refs/heads/feature', resolved.sha);
@@ -1004,7 +1005,7 @@ describe('auto-merge selection', () => {
     await seedStuckAutoChanges('auto-all', feature.sha);
     await create('auto-all', { title: 'mine', base: 'main', head: 'feature', mergePolicy: 'auto' });
     const r21 = await commit(repo, { 'README.md': 'one\n', 'mine.txt': 'mine\n' }, [root.sha]);
-    await env.DB.prepare('UPDATE change_sets SET head_sha = ? WHERE repo_id = ? AND number = 21').bind(r21.sha, repoIds['auto-all']).run();
+    await env.DB.prepare(`UPDATE change_sets SET head_sha = ?, state = 'open', conflicts = NULL WHERE repo_id = ? AND number = 21`).bind(r21.sha, repoIds['auto-all']).run();
 
     const repoId = repoIds['auto-all']!;
     const first = await mergeReadyAutoChanges(env, repoId, null, () => {});

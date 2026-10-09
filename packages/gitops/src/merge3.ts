@@ -70,6 +70,22 @@ export interface MergeConflict {
   hunks?: number;
 }
 
+/**
+ * Decides a conflicting hunk of `path` (records as byte strings, `\n`
+ * included): a side's lines, or null to keep the conflict. See resolve.ts.
+ */
+export type HunkResolver = (path: string, ours: readonly string[], theirs: readonly string[]) => 'ours' | 'theirs' | null;
+
+export type ResolutionRule = 'non-overlapping' | 'identical-change' | 'whitespace-only' | 'add-add-identical';
+
+/** A path both sides changed that merged without a conflict, and the rule that merged it. */
+export interface MergeResolution {
+  path: string;
+  rule: ResolutionRule;
+  /** Hunks decided by the resolver (`whitespace-only`). */
+  hunks?: number;
+}
+
 export interface Merge3Options {
   /** Max readTree calls across the whole merge (default 10_000). */
   maxTreeReads?: number;
@@ -91,6 +107,8 @@ export interface Merge3Options {
   maxMergedBytes?: number;
   /** Content merges (source reads, line merge, blob build) in progress at once (default 1). */
   contentConcurrency?: number;
+  /** Resolves conflicting hunks beyond git's rules (default none: git's result exactly). */
+  resolver?: HunkResolver;
 }
 
 export type Merge3Truncation = TreeDiffTruncation | 'maxBlobReads' | 'maxBlobBytes' | 'maxMergedBytes' | 'diffBudget' | 'missingObject';
@@ -104,6 +122,8 @@ export interface Merge3Result {
   objects: GitObject[];
   /** Sorted by path, then kind. */
   conflicts: MergeConflict[];
+  /** Paths both sides changed that merged cleanly, sorted by path; empty unless clean. */
+  resolved: MergeResolution[];
   truncated: boolean;
   truncatedReason?: Merge3Truncation;
   /** The missing object id or failed read message. */
@@ -121,6 +141,7 @@ const DEFAULTS = {
   concurrency: 8,
   maxMergedBytes: 16 * 1024 * 1024,
   contentConcurrency: 1,
+  resolver: undefined as HunkResolver | undefined,
 };
 
 /** Upper bound of an object's raw plus deflated size (deflate's stored-block overhead included). */
@@ -244,6 +265,7 @@ class Merge {
   private readonly treeCache = new Map<string, Promise<TreeEntry[]>>();
   private readonly edits = new Map<string, Entry | null>();
   private readonly conflicts: MergeConflict[] = [];
+  private readonly resolutions: MergeResolution[] = [];
   private readonly objects: GitObject[] = [];
   private readonly tasks: ContentTask[] = [];
   private readonly contentLimiter: Limiter;
@@ -276,6 +298,7 @@ class Merge {
       treeHash: null,
       objects: [],
       conflicts: [],
+      resolved: [],
       truncated: false,
       treeReads: this.treeReads,
       blobReads: this.blobReads,
@@ -432,7 +455,8 @@ class Merge {
       this.keep(empty, bound);
       treeHash = empty.hash;
     }
-    return this.result({ clean: true, treeHash, objects: this.objects });
+    const resolved = this.resolutions.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return this.result({ clean: true, treeHash, objects: this.objects, resolved });
   }
 
   private async placeAdds(
@@ -465,7 +489,7 @@ class Merge {
       if (oe && te && !sameEntry(oe, te)) {
         const kind = typeOf(oe.mode) !== typeOf(te.mode) ? 'typechange' : 'add-add';
         this.conflict({ path: q, kind, ours: side(q, oe), theirs: side(q, te) });
-      }
+      } else if (oe && te) this.resolutions.push({ path: q, rule: 'add-add-identical' });
       this.edits.set(q, (oe ?? te)!);
     }
   }
@@ -528,7 +552,10 @@ class Merge {
   private async contentMerge(t: ContentTask): Promise<void> {
     const { place, base: b, ours: o, theirs: th } = t;
     const set = (e: Entry) => this.edits.set(place, e);
-    if (sameEntry(o, th)) return void set(o);
+    if (sameEntry(o, th)) {
+      if (!b || !sameEntry(o, b)) this.resolutions.push({ path: place, rule: 'identical-change' });
+      return void set(o);
+    }
     if (b && sameEntry(o, b)) return void set(th);
     if (b && sameEntry(th, b)) return void set(o);
     if (typeOf(o.mode) !== typeOf(th.mode)) {
@@ -557,7 +584,11 @@ class Merge {
         this.conflict({ path: place, kind: 'binary', base: b, ours: o, theirs: th });
         return void set(o);
       }
-      const merged = mergeText(bb, ob, tb, { nodeBudget: this.opts.nodeBudget });
+      const resolver = this.opts.resolver;
+      const merged = mergeText(bb, ob, tb, {
+        nodeBudget: this.opts.nodeBudget,
+        ...(resolver ? { resolveHunk: (ours: readonly string[], theirs: readonly string[]) => resolver(place, ours, theirs) } : {}),
+      });
       if (!merged) throw new Stop('diffBudget', place);
       if (!merged.clean) {
         this.conflict({ path: place, kind: 'content', base: b, ours: o, theirs: th, hunks: merged.conflicts });
@@ -568,6 +599,7 @@ class Merge {
       const blob = await buildBlob(merged.merged);
       this.keep(blob, bound);
       hash = blob.hash;
+      this.resolutions.push(merged.resolved > 0 ? { path: place, rule: 'whitespace-only', hunks: merged.resolved } : { path: place, rule: 'non-overlapping' });
     }
     if (!modeClean) {
       this.conflict({ path: place, kind: 'content', base: b, ours: o, theirs: th });

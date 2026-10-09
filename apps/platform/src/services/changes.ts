@@ -16,7 +16,7 @@
  * the gate has no producers).
  */
 
-import type { MergeConflict } from '@forge/gitops';
+import type { MergeResolution } from '@forge/gitops';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import type { RepoRow } from '../db/repos';
@@ -26,6 +26,16 @@ import { credentialMayUpdateRef, type Actor } from './authz';
 import { effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
 import { treePairRating } from './compare';
+import {
+  conflictTransition,
+  conflictViews,
+  markConflictedStatements,
+  parseConflictRecord,
+  reconcileConflicts,
+  retireConflictTaskStatement,
+  transitionStatements,
+  type ConflictView,
+} from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { changeSignalCleanup } from './intents/store';
 import {
@@ -91,11 +101,13 @@ export interface ChangeRow {
   queue_state: string | null;
   /** The agent workspace linked to this change set (services/workspaces.ts), if any. */
   workspace_id: string | null;
+  /** JSON ConflictRecord (services/conflicts.ts) while the change is conflicted. */
+  conflicts: string | null;
 }
 
 const CHANGE_SELECT = `SELECT c.id, c.repo_id, c.number, c.title, c.body, c.base_ref, c.head_ref, c.head_sha, c.base_sha,
        c.state, c.author_id, u.login AS author_login, c.agent_meta, c.merge_commit, c.merged_at, c.created_at,
-       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id,
+       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.conflicts,
        (SELECT q.state FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queue_state,
        (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1) AS workspace_id
   FROM change_sets c LEFT JOIN users u ON u.id = c.author_id`;
@@ -145,6 +157,9 @@ export interface ChangeView {
   workspace: string | null;
   /** State of the change's merge-queue entry (`GET queue`), null when it is not queued. */
   queueState: string | null;
+  /** The conflicts that made the change `conflicted` (empty otherwise). */
+  conflicts: ConflictView[];
+  conflictsTruncated?: true;
 }
 
 export interface MergeabilityView {
@@ -152,8 +167,11 @@ export interface MergeabilityView {
   /** Fast-forward or clean, and every required check passed. */
   mergeable: boolean;
   fastForward: boolean;
-  conflicts: Array<Pick<MergeConflict, 'path' | 'kind'>>;
+  conflicts: ConflictView[];
   conflictsTruncated?: true;
+  /** Paths both sides changed that the deterministic rules merged, with the rule. */
+  resolved: MergeResolution[];
+  resolvedTruncated?: true;
   targetSha: string;
   headSha: string;
   mergeBase: string | null;
@@ -200,7 +218,14 @@ export function changeView(row: ChangeRow): ChangeView {
     updatedAt: iso(row.updated_at ?? row.created_at)!,
     workspace: row.workspace_id ?? null,
     queueState: row.queue_state ?? null,
+    ...storedConflicts(row),
   };
+}
+
+function storedConflicts(row: Pick<ChangeRow, 'state' | 'conflicts'>): { conflicts: ConflictView[]; conflictsTruncated?: true } {
+  const record = row.state === 'conflicted' ? parseConflictRecord(row.conflicts) : null;
+  if (!record) return { conflicts: [] };
+  return { conflicts: record.conflicts, ...(record.truncated ? { conflictsTruncated: true as const } : {}) };
 }
 
 function storedRating(row: ChangeRow): ChangeRating | null {
@@ -230,13 +255,16 @@ function checkRunView(r: CheckRunRow): CheckRunView {
 }
 
 function mergeabilityView(m: Mergeability): MergeabilityView {
-  const conflicts = m.conflicts.slice(0, CHANGE_LIMITS.conflictsMax).map((c) => ({ path: c.path, kind: c.kind }));
+  const { conflicts, truncated } = conflictViews(m.conflicts);
+  const resolved = m.resolved.slice(0, CHANGE_LIMITS.conflictsMax);
   return {
     status: m.status,
     mergeable: m.mergeable,
     fastForward: m.fastForward,
     conflicts,
-    ...(m.conflicts.length > conflicts.length ? { conflictsTruncated: true as const } : {}),
+    ...(truncated ? { conflictsTruncated: true as const } : {}),
+    resolved,
+    ...(m.resolved.length > resolved.length ? { resolvedTruncated: true as const } : {}),
     targetSha: m.targetSha,
     headSha: m.headSha,
     mergeBase: m.mergeBase,
@@ -260,7 +288,7 @@ export interface ChangeContext {
 }
 
 export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
-  conflicts?: Array<Pick<MergeConflict, 'path' | 'kind'>>;
+  conflicts?: ConflictView[];
   checks?: RequiredChecks;
   ref?: string;
 };
@@ -401,7 +429,7 @@ function cacheablePlan(m: Mergeability): boolean {
  * fresh from the checks-gate.
  */
 async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, targetSha: string, headSha: string): Promise<Mergeability> {
-  const key = internalKey('mergeplan/v1', ctx.repo.id, targetSha, headSha);
+  const key = internalKey('mergeplan/v2', ctx.repo.id, targetSha, headSha);
   const hit = await readCachedJson<CachedPlan>(key);
   if (hit) {
     const checks = hit.treeSha ? await gate.requiredChecksFor({ id: ctx.repo.id }, hit.treeSha, null) : null;
@@ -421,19 +449,25 @@ async function liveState(
   ctx: ResolveContext,
   gate: ChecksGate,
   row: ChangeRow,
-): Promise<ServiceResult<{ rating: ChangeRating | null; mergeability: MergeabilityView | null; baseSha: string | null }>> {
-  if (!row.head_sha) return { ok: true, value: { rating: null, mergeability: null, baseSha: null } };
+): Promise<{ rating: ChangeRating | null; mergeability: Mergeability | null; baseSha: string | null }> {
+  if (!row.head_sha) return { rating: null, mergeability: null, baseSha: null };
   const baseName = branchRef(row.base_ref);
   const resolved = await resolveCommitish(ctx, [baseName, row.head_sha]);
   const base = resolved.get(baseName) ?? null;
   const head = resolved.get(row.head_sha) ?? null;
-  if (!base || !head) return { ok: true, value: { rating: null, mergeability: null, baseSha: base?.sha ?? null } };
+  if (!base || !head) return { rating: null, mergeability: null, baseSha: base?.sha ?? null };
   const [rating, m] = await Promise.all([treePairRating(ctx, base.tree, head.tree), mergeabilityFor(ctx, gate, base.sha, head.sha)]);
-  return { ok: true, value: { rating, mergeability: mergeabilityView(m), baseSha: base.sha } };
+  return { rating, mergeability: m, baseSha: base.sha };
 }
 
 function isLive(row: ChangeRow): boolean {
   return row.state === 'open' || row.state === 'conflicted';
+}
+
+/** The row after the conflict transition (services/conflicts.ts) this evaluation of its head calls for. */
+async function reconciled(env: Env, repoId: string, row: ChangeRow, m: Mergeability): Promise<ChangeRow> {
+  const after = await reconcileConflicts(env, repoId, row, m);
+  return after ? { ...row, ...after } : row;
 }
 
 /** GET changes/:number — the change, its rating and mergeability (open changes) and check runs. */
@@ -444,14 +478,20 @@ export function getChange(cx: ChangeContext, rawNumber: string): Promise<Service
     const found = await readChangeWithChecks(cx.env, cx.repo.id, number);
     if (!found) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const { row, checks } = found;
-    const view = changeView(row);
-    if (!isLive(row)) return { ok: true, value: { ...view, rating: storedRating(row), mergeability: null, checks } };
+    if (!isLive(row)) return { ok: true, value: { ...changeView(row), rating: storedRating(row), mergeability: null, checks } };
     return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const live = await liveState(resolveCtx(cx, artifacts), defaultChecksGate(cx.env), row);
-      if (!live.ok) return live;
+      const current = live.mergeability ? await reconciled(cx.env, cx.repo.id, row, live.mergeability) : row;
+      const view = changeView(current);
       return {
         ok: true,
-        value: { ...view, baseSha: live.value.baseSha ?? view.baseSha, rating: live.value.rating, mergeability: live.value.mergeability, checks },
+        value: {
+          ...view,
+          baseSha: live.baseSha ?? view.baseSha,
+          rating: live.rating,
+          mergeability: live.mergeability ? mergeabilityView(live.mergeability) : null,
+          checks,
+        },
       };
     });
   });
@@ -477,7 +517,8 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
       const base = resolved.get(baseName);
       if (!base) return fail(409, `base branch ${row.base_ref} no longer exists`, 'BASE_NOT_FOUND');
       const m = await mergeabilityFor(ctx, defaultChecksGate(cx.env), base.sha, row.head_sha!);
-      return { ok: true, value: { number: row.number, state: row.state, mergeability: mergeabilityView(m) } };
+      const current = await reconciled(cx.env, cx.repo.id, row, m);
+      return { ok: true, value: { number: row.number, state: current.state, mergeability: mergeabilityView(m) } };
     });
   });
 }
@@ -554,11 +595,15 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       const base = commits.get(baseSha);
       const head = commits.get(headSha);
       if (!base || !head) return fail(503, 'branch commits could not be read, retry shortly', 'STORAGE_UNAVAILABLE');
-      const rating = await treePairRating(ctx, base.tree, head.tree);
-      return { ok: true as const, value: { baseSha, headSha, rating } };
+      // Conflict detection is eager: a change that conflicts is created `conflicted` with its resolve-conflict task.
+      const [rating, m] = await Promise.all([
+        treePairRating(ctx, base.tree, head.tree),
+        mergeabilityFor(ctx, defaultChecksGate(cx.env), baseSha, headSha),
+      ]);
+      return { ok: true as const, value: { baseSha, headSha, rating, m } };
     });
     if (!resolved.ok) return resolved;
-    const { baseSha, headSha, rating } = resolved.value;
+    const { baseSha, headSha, rating, m } = resolved.value;
 
     const now = Date.now();
     const id = crypto.randomUUID();
@@ -568,7 +613,8 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
     // observed head lends its event time; otherwise the observation time, so a
     // push racing this create and delivered later is still newer.
     const newerPush = `f.repo_id = ?2 AND f.ref = ?16 AND f.event_at > ?17 AND f.sha != '${ZERO_SHA}'`;
-    const [, read] = await cx.env.DB.batch([
+    const conflicted = conflictTransition({ id, state: 'open', head_sha: headSha, conflicts: null }, m);
+    const results = await cx.env.DB.batch([
       cx.env.DB.prepare(
         `INSERT INTO change_sets (id, repo_id, number, title, body, base_ref, head_ref, head_sha, base_sha, state, author_id,
            agent_meta, merge_policy, risk_score, risk_level, risk_reasons, kind, created_at, updated_at, head_event_at)
@@ -596,9 +642,11 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
         branchRef(p.head),
         observedAt,
       ),
+      // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
+      ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
       cx.env.DB.prepare(`${CHANGE_SELECT} WHERE c.id = ?`).bind(id),
     ]);
-    let row = (read?.results as ChangeRow[] | undefined)?.[0];
+    let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(500, 'change could not be created', 'CREATE_FAILED');
     if (opts.admit) {
       const refused = await opts.admit({ id: row.id, number: row.number });
@@ -673,17 +721,24 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
       }
     }
     if (p.mergePolicy !== undefined) set('merge_policy', p.mergePolicy);
-    if (p.state !== undefined) set('state', p.state);
-    set('updated_at', Date.now());
-    const [, read] = await cx.env.DB.batch([
+    if (p.state === 'closed') set('state', 'closed');
+    if (p.state === 'open') {
+      // Reopening keeps a conflicted change conflicted; the next evaluation of its head decides.
+      args.push('open');
+      sets.push(`state = CASE WHEN state = 'conflicted' THEN state ELSE ?${args.length + 2} END`);
+    }
+    const now = Date.now();
+    set('updated_at', now);
+    const results = await cx.env.DB.batch([
       cx.env.DB.prepare(`UPDATE change_sets SET ${sets.join(', ')} WHERE repo_id = ?1 AND number = ?2 AND state != 'merged'`).bind(
         cx.repo.id,
         number,
         ...args,
       ),
+      ...(p.state === 'closed' ? [retireConflictTaskStatement(cx.env.DB, cx.repo.id, number, now)] : []),
       changeSelect(cx.env.DB, cx.repo.id, number),
     ]);
-    let row = (read?.results as ChangeRow[] | undefined)?.[0];
+    let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (row.state === 'merged') return fail(409, 'a merged change cannot be updated', 'CHANGE_MERGED');
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
@@ -819,7 +874,7 @@ export function mergedRecordStatements(
   return [
     db
       .prepare(
-        `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5
+        `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5, conflicts = NULL
           WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft'`,
       )
       .bind(repoId, row.number, pub.mergeCommit, mergedAt, pub.targetSha, pub.headSha),
@@ -832,6 +887,7 @@ export function mergedRecordStatements(
       )
       .bind(repoId, row.id, mergedAt, pub.headSha, pub.mergeCommit),
     changeSignalCleanup(db, repoId, row.id),
+    retireConflictTaskStatement(db, repoId, row.number, mergedAt),
   ];
 }
 
@@ -876,7 +932,11 @@ async function performMerge(
         ...(author ? { author } : {}),
       });
       if (!prepared.ok) {
-        return fail(prepared.status, prepared.error, prepared.code, prepared.conflicts ? { conflicts: prepared.conflicts.map((c) => ({ path: c.path, kind: c.kind })) } : {});
+        if (prepared.code === 'MERGE_CONFLICT' && prepared.conflicts) {
+          const t = conflictTransition(row, { status: 'conflicts', headSha, targetSha, conflicts: prepared.conflicts });
+          if (t) await cx.env.DB.batch(transitionStatements(cx.env.DB, cx.repo.id, { id: row.id, number: row.number, head_sha: headSha }, t, Date.now()));
+        }
+        return fail(prepared.status, prepared.error, prepared.code, prepared.conflicts ? { conflicts: conflictViews(prepared.conflicts).conflicts } : {});
       }
       const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null);
       const blocked = branchPolicyBlock(policy, checks);
@@ -906,10 +966,12 @@ async function performMerge(
       }
       const pv = prepared.value;
       const mergedAt = Date.now();
-      const [update, , , read] = await cx.env.DB.batch([
+      const recorded = await cx.env.DB.batch([
         ...mergedRecordStatements(cx.env.DB, cx.repo.id, row, { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha }, mergedAt),
         changeSelect(cx.env.DB, cx.repo.id, row.number),
       ]);
+      const update = recorded[0];
+      const read = recorded[recorded.length - 1];
       if (pv.kind === 'merge') {
         // The merge commit is Forge's own, so it carries the merging principal; a fast-forward publishes the author's commit untouched.
         await attributeMerge(cx, artifacts, pusher, { changeNumber: row.number, mergeCommit: pv.mergeCommit, input: attribution });
@@ -1021,6 +1083,8 @@ export async function autoMerge(cx: ChangeContext, row: ChangeRow, deps: MergeDe
 export interface ChangeOnRef {
   id: string;
   number: number;
+  /** Open or conflicted (absent in readbacks that predate conflicts: open). */
+  state?: ChangeState;
   policy: MergePolicy;
   headSha: string | null;
   /** The head its active merge-queue entry approved, when the change is queued. */
@@ -1096,9 +1160,52 @@ export async function mergeReadyAutoChanges(
 }
 
 /**
+ * Re-evaluates the conflict state (services/conflicts.ts) of the given live
+ * changes at their current heads against their base tips: two D1 reads, the
+ * cached merge plans, and one batch with the transitions (none when nothing
+ * changed). Returns the numbers now open.
+ */
+async function reevaluateConflicts(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<number[]> {
+  const [repoRead, changeRead] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
+    env.DB.prepare(
+      `${CHANGE_SELECT} WHERE c.repo_id = ?1 AND c.state IN ('open', 'conflicted') AND c.number IN (SELECT value FROM json_each(?2))
+        ORDER BY c.number LIMIT ${AUTO_MERGE_PAGE}`,
+    ).bind(repoId, JSON.stringify(numbers)),
+  ]);
+  const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
+  const rows = (changeRead?.results as ChangeRow[] | undefined) ?? [];
+  if (!repo || rows.length === 0) return [];
+  const now = Date.now();
+  const writes: D1PreparedStatement[] = [];
+  const open = new Set(rows.filter((r) => r.state === 'open').map((r) => r.number));
+  await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+    const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
+    const gate = defaultChecksGate(env);
+    const bases = [...new Set(rows.map((r) => branchRef(r.base_ref)))];
+    const tips = await lsRefs(ctx, bases);
+    for (const row of rows) {
+      const target = tips.get(branchRef(row.base_ref));
+      if (!target || !row.head_sha) continue;
+      const m = await mergeabilityFor(ctx, gate, target, row.head_sha);
+      const t = conflictTransition(row, m);
+      if (!t) continue;
+      writes.push(...transitionStatements(env.DB, repoId, { id: row.id, number: row.number, head_sha: row.head_sha }, t, now));
+      if (t.kind === 'clear') open.add(row.number);
+      else open.delete(row.number);
+    }
+  });
+  if (writes.length > 0) await env.DB.batch(writes);
+  return [...open];
+}
+
+/**
  * Push-event effect body for a branch push: runs the head-moved hooks for
- * open changes now at `after`, then merges the `auto` ones that are ready.
- * Costs no D1 when no open change uses the branch as its head.
+ * live changes now at `after`, re-evaluates the conflict state of those that
+ * do not merge on their own (conflicted ones, and open ones without
+ * mergePolicy auto, whose merge attempt records a conflict itself), then
+ * merges the `auto` ones that are ready. Costs no D1 when no live change
+ * uses the branch as its head.
  */
 export async function onHeadPushed(
   env: Env,
@@ -1113,7 +1220,9 @@ export async function onHeadPushed(
   for (const change of moved) {
     for (const hook of HEAD_MOVED_HOOKS) await hook({ env, repoId, change, headSha: after });
   }
-  const auto = moved.filter((c) => c.policy === 'auto').map((c) => c.number);
+  const evaluate = moved.filter((c) => c.state === 'conflicted' || c.policy !== 'auto').map((c) => c.number);
+  const reopened = evaluate.length > 0 ? new Set(await reevaluateConflicts(env, repoId, evaluate, waitUntil)) : new Set<number>();
+  const auto = moved.filter((c) => c.policy === 'auto' && (c.state !== 'conflicted' || reopened.has(c.number))).map((c) => c.number);
   const merged: number[] = [];
   // The moved changes are a finite set from the ingest batch; each pass is one bounded page of them.
   for (let after: number | null = 0; auto.length > 0 && after !== null; ) {
@@ -1135,6 +1244,7 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM merge_queue WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM merge_trains WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM merge_admission WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM agent_tasks WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),
   ];
 }

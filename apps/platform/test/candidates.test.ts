@@ -409,10 +409,10 @@ describe('arenas', () => {
     expect((await call('GET', `${R('arena-rank')}/arenas/${arena.id}`, tok.owner)).json.selection.selectedWorkspace).toBe(a.id);
     expect((await call('POST', `${R('arena-rank')}/arenas/${arena.id}/select`, tok.owner, { workspace: 'feedfeed' })).json.code).toBe('NOT_ARENA_CANDIDATE');
 
-    // The winner merges through its change set; losers stay open, then one is abandoned.
+    // The winner merges through its change set; losers stay live (B edited the same file, so it now conflicts), then one is abandoned.
     const merged = await call('POST', `${R('arena-rank')}/changes/${changeA.number}/merge`, tok.owner);
     expect(merged.status).toBe(200);
-    expect((await call('GET', `${R('arena-rank')}/changes/${changeB.number}`, tok.owner)).json.state).toBe('open');
+    expect((await call('GET', `${R('arena-rank')}/changes/${changeB.number}`, tok.owner)).json.state).toBe('conflicted');
     expect((await call('GET', `${R('arena-rank')}/workspaces/${c.id}`, tok.owner)).json.status).toBe('active');
     const ab = await call('POST', `${R('arena-rank')}/workspaces/${b.id}/abandon`, tok.owner);
     expect([ab.status, ab.json.status]).toEqual([200, 'abandoned']);
