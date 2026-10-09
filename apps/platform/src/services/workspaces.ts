@@ -25,6 +25,8 @@ import type { BranchRule } from './branchRules';
 import { createChange, normalizeBranch, type ChangeDetail } from './changes';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
+import { normalizeDeclaration, type Declaration } from './intents/paths';
+import { declaredInsertStatement, repoSignalCleanup, workspaceSignalCleanup } from './intents/store';
 
 export const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
 export const WORKSPACE_STATUSES = ['active', 'merged', 'abandoned'] as const;
@@ -39,7 +41,8 @@ export const WORKSPACE_LIMITS = {
 };
 
 const ZERO_SHA = '0000000000000000000000000000000000000000';
-const ID_RE = /^[0-9a-z]{1,64}$/;
+export const WORKSPACE_ID_RE = /^[0-9a-z]{1,64}$/;
+const ID_RE = WORKSPACE_ID_RE;
 
 // ---------------------------------------------------------------------------
 // Rows and views
@@ -64,12 +67,13 @@ interface WorkspaceRow {
   updated_at: number | null;
   abandoned_at: number | null;
   merged_at: number | null;
+  intent_paths: string | null;
   seq: number;
 }
 
 const WORKSPACE_SELECT = `SELECT w.id, w.task, w.agent, w.agent_id, w.status, w.ref, w.base_ref, w.base_sha, w.head_sha,
        w.change_set_id, c.number AS change_number, u.login AS created_by_login, f.sha AS ref_sha,
-       w.created_at, w.updated_at, w.abandoned_at, w.merged_at, w.rowid AS seq
+       w.created_at, w.updated_at, w.abandoned_at, w.merged_at, w.intent_paths, w.rowid AS seq
   FROM workspaces w
   LEFT JOIN change_sets c ON c.id = w.change_set_id
   LEFT JOIN users u ON u.id = w.created_by
@@ -95,6 +99,8 @@ export interface WorkspaceView {
   updatedAt: string;
   abandonedAt: string | null;
   mergedAt: string | null;
+  /** The declared intent (normalized paths; a trailing `/` is a prefix), advisory only. */
+  declaredPaths: string[];
 }
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
@@ -124,6 +130,7 @@ function workspaceView(row: WorkspaceRow, repo: RepoRow, origin: string, headSha
     updatedAt: iso(row.updated_at ?? row.created_at)!,
     abandonedAt: iso(row.abandoned_at),
     mergedAt: iso(row.merged_at),
+    declaredPaths: row.intent_paths ? (JSON.parse(row.intent_paths) as string[]) : [],
   };
 }
 
@@ -209,7 +216,7 @@ export function workspaceIdOf(ref: string): string | null {
  * agent-owned workspace belongs to that agent only; a person's workspace is
  * open to agent tokens whose ref patterns grant its ref.
  */
-function agentOwnershipDenial(actor: Actor | null, row: Pick<WorkspaceRow, 'agent_id' | 'ref'>): string | null {
+export function agentOwnershipDenial(actor: Actor | null, row: Pick<WorkspaceRow, 'agent_id' | 'ref'>): string | null {
   if (!actor?.agent) return null;
   if (row.agent_id !== null) return row.agent_id === actor.agent.agentId ? null : 'workspace owned by another agent';
   return row.ref && credentialMayUpdateRef(actor, row.ref) ? null : 'workspace outside agent token grant';
@@ -223,6 +230,7 @@ interface CreateInput {
   task: string;
   agent: string;
   base: string;
+  intent: Declaration | null;
 }
 
 function parseCreate(cx: WorkspaceContext, input: unknown): ServiceResult<CreateInput> {
@@ -242,7 +250,13 @@ function parseCreate(cx: WorkspaceContext, input: unknown): ServiceResult<Create
   }
   const base = b.base === undefined || b.base === null ? cx.repo.default_branch : normalizeBranch(b.base);
   if (base === null) return fail(422, 'base must be a branch name', 'INVALID_REF');
-  return { ok: true, value: { task, agent, base } };
+  let intent: Declaration | null = null;
+  if (b.intent !== undefined && b.intent !== null) {
+    const d = normalizeDeclaration(b.intent);
+    if (!d.ok) return fail(422, d.error, 'INVALID_INTENT');
+    intent = d.value;
+  }
+  return { ok: true, value: { task, agent, base, intent } };
 }
 
 /**
@@ -277,11 +291,15 @@ export function createWorkspace(
     }
 
     const now = Date.now();
-    const [, read] = await cx.env.DB.batch([
+    const intentJson = p.intent ? JSON.stringify(p.intent.paths) : null;
+    const expiresAt = p.intent?.ttlSeconds ? now + p.intent.ttlSeconds * 1000 : null;
+    // The observed set starts empty at the base head; push reconciliation replaces it.
+    const results = await cx.env.DB.batch([
       cx.env.DB.prepare(
         `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_by, agent_id,
-           created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11)`,
+           created_at, updated_at, intent_paths, intent_updated_at, intent_expires_at,
+           observed_paths, observed_base_sha, observed_head_sha, observed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, '[]', ?8, ?8, ?11)`,
       ).bind(
         id,
         cx.repo.id,
@@ -294,9 +312,14 @@ export function createWorkspace(
         cx.actor?.user.id ?? null,
         cx.actor?.agent?.agentId ?? null,
         now,
+        intentJson,
+        intentJson ? now : null,
+        expiresAt,
       ),
+      ...(intentJson ? [declaredInsertStatement(cx.env.DB, cx.repo.id, id, intentJson)] : []),
       cx.env.DB.prepare(`${WORKSPACE_SELECT} WHERE w.id = ?`).bind(id),
     ]);
+    const read = results[results.length - 1];
     const row = (read?.results as WorkspaceRow[] | undefined)?.[0];
     if (!row) return fail(500, 'workspace could not be created', 'CREATE_FAILED');
     return { ok: true, value: workspaceView(row, cx.repo, cx.origin, baseSha) };
@@ -434,6 +457,11 @@ export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown):
           WHERE repo_id = ?1 AND number = ?2 AND state = 'open'
             AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?4 AND w.change_set_id = change_sets.id)`,
       ).bind(cx.repo.id, change.number, now, row.id),
+      // An auto change that merged right away took the workspace out of the active index.
+      cx.env.DB.prepare(
+        `DELETE FROM workspace_paths WHERE repo_id = ?1 AND workspace_id = ?2
+            AND EXISTS (SELECT 1 FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?2 AND w.status = 'merged')`,
+      ).bind(cx.repo.id, row.id),
     ]);
     if (!link?.meta.changes) {
       return fail(409, 'the workspace got a change set or left active meanwhile; this change was closed', 'CHANGE_SET_EXISTS', {
@@ -470,7 +498,7 @@ export function abandonWorkspace(
 
     if (row.status === 'active') {
       const now = Date.now();
-      const [, , read] = await cx.env.DB.batch([
+      const [, , , read] = await cx.env.DB.batch([
         cx.env.DB.prepare(
           `UPDATE workspaces SET status = 'abandoned', abandoned_at = ?3, updated_at = ?3, head_sha = COALESCE(?4, head_sha, base_sha)
             WHERE repo_id = ?1 AND id = ?2 AND status = 'active'`,
@@ -480,6 +508,8 @@ export function abandonWorkspace(
             WHERE repo_id = ?1 AND state IN ('open', 'conflicted')
               AND id = (SELECT w.change_set_id FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?2 AND w.status = 'abandoned')`,
         ).bind(cx.repo.id, row.id, now),
+        // The intent signal leaves the active index; the declaration and observed set stay on the row.
+        workspaceSignalCleanup(cx.env.DB, cx.repo.id, row.id),
         cx.env.DB.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, row.id),
       ]);
       row = (read?.results as WorkspaceRow[] | undefined)?.[0] ?? row;
@@ -547,5 +577,5 @@ export function agentWorkspaceDenial(actor: Actor, cmd: RefCommand, owners: Map<
 
 /** Statements that remove a repo's workspaces, for the repo DELETE batch (before its change sets). */
 export function workspaceCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
-  return [db.prepare('DELETE FROM workspaces WHERE repo_id = ?').bind(repoId)];
+  return [repoSignalCleanup(db, repoId), db.prepare('DELETE FROM workspaces WHERE repo_id = ?').bind(repoId)];
 }

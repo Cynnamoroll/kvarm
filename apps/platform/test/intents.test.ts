@@ -1,0 +1,570 @@
+/**
+ * Nexus intents and forecasts (services/intents/forecast.ts) through the
+ * Worker's routes, the git gate and the push queue, over the in-memory
+ * Artifacts fake. Declarations are written by the intent routes and workspace
+ * creation; observed paths are reconciled by the push consumer's
+ * `intent-index` effect from the cumulative base→head tree diff.
+ */
+
+import { env as cfEnv } from 'cloudflare:workers';
+import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines } from '@forge/gitops';
+import { mintPAT, type Scope } from '../src/auth/pat';
+import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { INTENT_LIMITS, collapseObserved, normalizeDeclaration } from '../src/services/intents/paths';
+import worker from '../src/index';
+import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+
+const baseEnv = cfEnv as unknown as Env;
+const ORIGIN = 'https://forge.test';
+const FULL: Scope[] = ['read', 'write', 'api'];
+const OWNER = 'nx-owner';
+
+class FakeWorkflow {
+  async create(opts: { id?: string }) {
+    return { id: opts.id ?? crypto.randomUUID() };
+  }
+  async get(id: string) {
+    return { id };
+  }
+}
+
+const env = {
+  ...baseEnv,
+  ARTIFACTS: fakeArtifacts,
+  SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
+} as Env;
+
+const tok = { owner: '', outsider: '' };
+
+async function seedUser(login: string): Promise<string> {
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
+  )
+    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, Date.now())
+    .run();
+  return id;
+}
+
+async function seedRepo(name: string, visibility: 'public' | 'private' = 'private'): Promise<FakeRepo> {
+  const artifactsName = `${OWNER}--${name}`;
+  const repo = new FakeRepo();
+  fakeRepos.set(artifactsName, repo);
+  await env.DB.prepare(
+    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
+  )
+    .bind(crypto.randomUUID(), OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
+    .run();
+  return repo;
+}
+
+interface Reply {
+  status: number;
+  text: string;
+  json: Record<string, any>;
+  cost: CostCounters;
+}
+
+async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
+  const ctx = createExecutionContext();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+  const text = await res.text();
+  await waitOnExecutionContext(ctx);
+  const cost = parseCostHeader(res.headers.get(COST_HEADER));
+  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
+  let json: Record<string, any> = {};
+  try {
+    json = JSON.parse(text) as Record<string, any>;
+  } catch {
+    // non-JSON body
+  }
+  return { status: res.status, text, json, cost: cost! };
+}
+
+const R = (repo: string) => `/api/v1/repos/${OWNER}/${repo}`;
+const createWs = (repo: string, body: unknown, token = tok.owner) => call('POST', `${R(repo)}/workspaces`, token, body);
+const getIntent = (repo: string, id: string, token: string | undefined = tok.owner) => call('GET', `${R(repo)}/workspaces/${id}/intent`, token);
+const setIntent = (repo: string, id: string, body: unknown, token = tok.owner) => call('POST', `${R(repo)}/workspaces/${id}/intent`, token, body);
+const forecast = (repo: string, q: string, token: string | undefined = tok.owner) => call('GET', `${R(repo)}/forecast?${q}`, token);
+const overlap = (repo: string, q = 'base=main', token: string | undefined = tok.owner) => call('GET', `${R(repo)}/workspaces/overlap?${q}`, token);
+const abandon = (repo: string, id: string) => call('POST', `${R(repo)}/workspaces/${id}/abandon`, tok.owner);
+
+async function gitPush(repo: string, token: string, cmds: string[]): Promise<string[]> {
+  const parts = cmds.map((c, i) => pktLine(i === 0 ? `${c}\0report-status agent=git/2.47\n` : `${c}\n`));
+  const needsPack = cmds.some((c) => c.split(' ')[1] !== ZERO_OID);
+  const body = new Blob([...parts, new TextEncoder().encode('0000'), ...(needsPack ? [EMPTY_PACK] : [])]);
+  const ctx = createExecutionContext();
+  const req = new Request(`${ORIGIN}/${OWNER}/${repo}.git/git-receive-pack`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${btoa(`x:${token}`)}`, 'content-type': 'application/x-git-receive-pack-request' },
+    body: new Uint8Array(await body.arrayBuffer()),
+  });
+  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+  const buf = new Uint8Array(await res.arrayBuffer());
+  await waitOnExecutionContext(ctx);
+  expect(res.status).toBe(200);
+  return readPktLines(buf)
+    .filter((p) => !p.flush)
+    .map((p) => new TextDecoder().decode(p.data).trim());
+}
+
+function pushEvent(repo: string, ref: string, before: string, after: string, at: number) {
+  return {
+    type: 'cf.artifacts.repo.pushed',
+    source: { type: 'artifacts', namespace: 'default', repoName: `${OWNER}--${repo}` },
+    payload: { ref, before, after, commits: [], totalCommitsCount: 0, commitsTruncated: false },
+    metadata: { accountId: 'acct', eventSubscriptionId: 'sub', eventSchemaVersion: 1, eventTimestamp: new Date(at).toISOString() },
+  };
+}
+
+async function deliver(body: unknown): Promise<void> {
+  const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
+  const ctx = createExecutionContext();
+  await worker.queue!(batch, env, ctx);
+  const result = await getQueueResult(batch, ctx);
+  await waitOnExecutionContext(ctx);
+  expect(result.explicitAcks).toHaveLength(1);
+}
+
+let clock = Date.now();
+
+/** Pushes `files` as a commit on top of `from` to the workspace ref and delivers its push event. */
+async function push(repoName: string, repo: FakeRepo, ws: Record<string, any>, from: string, files: Files): Promise<string> {
+  const c = await commit(repo, files, [from]);
+  const report = await gitPush(repoName, tok.owner, [`${from} ${c.sha} ${ws.ref}`]);
+  expect(report).toEqual(['unpack ok', `ok ${ws.ref}`]);
+  await deliver(pushEvent(repoName, ws.ref, from, c.sha, (clock += 1000)));
+  return c.sha;
+}
+
+async function based(repo: FakeRepo, files: Files = { 'README.md': 'readme\n' }) {
+  const main = await commit(repo, files);
+  repo.refs.set('refs/heads/main', main.sha);
+  return main;
+}
+
+const BASE_FILES: Files = { 'README.md': 'readme\n', 'src/app.ts': 'app\n', 'docs/guide.md': 'guide\n' };
+
+beforeAll(async () => {
+  installFakeGitRemote();
+  tok.owner = (await mintPAT(env, await seedUser(OWNER), 'owner', FULL)).token;
+  tok.outsider = (await mintPAT(env, await seedUser('nx-outsider'), 'outsider', FULL)).token;
+});
+
+afterAll(() => restoreFetch());
+
+// ---------------------------------------------------------------------------
+
+describe('path normalization (pure)', () => {
+  it('normalizes, dedupes, subsumes paths under declared prefixes and sorts', () => {
+    const r = normalizeDeclaration({ paths: ['src/', 'src/a.ts', 'docs//guide.md', './docs/guide.md', 'lib'], prefixes: ['tools', 'tools/'] });
+    expect(r).toEqual({ ok: true, value: { paths: ['docs/guide.md', 'lib', 'src/', 'tools/'], ttlSeconds: null } });
+  });
+
+  it('rejects absolute paths, dot-dot segments, empty declarations and over-cap input', () => {
+    const bad: unknown[] = [
+      { paths: ['/etc/passwd'] },
+      { paths: ['src/../secret'] },
+      { paths: ['..'] },
+      { paths: [] },
+      { paths: ['', '/'] },
+      { paths: 'src/' },
+      { paths: [7] },
+      { paths: ['a\\b'] },
+      { paths: ['x'.repeat(INTENT_LIMITS.pathMaxBytes + 1)] },
+      { paths: Array.from({ length: INTENT_LIMITS.declaredMax + 1 }, (_, i) => `f${i}.ts`) },
+      { paths: ['ok.ts'], ttlSeconds: 1 },
+    ];
+    for (const b of bad) {
+      const r = normalizeDeclaration(b);
+      expect(r.ok, JSON.stringify(b).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it('collapses wide observed sets into bounded directory prefixes', () => {
+    const many = Array.from({ length: 40 }, (_, i) => `gen/part${i % 4}/f${i}.ts`).concat(['README.md']);
+    const c = collapseObserved(many, 10);
+    expect(c.paths).toEqual(['README.md', 'gen/part0/', 'gen/part1/', 'gen/part2/', 'gen/part3/']);
+    expect(c.collapsed).toBe(true);
+    const small = collapseObserved(['b.ts', 'a.ts'], 10);
+    expect(small).toEqual({ paths: ['a.ts', 'b.ts'], collapsed: false, truncated: false });
+  });
+});
+
+describe('declarations', () => {
+  it('records intent at creation, replaces it through the intent route and rejects invalid paths without change', async () => {
+    const repo = await seedRepo('declare');
+    const main = await based(repo, BASE_FILES);
+    const made = await createWs('declare', { task: 'docs and src', agent: 'a1', intent: { paths: ['src/', 'docs/guide.md'] } });
+    expect(made.status).toBe(201);
+    expect(made.json.declaredPaths).toEqual(['docs/guide.md', 'src/']);
+    const id = made.json.id as string;
+
+    const got = await getIntent('declare', id);
+    expect(got.status).toBe(200);
+    expect(got.json).toMatchObject({
+      workspace: id,
+      status: 'active',
+      declaredPaths: ['docs/guide.md', 'src/'],
+      observedPaths: [],
+      baseSha: main.sha,
+      headSha: main.sha,
+      observedTruncated: false,
+      advisory: true,
+      index: { declared: 2, observed: 0 },
+    });
+    expect(got.cost).toMatchObject({ d1: 2, do: 0, art: 0, sub: 0 });
+
+    const upd = await setIntent('declare', id, { paths: ['lib/util.ts'] });
+    expect(upd.status).toBe(200);
+    expect(upd.json.declaredPaths).toEqual(['lib/util.ts']);
+    expect(upd.cost.d1).toBeLessThanOrEqual(2);
+    expect(upd.cost.do).toBe(0);
+    expect((await getIntent('declare', id)).json.declaredPaths).toEqual(['lib/util.ts']);
+
+    for (const body of [{ paths: ['/abs/path'] }, { paths: ['a/../b'] }, { paths: [] }, {}]) {
+      const r = await setIntent('declare', id, body);
+      expect([r.status, r.json.code], JSON.stringify(body)).toEqual([422, 'INVALID_INTENT']);
+      expect(r.json.error).toEqual(expect.any(String));
+    }
+    expect((await getIntent('declare', id)).json.declaredPaths).toEqual(['lib/util.ts']);
+
+    // An invalid declaration at creation writes nothing (no ref, no row).
+    const before = repo.count('receivePack:');
+    const refused = await createWs('declare', { task: 'bad', agent: 'a1', intent: { paths: ['../x'] } });
+    expect([refused.status, refused.json.code]).toEqual([422, 'INVALID_INTENT']);
+    expect(repo.count('receivePack:')).toBe(before);
+  });
+
+  it('reads follow repo read access and writes need write; unknown workspaces are 404', async () => {
+    const repo = await seedRepo('declare-auth');
+    await based(repo, BASE_FILES);
+    const id = (await createWs('declare-auth', { task: 't', agent: 'a' })).json.id as string;
+    expect((await getIntent('declare-auth', id, tok.outsider)).status).toBe(404);
+    expect((await setIntent('declare-auth', id, { paths: ['a'] }, tok.outsider)).status).toBe(404);
+    expect((await forecast('declare-auth', 'paths=a', tok.outsider)).status).toBe(404);
+    expect((await overlap('declare-auth', 'base=main', tok.outsider)).status).toBe(404);
+    expect((await getIntent('declare-auth', 'nope')).json.code).toBe('WORKSPACE_NOT_FOUND');
+    expect((await setIntent('declare-auth', 'nope', { paths: ['a'] })).json.code).toBe('WORKSPACE_NOT_FOUND');
+    expect((await abandon('declare-auth', id)).status).toBe(200);
+    const late = await setIntent('declare-auth', id, { paths: ['a'] });
+    expect([late.status, late.json.code]).toEqual([409, 'WORKSPACE_NOT_ACTIVE']);
+  });
+
+  it('is nonexclusive: overlapping declarations coexist and every push lands', async () => {
+    const repo = await seedRepo('nonexclusive');
+    const main = await based(repo, BASE_FILES);
+    const a = (await createWs('nonexclusive', { task: 'a', agent: 'a', intent: { paths: ['src/'] } })).json;
+    const b = (await createWs('nonexclusive', { task: 'b', agent: 'b', intent: { paths: ['src/'] } })).json;
+    const c = (await createWs('nonexclusive', { task: 'c', agent: 'c' })).json;
+    for (const [i, ws] of [a, b, c].entries()) {
+      await push('nonexclusive', repo, ws, main.sha, { ...BASE_FILES, 'src/a.ts': `v${i}\n` });
+    }
+    expect((await getIntent('nonexclusive', a.id)).json).toMatchObject({ declaredPaths: ['src/'], observedPaths: ['src/a.ts'] });
+    expect((await getIntent('nonexclusive', b.id)).json).toMatchObject({ declaredPaths: ['src/'], observedPaths: ['src/a.ts'] });
+    const cIntent = (await getIntent('nonexclusive', c.id)).json;
+    expect(cIntent).toMatchObject({ declaredPaths: [], observedPaths: ['src/a.ts'] });
+    expect(JSON.stringify(cIntent)).not.toMatch(/lock|claim|blocked/i);
+  });
+});
+
+describe('observed index', () => {
+  it('a prefix declaration is one indexed row and matches descendant observed paths', async () => {
+    const repo = await seedRepo('prefix');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('prefix', { task: 'p', agent: 'a', intent: { paths: ['src/'] } })).json;
+    expect((await getIntent('prefix', ws.id)).json.index).toEqual({ declared: 1, observed: 0 });
+    const head = await push('prefix', repo, ws, main.sha, { ...BASE_FILES, 'src/deep/nested/file.ts': 'x\n' });
+    const got = (await getIntent('prefix', ws.id)).json;
+    expect(got).toMatchObject({
+      declaredPaths: ['src/'],
+      observedPaths: ['src/deep/nested/file.ts'],
+      headSha: head,
+      matches: [{ declared: 'src/', observed: ['src/deep/nested/file.ts'] }],
+      outsideDeclaration: [],
+      index: { declared: 1, observed: 1 },
+    });
+  });
+
+  it('is cumulative base→head across pushes, not the last delta', async () => {
+    const repo = await seedRepo('cumulative');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('cumulative', { task: 'c', agent: 'a' })).json;
+    const c1 = await push('cumulative', repo, ws, main.sha, { ...BASE_FILES, 'a.txt': 'a\n' });
+    const c2 = await push('cumulative', repo, ws, c1, { ...BASE_FILES, 'a.txt': 'a\n', 'b.txt': 'b\n' });
+    const got = (await getIntent('cumulative', ws.id)).json;
+    expect(got).toMatchObject({ observedPaths: ['a.txt', 'b.txt'], baseSha: main.sha, headSha: c2, workspaceHeadSha: c2, observedCurrent: true });
+  });
+
+  it('drops net-zero edits and keeps paths still changed', async () => {
+    const repo = await seedRepo('netzero');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('netzero', { task: 'n', agent: 'a' })).json;
+    const c1 = await push('netzero', repo, ws, main.sha, { ...BASE_FILES, 'tmp.txt': 't\n', 'keep.txt': 'k\n', 'src/app.ts': 'changed\n' });
+    const c2 = await push('netzero', repo, ws, c1, { ...BASE_FILES, 'keep.txt': 'k\n' });
+    const got = (await getIntent('netzero', ws.id)).json;
+    expect(got.observedPaths).toEqual(['keep.txt']);
+    expect(got.headSha).toBe(c2);
+    // The reverted src/app.ts edit is no longer forecast as observed either.
+    expect((await forecast('netzero', 'paths=src/app.ts')).json.matches).toEqual([]);
+  });
+
+  it('records pushes outside the declaration honestly as advisory evidence', async () => {
+    const repo = await seedRepo('outside');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('outside', { task: 'o', agent: 'a', intent: { paths: ['docs/'] } })).json;
+    const head = await push('outside', repo, ws, main.sha, { ...BASE_FILES, 'src/billing.ts': 'bill\n' });
+    expect(repo.refs.get(ws.ref)).toBe(head);
+    const got = (await getIntent('outside', ws.id)).json;
+    expect(got).toMatchObject({
+      declaredPaths: ['docs/'],
+      observedPaths: ['src/billing.ts'],
+      matches: [{ declared: 'docs/', observed: [] }],
+      outsideDeclaration: ['src/billing.ts'],
+      advisory: true,
+    });
+  });
+
+  it('a late older push event never rolls the observed set back', async () => {
+    const repo = await seedRepo('ordering');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('ordering', { task: 'o', agent: 'a' })).json;
+    const c1 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n' }, [main.sha]);
+    const c2 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n', 'two.txt': '2\n' }, [c1.sha]);
+    await gitPush('ordering', tok.owner, [`${main.sha} ${c2.sha} ${ws.ref}`]);
+    const t1 = (clock += 1000);
+    const t2 = (clock += 1000);
+    await deliver(pushEvent('ordering', ws.ref, c1.sha, c2.sha, t2));
+    await deliver(pushEvent('ordering', ws.ref, main.sha, c1.sha, t1));
+    const got = (await getIntent('ordering', ws.id)).json;
+    expect(got).toMatchObject({ observedPaths: ['one.txt', 'two.txt'], headSha: c2.sha });
+  });
+
+  it('collapses a wide edit into bounded prefixes that still forecast and overlap', async () => {
+    const repo = await seedRepo('wide');
+    const main = await based(repo, BASE_FILES);
+    const wide = (await createWs('wide', { task: 'wide', agent: 'a' })).json;
+    const files: Files = { ...BASE_FILES };
+    for (let i = 0; i < INTENT_LIMITS.observedMax + 10; i++) files[`gen/d${i % 3}/f${i}.ts`] = `${i}\n`;
+    await push('wide', repo, wide, main.sha, files);
+    const got = (await getIntent('wide', wide.id)).json;
+    expect(got.observedPaths).toEqual(['gen/d0/', 'gen/d1/', 'gen/d2/']);
+    expect(got.observedTruncated).toBe(true);
+    expect(got.observedTruncatedReason).toMatch(/prefix/);
+
+    const narrow = (await createWs('wide', { task: 'narrow', agent: 'b' })).json;
+    await push('wide', repo, narrow, main.sha, { ...BASE_FILES, 'gen/d1/f1.ts': 'other\n' });
+    const f = (await forecast('wide', 'paths=gen/d1/f1.ts')).json;
+    expect(f.matches.map((m: any) => [m.workspace, m.matchKind]).sort()).toEqual([[narrow.id, 'observed'], [wide.id, 'observed']].sort());
+    const o = (await overlap('wide')).json;
+    expect(o.pairs).toHaveLength(1);
+    expect(o.pairs[0].workspaces).toEqual([narrow.id, wide.id].sort());
+    expect(o.pairs[0].paths).toEqual(['gen/d1/f1.ts']);
+  });
+});
+
+describe('forecast', () => {
+  it('matches declared and observed workspaces with evidence, class and freshness', async () => {
+    const repo = await seedRepo('fc');
+    const main = await based(repo, BASE_FILES);
+    const a = (await createWs('fc', { task: 'a', agent: 'a', intent: { paths: ['src/'] } })).json;
+    const b = (await createWs('fc', { task: 'b', agent: 'b' })).json;
+    const bHead = await push('fc', repo, b, main.sha, { ...BASE_FILES, 'src/b.ts': 'b\n' });
+    const r = await forecast('fc', 'paths=src/b.ts&base=main');
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ advisory: true, truncated: false, nextCursor: null, query: { paths: ['src/b.ts'], base: 'main' } });
+    expect(r.json.advisoryNote).toEqual(expect.any(String));
+    const byId = new Map<string, any>(r.json.matches.map((m: any) => [m.workspace, m]));
+    expect(byId.size).toBe(2);
+    expect(byId.get(a.id)).toMatchObject({
+      matchKind: 'declared',
+      evidence: [{ kind: 'declared', path: 'src/', query: 'src/b.ts' }],
+      revision: main.sha,
+      observedHeadSha: main.sha,
+    });
+    expect(byId.get(a.id).declaredAt).toMatch(/^\d{4}-\d\d-\d\dT.*Z$/);
+    expect(byId.get(b.id)).toMatchObject({
+      matchKind: 'observed',
+      evidence: [{ kind: 'observed', path: 'src/b.ts', query: 'src/b.ts' }],
+      revision: bHead,
+      observedHeadSha: bHead,
+    });
+    expect(byId.get(b.id).observedAt).toMatch(/Z$/);
+    expect(r.cost).toMatchObject({ d1: 2, do: 0, art: 0, sub: 0 });
+
+    // A prefix query finds descendants; another base finds nothing.
+    expect((await forecast('fc', 'paths=src/')).json.matches.map((m: any) => m.workspace).sort()).toEqual([a.id, b.id].sort());
+    expect((await forecast('fc', 'paths=src/b.ts&base=other')).json.matches).toEqual([]);
+    expect((await forecast('fc', `paths=src/b.ts&exclude=${b.id}`)).json.matches.map((m: any) => m.workspace)).toEqual([a.id]);
+  });
+
+  it('is bounded: explicit truncation, a complete duplicate-free cursor and an actionable cap error', async () => {
+    const repo = await seedRepo('fc-page');
+    const main = await based(repo, BASE_FILES);
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const ws = (await createWs('fc-page', { task: `w${i}`, agent: `a${i}`, ...(i % 2 ? { intent: { paths: ['shared/'] } } : {}) })).json;
+      ids.push(ws.id);
+      if (i % 2 === 0) await push('fc-page', repo, ws, main.sha, { ...BASE_FILES, 'shared/x.ts': `${i}\n` });
+    }
+    const full = await forecast('fc-page', 'paths=shared/x.ts&limit=100');
+    expect(full.json).toMatchObject({ truncated: false, nextCursor: null });
+    expect(full.json.matches.map((m: any) => m.workspace).sort()).toEqual([...ids].sort());
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const q: string = `paths=shared/x.ts&limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      const page = (await forecast('fc-page', q)).json;
+      expect(page.matches.length).toBeLessThanOrEqual(2);
+      if (page.nextCursor) expect(page).toMatchObject({ truncated: true, truncatedReason: expect.any(String) });
+      else expect(page.truncated).toBe(false);
+      seen.push(...page.matches.map((m: any) => m.workspace));
+      cursor = page.nextCursor;
+      pages++;
+    } while (cursor && pages < 10);
+    expect(pages).toBe(4);
+    expect(seen).toEqual(full.json.matches.map((m: any) => m.workspace));
+    expect(new Set(seen).size).toBe(seen.length);
+
+    const over = Array.from({ length: INTENT_LIMITS.forecastPathsMax + 1 }, (_, i) => `p${i}.ts`).join(',');
+    const capped = await forecast('fc-page', `paths=${over}`);
+    expect([capped.status, capped.json.code]).toEqual([422, 'TOO_MANY_PATHS']);
+    expect(capped.json.error).toContain(String(INTENT_LIMITS.forecastPathsMax));
+    expect((await forecast('fc-page', '')).json.code).toBe('INVALID_PATHS');
+    expect((await forecast('fc-page', 'paths=../x')).json.code).toBe('INVALID_PATHS');
+    expect((await forecast('fc-page', 'paths=a&limit=0')).json.code).toBe('INVALID_LIMIT');
+    expect((await forecast('fc-page', 'paths=a&cursor=Z!')).json.code).toBe('INVALID_CURSOR');
+  });
+
+  it('an empty forecast is explicit and advisory; forecasts are read-only and byte-identical', async () => {
+    const repo = await seedRepo('fc-empty');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('fc-empty', { task: 'e', agent: 'a', intent: { paths: ['src/'] } })).json;
+    await push('fc-empty', repo, ws, main.sha, { ...BASE_FILES, 'src/a.ts': 'a\n' });
+    const empty = await forecast('fc-empty', 'paths=path/that/no/workspace/touches&base=main');
+    expect(empty.status).toBe(200);
+    expect(empty.json).toMatchObject({ matches: [], truncated: false, advisory: true });
+
+    const snapshot = async () =>
+      JSON.stringify([
+        (await env.DB.prepare('SELECT * FROM workspace_paths ORDER BY repo_id, kind, path, workspace_id').all()).results,
+        (await env.DB.prepare('SELECT * FROM workspaces ORDER BY id').all()).results,
+        [...repo.refs.entries()].sort(),
+      ]);
+    const before = await snapshot();
+    const one = await forecast('fc-empty', 'paths=src/a.ts,docs/guide.md&base=main');
+    const two = await forecast('fc-empty', 'paths=src/a.ts,docs/guide.md&base=main');
+    expect(one.text).toBe(two.text);
+    expect(one.json.matches).toHaveLength(1);
+    expect(one.cost.rw).toBe(0);
+    expect(await snapshot()).toBe(before);
+  });
+
+  it('abandon and expiry remove the signal, not the workspace record or code', async () => {
+    const repo = await seedRepo('fc-expire');
+    const main = await based(repo, BASE_FILES);
+    const b = (await createWs('fc-expire', { task: 'b', agent: 'b', intent: { paths: ['lib/'] } })).json;
+    const bHead = await push('fc-expire', repo, b, main.sha, { ...BASE_FILES, 'lib/x.ts': 'x\n' });
+    repo.refs.set('refs/heads/keep-b', bHead);
+    const idle = (await createWs('fc-expire', { task: 'idle', agent: 'i', intent: { paths: ['lib/'] } })).json;
+    const ttl = (await createWs('fc-expire', { task: 'ttl', agent: 't', intent: { paths: ['lib/'], ttlSeconds: 3600 } })).json;
+    expect((await getIntent('fc-expire', ttl.id)).json.declaredExpiresAt).toMatch(/Z$/);
+    const before = (await forecast('fc-expire', 'paths=lib/x.ts')).json.matches.map((m: any) => m.workspace).sort();
+    expect(before).toEqual([b.id, idle.id, ttl.id].sort());
+
+    expect((await abandon('fc-expire', b.id)).status).toBe(200);
+    await env.DB.prepare('UPDATE workspaces SET intent_expires_at = ? WHERE id = ?').bind(Date.now() - 1000, ttl.id).run();
+    const after = (await forecast('fc-expire', 'paths=lib/x.ts')).json.matches.map((m: any) => m.workspace);
+    expect(after).toEqual([idle.id]);
+    const bIntent = (await getIntent('fc-expire', b.id)).json;
+    expect(bIntent).toMatchObject({ status: 'abandoned', declaredPaths: ['lib/'], observedPaths: ['lib/x.ts'], index: { declared: 0, observed: 0 } });
+    expect((await getIntent('fc-expire', ttl.id)).json).toMatchObject({ declaredPaths: ['lib/'], declaredExpired: true, index: { declared: 0 } });
+    expect((await call('GET', `${R('fc-expire')}/workspaces/${b.id}`, tok.owner)).json.status).toBe('abandoned');
+    expect(repo.refs.has(b.ref)).toBe(false);
+    expect(repo.refs.get('refs/heads/keep-b')).toBe(bHead);
+    expect(repo.refs.get(idle.ref)).toBe(main.sha);
+    expect((await overlap('fc-expire')).json.pairs).toEqual([]);
+  });
+
+  it('merged workspaces leave the active index', async () => {
+    const repo = await seedRepo('fc-merged');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('fc-merged', { task: 'm', agent: 'm', intent: { paths: ['m/'] } })).json;
+    await push('fc-merged', repo, ws, main.sha, { ...BASE_FILES, 'm/x.ts': 'x\n' });
+    const opened = await call('POST', `${R('fc-merged')}/workspaces/${ws.id}/change-set`, tok.owner, { title: 'm' });
+    expect(opened.status).toBe(201);
+    expect((await forecast('fc-merged', 'paths=m/x.ts')).json.matches).toHaveLength(1);
+    const merged = await call('POST', `${R('fc-merged')}/changes/${opened.json.number}/merge`, tok.owner);
+    expect(merged.status).toBe(200);
+    expect((await forecast('fc-merged', 'paths=m/x.ts')).json.matches).toEqual([]);
+    expect((await getIntent('fc-merged', ws.id)).json).toMatchObject({ status: 'merged', index: { declared: 0, observed: 0 } });
+  });
+});
+
+describe('active-workspace overlap', () => {
+  it('pairs overlapping workspaces with their shared paths, against the requested base, without abandoned ones', async () => {
+    const repo = await seedRepo('overlap');
+    const main = await based(repo, BASE_FILES);
+    const a = (await createWs('overlap', { task: 'a', agent: 'a' })).json;
+    const b = (await createWs('overlap', { task: 'b', agent: 'b' })).json;
+    const c = (await createWs('overlap', { task: 'c', agent: 'c' })).json;
+    const d = (await createWs('overlap', { task: 'd', agent: 'd', intent: { paths: ['src/app.ts'] } })).json;
+    const aHead = await push('overlap', repo, a, main.sha, { ...BASE_FILES, 'src/app.ts': 'A\n', 'a-only.ts': 'a\n' });
+    const bHead = await push('overlap', repo, b, main.sha, { ...BASE_FILES, 'src/app.ts': 'B\n' });
+    await push('overlap', repo, c, main.sha, { ...BASE_FILES, 'docs/guide.md': 'C\n' });
+
+    const r = await overlap('overlap');
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ base: 'main', advisory: true, truncated: false, nextCursor: null });
+    expect(r.json.pairs).toHaveLength(1);
+    const pair = r.json.pairs[0];
+    expect(pair.workspaces).toEqual([a.id, b.id].sort());
+    expect(pair.paths).toEqual(['src/app.ts']);
+    expect(pair.matchKind).toBe('observed');
+    const heads = Object.fromEntries(pair.heads.map((h: any) => [h.workspace, h.observedHeadSha]));
+    expect(heads).toEqual({ [a.id]: aHead, [b.id]: bHead });
+    for (const p of r.json.pairs) for (const w of [c.id, d.id]) expect(p.workspaces).not.toContain(w);
+    expect(r.cost).toMatchObject({ d1: 2, do: 0, art: 0, sub: 0 });
+    const again = await overlap('overlap');
+    expect(again.text).toBe(r.text);
+    expect(again.cost.art).toBe(0);
+
+    expect((await overlap('overlap', 'base=dev')).json.pairs).toEqual([]);
+    expect((await overlap('overlap', 'base=..bad')).json.code).toBe('INVALID_REF');
+
+    expect((await abandon('overlap', a.id)).status).toBe(200);
+    expect((await overlap('overlap')).json.pairs).toEqual([]);
+  });
+
+  it('bounds pairs with explicit truncation and a cursor', async () => {
+    const repo = await seedRepo('overlap-page');
+    const main = await based(repo, BASE_FILES);
+    for (let i = 0; i < 4; i++) {
+      const ws = (await createWs('overlap-page', { task: `w${i}`, agent: 'a' })).json;
+      await push('overlap-page', repo, ws, main.sha, { ...BASE_FILES, 'hot.ts': `${i}\n` });
+    }
+    const full = (await overlap('overlap-page', 'base=main&limit=100')).json;
+    expect(full.pairs).toHaveLength(6);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const page: any = (await overlap('overlap-page', `base=main&limit=4${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)).json;
+      if (page.nextCursor) expect(page).toMatchObject({ truncated: true, truncatedReason: expect.any(String) });
+      seen.push(...page.pairs.map((p: any) => p.workspaces.join(':')));
+      cursor = page.nextCursor;
+      pages++;
+    } while (cursor && pages < 5);
+    expect(pages).toBe(2);
+    expect(seen).toEqual(full.pairs.map((p: any) => p.workspaces.join(':')));
+    expect((await overlap('overlap-page', 'base=main&limit=0')).json.code).toBe('INVALID_LIMIT');
+  });
+});

@@ -26,6 +26,7 @@ import { bumpRefGeneration } from '../cache/compare';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import type { ServiceResult } from '../repos/service';
 import { onHeadPushed, type ChangeOnRef } from './changes';
+import { reconcileObserved } from './intents/forecast';
 
 export interface PushEvent {
   namespace: string;
@@ -107,9 +108,18 @@ interface IngestRow {
   repo_id: string;
   default_branch: string;
   deliveries: number;
+  event_at: number;
   head_event_id: string | null;
   done: string;
   changes: string | null;
+  workspace: string | null;
+}
+
+/** The workspace whose ref was pushed (workspace-namespace refs only). */
+export interface PushedWorkspace {
+  id: string;
+  status: string;
+  baseSha: string | null;
 }
 
 export interface Ingested {
@@ -121,6 +131,9 @@ export interface Ingested {
   done: Set<string>;
   /** Open change requests whose head is the pushed branch, after the head refresh. */
   changes: ChangeOnRef[];
+  /** Event time as first persisted (orders reconciliations of one ref). */
+  eventAt: number;
+  workspace: PushedWorkspace | null;
 }
 
 const BRANCH_PREFIX = 'refs/heads/';
@@ -197,16 +210,18 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
       .bind(ev.repoName, ev.ref, branch, now),
     db
       .prepare(
-        `SELECT r.id AS repo_id, r.default_branch, p.deliveries, f.event_id AS head_event_id,
+        `SELECT r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,
            (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done,
            (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'policy', c.merge_policy, 'headSha', c.head_sha))
-              FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state = 'open') AS changes
+              FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state = 'open') AS changes,
+           (SELECT json_object('id', w.id, 'status', w.status, 'baseSha', w.base_sha)
+              FROM workspaces w WHERE w.repo_id = r.id AND w.ref = ?5) AS workspace
          FROM repos r
          JOIN push_events p ON p.id = ?2 AND p.repo_id = r.id
          LEFT JOIN repo_refs f ON f.repo_id = r.id AND f.ref = ?3
          WHERE r.artifacts_name = ?1`,
       )
-      .bind(ev.repoName, id, ev.ref, branch),
+      .bind(ev.repoName, id, ev.ref, branch, ev.ref.startsWith(WORKSPACE_REF_PREFIX) ? ev.ref : null),
   ]);
   const row = (results[5]?.results as IngestRow[] | undefined)?.[0];
   if (!row) return null;
@@ -217,6 +232,8 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
     superseded: row.head_event_id !== id,
     done: new Set(JSON.parse(row.done || '[]') as string[]),
     changes: parseChanges(row.changes),
+    eventAt: row.event_at,
+    workspace: row.workspace ? (JSON.parse(row.workspace) as PushedWorkspace) : null,
   };
 }
 
@@ -233,6 +250,8 @@ export interface EffectContext {
   superseded: boolean;
   /** Open change requests whose head is the pushed branch (from the ingest batch). */
   changes: ChangeOnRef[];
+  eventAt: number;
+  workspace: PushedWorkspace | null;
   /** Counts SnapshotBuilder instance creations for the per-message log line. */
   counters: { wf: number };
 }
@@ -240,6 +259,8 @@ export interface EffectContext {
 export interface EffectOutcome {
   state: 'done' | 'skipped';
   detail?: string;
+  /** D1 writes that land in the message's completion batch, together with the effect's completion record. */
+  statements?: D1PreparedStatement[];
 }
 
 export interface PushEffect {
@@ -285,15 +306,29 @@ const snapshotEffect: PushEffect = {
 };
 
 /**
- * Hook for the workspace intent index (architecture §11.2), which reconciles
- * a workspace's cumulative base→head path set on push. Until the index lands
- * the effect records itself as skipped.
+ * Nexus observed index (services/intents/forecast.ts): reconciles the pushed
+ * workspace's cumulative base→head changed paths. Its writes join the
+ * completion batch, guarded so a newer push's set is never replaced.
  */
 const intentIndexEffect: PushEffect = {
   name: 'intent-index',
   async run(ctx) {
-    if (!ctx.event.ref.startsWith(WORKSPACE_REF_PREFIX)) return { state: 'skipped', detail: 'not a workspace ref' };
-    return { state: 'skipped', detail: 'intent index not enabled' };
+    const { event, workspace } = ctx;
+    if (!event.ref.startsWith(WORKSPACE_REF_PREFIX)) return { state: 'skipped', detail: 'not a workspace ref' };
+    if (!workspace) return { state: 'skipped', detail: 'no workspace for this ref' };
+    if (workspace.status !== 'active') return { state: 'skipped', detail: `workspace ${workspace.status}` };
+    if (event.after === ZERO_OID) return { state: 'skipped', detail: 'ref deleted' };
+    if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
+    if (!workspace.baseSha) return { state: 'skipped', detail: 'workspace has no base commit' };
+    const r = await reconcileObserved(ctx.env, {
+      repoId: ctx.repoId,
+      artifactsName: event.repoName,
+      workspaceId: workspace.id,
+      baseSha: workspace.baseSha,
+      headSha: event.after,
+      eventAt: ctx.eventAt,
+    });
+    return { state: 'done', detail: r.detail, statements: r.statements };
   },
 };
 
@@ -356,6 +391,8 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
     defaultBranch: state.defaultBranch,
     superseded: state.superseded,
     changes: state.changes,
+    eventAt: state.eventAt,
+    workspace: state.workspace,
     counters,
   };
   const settled = await Promise.allSettled(pending.map((e) => e.run(ctx)));
@@ -375,11 +412,14 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
 
   if (finished.length > 0) {
     const doneAt = Date.now();
-    const stmts = finished.map(({ name, outcome }) =>
-      env.DB.prepare(
-        'INSERT OR IGNORE INTO push_event_effects (event_id, effect, state, detail, completed_at) VALUES (?, ?, ?, ?, ?)',
-      ).bind(eventId, name, outcome.state, outcome.detail ?? null, doneAt),
-    );
+    const stmts = finished.flatMap(({ outcome }) => outcome.statements ?? []);
+    for (const { name, outcome } of finished) {
+      stmts.push(
+        env.DB.prepare(
+          'INSERT OR IGNORE INTO push_event_effects (event_id, effect, state, detail, completed_at) VALUES (?, ?, ?, ?, ?)',
+        ).bind(eventId, name, outcome.state, outcome.detail ?? null, doneAt),
+      );
+    }
     stmts.push(
       env.DB.prepare(
         `UPDATE push_events SET completed_at = ?2

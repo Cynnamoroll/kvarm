@@ -477,7 +477,7 @@ describe('queue dispatcher', () => {
     const byRef = Object.fromEntries(await Promise.all(rows.map(async (r) => [r.ref, await effects(r.id)] as const)));
     expect(byRef['refs/heads/main']!.snapshot).toEqual({ state: 'skipped', detail: 'lazy: not the default branch' });
     expect(byRef['refs/heads/agents/ws1/fix']!.snapshot).toEqual({ state: 'skipped', detail: 'lazy: not the default branch' });
-    expect(byRef['refs/heads/agents/ws1/fix']!['intent-index']).toEqual({ state: 'skipped', detail: 'intent index not enabled' });
+    expect(byRef['refs/heads/agents/ws1/fix']!['intent-index']).toEqual({ state: 'skipped', detail: 'no workspace for this ref' });
     expect(byRef['refs/heads/main']!['intent-index']).toEqual({ state: 'skipped', detail: 'not a workspace ref' });
     expect(byRef['refs/heads/trunk']!.snapshot).toEqual({ state: 'skipped', detail: 'ref deleted' });
     expect(wf.instances.size).toBe(0);

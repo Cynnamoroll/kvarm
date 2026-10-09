@@ -488,6 +488,46 @@ async function loadCompareBody(ctx: Ctx, baseTree: string, headTree: string): Pr
   return { body: JSON.parse(serialized) as CompareBody, cache: ctx.bypass ? 'bypass' : 'miss' };
 }
 
+export interface ChangedPaths {
+  /** Changed paths, both sides of a rename included. */
+  paths: string[];
+  truncated: boolean;
+  truncatedReason?: string;
+  /** Where the list came from: the cached compare body or a tree-only walk. */
+  source: 'cache' | 'diff';
+}
+
+/**
+ * The changed paths of a tree pair: from the cached compare body when one
+ * exists, otherwise a tree-only diff (no blob reads, nothing cached).
+ */
+export async function changedPaths(ctx: Ctx, baseTree: string, headTree: string): Promise<ChangedPaths> {
+  const fromChanges = (changes: Array<{ path: string; oldPath?: string }>) => changes.flatMap((c) => (c.oldPath ? [c.path, c.oldPath] : [c.path]));
+  if (!ctx.bypass) {
+    const hit = await readJson<CompareBody>(compareKeys.treediff(baseTree, headTree));
+    if (hit) {
+      return {
+        paths: fromChanges(hit.files),
+        truncated: hit.truncated,
+        ...(hit.truncatedReason ? { truncatedReason: hit.truncatedReason } : {}),
+        source: 'cache',
+      };
+    }
+  }
+  const diff = await diffTrees(new ArtifactsTreeReader(ctx.artifacts), baseTree, headTree, {
+    maxTreeReads: COMPARE_BUDGETS.maxTreeReads,
+    maxChanges: COMPARE_BUDGETS.maxChanges,
+    concurrency: COMPARE_BUDGETS.treeConcurrency,
+  });
+  if (diff.truncatedReason === 'readError') throw new Error(`tree read failed: ${diff.readError ?? 'unknown error'}`);
+  return {
+    paths: fromChanges(diff.changes),
+    truncated: diff.truncated,
+    ...(diff.truncatedReason ? { truncatedReason: TRUNCATION_REASONS[diff.truncatedReason] } : {}),
+    source: 'diff',
+  };
+}
+
 /**
  * The rating `compare` reports for a tree pair, from the same cached body, so
  * a change request and `compare/<base>...<head>` agree on identical trees.

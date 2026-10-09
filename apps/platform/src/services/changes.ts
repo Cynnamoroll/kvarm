@@ -26,6 +26,7 @@ import { effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type 
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
 import { treePairRating } from './compare';
 import { artifactsPusher, type GitPusher } from './gitwrite';
+import { changeSignalCleanup } from './intents/store';
 import {
   artifactsMergeSources,
   computeMergeability,
@@ -808,7 +809,7 @@ async function performMerge(
       }
       const pv = prepared.value;
       const mergedAt = Date.now();
-      const [update, , read] = await cx.env.DB.batch([
+      const [update, , , read] = await cx.env.DB.batch([
         cx.env.DB.prepare(
           `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5
             WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft'`,
@@ -819,6 +820,7 @@ async function performMerge(
             WHERE repo_id = ?1 AND change_set_id = ?2 AND status = 'active'
               AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?2 AND c.state = 'merged' AND c.merge_commit = ?5 AND c.merged_at = ?3)`,
         ).bind(cx.repo.id, row.id, mergedAt, headSha, pv.mergeCommit),
+        changeSignalCleanup(cx.env.DB, cx.repo.id, row.id),
         changeSelect(cx.env.DB, cx.repo.id, row.number),
       ]);
       if (!update?.meta.changes) {

@@ -1,0 +1,607 @@
+/**
+ * Nexus intents, forecasts and active-workspace overlap (architecture §11.2).
+ * This module owns all overlap/conflict-prediction signal (§0.1); other
+ * services read it through these functions instead of computing their own.
+ *
+ * Two kinds of signal live in the `workspace_paths` index, one row per
+ * normalized path or prefix (a trailing `/`) of an active workspace:
+ *  - declared: the workspace's nonexclusive intent, replaced as a whole;
+ *  - observed: the cumulative base→head changed-path set, reconciled from the
+ *    push consumer, so reverted edits drop out and a late older event never
+ *    rolls a newer set back.
+ * Reads probe the index by path (exact keys, ancestor prefixes, prefix
+ * ranges) or group it by shared path; no request compares workspaces pairwise.
+ * Everything here is advice: nothing locks a path, refuses a push or changes a
+ * merge decision. Abandon, merge and expiry remove a workspace's signal from
+ * the active index; code, refs and the workspace row stay.
+ */
+
+import { withLazyRepo } from '../../artifacts/repo';
+import type { RepoRow } from '../../db/repos';
+import type { ServiceResult } from '../../repos/service';
+import type { Actor } from '../authz';
+import { normalizeBranch } from '../changes';
+import { changedPaths } from '../compare';
+import { readCommitInfo, type ResolveContext } from '../refs';
+import { WORKSPACE_ID_RE, agentOwnershipDenial } from '../workspaces';
+import { INTENT_LIMITS, ancestorPrefixes, collapseObserved, covers, intersects, isPrefix, normalizeDeclaration, normalizePath, prefixUpper } from './paths';
+import { declarationReplaceStatements, observedWriteStatements } from './store';
+
+const ZERO_SHA = '0000000000000000000000000000000000000000';
+
+export const ADVISORY_NOTE =
+  'Advisory only: matches predict likely overlap from declared intents and observed changes. An empty or truncated result is not proof of compatibility, and nothing here locks paths, refuses pushes or changes merge decisions; mergeability and required checks decide.';
+
+type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
+
+function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
+  return { ok: false, status, error, code, ...extra };
+}
+
+const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
+
+function parseList(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json) as unknown;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export interface IntentContext {
+  env: Env;
+  repo: RepoRow;
+  actor: Actor | null;
+}
+
+// ---------------------------------------------------------------------------
+// Intent view
+// ---------------------------------------------------------------------------
+
+interface IntentRow {
+  id: string;
+  status: string;
+  ref: string | null;
+  agent_id: string | null;
+  base_ref: string | null;
+  base_sha: string | null;
+  head_sha: string | null;
+  ref_sha: string | null;
+  intent_paths: string | null;
+  intent_updated_at: number | null;
+  intent_expires_at: number | null;
+  observed_paths: string | null;
+  observed_base_sha: string | null;
+  observed_head_sha: string | null;
+  observed_at: number | null;
+  observed_truncated: string | null;
+  declared_rows: number;
+  observed_rows: number;
+}
+
+const INTENT_SELECT = `SELECT w.id, w.status, w.ref, w.agent_id, w.base_ref, w.base_sha, w.head_sha, f.sha AS ref_sha,
+       w.intent_paths, w.intent_updated_at, w.intent_expires_at,
+       w.observed_paths, w.observed_base_sha, w.observed_head_sha, w.observed_at, w.observed_truncated,
+       (SELECT COUNT(*) FROM workspace_paths p WHERE p.repo_id = w.repo_id AND p.workspace_id = w.id AND p.kind = 'declared') AS declared_rows,
+       (SELECT COUNT(*) FROM workspace_paths p WHERE p.repo_id = w.repo_id AND p.workspace_id = w.id AND p.kind = 'observed') AS observed_rows
+  FROM workspaces w
+  LEFT JOIN repo_refs f ON f.repo_id = w.repo_id AND f.ref = w.ref`;
+
+export interface IntentView {
+  workspace: string;
+  status: string;
+  base: string | null;
+  declaredPaths: string[];
+  declaredAt: string | null;
+  declaredExpiresAt: string | null;
+  /** The declaration's ttl passed: it stays readable here but no longer matches forecasts. */
+  declaredExpired: boolean;
+  observedPaths: string[];
+  /** The commit pair the observed set was computed from. */
+  baseSha: string | null;
+  headSha: string | null;
+  observedAt: string | null;
+  observedTruncated: boolean;
+  observedTruncatedReason?: string;
+  /** The workspace head as last recorded from pushes; differs from headSha while a reconciliation is pending. */
+  workspaceHeadSha: string | null;
+  observedCurrent: boolean;
+  /** Per declared entry, the observed paths it intersects. */
+  matches: Array<{ declared: string; observed: string[] }>;
+  /** Observed paths no declared entry covers (advisory evidence, never a refusal). */
+  outsideDeclaration: string[];
+  /** Rows this workspace has in the active index (a prefix is one row). */
+  index: { declared: number; observed: number };
+  advisory: true;
+}
+
+function intentView(row: IntentRow, now: number): IntentView {
+  const declared = parseList(row.intent_paths);
+  const observed = parseList(row.observed_paths);
+  const expired = row.intent_expires_at !== null && row.intent_expires_at <= now;
+  const pushed = row.ref_sha && row.ref_sha !== ZERO_SHA ? row.ref_sha : null;
+  const workspaceHead = row.status === 'active' ? (pushed ?? row.head_sha ?? row.base_sha) : row.head_sha;
+  const view: IntentView = {
+    workspace: row.id,
+    status: row.status,
+    base: row.base_ref,
+    declaredPaths: declared,
+    declaredAt: iso(row.intent_updated_at),
+    declaredExpiresAt: iso(row.intent_expires_at),
+    declaredExpired: expired,
+    observedPaths: observed,
+    baseSha: row.observed_base_sha ?? row.base_sha,
+    headSha: row.observed_head_sha,
+    observedAt: iso(row.observed_at),
+    observedTruncated: row.observed_truncated !== null,
+    workspaceHeadSha: workspaceHead,
+    observedCurrent: workspaceHead !== null && workspaceHead === row.observed_head_sha,
+    matches: declared.map((d) => ({ declared: d, observed: observed.filter((o) => intersects(d, o)) })),
+    outsideDeclaration: observed.filter((o) => !declared.some((d) => covers(d, o))),
+    index: { declared: expired ? 0 : row.declared_rows, observed: row.observed_rows },
+    advisory: true,
+  };
+  if (row.observed_truncated !== null) view.observedTruncatedReason = row.observed_truncated;
+  return view;
+}
+
+/** GET workspaces/:id/intent: one indexed read. */
+export async function getIntent(cx: IntentContext, id: string): Promise<ServiceResult<IntentView>> {
+  const row = WORKSPACE_ID_RE.test(id)
+    ? await cx.env.DB.prepare(`${INTENT_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, id).first<IntentRow>()
+    : null;
+  if (!row) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
+  return { ok: true, value: intentView(row, Date.now()) };
+}
+
+/**
+ * POST workspaces/:id/intent {paths, prefixes?, ttlSeconds?}: replaces the
+ * declaration in one guarded batch that also reads the row back. Only when
+ * that write did not land (missing, inactive, or an agent acting on a
+ * person's workspace) does a reason get worked out from the read-back row.
+ */
+export async function declareIntent(cx: IntentContext, id: string, input: unknown): Promise<ServiceResult<IntentView>> {
+  if (!WORKSPACE_ID_RE.test(id)) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
+  const parsed = normalizeDeclaration(input);
+  if (!parsed.ok) return fail(422, parsed.error, 'INVALID_INTENT');
+  const now = Date.now();
+  const pathsJson = JSON.stringify(parsed.value.paths);
+  const expiresAt = parsed.value.ttlSeconds ? now + parsed.value.ttlSeconds * 1000 : null;
+  const write = async (agentId: string | null) => {
+    const results = await cx.env.DB.batch([
+      ...declarationReplaceStatements(cx.env.DB, { repoId: cx.repo.id, workspaceId: id, pathsJson, expiresAt, now, agentId }),
+      cx.env.DB.prepare(`${INTENT_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, id),
+    ]);
+    return {
+      landed: (results[0]?.meta.changes ?? 0) > 0,
+      row: (results[results.length - 1]?.results as IntentRow[] | undefined)?.[0] ?? null,
+    };
+  };
+  let r = await write(cx.actor?.agent?.agentId ?? null);
+  if (!r.landed) {
+    if (!r.row) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
+    if (r.row.status !== 'active') return fail(409, `the workspace is ${r.row.status}`, 'WORKSPACE_NOT_ACTIVE', { workspaceStatus: r.row.status });
+    const denied = agentOwnershipDenial(cx.actor, r.row);
+    if (denied) return fail(403, denied, 'WORKSPACE_NOT_OWNED');
+    r = await write(null);
+    if (!r.landed || !r.row) return fail(409, 'the workspace left active meanwhile', 'WORKSPACE_NOT_ACTIVE');
+  }
+  return { ok: true, value: intentView(r.row!, now) };
+}
+
+// ---------------------------------------------------------------------------
+// Push reconciliation (push consumer `intent-index` effect)
+// ---------------------------------------------------------------------------
+
+export interface ObservedTarget {
+  repoId: string;
+  artifactsName: string;
+  workspaceId: string;
+  /** The workspace's base commit (its creation-time base head). */
+  baseSha: string;
+  headSha: string;
+  eventAt: number;
+}
+
+/**
+ * The statements recording a workspace's cumulative base→head changed paths,
+ * for the consumer's completion batch. Commits and trees come from the
+ * commit cache and the cached compare body when present, else Artifacts.
+ */
+export async function reconcileObserved(env: Env, t: ObservedTarget): Promise<{ statements: D1PreparedStatement[]; detail: string }> {
+  const pending: Promise<unknown>[] = [];
+  try {
+    return await withLazyRepo(env, t.artifactsName, async (artifacts) => {
+      const ctx: ResolveContext = {
+        env,
+        repo: { id: t.repoId, artifacts_name: t.artifactsName } as RepoRow,
+        artifacts,
+        bypass: false,
+        waitUntil: (p) => pending.push(p),
+      };
+      const [base, head] = await Promise.all([readCommitInfo(ctx, t.baseSha), readCommitInfo(ctx, t.headSha)]);
+      if (!base || !head) throw new Error(`commit not readable: ${base ? t.headSha : t.baseSha}`);
+      const diff = await changedPaths(ctx, base.tree, head.tree);
+      const changed = new Set(diff.paths).size;
+      const c = collapseObserved(diff.paths);
+      const reasons: string[] = [];
+      if (diff.truncated) reasons.push(`base→head diff incomplete: ${diff.truncatedReason ?? 'budget exhausted'}`);
+      if (c.truncated) reasons.push(`more than ${INTENT_LIMITS.observedMax} top-level entries changed; the first ${INTENT_LIMITS.observedMax} are kept`);
+      else if (c.collapsed) reasons.push(`${changed} changed paths collapsed into directory prefixes (cap ${INTENT_LIMITS.observedMax} entries)`);
+      const statements = observedWriteStatements(env.DB, {
+        repoId: t.repoId,
+        workspaceId: t.workspaceId,
+        pathsJson: JSON.stringify(c.paths),
+        baseSha: t.baseSha,
+        headSha: t.headSha,
+        eventAt: t.eventAt,
+        now: Date.now(),
+        truncated: reasons.length > 0 ? reasons.join('; ') : null,
+        prefixes: c.paths.filter(isPrefix).length,
+      });
+      return { statements, detail: `${c.paths.length} observed entries for ${changed} changed paths (${diff.source})` };
+    });
+  } finally {
+    await Promise.allSettled(pending);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Forecast
+// ---------------------------------------------------------------------------
+
+export interface ForecastQuery {
+  paths?: string;
+  base?: string;
+  limit?: string;
+  cursor?: string;
+  exclude?: string;
+}
+
+export interface Evidence {
+  kind: 'declared' | 'observed';
+  /** The indexed entry (a trailing `/` is a prefix). */
+  path: string;
+  /** The query path it intersects. */
+  query: string;
+}
+
+export interface ForecastMatch {
+  workspace: string;
+  task: string | null;
+  agent: string | null;
+  agentId: string | null;
+  base: string | null;
+  baseSha: string | null;
+  /** `observed` when any actual change matched, else `declared`. */
+  matchKind: 'declared' | 'observed';
+  matchKinds: Array<'declared' | 'observed'>;
+  evidence: Evidence[];
+  evidenceCount: number;
+  evidenceTruncated?: true;
+  /** The workspace revision the observed signal reflects (its base head before any push). */
+  revision: string | null;
+  observedHeadSha: string | null;
+  observedBaseSha: string | null;
+  observedAt: string | null;
+  observedTruncated: boolean;
+  declaredAt: string | null;
+  declaredExpiresAt: string | null;
+}
+
+export interface ForecastResponse {
+  query: { paths: string[]; base: string | null; exclude: string | null };
+  advisory: true;
+  advisoryNote: string;
+  matches: ForecastMatch[];
+  truncated: boolean;
+  truncatedReason?: string;
+  nextCursor: string | null;
+  limit: number;
+}
+
+interface ForecastRow {
+  id: string;
+  task: string | null;
+  agent: string | null;
+  agent_id: string | null;
+  base_ref: string | null;
+  base_sha: string | null;
+  observed_head_sha: string | null;
+  observed_base_sha: string | null;
+  observed_at: number | null;
+  observed_truncated: string | null;
+  intent_updated_at: number | null;
+  intent_expires_at: number | null;
+  ev: string;
+}
+
+function parseLimit(raw: string | undefined, def: number, max: number): number | Fail {
+  if (raw === undefined) return def;
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(n) || n < 1 || n > max) return fail(400, `limit must be an integer 1-${max}`, 'INVALID_LIMIT');
+  return n;
+}
+
+function parseQueryPaths(raw: string | undefined): string[] | Fail {
+  const parts = (raw ?? '').split(',').filter((p) => p.length > 0);
+  if (parts.length === 0) return fail(422, 'paths is required: comma-separated repo-relative paths or prefixes (trailing /)', 'INVALID_PATHS');
+  if (parts.length > INTENT_LIMITS.forecastPathsMax) {
+    return fail(422, `at most ${INTENT_LIMITS.forecastPathsMax} paths per forecast request (got ${parts.length})`, 'TOO_MANY_PATHS', {
+      limit: INTENT_LIMITS.forecastPathsMax,
+    });
+  }
+  const out = new Set<string>();
+  for (const p of parts) {
+    const n = normalizePath(p);
+    if (!n.ok) return fail(422, n.error, 'INVALID_PATHS');
+    out.add(n.value);
+  }
+  return [...out].sort();
+}
+
+const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === false;
+
+/**
+ * GET forecast?paths=a,b/&base=&limit=&cursor=&exclude=: the active
+ * workspaces whose declared or observed entries intersect the query paths.
+ * Index probes per query path: the path itself and its ancestor prefixes
+ * (a declared `src/` matches `src/a.ts`), plus the range below a query
+ * prefix. One page of workspaces, ordered by id; the cursor is the last id.
+ */
+export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<ServiceResult<ForecastResponse>> {
+  const paths = parseQueryPaths(q.paths);
+  if (isFail(paths)) return paths;
+  let base: string | null = null;
+  if (q.base !== undefined && q.base !== '') {
+    base = normalizeBranch(q.base);
+    if (base === null) return fail(422, 'base must be a branch name', 'INVALID_REF');
+  }
+  const limit = parseLimit(q.limit, INTENT_LIMITS.forecastPageDefault, INTENT_LIMITS.forecastPageMax);
+  if (isFail(limit)) return limit;
+  const cursor = q.cursor ?? null;
+  if (cursor !== null && !WORKSPACE_ID_RE.test(cursor)) return fail(400, 'cursor is invalid', 'INVALID_CURSOR');
+  const exclude = q.exclude ?? null;
+  if (exclude !== null && !WORKSPACE_ID_RE.test(exclude)) return fail(400, 'exclude must be a workspace id', 'INVALID_EXCLUDE');
+
+  const exact = new Set<string>();
+  const ranges: string[] = [];
+  for (const p of paths) {
+    exact.add(p);
+    for (const a of ancestorPrefixes(p)) exact.add(a);
+    if (isPrefix(p)) ranges.push(p);
+  }
+  const hitTerms = [
+    `SELECT workspace_id, kind, path FROM workspace_paths
+      WHERE repo_id = ?1 AND kind IN ('declared', 'observed') AND path IN (SELECT value FROM json_each(?2))`,
+    ...ranges.map(
+      (_, i) => `SELECT workspace_id, kind, path FROM workspace_paths
+      WHERE repo_id = ?1 AND kind IN ('declared', 'observed') AND path >= ?${7 + 2 * i} AND path < ?${8 + 2 * i}`,
+    ),
+  ];
+  const sql = `WITH hits(workspace_id, kind, path) AS (${hitTerms.join(' UNION ')})
+    SELECT w.id, w.task, w.agent, w.agent_id, w.base_ref, w.base_sha, w.observed_head_sha, w.observed_base_sha, w.observed_at,
+           w.observed_truncated, w.intent_updated_at, w.intent_expires_at,
+           json_group_array(json_array(h.kind, h.path)) AS ev
+      FROM hits h JOIN workspaces w ON w.id = h.workspace_id
+     WHERE w.repo_id = ?1 AND w.status = 'active'
+       AND (h.kind = 'observed' OR w.intent_expires_at IS NULL OR w.intent_expires_at > ?3)
+       AND (?4 IS NULL OR w.base_ref = ?4)
+       AND (?5 IS NULL OR w.id > ?5)
+       AND (?6 IS NULL OR w.id != ?6)
+     GROUP BY w.id ORDER BY w.id LIMIT ${limit + 1}`;
+  const now = Date.now();
+  const rows =
+    (
+      await cx.env.DB.prepare(sql)
+        .bind(cx.repo.id, JSON.stringify([...exact]), now, base, cursor, exclude, ...ranges.flatMap((r) => [r, prefixUpper(r)]))
+        .all<ForecastRow>()
+    ).results ?? [];
+
+  const page = rows.slice(0, limit);
+  const matches = page.map((row) => forecastMatch(row, paths));
+  const more = rows.length > limit;
+  const out: ForecastResponse = {
+    query: { paths, base, exclude },
+    advisory: true,
+    advisoryNote: ADVISORY_NOTE,
+    matches,
+    truncated: more,
+    nextCursor: more ? (page[page.length - 1]?.id ?? null) : null,
+    limit,
+  };
+  if (more) out.truncatedReason = `more than ${limit} matching workspaces; follow nextCursor for the rest`;
+  return { ok: true, value: out };
+}
+
+function forecastMatch(row: ForecastRow, queries: string[]): ForecastMatch {
+  const hits = (JSON.parse(row.ev) as Array<[Evidence['kind'], string]>).map(([kind, path]): Evidence => ({
+    kind,
+    path,
+    query: queries.find((q) => intersects(path, q)) ?? path,
+  }));
+  hits.sort((a, b) => (a.kind !== b.kind ? (a.kind < b.kind ? -1 : 1) : a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const kinds = [...new Set(hits.map((h) => h.kind))].sort();
+  const m: ForecastMatch = {
+    workspace: row.id,
+    task: row.task,
+    agent: row.agent,
+    agentId: row.agent_id,
+    base: row.base_ref,
+    baseSha: row.base_sha,
+    matchKind: kinds.includes('observed') ? 'observed' : 'declared',
+    matchKinds: kinds,
+    evidence: hits.slice(0, INTENT_LIMITS.evidenceMax),
+    evidenceCount: hits.length,
+    revision: row.observed_head_sha ?? row.base_sha,
+    observedHeadSha: row.observed_head_sha,
+    observedBaseSha: row.observed_base_sha,
+    observedAt: iso(row.observed_at),
+    observedTruncated: row.observed_truncated !== null,
+    declaredAt: iso(row.intent_updated_at),
+    declaredExpiresAt: iso(row.intent_expires_at),
+  };
+  if (hits.length > INTENT_LIMITS.evidenceMax) m.evidenceTruncated = true;
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// Active-workspace overlap
+// ---------------------------------------------------------------------------
+
+export interface OverlapQuery {
+  base?: string;
+  limit?: string;
+  cursor?: string;
+}
+
+export interface OverlapHead {
+  workspace: string;
+  task: string | null;
+  agent: string | null;
+  observedHeadSha: string | null;
+  observedAt: string | null;
+}
+
+export interface OverlapPair {
+  /** Sorted workspace ids. */
+  workspaces: [string, string];
+  matchKind: 'observed';
+  /** Shared changed paths (for a collapsed prefix, the other side's paths below it). */
+  paths: string[];
+  pathCount: number;
+  pathsTruncated?: true;
+  heads: [OverlapHead, OverlapHead];
+}
+
+export interface OverlapResponse {
+  base: string;
+  advisory: true;
+  advisoryNote: string;
+  pairs: OverlapPair[];
+  truncated: boolean;
+  truncatedReason?: string;
+  nextCursor: string | null;
+  limit: number;
+}
+
+type HeadTuple = [string, string | null, number | null, string | null, string | null];
+
+const headOf = (t: HeadTuple): OverlapHead => ({ workspace: t[0], task: t[3], agent: t[4], observedHeadSha: t[1], observedAt: iso(t[2]) });
+
+const HEAD_JSON = (w: string) => `json_array(${w}.id, ${w}.observed_head_sha, ${w}.observed_at, ${w}.task, ${w}.agent)`;
+
+/**
+ * GET workspaces/overlap?base=&limit=&cursor=: pairs of active workspaces on
+ * `base` (default: the repo's default branch) whose observed base→head
+ * changes share paths. Workspaces with no change against their base have no
+ * observed rows and so never pair. One batch: shared-path groups straight
+ * from the index, plus the descendants of collapsed prefixes (only
+ * workspaces with prefixes start that probe). Pairs are derived from groups,
+ * capped, sorted, and paged by the `a:b` cursor.
+ */
+export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<ServiceResult<OverlapResponse>> {
+  const base = q.base === undefined || q.base === '' ? cx.repo.default_branch : normalizeBranch(q.base);
+  if (base === null) return fail(422, 'base must be a branch name', 'INVALID_REF');
+  const limit = parseLimit(q.limit, INTENT_LIMITS.overlapPageDefault, INTENT_LIMITS.overlapPageMax);
+  if (isFail(limit)) return limit;
+  const cursor = q.cursor ?? null;
+  if (cursor !== null) {
+    const [a, b, extra] = cursor.split(':');
+    if (extra !== undefined || !a || !b || !WORKSPACE_ID_RE.test(a) || !WORKSPACE_ID_RE.test(b)) return fail(400, 'cursor is invalid', 'INVALID_CURSOR');
+  }
+
+  const db = cx.env.DB;
+  const [groups, prefixHits] = await db.batch([
+    db
+      .prepare(
+        `SELECT p.path, json_group_array(${HEAD_JSON('w')}) AS ws
+           FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
+          WHERE p.repo_id = ?1 AND p.kind = 'observed' AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
+          GROUP BY p.path HAVING COUNT(*) > 1 ORDER BY p.path LIMIT ${INTENT_LIMITS.overlapGroupMax + 1}`,
+      )
+      .bind(cx.repo.id, base),
+    db
+      .prepare(
+        `SELECT b.path AS path, ${HEAD_JSON('wa')} AS wa, ${HEAD_JSON('wb')} AS wb
+           FROM workspaces wa
+           JOIN workspace_paths a ON a.repo_id = wa.repo_id AND a.workspace_id = wa.id AND a.kind = 'observed' AND substr(a.path, -1) = '/'
+           JOIN workspace_paths b ON b.repo_id = wa.repo_id AND b.kind = 'observed'
+                AND b.path > a.path AND b.path < substr(a.path, 1, length(a.path) - 1) || '0' AND b.workspace_id != wa.id
+           JOIN workspaces wb ON wb.id = b.workspace_id AND wb.repo_id = wa.repo_id AND wb.status = 'active' AND wb.base_ref = ?2
+          WHERE wa.repo_id = ?1 AND wa.status = 'active' AND wa.base_ref = ?2 AND wa.observed_prefixes > 0
+          ORDER BY b.path, wa.id, wb.id LIMIT ${INTENT_LIMITS.overlapPrefixHitMax + 1}`,
+      )
+      .bind(cx.repo.id, base),
+  ]);
+
+  const reasons: string[] = [];
+  const pairs = new Map<string, { heads: Map<string, OverlapHead>; paths: Set<string> }>();
+  let pairCapped = false;
+  const add = (x: OverlapHead, y: OverlapHead, path: string) => {
+    if (x.workspace === y.workspace) return;
+    const [a, b] = x.workspace < y.workspace ? [x, y] : [y, x];
+    const key = `${a.workspace}:${b.workspace}`;
+    let p = pairs.get(key);
+    if (!p) {
+      if (pairs.size >= INTENT_LIMITS.overlapPairMax) {
+        pairCapped = true;
+        return;
+      }
+      p = { heads: new Map([[a.workspace, a], [b.workspace, b]]), paths: new Set() };
+      pairs.set(key, p);
+    }
+    p.paths.add(path);
+  };
+
+  const groupRows = (groups?.results as Array<{ path: string; ws: string }> | undefined) ?? [];
+  if (groupRows.length > INTENT_LIMITS.overlapGroupMax) {
+    reasons.push(`more than ${INTENT_LIMITS.overlapGroupMax} shared paths; pairs beyond them are not reported`);
+  }
+  for (const g of groupRows.slice(0, INTENT_LIMITS.overlapGroupMax)) {
+    const heads = (JSON.parse(g.ws) as HeadTuple[]).map(headOf);
+    for (let i = 0; i < heads.length; i++) for (let j = i + 1; j < heads.length; j++) add(heads[i]!, heads[j]!, g.path);
+  }
+  const prefixRows = (prefixHits?.results as Array<{ path: string; wa: string; wb: string }> | undefined) ?? [];
+  if (prefixRows.length > INTENT_LIMITS.overlapPrefixHitMax) {
+    reasons.push(`more than ${INTENT_LIMITS.overlapPrefixHitMax} paths below collapsed prefixes; pairs beyond them are not reported`);
+  }
+  for (const h of prefixRows.slice(0, INTENT_LIMITS.overlapPrefixHitMax)) {
+    add(headOf(JSON.parse(h.wa) as HeadTuple), headOf(JSON.parse(h.wb) as HeadTuple), h.path);
+  }
+  if (pairCapped) reasons.push(`more than ${INTENT_LIMITS.overlapPairMax} overlapping pairs; the rest are not reported`);
+
+  const sorted = [...pairs.keys()].sort();
+  const start = cursor === null ? 0 : sorted.findIndex((k) => k > cursor);
+  const from = start < 0 ? sorted.length : start;
+  const keys = sorted.slice(from, from + limit);
+  const more = from + limit < sorted.length;
+  if (more) reasons.unshift(`more than ${limit} pairs; follow nextCursor for the rest`);
+
+  const out: OverlapResponse = {
+    base,
+    advisory: true,
+    advisoryNote: ADVISORY_NOTE,
+    pairs: keys.map((key) => {
+      const p = pairs.get(key)!;
+      const [a, b] = key.split(':') as [string, string];
+      const all = [...p.paths].sort();
+      const pair: OverlapPair = {
+        workspaces: [a, b],
+        matchKind: 'observed',
+        paths: all.slice(0, INTENT_LIMITS.overlapPathsPerPair),
+        pathCount: all.length,
+        heads: [p.heads.get(a)!, p.heads.get(b)!],
+      };
+      if (all.length > INTENT_LIMITS.overlapPathsPerPair) pair.pathsTruncated = true;
+      return pair;
+    }),
+    truncated: reasons.length > 0,
+    nextCursor: more ? (keys[keys.length - 1] ?? null) : null,
+    limit,
+  };
+  if (reasons.length > 0) out.truncatedReason = reasons.join('; ');
+  return { ok: true, value: out };
+}
