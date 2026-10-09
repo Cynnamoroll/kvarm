@@ -12,7 +12,8 @@ import { decode } from '@forge/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
-import { mergeReadyAutoChanges } from '../src/services/changes';
+import { getRepoById } from '../src/db/repos';
+import { defaultMergeDeps, mergeChange, mergeReadyAutoChanges, type MergeDeps } from '../src/services/changes';
 import {
   FakeRepo,
   commit,
@@ -763,6 +764,105 @@ describe('merge', () => {
     expect(r.status).toBe(200);
     expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
     expect((await get('race-auto', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'review', mergeCommit: null });
+  });
+
+  it('a draft PATCH that lands while the write token is minted stops publication', async () => {
+    const repo = await seedRepo('race-token-draft');
+    const { main } = await divergent(repo);
+    await create('race-token-draft', { title: 'x', base: 'main', head: 'feature' });
+    interleave(repo, 'createToken:write', async () => {
+      expect((await patch('race-token-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await merge('race-token-draft', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'DRAFT']);
+    expect(repo.hook).toBeNull();
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-token-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null });
+  });
+
+  it('a head refresh that lands while the write token is minted stops publication of the old head', async () => {
+    const repo = await seedRepo('race-token-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-token-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    interleave(repo, 'createToken:write', async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-token-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await merge('race-token-head', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'HEAD_MOVED']);
+    expect(repo.hook).toBeNull();
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-token-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha, mergeCommit: null });
+
+    const again = await merge('race-token-head', 1);
+    expect(again.json).toMatchObject({ state: 'merged', headSha: c2.sha });
+    expect(commitOf(repo, again.json.mergeCommit).parents).toEqual([main.sha, c2.sha]);
+  });
+
+  /** Merge deps whose pusher runs `fn` once, after the real pusher built the pack and before anything is sent. */
+  function pausedAfterPack(fn: () => Promise<void>): MergeDeps & { paused: () => boolean } {
+    let pending: (() => Promise<void>) | null = fn;
+    return {
+      ...defaultMergeDeps,
+      paused: () => pending === null,
+      pusher(e, r) {
+        const real = defaultMergeDeps.pusher(e, r);
+        return {
+          listRefs: () => real.listRefs(),
+          updateRef: (command, objects) => real.updateRef(command, objects),
+          async prepareUpdate(command, objects) {
+            const prepared = await real.prepareUpdate(command, objects);
+            const run = pending;
+            pending = null;
+            await run?.();
+            return prepared;
+          },
+        };
+      },
+    };
+  }
+
+  async function mergeWith(name: string, number: number, deps: MergeDeps) {
+    const row = await getRepoById(env.DB, repoIds[name]!);
+    const waits: Promise<unknown>[] = [];
+    const r = await mergeChange({ env, repo: row!, actor: null, waitUntil: (p) => void waits.push(p) }, String(number), deps);
+    await Promise.allSettled(waits);
+    return r;
+  }
+
+  it('a draft PATCH that lands while the pack is prepared stops publication', async () => {
+    const repo = await seedRepo('race-pack-draft');
+    const { main } = await divergent(repo);
+    await create('race-pack-draft', { title: 'x', base: 'main', head: 'feature' });
+    const deps = pausedAfterPack(async () => {
+      expect((await patch('race-pack-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await mergeWith('race-pack-draft', 1, deps);
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'DRAFT' });
+    expect(deps.paused()).toBe(true);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-pack-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null });
+  });
+
+  it('a head refresh that lands while the pack is prepared stops publication of the old head', async () => {
+    const repo = await seedRepo('race-pack-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-pack-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    const deps = pausedAfterPack(async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-pack-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await mergeWith('race-pack-head', 1, deps);
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'HEAD_MOVED' });
+    expect(deps.paused()).toBe(true);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-pack-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha, mergeCommit: null });
   });
 });
 

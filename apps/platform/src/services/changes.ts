@@ -746,10 +746,13 @@ function mergeRefusal(row: ChangeRow | null, mode: MergeMode, headSha?: string):
 /**
  * Merges an open change's recorded head into its base branch: plan against
  * the base tip read fresh, check branch rules against the checks-gate answer
- * for the exact merge tree, re-read the change (state, policy and head must
- * still allow this merge), publish one ref with the tip as expected old
- * value, then mark the change merged only while its head is still the
- * published one and it is not a draft. A moved base re-plans once.
+ * for the exact merge tree, prepare the push (write token and pack), re-read
+ * the change immediately before sending (state, policy and head must still
+ * allow this merge), publish one ref with the tip as expected old value,
+ * then mark the change merged only while its head is still the published
+ * one and it is not a draft. A moved base re-plans once. A change edited
+ * between that last read and the send is not caught here; the guarded
+ * merged write then refuses to record it.
  */
 async function performMerge(
   cx: ChangeContext,
@@ -784,9 +787,14 @@ async function performMerge(
       const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null);
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
-      const changed = mergeRefusal(await readChange(cx.env, cx.repo.id, row.number), mode, headSha);
-      if (changed) return changed;
-      const published = await publishMerge({ pusher, gate }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);
+      // The last change read runs after every asynchronous preparation step (checks, write token, pack).
+      const verdict: { refusal: Fail | null } = { refusal: null };
+      const beforeSend = async () => {
+        verdict.refusal = mergeRefusal(await readChange(cx.env, cx.repo.id, row.number), mode, headSha);
+        return verdict.refusal === null;
+      };
+      const published = await publishMerge({ pusher, gate, beforeSend }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);
+      if (verdict.refusal) return verdict.refusal;
       let ok = published.ok;
       if (!published.ok && published.code === 'PUBLISH_UNKNOWN') {
         // The update may have landed: the ref decides.

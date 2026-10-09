@@ -28,9 +28,21 @@ import type { RepoRow } from '../db/repos';
 import { recordConfirmedPush } from './pushFreshness';
 import { RefStoreUnavailable } from './refs';
 
+/** A ref update whose write credential and pack are ready; nothing has been sent. */
+export interface PreparedRefUpdate {
+  /** Sends the receive-pack request; no asynchronous work precedes the request. */
+  send(): Promise<RefUpdateResult>;
+}
+
 export interface GitPusher {
   /** Every ref's current value, from the receive-pack advertisement. */
   listRefs(): Promise<Map<string, string>>;
+  /**
+   * Does all the asynchronous work of `updateRef` except sending, so a caller
+   * can revalidate between preparation and the request. Throws
+   * RefStoreUnavailable when no write credential can be had.
+   */
+  prepareUpdate(command: RefCommand, objects?: readonly PackInput[]): Promise<PreparedRefUpdate>;
   /**
    * Compare-and-swap one ref from `oldOid` to `newOid` (zero OIDs create or
    * delete). `objects` are the objects `newOid` needs that the store may not
@@ -61,6 +73,28 @@ export function artifactsPusher(env: Env, repo: PushTarget, opts: GitPusherOptio
     };
   };
 
+  const prepareUpdate = async (command: RefCommand, objects?: readonly PackInput[]): Promise<PreparedRefUpdate> => {
+    const target = await remote();
+    const pack = objects && objects.length > 0 ? await writePack(objects) : undefined;
+    return {
+      async send() {
+        const result = await pushOneRef(target, command, pack);
+        if (result.status === 'ok') {
+          // The ref already moved; a failed freshness write must not turn it into a failure.
+          await recordConfirmedPush(env, repo.id).catch((err: unknown) => {
+            console.warn(JSON.stringify({ gitWriteFreshnessFailed: String(err).slice(0, 200) }));
+          });
+        }
+        console.log(
+          JSON.stringify({
+            gitWrite: { repo: repo.artifacts_name, ref: command.ref, status: result.status, httpStatus: result.httpStatus, reason: result.reason },
+          }),
+        );
+        return result;
+      },
+    };
+  };
+
   return {
     async listRefs() {
       const adv = await advertiseReceivePack(await remote()).catch((err: unknown) => {
@@ -69,22 +103,10 @@ export function artifactsPusher(env: Env, repo: PushTarget, opts: GitPusherOptio
       return adv.refs;
     },
 
+    prepareUpdate,
+
     async updateRef(command, objects) {
-      const target = await remote();
-      const pack = objects && objects.length > 0 ? await writePack(objects) : undefined;
-      const result = await pushOneRef(target, command, pack);
-      if (result.status === 'ok') {
-        // The ref already moved; a failed freshness write must not turn it into a failure.
-        await recordConfirmedPush(env, repo.id).catch((err: unknown) => {
-          console.warn(JSON.stringify({ gitWriteFreshnessFailed: String(err).slice(0, 200) }));
-        });
-      }
-      console.log(
-        JSON.stringify({
-          gitWrite: { repo: repo.artifacts_name, ref: command.ref, status: result.status, httpStatus: result.httpStatus, reason: result.reason },
-        }),
-      );
-      return result;
+      return (await prepareUpdate(command, objects)).send();
     },
   };
 }

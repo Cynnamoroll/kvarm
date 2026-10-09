@@ -6,9 +6,11 @@
  * moves to the head; mergeCommit = head) or a two-parent merge commit
  * [target, head] over gitops `merge3`'s tree, committed by Forge. It only
  * reads, so it runs outside any publication lease. `publishMerge` asks the
- * checks-gate about the exact tree being published, then moves the one
- * target ref through GitPusher with the target as the expected old value;
- * only a confirmed `ok` counts. A moved target is `STALE_TARGET` (re-plan).
+ * checks-gate about the exact tree being published, prepares the push
+ * (write credential and pack), lets the caller revalidate (`beforeSend`),
+ * then moves the one target ref through GitPusher with the target as the
+ * expected old value; only a confirmed `ok` counts. A moved target is
+ * `STALE_TARGET` (re-plan).
  *
  * Criss-cross histories (several merge bases) are refused as
  * `MULTIPLE_MERGE_BASES` rather than merged against an arbitrary base.
@@ -146,6 +148,12 @@ export interface PublishDeps {
   pusher: GitPusher;
   gate: ChecksGate;
   attribution?: MergeAttributionHook;
+  /**
+   * Awaited once the checks-gate answer, the write credential and the pack
+   * are ready, immediately before the receive-pack request. Returning false
+   * cancels the publication without sending anything (`PUBLISH_CANCELLED`).
+   */
+  beforeSend?: () => Promise<boolean>;
 }
 
 export type MergeErrorCode =
@@ -160,7 +168,8 @@ export type MergeErrorCode =
   | 'STALE_TARGET'
   | 'PUBLISH_REJECTED'
   | 'PUBLISH_UNKNOWN'
-  | 'PUBLISH_UNAVAILABLE';
+  | 'PUBLISH_UNAVAILABLE'
+  | 'PUBLISH_CANCELLED';
 
 export type MergeResult<T> =
   | { ok: true; value: T }
@@ -308,13 +317,17 @@ export async function publishMerge(deps: PublishDeps, target: MergeTarget, prepa
     return { ok: false, status: 409, error: 'required checks have not finished', code: 'REQUIRED_CHECKS_PENDING', checks };
   }
 
-  let r;
+  let update;
   try {
-    r = await deps.pusher.updateRef({ ref: target.ref, oldOid: prepared.targetSha, newOid: prepared.mergeCommit }, prepared.objects);
+    update = await deps.pusher.prepareUpdate({ ref: target.ref, oldOid: prepared.targetSha, newOid: prepared.mergeCommit }, prepared.objects);
   } catch (err) {
     if (!(err instanceof RefStoreUnavailable)) throw err;
     return { ok: false, status: 503, error: `git write unavailable: ${err.message}`, code: 'PUBLISH_UNAVAILABLE' };
   }
+  if (deps.beforeSend && !(await deps.beforeSend())) {
+    return { ok: false, status: 409, error: 'the publication was cancelled before it was sent', code: 'PUBLISH_CANCELLED' };
+  }
+  const r = await update.send();
   if (r.status === 'stale') {
     return { ok: false, status: 409, error: `${target.ref} moved since the merge was prepared`, code: 'STALE_TARGET' };
   }

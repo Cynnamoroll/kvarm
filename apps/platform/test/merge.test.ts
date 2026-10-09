@@ -44,6 +44,8 @@ const REPO = { id: 'repo-merge-test' };
 class FakePusher implements GitPusher {
   readonly refs = new Map<string, string>();
   readonly calls: Array<{ command: RefCommand; objects: readonly PackInput[] }> = [];
+  /** `prepare` and `send` in the order they happened; tests may append their own events. */
+  readonly events: string[] = [];
 
   constructor(private readonly store: Store) {}
 
@@ -51,7 +53,21 @@ class FakePusher implements GitPusher {
     return new Map(this.refs);
   }
 
+  async prepareUpdate(command: RefCommand, objects: readonly PackInput[] = []) {
+    this.events.push('prepare');
+    return {
+      send: async () => {
+        this.events.push('send');
+        return this.apply(command, objects);
+      },
+    };
+  }
+
   async updateRef(command: RefCommand, objects: readonly PackInput[] = []): Promise<RefUpdateResult> {
+    return (await this.prepareUpdate(command, objects)).send();
+  }
+
+  private apply(command: RefCommand, objects: readonly PackInput[]): RefUpdateResult {
     this.calls.push({ command, objects });
     if ((this.refs.get(command.ref) ?? ZERO_OID) !== command.oldOid) return { status: 'stale', reason: 'stale ref', httpStatus: 200 };
     for (const o of objects) this.store.add(o as GitObject);
@@ -405,5 +421,79 @@ describe('prepareMerge + publishMerge', () => {
     );
     expect(r.ok).toBe(true);
     expect(pusher.refs.get('refs/heads/main')).toBe(prepared.value.mergeCommit);
+  });
+});
+
+describe('publishMerge before-send revalidation', () => {
+  const target = { repo: REPO, ref: 'refs/heads/main' };
+
+  async function preparedDivergent() {
+    const store = new Store();
+    const { head, main } = await divergent(store);
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    if (!prepared.ok) throw new Error('prepare failed');
+    return { store, main, prepared: prepared.value };
+  }
+
+  it('runs after the checks-gate answer and the prepared update, immediately before the send', async () => {
+    const { store, main, prepared } = await preparedDivergent();
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', main);
+    const gate = checksGate([
+      {
+        name: 'order',
+        async requiredChecksFor() {
+          pusher.events.push('gate');
+          return [];
+        },
+      },
+    ]);
+    const r = await publishMerge({ pusher, gate, beforeSend: async () => (pusher.events.push('beforeSend'), true) }, target, prepared);
+    expect(r.ok).toBe(true);
+    expect(pusher.events).toEqual(['gate', 'prepare', 'beforeSend', 'send']);
+    expect(pusher.refs.get('refs/heads/main')).toBe(prepared.mergeCommit);
+  });
+
+  it('a refusal sends nothing: the ref stays and attribution does not run', async () => {
+    const { store, main, prepared } = await preparedDivergent();
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', main);
+    const hooked: unknown[] = [];
+    const r = await publishMerge(
+      { pusher, gate: checksGate([]), attribution: async (m) => void hooked.push(m), beforeSend: async () => false },
+      target,
+      prepared,
+    );
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'PUBLISH_CANCELLED' });
+    expect(pusher.events).toEqual(['prepare']);
+    expect(pusher.calls).toEqual([]);
+    expect(pusher.refs.get('refs/heads/main')).toBe(main);
+    expect(hooked).toEqual([]);
+  });
+
+  it('through the real GitPusher, a refusal after the token and pack are ready sends no receive-pack request', async () => {
+    const { prepared } = await preparedDivergent();
+    const repo = { id: crypto.randomUUID(), artifacts_name: 'merge-owner--cancel', artifacts_remote: 'https://artifacts.invalid/git/default/merge-owner--cancel.git' };
+    const fakeRepo = new FakeRepo();
+    fakeRepos.set(repo.artifacts_name, fakeRepo);
+    const env = { ...baseEnv, ARTIFACTS: fakeArtifacts } as Env;
+    const requests: string[] = [];
+    const fetch: FetchLike = async (url) => {
+      requests.push(String(url));
+      return new Response(concat(pktLine('unpack ok\n'), pktLine('ok refs/heads/main\n'), encode('0000')), { status: 200 });
+    };
+    const pusher = artifactsPusher(env, repo as Pick<RepoRow, 'id' | 'artifacts_name' | 'artifacts_remote'>, { fetch });
+    let tokenMinted = false;
+    fakeRepo.hook = async (c) => {
+      if (c === 'createToken:write') tokenMinted = true;
+    };
+
+    const refused = await publishMerge({ pusher, gate: checksGate([]), beforeSend: async () => (expect(tokenMinted).toBe(true), false) }, target, prepared);
+    expect(refused).toMatchObject({ ok: false, status: 409, code: 'PUBLISH_CANCELLED' });
+    expect(requests).toEqual([]);
+
+    const sent = await publishMerge({ pusher, gate: checksGate([]), beforeSend: async () => true }, target, prepared);
+    expect(sent.ok).toBe(true);
+    expect(requests).toEqual([`${repo.artifacts_remote}/git-receive-pack`]);
   });
 });

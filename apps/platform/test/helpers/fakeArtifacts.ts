@@ -49,8 +49,9 @@ export class FakeRepo {
   receivePackStatus: number | null = null;
   /**
    * Awaited at a call, to interleave other work deterministically: before
-   * readTree/readBlob/readCommit and before receive-pack applies anything,
-   * and after ls-refs has read the refs it answers with (`lsRefs`).
+   * readTree/readBlob/readCommit, inside a token mint (`createToken:<scope>`)
+   * and before receive-pack applies anything, and after ls-refs has read the
+   * refs it answers with (`lsRefs`).
    */
   hook: ((call: string) => Promise<void>) | null = null;
 
@@ -180,6 +181,7 @@ function handle(name: string): ArtifactsRepo {
     },
     async createToken(scope: 'read' | 'write' = 'write', ttl = 86_400) {
       r.calls.push('createToken');
+      await r.hook?.(`createToken:${scope}`);
       return { id: 't', plaintext: 'fake-token', scope, expiresAt: new Date(Date.now() + ttl * 1000).toISOString() };
     },
     [Symbol.dispose]() {},
