@@ -16,6 +16,10 @@
  *   DELETE changes/:number/enqueue
  *   GET   queue?limit=&cursor=&base=
  *   GET   tasks?status=&kind=&limit=&cursor=   agent tasks (resolve-conflict)
+ *   GET   tasks/:id
+ *   POST  tasks/:id/claim               {agent?, ttlSeconds?} → {task, workspace, lease}
+ *   POST  tasks/:id/heartbeat           {agent?, generation, ttlSeconds?}
+ *   POST  tasks/:id/complete            {agent?, generation, sha?, attribution?} → {task, change, headBranch}
  */
 
 import { Hono, type Context } from 'hono';
@@ -143,6 +147,45 @@ changesApi.get('/repos/:owner/:repo/tasks', async (c) => {
     limit: c.req.query('limit'),
     cursor: c.req.query('cursor'),
   });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+changesApi.get('/repos/:owner/:repo/tasks/:id', async (c) => {
+  const rd = await readContext(c);
+  if ('denied' in rd) return rd.denied;
+  const r = await tasks.getTask(c.env, rd.cx.repo, c.req.param('id'));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+async function taskContext(c: Context<App>) {
+  const w = await writeContext(c);
+  if ('denied' in w) return { denied: w.denied } as const;
+  const cx: tasks.TaskContext = { ...w.cx, origin: new URL(c.req.url).origin };
+  return { cx } as const;
+}
+
+changesApi.post('/repos/:owner/:repo/tasks/:id/claim', async (c) => {
+  const t = await taskContext(c);
+  if ('denied' in t) return t.denied;
+  const r = await tasks.claimTask(t.cx, c.req.param('id'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+changesApi.post('/repos/:owner/:repo/tasks/:id/heartbeat', async (c) => {
+  const t = await taskContext(c);
+  if ('denied' in t) return t.denied;
+  const r = await tasks.heartbeatTask(t.cx, c.req.param('id'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+changesApi.post('/repos/:owner/:repo/tasks/:id/complete', async (c) => {
+  const t = await taskContext(c);
+  if ('denied' in t) return t.denied;
+  const r = await tasks.completeTask(t.cx, c.req.param('id'), await jsonBody(c));
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

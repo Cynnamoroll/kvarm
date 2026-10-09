@@ -13,7 +13,9 @@
  * new head or base tip. A steady read writes nothing.
  *
  * Tasks are retired (`obsolete`) once the change is no longer conflicted:
- * the conflict cleared, or the change closed or merged.
+ * the conflict cleared, or the change closed or merged. A task an agent
+ * completed (services/tasks.ts) stays `completed`. Each new task records a
+ * `forge.task.created` event for external agent runners.
  */
 
 import type { MergeConflict, MergeStatus } from './merge';
@@ -107,6 +109,7 @@ export function conflictTransition(row: ConflictSubject, m: ConflictEvaluation):
 export function markConflictedStatements(db: D1Database, changeId: string, record: ConflictRecord, now: number): D1PreparedStatement[] {
   const json = JSON.stringify(record);
   const payload = JSON.stringify({ conflicts: record.conflicts, ...(record.truncated ? { truncated: true } : {}) });
+  const taskId = crypto.randomUUID();
   return [
     db
       .prepare(
@@ -114,6 +117,7 @@ export function markConflictedStatements(db: D1Database, changeId: string, recor
           WHERE id = ?1 AND state IN ('open', 'conflicted') AND head_sha = ?2`,
       )
       .bind(changeId, record.headSha, json, now),
+    taskCreatedEventStatement(db, taskId, changeId, record, now),
     db
       .prepare(
         `INSERT INTO agent_tasks (id, repo_id, kind, change_set_id, workspace_id, status, generation, head_sha, base_sha, payload, created_at, updated_at)
@@ -123,8 +127,35 @@ export function markConflictedStatements(db: D1Database, changeId: string, recor
          ON CONFLICT (change_set_id, kind) WHERE status IN ('open', 'claimed') DO UPDATE SET
            head_sha = excluded.head_sha, base_sha = excluded.base_sha, payload = excluded.payload, updated_at = excluded.updated_at`,
       )
-      .bind(crypto.randomUUID(), changeId, record.headSha, record.baseSha, payload, now),
+      .bind(taskId, changeId, record.headSha, record.baseSha, payload, now),
   ];
+}
+
+export const TASK_CREATED_EVENT = 'forge.task.created';
+
+/**
+ * The outbound `forge.task.created` event (a CloudEvents 1.0 envelope in the
+ * events ledger, `processed_at` NULL until a delivery picks it up) for the
+ * task the following upsert creates. It must run before that upsert: it is
+ * written only while the change has no live task of the kind yet, so a
+ * refresh of an existing task records nothing.
+ */
+function taskCreatedEventStatement(db: D1Database, taskId: string, changeId: string, record: ConflictRecord, now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO events (id, type, payload, processed_at, created_at)
+       SELECT ?1, '${TASK_CREATED_EVENT}',
+              json_object('specversion', '1.0', 'id', ?1, 'type', '${TASK_CREATED_EVENT}',
+                          'source', '/repos/' || r.owner_login || '/' || r.name, 'subject', ?2, 'time', ?7,
+                          'datacontenttype', 'application/json',
+                          'data', json_object('task', ?2, 'kind', '${RESOLVE_CONFLICT}', 'repo', r.owner_login || '/' || r.name,
+                                              'change', c.number, 'headSha', ?4, 'baseSha', ?5, 'conflicts', json(?6))),
+              NULL, ?8
+         FROM change_sets c JOIN repos r ON r.id = c.repo_id
+        WHERE c.id = ?3 AND c.state = 'conflicted' AND c.head_sha = ?4
+          AND NOT EXISTS (SELECT 1 FROM agent_tasks t WHERE t.change_set_id = c.id AND t.kind = '${RESOLVE_CONFLICT}' AND t.status IN ('open', 'claimed'))`,
+    )
+    .bind(crypto.randomUUID(), taskId, changeId, record.headSha, record.baseSha, JSON.stringify(record.conflicts), new Date(now).toISOString(), now);
 }
 
 /**

@@ -9,12 +9,13 @@
  *   node scripts/mcp-agent.mjs call <tool> ['<json args>']
  *       one tools/call; prints the /mcp HTTP status, x-forge-cost, isError
  *       and the result JSON
- *   node scripts/mcp-agent.mjs e2e [--keep] [--only auth,registry,parity,visibility,cost,two-agent,arena,attribution]
+ *   node scripts/mcp-agent.mjs e2e [--keep] [--only auth,registry,parity,visibility,cost,two-agent,arena,attribution,dispatch]
  *       live checks for the MCP surface (VAL-MCP-001..010, VAL-COST-017,
  *       VAL-CROSS-012, VAL-ATTR-001..006, VAL-DECISION-001..003, the repo
- *       lifecycle tools fork_repo/delete_repo/import_repo in parity, and
+ *       lifecycle tools fork_repo/delete_repo/import_repo in parity,
  *       comma-containing decision paths across REST, MCP and the forge CLI
- *       in attribution). Each
+ *       in attribution, and the conflict-dispatch flow in dispatch:
+ *       VAL-DISPATCH-001..007, VAL-WORKFLOW-001..003, VAL-CROSS-004/009). Each
  *       scenario runs in a fresh repo owned by
  *       FORGE_USER, named `mcp-agent-<purpose>-<timestamp>`, seeded by real
  *       git pushes and deleted afterwards (unless --keep).
@@ -38,9 +39,15 @@
  *
  * The two-agent scenario (VAL-CROSS-001) lands the winner with
  * enqueue_change and polls get_change until the integration train merged
- * it. The conflict-dispatch flow (list_tasks, claim_task, complete_task)
- * needs operations that are not in the registry yet; the feature adding
- * them extends this driver.
+ * it.
+ *
+ * The dispatch scenario builds three genuine src/app.ts conflicts (draft,
+ * review and auto policies). Agents list, claim and complete the
+ * resolve-conflict tasks through MCP after pushing a resolution (origin/main
+ * merged into the change head) to the claimed workspace with git. The auto
+ * change runs the dead-agent path: an MCP claim with a 10 s lease that lapses,
+ * a reclaim and completion through the forge CLI, and the stale holder's
+ * completion refused.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -232,6 +239,17 @@ async function runE2e(argv) {
     }
     throw new Error(`push ${refspec} kept failing`);
   }
+  /** One `forge ... --json` CLI run as FORGE_USER (FORGE_PAT from the environment). */
+  function forge(args) {
+    const r = spawnSync(process.execPath, [CLI_BIN, ...args, '--json'], { env: { ...process.env, FORGE_BASE_URL: BASE }, encoding: 'utf8' });
+    let data = null;
+    try {
+      data = JSON.parse(r.stdout);
+    } catch {
+      data = null;
+    }
+    return { code: r.status, data, err: (r.stderr ?? '').trim() };
+  }
 
   const SEED = {
     'README.md': '# mcp agent fixture\n',
@@ -306,7 +324,7 @@ async function runE2e(argv) {
     console.log(`listTools names (${names.length}): ${names.join(', ')}`);
     check('registry', 'tools/list equals the shared operation registry', eq([...names].sort(), OPERATIONS.map((o) => o.name).sort()));
     check('registry', 'every tool has a description and an object input schema', tools.every((t) => t.description && t.inputSchema?.type === 'object'));
-    const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'get_attribution', 'set_attribution', 'get_context'];
+    const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'get_attribution', 'set_attribution', 'get_context', 'list_tasks', 'claim_task', 'complete_task'];
     check('registry', 'original tools implemented so far are present', original.every((n) => names.includes(n)), original.filter((n) => !names.includes(n)).join(',') || 'all present');
     const lifecycle = ['list_repos', 'get_repo', 'create_repo', 'update_repo', 'delete_repo', 'fork_repo', 'import_repo'];
     check('registry', 'every existing repos-family route is a tool (incl. delete, fork, import)', lifecycle.every((n) => names.includes(n)), lifecycle.filter((n) => !names.includes(n)).join(',') || 'all present');
@@ -782,16 +800,6 @@ async function runE2e(argv) {
     check('VAL-DECISION-001', 'a paths-only decision is retrievable by its path', rd2.status === 201 && rd2.json?.task === null && eq(byDoc.json?.decisions, [rd2.json]));
 
     // Literal comma-containing Git paths round-trip through REST, MCP and the forge CLI (never split).
-    const forge = (args) => {
-      const r = spawnSync(process.execPath, [CLI_BIN, ...args, '--json'], { env: { ...process.env, FORGE_BASE_URL: BASE }, encoding: 'utf8' });
-      let data = null;
-      try {
-        data = JSON.parse(r.stdout);
-      } catch {
-        data = null;
-      }
-      return { code: r.status, data, err: (r.stderr ?? '').trim() };
-    };
     const d3 = { paths: ['src/a,b.ts'], chosen: 'ws-comma', rejected: [], reason: 'literal comma path' };
     const rd3 = await http(`${api}/decisions`, { method: 'POST', json: d3 });
     const restComma = await http(`${api}/context?path=${encodeURIComponent('src/a,b.ts')}`);
@@ -847,6 +855,168 @@ async function runE2e(argv) {
     check('VAL-DECISION-003', 'more paths than the cap → actionable 4xx {error, code}', om.isError && om.data?.code === 'TOO_MANY_PATHS' && orr.status === 400 && orr.json?.code === 'TOO_MANY_PATHS' && typeof orr.json?.error === 'string');
     const cost = parseCost(byTask.cost);
     check('VAL-DECISION-003', 'GET context work stays within the cost.md row (d1 <= 2, do = 0, art = 0)', cost.d1 <= 2 && cost.do === 0 && cost.art === 0, byTask.cost);
+  });
+
+  // VAL-DISPATCH-001..007, VAL-WORKFLOW-001..003, VAL-CROSS-004, VAL-CROSS-009
+  await scenario('dispatch', 'public', async (repo) => {
+    const env = await seeded(repo);
+    const { api, dir, url } = env;
+    const lsRemote = (ref) => git(['ls-remote', url, ref], dir).out.split(/\s+/)[0] || null;
+    const restTask = async (id) => (await http(`${api}/tasks/${id}`)).json;
+    const restChange = async (n) => (await http(`${api}/changes/${n}`)).json;
+    const taskWorkspaces = async (id) => {
+      const all = await http(`${api}/workspaces?status=all&limit=100`);
+      return (all.json?.workspaces ?? []).filter((w) => (w.task ?? '').includes(`(task ${id})`));
+    };
+    /** The agent's resolution: origin/main merged into the change head, src/app.ts carrying both sides. */
+    const resolve = (head, content, msg) => {
+      mustGit(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main'], dir);
+      mustGit(['checkout', '-q', '--detach', head], dir);
+      const merged = git(['merge', '--no-edit', '-q', 'origin/main'], dir);
+      writeFiles(dir, { 'src/app.ts': content });
+      mustGit(['add', '-A'], dir);
+      mustGit(['commit', '-q', '-m', msg], dir);
+      return { sha: mustGit(['rev-parse', 'HEAD'], dir), mergeExit: merged.code, base: mustGit(['rev-parse', 'origin/main'], dir) };
+    };
+    const MAIN_LINE = 'export const app = 100; // main\n';
+    const heads = {};
+    for (const [policy, line] of [
+      ['draft', 'export const app = 2; // draft\n'],
+      ['review', 'export const app = 3; // review\n'],
+      ['auto', 'export const app = 4; // auto\n'],
+    ]) {
+      heads[policy] = commitOn(dir, env.main, { 'src/app.ts': line }, `app ${policy}`);
+      await pushRetry(dir, url, `${heads[policy]}:refs/heads/fix-${policy}`);
+    }
+    const mainTip = commitOn(dir, env.main, { 'src/app.ts': MAIN_LINE }, 'main edits app');
+    await pushRetry(dir, url, `${mainTip}:refs/heads/main`);
+    const changes = {};
+    for (const policy of ['draft', 'review', 'auto']) {
+      const c = await call(owner, 'create_change', { repo: env.repo, title: `app ${policy}`, base: 'main', head: `fix-${policy}`, mergePolicy: policy });
+      changes[policy] = c.data;
+      console.log(`create_change fix-${policy} (${policy}) -> #${c.data?.number} state=${c.data?.state} conflicts=${JSON.stringify(c.data?.conflicts)} (x-forge-cost ${c.cost})`);
+    }
+
+    // VAL-DISPATCH-001
+    const attempt = await call(owner, 'merge_change', { repo: env.repo, number: changes.review.number });
+    const restAttempt = await http(`${api}/changes/${changes.auto.number}/merge`, { method: 'POST' });
+    const openRest = await http(`${api}/tasks?status=open&kind=resolve-conflict`);
+    const openMcp = await call(owner, 'list_tasks', { repo: env.repo, status: 'open', kind: 'resolve-conflict' });
+    const taskOf = {};
+    for (const p of ['draft', 'review', 'auto']) taskOf[p] = (openRest.json?.tasks ?? []).find((t) => t.change?.number === changes[p].number);
+    console.log(`merge_change #${changes.review.number} -> isError=${attempt.isError} ${attempt.text.slice(0, 200)}\nREST POST merge #${changes.auto.number} -> ${restAttempt.status} ${restAttempt.text.slice(0, 200)}\nGET tasks?status=open -> ${openRest.status} ${JSON.stringify(openRest.json?.tasks?.map((t) => ({ id: t.id, kind: t.kind, change: t.change, conflicts: t.conflicts })))} (x-forge-cost ${openRest.cost})\nlist_tasks -> ids ${JSON.stringify(openMcp.data?.tasks?.map((t) => t.id))} (x-forge-cost ${openMcp.cost}); ls-remote main=${lsRemote('refs/heads/main')}`);
+    check(
+      'VAL-DISPATCH-001',
+      'a same-line src/app.ts conflict: merge refused 409 MERGE_CONFLICT, main unchanged, changes conflicted, one open resolve-conflict task per change on REST and MCP',
+      attempt.isError && attempt.data?.code === 'MERGE_CONFLICT' && restAttempt.status === 409 && lsRemote('refs/heads/main') === mainTip &&
+        ['draft', 'review', 'auto'].every((p) => changes[p]?.state === 'conflicted' && taskOf[p]?.kind === 'resolve-conflict' && taskOf[p]?.conflicts?.some((c) => c.path === 'src/app.ts')) &&
+        !openMcp.isError && eq(openMcp.data, openRest.json),
+    );
+
+    // Draft: VAL-DISPATCH-002, -007, -003, -005 and the completion precondition of VAL-WORKFLOW-003.
+    const dTask = taskOf.draft.id;
+    const claim = await call(owner, 'claim_task', { repo: env.repo, task: dTask, agent: 'claude-code-1' });
+    const ws = claim.data?.workspace;
+    const wsTip = ws?.ref ? lsRemote(ws.ref) : null;
+    const afterClaim = await restTask(dTask);
+    console.log(`claim_task ${dTask} (claude-code-1) -> isError=${claim.isError} workspace=${JSON.stringify({ id: ws?.id, ref: ws?.ref, headSha: ws?.headSha })} lease=${JSON.stringify(claim.data?.lease)} (x-forge-cost ${claim.cost})\ngit ls-remote ${ws?.ref} -> ${wsTip}; change head ${heads.draft}\nGET tasks/${dTask} -> status=${afterClaim?.status} claimedBy=${afterClaim?.claimedBy} workspace=${afterClaim?.workspace}`);
+    check('VAL-DISPATCH-002', 'claim_task returns a workspace whose ref sits at the conflicting change head; task claimed by claude-code-1', !claim.isError && ws?.id && wsTip === heads.draft && afterClaim?.status === 'claimed' && afterClaim?.claimedBy === 'claude-code-1' && afterClaim?.workspace === ws.id);
+    const other = await connect(PAT, 'mcp-agent-claude-code-2');
+    let second;
+    try {
+      second = await call(other, 'claim_task', { repo: env.repo, task: dTask, agent: 'claude-code-2' });
+    } finally {
+      await other.close();
+    }
+    const afterSecond = await restTask(dTask);
+    console.log(`fresh client claim_task ${dTask} (claude-code-2) -> isError=${second.isError} ${second.text.slice(0, 300)}\nGET tasks/${dTask} -> claimedBy=${afterSecond?.claimedBy} workspace=${afterSecond?.workspace} generation=${afterSecond?.generation}`);
+    check('VAL-DISPATCH-007', 'a second claim by another agent is refused 409 CLAIMED naming claude-code-1; claimant and workspace unchanged', second.isError && second.data?.code === 'CLAIMED' && second.text.includes('claude-code-1') && afterSecond?.claimedBy === 'claude-code-1' && afterSecond?.workspace === ws.id && afterSecond?.generation === claim.data?.lease?.generation);
+    const early = await call(owner, 'complete_task', { repo: env.repo, task: dTask, agent: 'claude-code-1', generation: claim.data.lease.generation });
+    console.log(`complete_task before any push -> isError=${early.isError} ${early.text.slice(0, 300)}`);
+    check('VAL-WORKFLOW-003', 'completion before the resolution push is refused 409 RESOLUTION_NOT_PUSHED naming the precondition', early.isError && early.data?.code === 'RESOLUTION_NOT_PUSHED' && /push/.test(early.data?.error ?? ''));
+    const dRes = resolve(heads.draft, 'export const app = 100 + 2; // main + draft\n', 'resolve draft conflict');
+    await pushRetry(dir, url, `${dRes.sha}:${ws.ref}`);
+    const dDone = await call(owner, 'complete_task', { repo: env.repo, task: dTask, agent: 'claude-code-1', generation: claim.data.lease.generation, sha: dRes.sha });
+    const dChange = await restChange(changes.draft.number);
+    console.log(`git merge origin/main (exit ${dRes.mergeExit}, conflict) + push ${dRes.sha} -> ${ws.ref}\ncomplete_task -> isError=${dDone.isError} task.status=${dDone.data?.task?.status} change=${JSON.stringify({ head: dDone.data?.change?.headSha, state: dDone.data?.change?.state, policy: dDone.data?.change?.mergePolicy })} headBranch=${JSON.stringify(dDone.data?.headBranch)} (x-forge-cost ${dDone.cost})\nGET changes/${changes.draft.number} -> head=${dChange?.headSha} state=${dChange?.state}; ls-remote fix-draft=${lsRemote('refs/heads/fix-draft')}`);
+    check('VAL-DISPATCH-003', 'complete_task completes the task and moves the change head (and its branch) to the pushed resolution; state leaves conflicted', !dDone.isError && dDone.data?.task?.status === 'completed' && dChange?.headSha === dRes.sha && dChange?.state === 'open' && lsRemote('refs/heads/fix-draft') === dRes.sha);
+    await sleep(20_000);
+    const dLater = await restChange(changes.draft.number);
+    const mainAfterDraft = lsRemote('refs/heads/main');
+    console.log(`after a 20 s settle: GET changes/${changes.draft.number} -> state=${dLater?.state} policy=${dLater?.mergePolicy} mergeCommit=${dLater?.mergeCommit}; ls-remote main=${mainAfterDraft}`);
+    check('VAL-DISPATCH-005', 'the resolved draft change stays an unmerged draft; main unchanged', dLater?.state === 'open' && dLater?.mergePolicy === 'draft' && !dLater?.mergeCommit && mainAfterDraft === mainTip);
+    const again = await call(owner, 'complete_task', { repo: env.repo, task: dTask, agent: 'claude-code-1', generation: claim.data.lease.generation, sha: dRes.sha });
+    const dFinal = await restChange(changes.draft.number);
+    console.log(`second complete_task -> isError=${again.isError} ${again.text.slice(0, 200)}; head=${dFinal?.headSha}; workspaces for the task=${(await taskWorkspaces(dTask)).length}`);
+    check('VAL-WORKFLOW-003', 'a second completion is refused 409 TASK_COMPLETED and changes nothing', again.isError && again.data?.code === 'TASK_COMPLETED' && dFinal?.headSha === dRes.sha && (await taskWorkspaces(dTask)).length === 1);
+
+    // Review: VAL-DISPATCH-006
+    const rTask = taskOf.review.id;
+    const rClaim = await call(owner, 'claim_task', { repo: env.repo, task: rTask, agent: 'claude-code-1' });
+    const rRes = resolve(heads.review, 'export const app = 100 + 3; // main + review\n', 'resolve review conflict');
+    await pushRetry(dir, url, `${rRes.sha}:${rClaim.data?.workspace?.ref}`);
+    const rDone = await call(owner, 'complete_task', { repo: env.repo, task: rTask, agent: 'claude-code-1', generation: rClaim.data?.lease?.generation, sha: rRes.sha });
+    await sleep(10_000);
+    const rOpen = await restChange(changes.review.number);
+    const mainBeforeMerge = lsRemote('refs/heads/main');
+    console.log(`review: claim -> ${rClaim.data?.workspace?.ref}; complete_task -> isError=${rDone.isError} state=${rDone.data?.change?.state}; after 10 s GET changes/${changes.review.number} -> state=${rOpen?.state} head=${rOpen?.headSha}; main=${mainBeforeMerge}`);
+    const rMerge = await http(`${api}/changes/${changes.review.number}/merge`, { method: 'POST' });
+    const rMerged = await restChange(changes.review.number);
+    mustGit(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main'], dir);
+    console.log(`POST changes/${changes.review.number}/merge -> ${rMerge.status} kind=${rMerge.json?.merge?.kind} (x-forge-cost ${rMerge.cost}); GET -> state=${rMerged?.state} mergeCommit=${rMerged?.mergeCommit}; origin/main=${mustGit(['rev-parse', 'origin/main'], dir)}`);
+    check('VAL-DISPATCH-006', 'the resolved review change stays open until the explicit merge, then merges', !rDone.isError && rOpen?.state === 'open' && rOpen?.headSha === rRes.sha && mainBeforeMerge === mainTip && rMerge.status === 200 && rMerged?.state === 'merged' && mustGit(['rev-parse', 'origin/main'], dir) === rMerged?.mergeCommit);
+
+    // Auto: the dead-agent path (VAL-WORKFLOW-001/002, VAL-CROSS-009) ending in VAL-DISPATCH-004 / VAL-CROSS-004.
+    const listed = await call(owner, 'list_tasks', { repo: env.repo, status: 'open' });
+    const aTask = (listed.data?.tasks ?? []).find((t) => t.change?.number === changes.auto.number);
+    console.log(`list_tasks(open) -> ${JSON.stringify(listed.data?.tasks?.map((t) => ({ id: t.id, change: t.change?.number, status: t.status })))}`);
+    const a1 = await call(owner, 'claim_task', { repo: env.repo, task: aTask?.id, agent: 'agent-one', ttlSeconds: 10 });
+    const gen1 = a1.data?.lease?.generation;
+    const live = forge(['task', 'claim', env.repo, aTask?.id, '--agent', 'agent-two']);
+    const during = await restTask(aTask?.id);
+    console.log(`MCP claim_task (agent-one, ttl 10 s) -> isError=${a1.isError} lease=${JSON.stringify(a1.data?.lease)} workspace=${a1.data?.workspace?.id}\nforge task claim (agent-two) while live -> exit ${live.code} ${JSON.stringify(live.data)?.slice(0, 300)}\nGET tasks/${aTask?.id} -> claimedBy=${during?.claimedBy} lease=${JSON.stringify(during?.lease)}`);
+    check('VAL-WORKFLOW-001', 'the claim carries an expiring lease {until, generation}; a claim while it is live is refused 409 naming agent-one', !a1.isError && typeof a1.data?.lease?.until === 'string' && Number.isInteger(gen1) && live.code !== 0 && live.data?.status === 409 && live.data?.code === 'CLAIMED' && JSON.stringify(live.data).includes('agent-one') && during?.claimedBy === 'agent-one' && during?.lease?.generation === gen1);
+    await sleep(Math.max(0, Date.parse(a1.data?.lease?.until ?? '') - Date.now()) + 2000);
+    const lapsed = await restTask(aTask?.id);
+    const reclaim = forge(['task', 'claim', env.repo, aTask?.id, '--agent', 'agent-two']);
+    const gen2 = reclaim.data?.lease?.generation;
+    console.log(`after expiry GET tasks/${aTask?.id} -> status=${lapsed?.status} lease=${JSON.stringify(lapsed?.lease)}\nforge task claim (agent-two) -> exit ${reclaim.code} claimedBy=${reclaim.data?.task?.claimedBy} lease=${JSON.stringify(reclaim.data?.lease)} workspace=${reclaim.data?.workspace?.id} ${reclaim.err}`);
+    check('VAL-WORKFLOW-001', 'after expiry the task is open again and the CLI reclaim gets generation n+1 with agent-two as claimant and the same workspace', lapsed?.status === 'open' && reclaim.code === 0 && gen2 === gen1 + 1 && reclaim.data?.task?.claimedBy === 'agent-two' && reclaim.data?.workspace?.id === a1.data?.workspace?.id);
+    const aRes = resolve(heads.auto, 'export const app = 100 + 3 + 4; // main + review + auto\n', 'resolve auto conflict');
+    const notPushed = forge(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two']);
+    console.log(`forge task complete before the push -> exit ${notPushed.code} ${JSON.stringify(notPushed.data)?.slice(0, 250)}`);
+    await pushRetry(dir, url, `${aRes.sha}:${reclaim.data?.workspace?.ref}`);
+    const before = await restChange(changes.auto.number);
+    const stale = await call(owner, 'complete_task', { repo: env.repo, task: aTask?.id, agent: 'agent-one', generation: gen1, sha: aRes.sha });
+    const afterStale = await restTask(aTask?.id);
+    const changeAfterStale = await restChange(changes.auto.number);
+    console.log(`agent-one stale complete_task (generation ${gen1}) -> isError=${stale.isError} ${stale.text.slice(0, 250)}\nGET tasks/${aTask?.id} -> status=${afterStale?.status} claimedBy=${afterStale?.claimedBy} workspace=${afterStale?.workspace}; GET changes/${changes.auto.number} head=${changeAfterStale?.headSha} state=${changeAfterStale?.state}`);
+    check('VAL-WORKFLOW-002', 'the stale generation completion is refused 409 STALE_GENERATION; task and change unchanged', stale.isError && stale.data?.code === 'STALE_GENERATION' && afterStale?.status === 'claimed' && afterStale?.claimedBy === 'agent-two' && afterStale?.workspace === a1.data?.workspace?.id && changeAfterStale?.headSha === before?.headSha && changeAfterStale?.headSha === heads.auto && changeAfterStale?.state === 'conflicted');
+    const done = forge(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two', '--sha', aRes.sha]);
+    console.log(`git push ${aRes.sha} -> ${reclaim.data?.workspace?.ref}; forge task complete (generation ${gen2}) -> exit ${done.code} task=${done.data?.task?.status} change=${JSON.stringify({ state: done.data?.change?.state, head: done.data?.change?.headSha })} ${done.err}`);
+    let merged = null;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 120_000) {
+      const g = await call(owner, 'get_change', { repo: env.repo, number: changes.auto.number });
+      if (g.data?.state === 'merged') {
+        merged = g.data;
+        break;
+      }
+      await sleep(3000);
+    }
+    mustGit(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main'], dir);
+    const tip = mustGit(['rev-parse', 'origin/main'], dir);
+    const appOnMain = mustGit(['show', 'origin/main:src/app.ts'], dir);
+    const attr = await call(owner, 'get_attribution', { repo: env.repo, sha: tip });
+    const finalTask = await restTask(aTask?.id);
+    const wsCount = (await taskWorkspaces(aTask?.id)).length;
+    const runs = await http(`${api}/changes/${changes.auto.number}/checks`);
+    const twice = await call(owner, 'complete_task', { repo: env.repo, task: aTask?.id, agent: 'agent-two', generation: gen2, sha: aRes.sha });
+    console.log(`get_change #${changes.auto.number} -> ${merged ? `merged ${merged.mergeCommit} after ${Math.round((Date.now() - t0) / 1000)} s` : 'not merged within 120 s'}\ngit log origin/main -1 -> ${tip}\ngit show origin/main:src/app.ts -> ${JSON.stringify(appOnMain)}\nget_attribution ${tip} -> ${attr.text}\nGET tasks/${aTask?.id} -> status=${finalTask?.status} generation=${finalTask?.generation} completedBy=${finalTask?.completedBy} resolution=${finalTask?.resolutionSha}\nworkspaces for the task=${wsCount}; check runs on the change=${JSON.stringify(runs.json)?.slice(0, 200)}\ncomplete_task again -> isError=${twice.isError} ${twice.text.slice(0, 160)}`);
+    check('VAL-WORKFLOW-003', 'a completion before the resolution push is refused 409 (CLI)', notPushed.code !== 0 && notPushed.data?.status === 409 && notPushed.data?.code === 'RESOLUTION_NOT_PUSHED');
+    check('VAL-DISPATCH-004', 'the resolved auto change merges with no further action; resolved src/app.ts on main', done.code === 0 && Boolean(merged) && merged.mergeCommit === tip && appOnMain === 'export const app = 100 + 3 + 4; // main + review + auto');
+    check('VAL-CROSS-004', 'list → claim → push → complete → merged; the landed commit carries the resolving agent attribution; task completed', Boolean(merged) && !attr.isError && attr.data?.agent === 'agent-two' && finalTask?.status === 'completed');
+    check('VAL-CROSS-009', 'MCP claim → lapse → CLI reclaim → resolution merged once; stale work had no effect; generation recorded; one workspace', Boolean(merged) && tip === aRes.sha && finalTask?.generation === gen2 && finalTask?.resolutionSha === aRes.sha && wsCount === 1 && twice.isError && twice.data?.code === 'TASK_COMPLETED' && (runs.json?.checks ?? runs.json?.runs ?? []).length <= 1);
   });
 
   await owner.close();

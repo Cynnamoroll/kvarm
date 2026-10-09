@@ -22,6 +22,9 @@ const ORIGINAL_AVAILABLE = [
   'get_attribution',
   'set_attribution',
   'get_context',
+  'list_tasks',
+  'claim_task',
+  'complete_task',
 ];
 
 describe('operation registry', () => {
@@ -55,6 +58,10 @@ describe('operation registry', () => {
     }
     expect(findOperation('list_tasks')).toMatchObject({ command: ['task', 'list'], method: 'GET', path: '/repos/{repo}/tasks', readOnly: true });
     expect(findOperation('list_tasks')?.params.map((p) => p.name)).toEqual(['repo', 'status', 'kind', 'limit', 'cursor']);
+    expect(findOperation('claim_task')).toMatchObject({ command: ['task', 'claim'], method: 'POST', path: '/repos/{repo}/tasks/{task}/claim', readOnly: false });
+    expect(findOperation('complete_task')).toMatchObject({ command: ['task', 'complete'], method: 'POST', path: '/repos/{repo}/tasks/{task}/complete', readOnly: false });
+    expect(findCommand(['task', 'heartbeat'])?.name).toBe('heartbeat_task');
+    expect(findCommand(['task', 'get'])?.name).toBe('get_task');
     // Arena ranking is reachable as a tool (VAL-CROSS-012).
     expect(findOperation('rank_arena')?.path).toBe('/repos/{repo}/arenas/{id}/candidates');
   });
@@ -175,6 +182,25 @@ describe('buildRequest', () => {
     // merge_change carries optional attribution fields for the merge commit's note.
     const merge = buildRequest(op('merge_change'), { repo: 'o/r', number: 2, attribution: { agent: 'a', session: 's' } });
     expect(merge.body).toEqual({ attribution: { agent: 'a', session: 's' } });
+  });
+
+  it('maps the task dispatch tools onto the task routes', () => {
+    const id = 'abcd1234';
+    expect(buildRequest(op('claim_task'), { repo: 'o/r', task: id, agent: 'bot', ttlSeconds: 60 })).toEqual({
+      method: 'POST',
+      path: `/api/v1/repos/o/r/tasks/${id}/claim`,
+      query: '',
+      body: { agent: 'bot', ttlSeconds: 60 },
+    });
+    expect(buildRequest(op('claim_task'), { repo: 'o/r', task: id }).body).toBeUndefined();
+    const sha = 'b'.repeat(40);
+    expect(buildRequest(op('complete_task'), { repo: 'o/r', task: id, generation: 2, sha })).toMatchObject({
+      path: `/api/v1/repos/o/r/tasks/${id}/complete`,
+      body: { generation: 2, sha },
+    });
+    expect(buildRequest(op('heartbeat_task'), { repo: 'o/r', task: id, generation: 1 }).path).toBe(`/api/v1/repos/o/r/tasks/${id}/heartbeat`);
+    expect(requestTarget(buildRequest(op('get_task'), { repo: 'o/r', task: id }))).toBe(`/api/v1/repos/o/r/tasks/${id}`);
+    expect(() => buildRequest(op('complete_task'), { repo: 'o/r', task: id })).toThrow(/generation.*required/);
   });
 
   it('refuses missing, mistyped, unknown and malformed arguments with the parameter named', () => {

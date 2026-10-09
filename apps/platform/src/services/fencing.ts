@@ -133,6 +133,29 @@ export async function reportFenced(
   return stale(input, view((read?.results as ClaimRow[] | undefined)?.[0]));
 }
 
+/**
+ * Extends the holder's lease to `ttlMs` from now (a heartbeat). Rejected
+ * unless generation and owner are current and the claim is still held; a
+ * lease that ran out but was not taken over yet may still be renewed.
+ */
+export async function renewFenced(db: D1Database, input: FencedInput & { ttlMs: number }): Promise<ServiceResult<ClaimView> & { current?: ClaimView | null }> {
+  const now = input.now ?? Date.now();
+  const ttl = Math.min(CLAIM_LIMITS.maxTtlMs, Math.max(CLAIM_LIMITS.minTtlMs, Math.floor(input.ttlMs)));
+  const [renewed, read] = await db.batch([
+    db
+      .prepare(
+        `UPDATE fenced_claims SET expires_at = ?5 + ?6, updated_at = ?5
+          WHERE kind = ?1 AND subject = ?2 AND generation = ?3 AND owner = ?4 AND state = 'claimed'
+          RETURNING kind, subject, generation, owner, identity, state, expires_at, result`,
+      )
+      .bind(input.kind, input.subject, input.generation, input.owner, now, ttl),
+    db.prepare(SELECT).bind(input.kind, input.subject),
+  ]);
+  const row = (renewed?.results as ClaimRow[] | undefined)?.[0];
+  if (row) return { ok: true, value: view(row)! };
+  return stale(input, view((read?.results as ClaimRow[] | undefined)?.[0]));
+}
+
 /** Gives a held claim back (open) so another worker can take it at once. */
 export async function releaseFenced(db: D1Database, input: FencedInput): Promise<ServiceResult<ClaimView> & { current?: ClaimView | null }> {
   const now = input.now ?? Date.now();

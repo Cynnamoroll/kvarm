@@ -87,6 +87,8 @@ const numberArg = (name, description) => ({ name, type: 'integer', in: 'path', r
 const CHANGE = numberArg('number', 'Change set number within the repository');
 /** @type {Param} */
 const WORKSPACE = pathArg('workspace', 'Workspace id (16 hex characters)');
+/** @type {Param} */
+const TASK = pathArg('task', 'Task id from list_tasks');
 
 /**
  * @param {string} name
@@ -513,6 +515,62 @@ export const OPERATIONS = Object.freeze([
       query('kind', 'string', 'Only tasks of this kind, e.g. resolve-conflict'),
       LIMIT(100),
       CURSOR,
+    ],
+  }),
+  define({
+    name: 'get_task',
+    command: ['task', 'get'],
+    family: 'tasks',
+    description: 'One agent task with its claim lease (holder, generation, expiry), claim workspace and resolution.',
+    method: 'GET',
+    path: '/repos/{repo}/tasks/{task}',
+    params: [REPO, TASK],
+  }),
+  define({
+    name: 'claim_task',
+    command: ['task', 'claim'],
+    family: 'tasks',
+    description:
+      "Claim an open task under an expiring lease. Creates (or on a reclaim reuses) a workspace whose branch sits at the conflicting change's head; push the resolution there. A live claim by another agent is refused 409 CLAIMED; a lapsed lease is taken over under the next generation.",
+    method: 'POST',
+    path: '/repos/{repo}/tasks/{task}/claim',
+    params: [
+      REPO,
+      TASK,
+      body('agent', 'string', 'Agent display name (default: the token agent or your login; an agent token always claims as its agent)'),
+      body('ttlSeconds', 'integer', 'Lease length in seconds (default 600, max 3600)'),
+    ],
+  }),
+  define({
+    name: 'heartbeat_task',
+    command: ['task', 'heartbeat'],
+    family: 'tasks',
+    description: 'Extend the claim lease of a task you hold. Refused 409 STALE_GENERATION when the claim was taken over.',
+    method: 'POST',
+    path: '/repos/{repo}/tasks/{task}/heartbeat',
+    params: [
+      REPO,
+      TASK,
+      body('generation', 'integer', 'Lease generation returned by claim_task', { required: true }),
+      body('agent', 'string', 'Agent display name used when claiming'),
+      body('ttlSeconds', 'integer', 'New lease length in seconds (default 600, max 3600)'),
+    ],
+  }),
+  define({
+    name: 'complete_task',
+    command: ['task', 'complete'],
+    family: 'tasks',
+    description:
+      "Complete a claimed resolve-conflict task: the workspace head must descend from the change's head and merge with the base without conflicts. The change moves to the resolution, reopens and follows its merge policy (auto merges, review waits, draft stays draft).",
+    method: 'POST',
+    path: '/repos/{repo}/tasks/{task}/complete',
+    params: [
+      REPO,
+      TASK,
+      body('generation', 'integer', 'Lease generation returned by claim_task', { required: true }),
+      body('sha', 'string', 'Expected resolution commit (40 hex); refused 409 if the workspace head differs'),
+      body('agent', 'string', 'Agent display name used when claiming'),
+      body('attribution', 'json', 'Attribution note for the resolution commit: {agent?, session?, promptHash?, model?}'),
     ],
   }),
 

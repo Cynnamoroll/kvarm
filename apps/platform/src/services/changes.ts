@@ -428,7 +428,7 @@ function cacheablePlan(m: Mergeability): boolean {
  * immutable, so it is cached per repo and pair; required checks always come
  * fresh from the checks-gate.
  */
-async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, targetSha: string, headSha: string): Promise<Mergeability> {
+export async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, targetSha: string, headSha: string): Promise<Mergeability> {
   const key = internalKey('mergeplan/v2', ctx.repo.id, targetSha, headSha);
   const hit = await readCachedJson<CachedPlan>(key);
   if (hit) {

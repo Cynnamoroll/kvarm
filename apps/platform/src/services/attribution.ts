@@ -133,7 +133,7 @@ export async function writeAttributionNote(
   pusher: GitPusher,
   sha: string,
   record: AttributionRecord,
-  source: 'api' | 'merge',
+  source: 'api' | 'merge' | 'task',
 ): Promise<AttributionWrite> {
   const ctx = resolveCtx(cx, artifacts);
   const reader = artifactsMergeSources(ctx);
@@ -281,5 +281,32 @@ export async function attributeMerge(cx: AttributionContext, artifacts: LazyRepo
     await writeAttributionNote(cx, artifacts, pusher, m.mergeCommit, makeRecord(input, actorLogin(cx.actor)), 'merge');
   } catch (err) {
     console.warn(JSON.stringify({ mergeAttributionFailed: String(err).slice(0, 200), mergeCommit: m.mergeCommit }));
+  }
+}
+
+/**
+ * Notes a commit Forge accepted on a principal's behalf (a completed task's
+ * resolution) unless it already carries a note and the caller gave no
+ * fields of its own; failures are logged. Returns whether a note was written.
+ */
+export async function attributeCommit(
+  cx: AttributionContext,
+  pusher: GitPusher,
+  sha: string,
+  input: AttributionInput,
+  opts: { replace: boolean },
+): Promise<boolean> {
+  try {
+    if (!opts.replace) {
+      const existing = await getAttribution(cx, sha);
+      if (existing.ok || existing.code !== 'ATTRIBUTION_NOT_FOUND') return false;
+    }
+    await withLazyRepo(cx.env, cx.repo.artifacts_name, (artifacts) =>
+      writeAttributionNote(cx, artifacts, pusher, sha, makeRecord(input, actorLogin(cx.actor)), 'task'),
+    );
+    return true;
+  } catch (err) {
+    console.warn(JSON.stringify({ commitAttributionFailed: String(err).slice(0, 200), commit: sha }));
+    return false;
   }
 }
