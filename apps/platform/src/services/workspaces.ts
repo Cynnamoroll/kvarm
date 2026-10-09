@@ -48,7 +48,7 @@ const ID_RE = WORKSPACE_ID_RE;
 // Rows and views
 // ---------------------------------------------------------------------------
 
-interface WorkspaceRow {
+export interface WorkspaceRow {
   id: string;
   task: string | null;
   agent: string | null;
@@ -68,12 +68,13 @@ interface WorkspaceRow {
   abandoned_at: number | null;
   merged_at: number | null;
   intent_paths: string | null;
+  arena_id: string | null;
   seq: number;
 }
 
-const WORKSPACE_SELECT = `SELECT w.id, w.task, w.agent, w.agent_id, w.status, w.ref, w.base_ref, w.base_sha, w.head_sha,
+export const WORKSPACE_SELECT = `SELECT w.id, w.task, w.agent, w.agent_id, w.status, w.ref, w.base_ref, w.base_sha, w.head_sha,
        w.change_set_id, c.number AS change_number, u.login AS created_by_login, f.sha AS ref_sha,
-       w.created_at, w.updated_at, w.abandoned_at, w.merged_at, w.intent_paths, w.rowid AS seq
+       w.created_at, w.updated_at, w.abandoned_at, w.merged_at, w.intent_paths, w.arena_id, w.rowid AS seq
   FROM workspaces w
   LEFT JOIN change_sets c ON c.id = w.change_set_id
   LEFT JOIN users u ON u.id = w.created_by
@@ -101,6 +102,8 @@ export interface WorkspaceView {
   mergedAt: string | null;
   /** The declared intent (normalized paths; a trailing `/` is a prefix), advisory only. */
   declaredPaths: string[];
+  /** The arena the workspace was created for, if any. */
+  arena: string | null;
 }
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
@@ -111,7 +114,7 @@ function recordedHead(row: WorkspaceRow): string | null {
   return pushed ?? row.head_sha ?? row.base_sha;
 }
 
-function workspaceView(row: WorkspaceRow, repo: RepoRow, origin: string, headSha = recordedHead(row)): WorkspaceView {
+export function workspaceView(row: WorkspaceRow, repo: RepoRow, origin: string, headSha = recordedHead(row)): WorkspaceView {
   return {
     id: row.id,
     task: row.task,
@@ -131,6 +134,7 @@ function workspaceView(row: WorkspaceRow, repo: RepoRow, origin: string, headSha
     abandonedAt: iso(row.abandoned_at),
     mergedAt: iso(row.merged_at),
     declaredPaths: row.intent_paths ? (JSON.parse(row.intent_paths) as string[]) : [],
+    arena: row.arena_id,
   };
 }
 
@@ -173,7 +177,7 @@ async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceR
 }
 
 /** Fresh ref positions (one ls-refs round trip, never cached). */
-function liveRefs(cx: WorkspaceContext, names: string[]): Promise<Map<string, string | null>> {
+export function liveRefs(cx: Pick<WorkspaceContext, 'env' | 'repo' | 'waitUntil'>, names: string[]): Promise<Map<string, string | null>> {
   return withLazyRepo(cx.env, cx.repo.artifacts_name, (artifacts) => {
     const ctx: ResolveContext = { env: cx.env, repo: cx.repo, artifacts, bypass: false, waitUntil: cx.waitUntil };
     return lsRefs(ctx, names);
@@ -184,7 +188,7 @@ function readRow(env: Env, repoId: string, id: string): Promise<WorkspaceRow | n
   return env.DB.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(repoId, id).first<WorkspaceRow>();
 }
 
-function newId(): string {
+export function newId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(8));
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -259,6 +263,67 @@ function parseCreate(cx: WorkspaceContext, input: unknown): ServiceResult<Create
   return { ok: true, value: { task, agent, base, intent } };
 }
 
+export interface WorkspaceSpec {
+  id: string;
+  ref: string;
+  task: string;
+  agent: string;
+  base: string;
+  baseSha: string;
+  arenaId?: string | null;
+}
+
+/**
+ * The INSERT for a new active workspace row. The observed set starts empty
+ * at the base head; push reconciliation replaces it, also for a workspace
+ * whose ref was created past the base (a composition).
+ */
+export function workspaceInsertStatement(
+  cx: Pick<WorkspaceContext, 'env' | 'repo' | 'actor'>,
+  w: WorkspaceSpec,
+  now: number,
+  intentJson: string | null = null,
+  expiresAt: number | null = null,
+): D1PreparedStatement {
+  return cx.env.DB.prepare(
+    `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_by, agent_id,
+       created_at, updated_at, intent_paths, intent_updated_at, intent_expires_at,
+       observed_paths, observed_base_sha, observed_head_sha, observed_at, arena_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, '[]', ?8, ?8, ?11, ?15)`,
+  ).bind(
+    w.id,
+    cx.repo.id,
+    cx.repo.artifacts_name,
+    w.task,
+    w.agent,
+    w.ref,
+    w.base,
+    w.baseSha,
+    cx.actor?.user.id ?? null,
+    cx.actor?.agent?.agentId ?? null,
+    now,
+    intentJson,
+    intentJson ? now : null,
+    expiresAt,
+    w.arenaId ?? null,
+  );
+}
+
+/** Rows (with views' joins) for the given workspace ids, in one statement. */
+export function workspaceRowsStatement(db: D1Database, repoId: string, ids: readonly string[]): D1PreparedStatement {
+  return db.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ?1 AND w.id IN (SELECT value FROM json_each(?2))`).bind(repoId, JSON.stringify([...ids]));
+}
+
+/** An arena's workspaces in creation order. */
+export function arenaWorkspacesStatement(db: D1Database, repoId: string, arenaId: string): D1PreparedStatement {
+  return db.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ?1 AND w.arena_id = ?2 ORDER BY w.created_at, w.rowid`).bind(repoId, arenaId);
+}
+
+/** The workspace ref for a new workspace id and its task. */
+export function workspaceRef(id: string, task: string): string {
+  return `${WORKSPACE_REF_PREFIX}${id}/${workspaceSlug(task)}`;
+}
+
 /**
  * POST workspaces. The ref is created at the base head before the row is
  * written (an orphan ref from a failed insert is harmless: no row, so no
@@ -274,7 +339,7 @@ export function createWorkspace(
     if (!parsed.ok) return parsed;
     const p = parsed.value;
     const id = newId();
-    const ref = `${WORKSPACE_REF_PREFIX}${id}/${workspaceSlug(p.task)}`;
+    const ref = workspaceRef(id, p.task);
     if (!isSafeRefName(ref)) return fail(422, 'task does not yield a valid ref name', 'INVALID_TASK');
     if (cx.actor?.agent && !credentialMayUpdateRef(cx.actor, ref)) {
       return fail(403, `this agent token may not create ${WORKSPACE_REF_PREFIX}<id>/ refs`, 'AGENT_REF_FORBIDDEN');
@@ -293,29 +358,8 @@ export function createWorkspace(
     const now = Date.now();
     const intentJson = p.intent ? JSON.stringify(p.intent.paths) : null;
     const expiresAt = p.intent?.ttlSeconds ? now + p.intent.ttlSeconds * 1000 : null;
-    // The observed set starts empty at the base head; push reconciliation replaces it.
     const results = await cx.env.DB.batch([
-      cx.env.DB.prepare(
-        `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_by, agent_id,
-           created_at, updated_at, intent_paths, intent_updated_at, intent_expires_at,
-           observed_paths, observed_base_sha, observed_head_sha, observed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, '[]', ?8, ?8, ?11)`,
-      ).bind(
-        id,
-        cx.repo.id,
-        cx.repo.artifacts_name,
-        p.task,
-        p.agent,
-        ref,
-        p.base,
-        baseSha,
-        cx.actor?.user.id ?? null,
-        cx.actor?.agent?.agentId ?? null,
-        now,
-        intentJson,
-        intentJson ? now : null,
-        expiresAt,
-      ),
+      workspaceInsertStatement(cx, { id, ref, task: p.task, agent: p.agent, base: p.base, baseSha }, now, intentJson, expiresAt),
       ...(intentJson ? [declaredInsertStatement(cx.env.DB, cx.repo.id, id, intentJson)] : []),
       cx.env.DB.prepare(`${WORKSPACE_SELECT} WHERE w.id = ?`).bind(id),
     ]);

@@ -22,6 +22,7 @@ export * from './pack';
 export * from './receivePack';
 export * from './mergebase';
 export * from './merge3';
+export * from './compose';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

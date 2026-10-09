@@ -16,6 +16,8 @@ import { purgeGitTokens } from '../artifacts/tokens';
 import { deleteSnapshotObjects, snapshotCleanupStatements } from '../services/snapshots';
 import { changeCleanupStatements } from '../services/changes';
 import { workspaceCleanupStatements } from '../services/workspaces';
+import { arenaCleanupStatements } from '../services/candidates';
+import { compositionCleanupStatements } from '../services/compositions';
 
 export type ServiceResult<T> =
   | { ok: true; value: T }
@@ -156,7 +158,12 @@ export async function deleteRepo(
   // One batch: the repo row with its workspace, change and snapshot rows,
   // returning the tarball keys. Those rows reference the repo (and workspaces
   // their change sets), so they go first.
-  const before = [...workspaceCleanupStatements(env.DB, repo.id), ...changeCleanupStatements(env.DB, repo.id)];
+  const before = [
+    ...compositionCleanupStatements(env.DB, repo.id),
+    ...arenaCleanupStatements(env.DB, repo.id),
+    ...workspaceCleanupStatements(env.DB, repo.id),
+    ...changeCleanupStatements(env.DB, repo.id),
+  ];
   const results = await env.DB.batch<{ r2_key: string }>([
     ...before,
     deleteRepoRowStatement(env.DB, repo.id),

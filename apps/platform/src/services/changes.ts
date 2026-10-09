@@ -855,7 +855,7 @@ function agentMergeDenial(actor: Actor | null, base: string, what: MergePolicy |
   return fail(403, `this agent token may not ${action} ${branchRef(base)}`, 'AGENT_REF_FORBIDDEN');
 }
 
-function mergeAuthor(actor: Actor | null): { name: string; email: string } | undefined {
+export function mergeAuthor(actor: Actor | null): { name: string; email: string } | undefined {
   if (!actor) return undefined;
   if (actor.agent) return { name: actor.agent.agentName, email: `${actor.agent.agentId}@agents.forge.invalid` };
   return { name: actor.user.name ?? actor.user.login, email: actor.user.email };

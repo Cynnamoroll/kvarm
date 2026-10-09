@@ -10,6 +10,7 @@ import { eventsApi } from './routes/api/events';
 import { snapshotsApi } from './routes/api/snapshots';
 import { changesApi } from './routes/api/changes';
 import { intentsApi } from './routes/api/intents';
+import { candidatesApi } from './routes/api/candidates';
 import { workspacesApi } from './routes/api/workspaces';
 import { handleEventBatch } from './services/events';
 import { web } from './routes/web';
@@ -59,6 +60,7 @@ app.route('/api/v1', changesApi);
 // Before workspacesApi: `workspaces/overlap` would otherwise match `workspaces/:id`.
 app.route('/api/v1', intentsApi);
 app.route('/api/v1', workspacesApi);
+app.route('/api/v1', candidatesApi);
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.

@@ -605,3 +605,102 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
   if (reasons.length > 0) out.truncatedReason = reasons.join('; ');
   return { ok: true, value: out };
 }
+
+// ---------------------------------------------------------------------------
+// Overlap within an explicit workspace set (candidates and arenas)
+// ---------------------------------------------------------------------------
+
+export interface SetOverlapPair {
+  /** Sorted workspace ids. */
+  workspaces: [string, string];
+  /** Shared observed paths (for a collapsed prefix, the other side's paths below it). */
+  paths: string[];
+  pathCount: number;
+  pathsTruncated?: true;
+}
+
+export interface SetOverlap {
+  /** Pairs of the set's active workspaces whose observed changes share paths, sorted. */
+  pairs: SetOverlapPair[];
+  /** Per member: the other members it overlaps and how many distinct paths it shares with them. */
+  members: Map<string, { with: string[]; sharedPaths: number }>;
+  truncated: boolean;
+  truncatedReason?: string;
+}
+
+/**
+ * The statements `setOverlap` reads, for the caller's batch: shared-path
+ * groups and collapsed-prefix hits restricted to the given workspaces. Each
+ * probes the per-workspace index, so rows read follow the members' own
+ * index rows, never the repo's other workspaces.
+ */
+export function setOverlapStatements(db: D1Database, repoId: string, ids: readonly string[]): D1PreparedStatement[] {
+  const members = JSON.stringify([...ids]);
+  return [
+    db
+      .prepare(
+        `SELECT p.path, json_group_array(p.workspace_id) AS ws
+           FROM workspace_paths p
+          WHERE p.repo_id = ?1 AND p.workspace_id IN (SELECT value FROM json_each(?2)) AND p.kind = 'observed'
+          GROUP BY p.path HAVING COUNT(*) > 1 ORDER BY p.path LIMIT ${INTENT_LIMITS.overlapGroupMax + 1}`,
+      )
+      .bind(repoId, members),
+    db
+      .prepare(
+        `SELECT b.path AS path, a.workspace_id AS a, b.workspace_id AS b
+           FROM workspace_paths a
+           JOIN workspace_paths b ON b.repo_id = a.repo_id AND b.workspace_id IN (SELECT value FROM json_each(?2)) AND b.kind = 'observed'
+                AND b.workspace_id != a.workspace_id
+                AND b.path > a.path AND b.path < substr(a.path, 1, length(a.path) - 1) || '0'
+          WHERE a.repo_id = ?1 AND a.workspace_id IN (SELECT value FROM json_each(?2)) AND a.kind = 'observed' AND substr(a.path, -1) = '/'
+          ORDER BY b.path, a.workspace_id, b.workspace_id LIMIT ${INTENT_LIMITS.overlapPrefixHitMax + 1}`,
+      )
+      .bind(repoId, members),
+  ];
+}
+
+/** Pairs and per-member counts from the results of `setOverlapStatements`, in order. */
+export function setOverlap(ids: readonly string[], results: readonly (D1Result | undefined)[]): SetOverlap {
+  const reasons: string[] = [];
+  const pairs = new Map<string, Set<string>>();
+  const add = (x: string, y: string, path: string) => {
+    if (x === y) return;
+    const key = x < y ? `${x}:${y}` : `${y}:${x}`;
+    let p = pairs.get(key);
+    if (!p) pairs.set(key, (p = new Set()));
+    p.add(path);
+  };
+  const groups = (results[0]?.results as Array<{ path: string; ws: string }> | undefined) ?? [];
+  if (groups.length > INTENT_LIMITS.overlapGroupMax) reasons.push(`more than ${INTENT_LIMITS.overlapGroupMax} shared paths; paths beyond them are not counted`);
+  for (const g of groups.slice(0, INTENT_LIMITS.overlapGroupMax)) {
+    const ws = [...new Set(JSON.parse(g.ws) as string[])];
+    for (let i = 0; i < ws.length; i++) for (let j = i + 1; j < ws.length; j++) add(ws[i]!, ws[j]!, g.path);
+  }
+  const hits = (results[1]?.results as Array<{ path: string; a: string; b: string }> | undefined) ?? [];
+  if (hits.length > INTENT_LIMITS.overlapPrefixHitMax) {
+    reasons.push(`more than ${INTENT_LIMITS.overlapPrefixHitMax} paths below collapsed prefixes; paths beyond them are not counted`);
+  }
+  for (const h of hits.slice(0, INTENT_LIMITS.overlapPrefixHitMax)) add(h.a, h.b, h.path);
+
+  const shared = new Map<string, { with: Set<string>; paths: Set<string> }>(ids.map((id) => [id, { with: new Set(), paths: new Set() }]));
+  const out: SetOverlapPair[] = [...pairs.keys()].sort().map((key) => {
+    const [a, b] = key.split(':') as [string, string];
+    const all = [...pairs.get(key)!].sort();
+    for (const [me, other] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      const m = shared.get(me);
+      if (!m) continue;
+      m.with.add(other);
+      for (const p of all) m.paths.add(p);
+    }
+    const pair: SetOverlapPair = { workspaces: [a, b], paths: all.slice(0, INTENT_LIMITS.overlapPathsPerPair), pathCount: all.length };
+    if (all.length > INTENT_LIMITS.overlapPathsPerPair) pair.pathsTruncated = true;
+    return pair;
+  });
+  const members = new Map([...shared].map(([id, m]) => [id, { with: [...m.with].sort(), sharedPaths: m.paths.size }]));
+  const result: SetOverlap = { pairs: out, members, truncated: reasons.length > 0 };
+  if (reasons.length > 0) result.truncatedReason = reasons.join('; ');
+  return result;
+}

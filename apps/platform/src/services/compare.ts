@@ -488,6 +488,16 @@ async function loadCompareBody(ctx: Ctx, baseTree: string, headTree: string): Pr
   return { body: JSON.parse(serialized) as CompareBody, cache: ctx.bypass ? 'bypass' : 'miss' };
 }
 
+/**
+ * The compare body for a tree pair exactly as `compare` renders it: from the
+ * content-addressed cache, or computed (and cached unless bypassed).
+ */
+export async function treePairBody(ctx: Ctx, baseTree: string, headTree: string): Promise<{ body: CompareBody; cache: CacheOutcome }> {
+  const r = await loadCompareBody(ctx, baseTree, headTree);
+  markOutcome(r.cache);
+  return r;
+}
+
 export interface ChangedPaths {
   /** Changed paths, both sides of a rename included. */
   paths: string[];
