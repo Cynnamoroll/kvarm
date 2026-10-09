@@ -1,12 +1,14 @@
 // @ts-check
 import { parseArgs } from 'node:util';
+import { findCommand } from '@forge/ops';
 import { CliError, checkout } from './checkout.js';
+import { commandHelp, commandUsage, groupCommands, operationsOverview, runOperation } from './ops.js';
 
 const USAGE = `usage: forge <command> [args]
 
 commands:
   checkout <owner/repo> <ref> <dir>   materialize <ref> into <dir> from a snapshot, or git clone
-  help [command]                      show help
+  help [command]                      show help (for API commands: help <group> <verb>)
 
 environment:
   FORGE_BASE_URL   platform origin, e.g. https://forge-platform.cynnamoroll.workers.dev (required)
@@ -46,28 +48,49 @@ the commit tree.`;
 
 /**
  * @param {string[]} argv
- * @param {{ env: NodeJS.ProcessEnv, stdout: (line: string) => void, stderr: (line: string) => void, fetch?: import('./http.js').HttpFetch }} io
+ * @param {{ env: NodeJS.ProcessEnv, stdout: (line: string) => void, stderr: (line: string) => void, fetch?: import('./http.js').HttpFetch, apiFetch?: typeof fetch }} io
  * @returns {Promise<number>} exit code
  */
 export async function main(argv, io) {
   const [command, ...rest] = argv;
   if (!command || command === 'help' || command === '--help' || command === '-h') {
-    io.stdout(rest[0] === 'checkout' ? CHECKOUT_HELP : USAGE);
+    const op = rest.length >= 2 ? findCommand(rest.slice(0, 2)) : undefined;
+    io.stdout(rest[0] === 'checkout' ? CHECKOUT_HELP : op ? commandHelp(op) : usage());
     return command ? 0 : 2;
   }
+  let label = command;
   try {
     if (command === 'checkout') return await runCheckout(rest, io);
-    io.stderr(`forge: unknown command "${command}"\n\n${USAGE}`);
-    return 2;
+    const verbs = groupCommands(command);
+    if (verbs.length === 0) {
+      io.stderr(`forge: unknown command "${command}"\n\n${usage()}`);
+      return 2;
+    }
+    const [verb, ...args] = rest;
+    if (!verb || verb === '--help' || verb === '-h') {
+      io.stderr(`forge ${command}: expected one of:\n${verbs.map((op) => `  ${commandUsage(op).replace(/^usage: /, '')}`).join('\n')}`);
+      return 2;
+    }
+    const op = findCommand([command, verb]);
+    if (!op) {
+      io.stderr(`forge: unknown command "${command} ${verb}"; "forge ${command}" lists its commands`);
+      return 2;
+    }
+    label = `${command} ${verb}`;
+    return await runOperation(op, args, { env: io.env, stdout: io.stdout, stderr: io.stderr, apiFetch: io.apiFetch });
   } catch (err) {
     if (err instanceof CliError) {
-      io.stderr(`forge ${command}: ${err.message}`);
-      if (err.exitCode === 2) io.stderr(`run "forge help ${command}" for usage`);
+      io.stderr(`forge ${label}: ${err.message}`);
+      if (err.exitCode === 2) io.stderr(`run "forge help ${label}" for usage`);
       return err.exitCode;
     }
-    io.stderr(`forge ${command}: ${err instanceof Error ? err.message : String(err)}`);
+    io.stderr(`forge ${label}: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
+}
+
+function usage() {
+  return `${USAGE}\n\nAPI commands (each maps to one REST endpoint and one MCP tool; "forge help <group> <verb>" for details):\n${operationsOverview()}`;
 }
 
 /**

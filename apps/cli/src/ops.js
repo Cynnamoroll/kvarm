@@ -1,0 +1,242 @@
+// @ts-check
+/**
+ * CLI adapter over the shared operation registry (@forge/ops): every registry
+ * entry is a `forge <group> <verb>` command that sends the entry's REST
+ * request and prints the JSON reply. The MCP server exposes the same entries
+ * as tools.
+ */
+
+import { OPERATIONS, OperationInputError, buildRequest, requestTarget } from '@forge/ops';
+import { CliError } from './checkout.js';
+
+/** @typedef {import('@forge/ops').Operation} Operation */
+/** @typedef {import('@forge/ops').Param} Param */
+
+/**
+ * @typedef {object} OpsIo
+ * @property {NodeJS.ProcessEnv} env
+ * @property {(line: string) => void} stdout
+ * @property {(line: string) => void} stderr
+ * @property {typeof fetch} [apiFetch]
+ */
+
+/** @param {string} name */
+const kebab = (name) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+
+/** @param {Param} p */
+function placeholder(p) {
+  if (p.enum) return `<${p.enum.join('|')}>`;
+  return { string: '<string>', integer: '<integer>', boolean: '', 'string[]': '<list>', json: '<json>' }[p.type];
+}
+
+/** @param {Operation} op */
+export function commandUsage(op) {
+  const parts = [`forge ${op.command.join(' ')}`];
+  for (const p of op.params) {
+    if (p.positional) parts.push(p.required ? `<${p.name}>` : `[<${p.name}>]`);
+  }
+  for (const p of op.params) {
+    if (p.positional) continue;
+    const flag = `--${kebab(p.name)}${p.type === 'boolean' ? '' : ` ${placeholder(p)}`}`;
+    parts.push(p.required ? flag : `[${flag}]`);
+  }
+  parts.push('[--json]');
+  return `usage: ${parts.join(' ')}`;
+}
+
+/** @param {Operation} op */
+export function commandHelp(op) {
+  const rows = op.params.map((p) => {
+    const left = p.positional ? `<${p.name}>` : `--${kebab(p.name)}${p.type === 'boolean' ? '' : ` ${placeholder(p)}`}`;
+    const extra = p.type === 'string[]' ? ' (repeat the flag or separate with commas)' : '';
+    return `  ${left.padEnd(28)} ${p.description}${p.required && !p.positional ? ' (required)' : ''}${extra}`;
+  });
+  rows.push(`  ${'--json'.padEnd(28)} print the reply as one line of JSON (default: indented JSON)`);
+  return [
+    commandUsage(op),
+    '',
+    op.description,
+    '',
+    'arguments:',
+    ...rows,
+    '',
+    `REST: ${op.method} /api/v1${op.path}`,
+    `MCP tool: ${op.name}`,
+    '',
+    'Exit status: 0 success; 1 API or network failure (with --json the error body',
+    '{status, error, code, ...} is printed on stdout); 2 usage error.',
+  ].join('\n');
+}
+
+/** One line per registry command, for `forge --help`. */
+export function operationsOverview() {
+  const width = Math.max(...OPERATIONS.map((op) => op.command.join(' ').length)) + 2;
+  return OPERATIONS.map((op) => `  ${op.command.join(' ').padEnd(width)} ${op.description.split(/(?<=\.)\s/)[0]}`).join('\n');
+}
+
+/** @param {string} group */
+export function groupCommands(group) {
+  return OPERATIONS.filter((op) => op.command[0] === group);
+}
+
+/**
+ * @param {Operation} op
+ * @param {string[]} argv arguments after the two command words
+ * @returns {{ help: true } | { help: false, json: boolean, args: Record<string, unknown> }}
+ */
+export function parseOperationArgs(op, argv) {
+  const usage = (/** @type {string} */ msg) => new CliError(msg, 2);
+  const positionals = op.params.filter((p) => p.positional);
+  /** @type {Map<string, Param>} */
+  const flags = new Map(op.params.filter((p) => !p.positional).map((p) => [kebab(p.name), p]));
+  /** @type {Record<string, unknown>} */
+  const args = {};
+  let json = false;
+  let next = 0;
+
+  /**
+   * @param {Param} p
+   * @param {string} raw
+   */
+  const assign = (p, raw) => {
+    switch (p.type) {
+      case 'integer':
+        if (!/^-?\d+$/.test(raw)) throw usage(`argument "${p.name}" must be an integer, got "${raw}"`);
+        args[p.name] = Number(raw);
+        return;
+      case 'string[]': {
+        const list = /** @type {string[]} */ (args[p.name] ?? []);
+        list.push(...raw.split(',').filter((s) => s.length > 0));
+        args[p.name] = list;
+        return;
+      }
+      case 'json':
+        try {
+          args[p.name] = JSON.parse(raw);
+        } catch {
+          throw usage(`argument "${p.name}" must be JSON, got ${JSON.stringify(raw)}`);
+        }
+        return;
+      case 'boolean':
+        args[p.name] = raw !== 'false';
+        return;
+      default:
+        args[p.name] = raw;
+    }
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = /** @type {string} */ (argv[i]);
+    if (a === '--help' || a === '-h') return { help: true };
+    if (a === '--json') {
+      json = true;
+      continue;
+    }
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      const name = a.slice(2, eq === -1 ? undefined : eq);
+      const p = flags.get(name);
+      if (!p) throw usage(`unknown option "--${name}" for forge ${op.command.join(' ')}`);
+      if (p.type === 'boolean' && eq === -1) {
+        args[p.name] = true;
+        continue;
+      }
+      const value = eq === -1 ? argv[++i] : a.slice(eq + 1);
+      if (value === undefined) throw usage(`option "--${name}" needs a value`);
+      assign(p, value);
+      continue;
+    }
+    const p = positionals[next++];
+    if (!p) throw usage(`unexpected argument "${a}"`);
+    assign(p, a);
+  }
+  return { help: false, json, args };
+}
+
+/**
+ * @param {Operation} op
+ * @param {number} status
+ * @param {Record<string, unknown>} body
+ * @param {Record<string, unknown>} args
+ * @param {string | null} retryAfter
+ */
+function hint(op, status, body, args, retryAfter) {
+  const code = typeof body.code === 'string' ? body.code : '';
+  const cmd = `forge ${op.command.join(' ')}`;
+  if (status === 401) return 'set FORGE_PAT to a valid personal access token with the api scope (or an unexpired agent token)';
+  if (status === 403 && code === 'INSUFFICIENT_SCOPE') return 'the token lacks the api scope or role this needs; use a token minted with the api scope';
+  if (status === 403) return `your account or token lacks the role this needs${args.repo ? ` on ${args.repo}` : ''}; ask an admin for a grant`;
+  if (status === 404 && code === 'NOT_FOUND' && args.repo) {
+    return `${args.repo} does not exist or is private to you; check owner/name and that FORGE_PAT can read it`;
+  }
+  if (status === 404) return `check the identifiers you passed to ${cmd}`;
+  if (status === 409) return 'the current state conflicts with this request; read the current state (details above) and retry';
+  if (status === 400 || status === 422) return `fix the argument named in the error; run "${cmd} --help"`;
+  if (status === 429) return `rate limited; retry after ${retryAfter ?? '60'} seconds`;
+  if (status >= 500) return 'platform or storage error; retry shortly';
+  return `run "${cmd} --help"`;
+}
+
+/**
+ * Runs one registry operation. Returns the exit code.
+ *
+ * @param {Operation} op
+ * @param {string[]} argv
+ * @param {OpsIo} io
+ * @returns {Promise<number>}
+ */
+export async function runOperation(op, argv, io) {
+  const parsed = parseOperationArgs(op, argv);
+  if (parsed.help) {
+    io.stdout(commandHelp(op));
+    return 0;
+  }
+  let built;
+  try {
+    built = buildRequest(op, parsed.args);
+  } catch (err) {
+    if (err instanceof OperationInputError) throw new CliError(err.message, 2);
+    throw err;
+  }
+  const baseUrl = io.env.FORGE_BASE_URL;
+  if (!baseUrl) throw new CliError('FORGE_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
+  if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`FORGE_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
+  /** @type {Record<string, string>} */
+  const headers = { accept: 'application/json' };
+  if (io.env.FORGE_PAT) headers.authorization = `Bearer ${io.env.FORGE_PAT}`;
+  if (built.body !== undefined) headers['content-type'] = 'application/json';
+  const url = new URL(requestTarget(built), baseUrl);
+  const doFetch = io.apiFetch ?? globalThis.fetch;
+  let res;
+  try {
+    res = await doFetch(url, {
+      method: built.method,
+      headers,
+      ...(built.body !== undefined ? { body: JSON.stringify(built.body) } : {}),
+    });
+  } catch (err) {
+    const cause = /** @type {{ cause?: { code?: string, message?: string } }} */ (err).cause;
+    throw new CliError(`could not reach ${url.origin}: ${cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err))}`, 1);
+  }
+  const text = await res.text();
+  /** @type {unknown} */
+  let data = text;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // non-JSON reply
+  }
+  if (res.ok) {
+    io.stdout(parsed.json ? JSON.stringify(data) : JSON.stringify(data, null, 2));
+    return 0;
+  }
+  /** @type {Record<string, unknown>} */
+  const body = data && typeof data === 'object' && !Array.isArray(data) ? /** @type {Record<string, unknown>} */ (data) : { error: text.slice(0, 200) };
+  if (parsed.json) io.stdout(JSON.stringify({ status: res.status, ...body }));
+  const { error, code, ...details } = body;
+  const cmd = `forge ${op.command.join(' ')}`;
+  io.stderr(`${cmd}: ${code ? `${code} ` : ''}(HTTP ${res.status}): ${typeof error === 'string' ? error : 'request failed'}`);
+  if (Object.keys(details).length > 0) io.stderr(`details: ${JSON.stringify(details)}`);
+  io.stderr(`hint: ${hint(op, res.status, body, parsed.args, res.headers.get('retry-after'))}`);
+  return 1;
+}

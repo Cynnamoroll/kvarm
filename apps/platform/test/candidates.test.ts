@@ -456,9 +456,14 @@ describe('composition', () => {
     expect(r.json.changeSet).toEqual(expect.any(Number));
     expect(r.json.workspace).toMatchObject({ status: 'active', base: 'main', changeSet: r.json.changeSet });
     expect(repo.refs.get(r.json.workspace.ref)).toBe(r.json.commitSha);
+    // The composed workspace's head is the composed commit, not the base, before its push event is consumed.
+    expect(r.json.workspace.headSha).toBe(r.json.commitSha);
+    expect(r.json.workspace.baseSha).toBe(main.sha);
 
     const read = await call('GET', `${R('compose')}/compositions/${r.json.id}`, tok.owner);
     expect(read.json).toEqual(r.json);
+    const listed = (await call('GET', `${R('compose')}/workspaces`, tok.owner)).json.workspaces.find((w: any) => w.id === r.json.workspace.id);
+    expect(listed.headSha).toBe(r.json.commitSha);
     const cmp = await call('GET', `${R('compose')}/compare/main...${r.json.workspace.ref}`, tok.owner);
     expect(cmp.json.files.map((f: any) => f.path)).toEqual(['docs/b.md', 'src/a.ts']);
     expect(cmp.json.head.tree).toBe(expectedTree);

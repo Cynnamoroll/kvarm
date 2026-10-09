@@ -179,6 +179,24 @@ function handle(name: string): ArtifactsRepo {
       }
       return out;
     },
+    async readFile({ ref, path }: { ref: string; path: string }) {
+      r.calls.push(`readFile:${ref}:${path}`);
+      await r.hook?.(`readFile:${ref}:${path}`);
+      const sha = /^[0-9a-f]{40}$/.test(ref) ? ref : (r.refs.get(ref) ?? r.refs.get(`refs/heads/${ref}`) ?? r.refs.get(`refs/tags/${ref}`));
+      const c = sha ? r.objects.get(sha) : undefined;
+      if (!c || c.type !== 'commit') return null;
+      let hash = parseCommit(c.content, sha!).treeHash;
+      const parts = path.split('/').filter((p) => p.length > 0);
+      for (let i = 0; i < parts.length; i++) {
+        const t = r.objects.get(hash);
+        if (!t || t.type !== 'tree') return null;
+        const e = parseTree(t.content).find((x) => x.name === parts[i]);
+        if (!e) return null;
+        hash = e.hash;
+      }
+      const o = r.objects.get(hash);
+      return o && o.type === 'blob' && parts.length > 0 ? new Blob([o.content as Uint8Array<ArrayBuffer>]) : null;
+    },
     async createToken(scope: 'read' | 'write' = 'write', ttl = 86_400) {
       r.calls.push('createToken');
       await r.hook?.(`createToken:${scope}`);

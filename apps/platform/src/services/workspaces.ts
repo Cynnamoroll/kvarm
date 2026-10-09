@@ -272,6 +272,12 @@ export interface WorkspaceSpec {
   base: string;
   baseSha: string;
   arenaId?: string | null;
+  /**
+   * The commit the ref was created at when it is not the base head (a
+   * composition). Recorded so the view reports it before the ref's push event
+   * reaches repo_refs.
+   */
+  headSha?: string | null;
 }
 
 /**
@@ -289,8 +295,8 @@ export function workspaceInsertStatement(
   return cx.env.DB.prepare(
     `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_by, agent_id,
        created_at, updated_at, intent_paths, intent_updated_at, intent_expires_at,
-       observed_paths, observed_base_sha, observed_head_sha, observed_at, arena_id)
-     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, '[]', ?8, ?8, ?11, ?15)`,
+       observed_paths, observed_base_sha, observed_head_sha, observed_at, arena_id, head_sha)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, '[]', ?8, ?8, ?11, ?15, ?16)`,
   ).bind(
     w.id,
     cx.repo.id,
@@ -307,6 +313,7 @@ export function workspaceInsertStatement(
     intentJson ? now : null,
     expiresAt,
     w.arenaId ?? null,
+    w.headSha ?? null,
   );
 }
 

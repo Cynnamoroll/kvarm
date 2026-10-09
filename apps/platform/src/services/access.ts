@@ -19,6 +19,7 @@
  * first, so unknown tokens cannot amplify into D1 reads.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   PAT_PATTERN,
   patFromRow,
@@ -268,12 +269,27 @@ async function authoritativeLookup(
     : patFromRow(row as PatRow | undefined, opts.now);
   const { repo, facts, userId } =
     repoIndex >= 0 ? splitFacts(results[repoIndex]?.results?.[0] as RepoFactsRow | undefined) : splitFacts(undefined);
-  if (opts.hash) await writePatCache(opts.hash, pat, opts.now);
+  if (opts.hash) {
+    await writePatCache(opts.hash, pat, opts.now);
+    principalObserver.getStore()?.(pat);
+  }
   const out: Authoritative = { pat, repo, facts, factsUserId: userId };
   if (rulesIndex >= 0) {
     out.branchRules = ((results[rulesIndex]?.results ?? []) as unknown as BranchRuleRow[]).map(ruleFromRow);
   }
   return out;
+}
+
+const principalObserver = new AsyncLocalStorage<(pat: PATInfo | null) => void>();
+
+/**
+ * Runs `fn` while reporting every authoritative token verification it
+ * performs (null: the token was rejected). The MCP endpoint dispatches a tool
+ * call to its REST route and learns from this whether the bearer token it
+ * relayed was valid, without paying for a second lookup of its own.
+ */
+export function observePrincipals<T>(observer: (pat: PATInfo | null) => void, fn: () => Promise<T>): Promise<T> {
+  return principalObserver.run(observer, fn);
 }
 
 /**

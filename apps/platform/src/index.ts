@@ -6,6 +6,7 @@ import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
 import { branchRulesApi } from './routes/api/branchRules';
 import { compareApi } from './routes/api/compare';
+import { contentsApi } from './routes/api/contents';
 import { eventsApi } from './routes/api/events';
 import { snapshotsApi } from './routes/api/snapshots';
 import { changesApi } from './routes/api/changes';
@@ -13,6 +14,7 @@ import { intentsApi } from './routes/api/intents';
 import { candidatesApi } from './routes/api/candidates';
 import { workspacesApi } from './routes/api/workspaces';
 import { handleEventBatch } from './services/events';
+import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
@@ -54,6 +56,7 @@ app.route('/api/v1', tenancyApi);
 app.route('/api/v1', agentsApi);
 app.route('/api/v1', branchRulesApi);
 app.route('/api/v1', compareApi);
+app.route('/api/v1', contentsApi);
 app.route('/api/v1', eventsApi);
 app.route('/api/v1', snapshotsApi);
 app.route('/api/v1', changesApi);
@@ -61,6 +64,8 @@ app.route('/api/v1', changesApi);
 app.route('/api/v1', intentsApi);
 app.route('/api/v1', workspacesApi);
 app.route('/api/v1', candidatesApi);
+// MCP tool calls are dispatched back through this router to their REST routes.
+app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.

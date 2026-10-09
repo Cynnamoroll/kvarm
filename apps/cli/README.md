@@ -1,7 +1,8 @@
 # forge CLI
 
-`apps/cli` is the Veyr-9 command-line client. It needs Node 20 or later and
-has no runtime dependencies.
+`apps/cli` is the Veyr-9 command-line client. It needs Node 20 or later. Its
+only runtime dependency is the workspace package `@forge/ops`, the operation
+registry it shares with the MCP server.
 
 ```bash
 npm install                      # from the repo root; links the `forge` bin
@@ -16,13 +17,48 @@ npx forge checkout cynthia/demo main ./demo
 | variable | meaning |
 | --- | --- |
 | `FORGE_BASE_URL` | Platform origin (required). |
-| `FORGE_PAT` | Token for private repositories and snapshot demands. A PAT needs the `api` scope to call the snapshot API; git access needs `read`. |
+| `FORGE_PAT` | Token for private repositories, writes and snapshot demands. A PAT needs the `api` scope for the REST API (API commands and the snapshot API); git access needs `read`. |
 
 The token goes to the REST API as `Authorization: Bearer` and to git as a
 basic-auth header scoped to `FORGE_BASE_URL`. It is passed through
 `GIT_CONFIG_*` environment variables, never on the command line. Git runs with
 credential helpers disabled and terminal prompts off, so no credential store
 is read or written.
+
+## API commands (`forge <group> <verb>`)
+
+Every entry of the shared operation registry (`packages/ops/src/index.js`) is
+a CLI command, a REST endpoint and an MCP tool at the same time. The MCP
+server at `POST /mcp` lists the same entries as tools, so the CLI, REST and
+MCP surfaces cannot drift apart. `forge --help` lists every command;
+`forge help <group> <verb>` (or `<group> <verb> --help`) shows its usage,
+arguments, REST endpoint and MCP tool name; `forge <group>` alone lists the
+group's verbs.
+
+```bash
+forge repo list --json
+forge file read cynthia/demo README.md --ref main
+forge tree get cynthia/demo src --ref main
+forge compare get cynthia/demo main feature/x --order=risk
+forge workspace create cynthia/demo --task "fix parser" --intent '{"paths":["src/parse.ts"]}'
+forge workspace change-set cynthia/demo <workspace-id> --title "Fix parser" --merge-policy review
+forge change merge cynthia/demo 3
+```
+
+Positional arguments come in the order shown by the usage line; the other
+parameters are kebab-case flags (`--merge-policy review` or
+`--merge-policy=review`). List flags repeat or take commas
+(`--paths a.ts --paths src/` or `--paths a.ts,src/`); JSON flags take a JSON
+value. The reply is printed as indented JSON, or as one line with `--json`.
+Commands send `Authorization: Bearer $FORGE_PAT` when it is set and run
+anonymously otherwise (public reads). The token is never printed.
+
+Exit status: 0 on success; 1 on an API or network failure, with
+`<command>: <CODE> (HTTP <status>): <error>`, a `details:` line carrying the
+current state from the reply (for example the head on a stale-revision
+conflict) and a `hint:` line on stderr (with `--json` the error body
+`{status, error, code, ...}` is also printed on stdout); 2 on a usage error
+that names the argument.
 
 ## `forge checkout <owner/repo> <ref> <dir>`
 

@@ -6,6 +6,6 @@
     "allowJs": true,
     "checkJs": true
   },
-  "include": ["bin", "src", "test"],
+  "include": ["bin", "src", "test", "../../packages/ops/src", "../../packages/ops/test"],
   "exclude": []
 }

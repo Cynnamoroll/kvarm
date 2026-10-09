@@ -415,7 +415,7 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     const now = Date.now();
     const compositionId = newId();
     await db.batch([
-      workspaceInsertStatement(cx, { id, ref, task, agent: p.agent, base: p.base, baseSha }, now),
+      workspaceInsertStatement(cx, { id, ref, task, agent: p.agent, base: p.base, baseSha, headSha: commit.hash }, now),
       ...observed,
       db
         .prepare(
