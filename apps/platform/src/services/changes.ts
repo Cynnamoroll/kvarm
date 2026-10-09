@@ -21,6 +21,7 @@ import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import { effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
@@ -87,11 +88,14 @@ export interface ChangeRow {
   kind: string;
   source_change_id: string | null;
   queue_state: string | null;
+  /** The agent workspace linked to this change set (services/workspaces.ts), if any. */
+  workspace_id: string | null;
 }
 
 const CHANGE_SELECT = `SELECT c.id, c.repo_id, c.number, c.title, c.body, c.base_ref, c.head_ref, c.head_sha, c.base_sha,
        c.state, c.author_id, u.login AS author_login, c.agent_meta, c.merge_commit, c.merged_at, c.created_at,
-       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.queue_state
+       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.queue_state,
+       (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1) AS workspace_id
   FROM change_sets c LEFT JOIN users u ON u.id = c.author_id`;
 
 export interface CheckRunView {
@@ -135,6 +139,8 @@ export interface ChangeView {
   mergedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Id of the agent workspace this change set was opened from, or null. */
+  workspace: string | null;
 }
 
 export interface MergeabilityView {
@@ -188,6 +194,7 @@ export function changeView(row: ChangeRow): ChangeView {
     mergedAt: iso(row.merged_at),
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at ?? row.created_at)!,
+    workspace: row.workspace_id ?? null,
   };
 }
 
@@ -809,6 +816,7 @@ async function performMerge(
   author: { name: string; email: string } | undefined,
   deps: MergeDeps,
   mode: MergeMode,
+  attribution: AttributionInput | null = null,
 ): Promise<ServiceResult<MergeOutcome>> {
   if (!row.head_sha) return fail(409, 'the change has no head commit', 'NO_HEAD');
   const headSha = row.head_sha;
@@ -875,6 +883,10 @@ async function performMerge(
         changeSignalCleanup(cx.env.DB, cx.repo.id, row.id),
         changeSelect(cx.env.DB, cx.repo.id, row.number),
       ]);
+      if (pv.kind === 'merge') {
+        // The merge commit is Forge's own, so it carries the merging principal; a fast-forward publishes the author's commit untouched.
+        await attributeMerge(cx, artifacts, pusher, { changeNumber: row.number, mergeCommit: pv.mergeCommit, input: attribution });
+      }
       if (!update?.meta.changes) {
         console.warn(JSON.stringify({ mergeNotRecorded: { repo: cx.repo.id, number: row.number, mergeCommit: pv.mergeCommit, headSha } }));
         return fail(
@@ -913,16 +925,38 @@ export function mergeAuthor(actor: Actor | null): { name: string; email: string 
   return { name: actor.user.name ?? actor.user.login, email: actor.user.email };
 }
 
-/** POST changes/:number/merge — explicit merge; refused for drafts, closed and merged changes. */
-export function mergeChange(cx: ChangeContext, rawNumber: string, deps: MergeDeps = defaultMergeDeps): Promise<ServiceResult<MergeOutcome>> {
+/**
+ * POST changes/:number/merge — explicit merge; refused for drafts, closed and
+ * merged changes. `body.attribution` ({agent?, session?, promptHash?, model?})
+ * fills the merge commit's attribution note; omitted fields name the caller.
+ */
+export function mergeChange(
+  cx: ChangeContext,
+  rawNumber: string,
+  deps: MergeDeps = defaultMergeDeps,
+  body: unknown = undefined,
+): Promise<ServiceResult<MergeOutcome>> {
   return guarded(async () => {
     const number = parseNumber(rawNumber);
+    let attribution: AttributionInput | null = null;
+    if (body !== undefined && body !== null) {
+      if (typeof body !== 'object' || Array.isArray(body)) return fail(400, 'body must be a JSON object {attribution?}', 'INVALID_BODY');
+      const raw = (body as { attribution?: unknown }).attribution;
+      if (raw !== undefined && raw !== null) {
+        if (typeof raw !== 'object' || Array.isArray(raw)) {
+          return fail(422, 'attribution must be an object {agent?, session?, promptHash?, model?}', 'INVALID_ATTRIBUTION');
+        }
+        const parsed = parseAttributionInput(raw, mergeAttributionDefaults(cx.actor, number ?? 0));
+        if (!parsed.ok) return fail(parsed.status, parsed.error, parsed.code ?? 'INVALID_ATTRIBUTION');
+        attribution = parsed.value;
+      }
+    }
     const row = number === null ? null : await readChange(cx.env, cx.repo.id, number);
     const refused = mergeRefusal(row, 'explicit');
     if (refused || !row) return refused ?? fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const denied = agentMergeDenial(cx.actor, row.base_ref, 'merge');
     if (denied) return denied;
-    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit');
+    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution);
   });
 }
 

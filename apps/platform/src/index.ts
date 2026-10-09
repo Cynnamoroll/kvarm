@@ -13,6 +13,7 @@ import { changesApi } from './routes/api/changes';
 import { intentsApi } from './routes/api/intents';
 import { candidatesApi } from './routes/api/candidates';
 import { workspacesApi } from './routes/api/workspaces';
+import { attributionApi } from './routes/api/attribution';
 import { handleEventBatch } from './services/events';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
@@ -64,6 +65,7 @@ app.route('/api/v1', changesApi);
 app.route('/api/v1', intentsApi);
 app.route('/api/v1', workspacesApi);
 app.route('/api/v1', candidatesApi);
+app.route('/api/v1', attributionApi);
 // MCP tool calls are dispatched back through this router to their REST routes.
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
 app.route('/', web);

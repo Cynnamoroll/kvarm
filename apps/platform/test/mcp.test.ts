@@ -272,6 +272,43 @@ describe('MCP tools match REST', () => {
     expect(repo.refs.get('refs/heads/main')).toBe(work.sha);
   });
 
+  it('set_attribution, get_attribution and get_context round-trip with REST and are permission-checked', async () => {
+    const { main } = await seedRepo('attr');
+    const repo = `${OWNER}/attr`;
+    const set = await tool('set_attribution', { repo, sha: main, agent: 'mcp-agent', session: 's-1', promptHash: 'b'.repeat(64), model: 'm' });
+    expect(set.isError, JSON.stringify(set.data)).toBe(false);
+    const got = await tool('get_attribution', { repo, sha: main });
+    expect(got.data).toEqual(set.data);
+    expect((await rest('GET', `${R('attr')}/commits/${main}/attribution`)).json).toEqual(set.data);
+    expect(set.data).toMatchObject({ agent: 'mcp-agent', actor: OWNER });
+
+    const rec = await tool('record_decision', {
+      repo,
+      task: 'T-1',
+      paths: ['README.md'],
+      chosen: 'ws-b',
+      rejected: [{ id: 'ws-a', reason: 'fails lint' }],
+      reason: 'smaller',
+    });
+    expect(rec.isError, JSON.stringify(rec.data)).toBe(false);
+    for (const args of [{ task: 'T-1' }, { path: ['README.md'] }]) {
+      const ctx = await tool('get_context', { repo, ...args });
+      expect(ctx.data).toEqual({ decisions: [rec.data], truncated: false, nextCursor: null });
+    }
+    expect((await tool('get_context', { repo, task: 'none' })).data.decisions).toEqual([]);
+    const over = await tool('get_context', { repo, path: Array.from({ length: 21 }, (_, i) => `p${i}`) });
+    expect([over.isError, over.data.code]).toEqual([true, 'TOO_MANY_PATHS']);
+
+    for (const [name, args] of [
+      ['get_context', { repo, task: 'T-1' }],
+      ['get_attribution', { repo, sha: main }],
+    ] as const) {
+      const t = await tool(name, args, tok.outsider);
+      expect(t.isError, name).toBe(true);
+      expect(t.data, name).toEqual({ status: 404, error: 'not found', code: 'NOT_FOUND' });
+    }
+  });
+
   it('compose_candidates returns the composed commit as the new workspace head', async () => {
     const { repo, main } = await seedRepo('compose');
     const a = await tool('create_workspace', { repo: `${OWNER}/compose`, task: 'a' });

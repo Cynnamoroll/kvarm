@@ -272,6 +272,11 @@ describe('pushes and change sets', () => {
     const branch = ws.ref.slice('refs/heads/'.length);
     expect(opened.json).toMatchObject({ number: 1, state: 'open', mergePolicy: 'review', base: 'main', head: branch, headSha: first.sha });
     expect((await getWs('change', ws.id)).json).toMatchObject({ changeSet: 1, status: 'active' });
+    // The change view links back to its workspace, so the create reply and a later read agree exactly.
+    expect(opened.json.workspace).toBe(ws.id);
+    const read = await getChange('change', 1);
+    expect(Object.keys(read.json)).toEqual(Object.keys(opened.json));
+    expect({ ...read.json, mergeability: null }).toEqual({ ...opened.json, mergeability: null });
     const again = await openChange('change', ws.id, { title: 'twice' });
     expect([again.status, again.json.code]).toEqual([409, 'CHANGE_SET_EXISTS']);
 

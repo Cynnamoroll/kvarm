@@ -402,7 +402,11 @@ export const OPERATIONS = Object.freeze([
     description: 'Explicitly merge a change set into its base (fast-forward or a two-parent merge commit) under branch rules and required checks.',
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/merge',
-    params: [REPO, CHANGE],
+    params: [
+      REPO,
+      CHANGE,
+      body('attribution', 'json', "Attribution note for a two-parent merge commit: {agent?, session?, promptHash?, model?}; omitted fields name the merging principal"),
+    ],
   }),
   define({
     name: 'get_mergeability',
@@ -764,6 +768,66 @@ export const OPERATIONS = Object.freeze([
     path: '/agents/{id}/tokens/{tokenId}',
     params: [pathArg('id', 'Agent id'), pathArg('tokenId', 'Token id')],
     destructive: true,
+  }),
+
+  // --- attribution and decision context ---------------------------------------
+  define({
+    name: 'set_attribution',
+    command: ['attribution', 'set'],
+    family: 'attribution',
+    description:
+      'Attach the attribution note {agent, session, promptHash, model?, actor, at} to a commit on refs/notes/forge-attribution (replaces an earlier note).',
+    method: 'POST',
+    path: '/repos/{repo}/commits/{sha}/attribution',
+    params: [
+      REPO,
+      pathArg('sha', 'Full 40-character commit sha'),
+      body('agent', 'string', 'Agent identity, e.g. claude-code-1', { required: true }),
+      body('session', 'string', 'Agent session id', { required: true }),
+      body('promptHash', 'string', 'Hash of the prompt that produced the commit', { required: true }),
+      body('model', 'string', 'Model name'),
+    ],
+  }),
+  define({
+    name: 'get_attribution',
+    command: ['attribution', 'get'],
+    family: 'attribution',
+    description: "A commit's attribution note (agent, session, promptHash, model, actor, at); not found when it has none.",
+    method: 'GET',
+    path: '/repos/{repo}/commits/{sha}/attribution',
+    params: [REPO, pathArg('sha', 'Full 40-character commit sha')],
+  }),
+  define({
+    name: 'record_decision',
+    command: ['decision', 'record'],
+    family: 'attribution',
+    description: 'Record which candidate was chosen for a task and/or paths, the rejected candidates and why, for later agents to read with get_context.',
+    method: 'POST',
+    path: '/repos/{repo}/decisions',
+    params: [
+      REPO,
+      body('task', 'string', 'Task id the decision belongs to (task and/or paths)'),
+      body('paths', 'string[]', 'Repository paths the decision covers (at most 100)'),
+      body('chosen', 'string', 'Chosen candidate, workspace or change id', { required: true }),
+      body('rejected', 'json', 'Rejected candidates: ids or {id, reason} objects (at most 50)', { required: true }),
+      body('reason', 'string', 'Why the chosen candidate won', { required: true }),
+    ],
+  }),
+  define({
+    name: 'get_context',
+    command: ['decision', 'context'],
+    family: 'attribution',
+    description:
+      'Prior decisions for a task and/or paths, newest first: chosen and rejected candidates with their reasons. Bounded pages with truncated/nextCursor.',
+    method: 'GET',
+    path: '/repos/{repo}/context',
+    params: [
+      REPO,
+      query('task', 'string', 'Task id'),
+      query('path', 'string[]', 'Repository paths (at most 20)'),
+      LIMIT(50),
+      CURSOR,
+    ],
   }),
 
   // --- branch rules ---------------------------------------------------------

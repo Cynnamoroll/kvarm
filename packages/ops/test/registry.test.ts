@@ -18,6 +18,9 @@ const ORIGINAL_AVAILABLE = [
   'create_change_set',
   'get_change',
   'merge_change',
+  'get_attribution',
+  'set_attribution',
+  'get_context',
 ];
 
 describe('operation registry', () => {
@@ -46,7 +49,7 @@ describe('operation registry', () => {
 
   it('covers every implemented operation family', () => {
     const families = new Set(OPERATIONS.map((o) => o.family));
-    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules']) {
+    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution']) {
       expect(families, f).toContain(f);
     }
     // Arena ranking is reachable as a tool (VAL-CROSS-012).
@@ -121,6 +124,22 @@ describe('buildRequest', () => {
   it('sends no body for a POST without body parameters', () => {
     const r = buildRequest(op('merge_change'), { repo: 'o/r', number: 3 });
     expect(r).toMatchObject({ method: 'POST', path: '/api/v1/repos/o/r/changes/3/merge', body: undefined });
+  });
+
+  it('maps attribution and decision context onto their REST routes', () => {
+    const sha = 'a'.repeat(40);
+    const set = buildRequest(op('set_attribution'), { repo: 'o/r', sha, agent: 'a', session: 's', promptHash: 'h', model: 'm' });
+    expect(set).toMatchObject({ method: 'POST', path: `/api/v1/repos/o/r/commits/${sha}/attribution`, body: { agent: 'a', session: 's', promptHash: 'h', model: 'm' } });
+    expect(requestTarget(buildRequest(op('get_attribution'), { repo: 'o/r', sha }))).toBe(`/api/v1/repos/o/r/commits/${sha}/attribution`);
+    const ctx = buildRequest(op('get_context'), { repo: 'o/r', task: 't1', path: ['src/a.ts', 'b.md'], limit: 5 });
+    expect(requestTarget(ctx)).toBe('/api/v1/repos/o/r/context?task=t1&path=src%2Fa.ts%2Cb.md&limit=5');
+    const rec = buildRequest(op('record_decision'), { repo: 'o/r', task: 't1', paths: ['a'], chosen: 'c1', rejected: ['c2', { id: 'c3', reason: 'r' }], reason: 'why' });
+    expect(rec).toMatchObject({ method: 'POST', path: '/api/v1/repos/o/r/decisions', body: { task: 't1', paths: ['a'], chosen: 'c1', rejected: ['c2', { id: 'c3', reason: 'r' }], reason: 'why' } });
+    expect(findCommand(['attribution', 'set'])?.name).toBe('set_attribution');
+    expect(findCommand(['decision', 'context'])?.name).toBe('get_context');
+    // merge_change carries optional attribution fields for the merge commit's note.
+    const merge = buildRequest(op('merge_change'), { repo: 'o/r', number: 2, attribution: { agent: 'a', session: 's' } });
+    expect(merge.body).toEqual({ attribution: { agent: 'a', session: 's' } });
   });
 
   it('refuses missing, mistyped, unknown and malformed arguments with the parameter named', () => {

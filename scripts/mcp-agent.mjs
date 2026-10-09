@@ -9,16 +9,17 @@
  *   node scripts/mcp-agent.mjs call <tool> ['<json args>']
  *       one tools/call; prints the /mcp HTTP status, x-forge-cost, isError
  *       and the result JSON
- *   node scripts/mcp-agent.mjs e2e [--keep] [--only auth,registry,parity,visibility,cost,two-agent,arena]
+ *   node scripts/mcp-agent.mjs e2e [--keep] [--only auth,registry,parity,visibility,cost,two-agent,arena,attribution]
  *       live checks for the MCP surface (VAL-MCP-001..010, VAL-COST-017,
- *       VAL-CROSS-012). Each scenario runs in a fresh repo owned by
+ *       VAL-CROSS-012, VAL-ATTR-001..006, VAL-DECISION-001..003). Each
+ *       scenario runs in a fresh repo owned by
  *       FORGE_USER, named `mcp-agent-<purpose>-<timestamp>`, seeded by real
  *       git pushes and deleted afterwards (unless --keep).
  *
  * Environment (tokens are read by NAME and never printed):
  *   FORGE_BASE_URL  platform origin
  *   FORGE_PAT       api-scope PAT of FORGE_USER (default cynthia)
- *   FORGE_PAT_BOT   api-scope PAT of an unrelated user (e2e visibility only)
+ *   FORGE_PAT_BOT   api-scope PAT of an unrelated user (e2e visibility and attribution)
  *   MCP_TOKEN_ENV   name of the env var holding the token for info/call
  *                   (default FORGE_PAT)
  *   set -a; . apps/platform/.dev.vars.validation; set +a
@@ -29,9 +30,12 @@
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper. Exit 0 only when every check held.
  *
+ * The attribution scenario mints (and afterwards revokes) a short-lived agent
+ * token for FORGE_USER to drive one merge as an agent session.
+ *
  * The conflict-dispatch flow (enqueue_change, list_tasks, claim_task,
- * complete_task) and attribution in the audit trail need operations that are
- * not in the registry yet; the features adding them extend this driver.
+ * complete_task) needs operations that are not in the registry yet; the
+ * feature adding them extends this driver.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -296,7 +300,7 @@ async function runE2e(argv) {
     console.log(`listTools names (${names.length}): ${names.join(', ')}`);
     check('registry', 'tools/list equals the shared operation registry', eq([...names].sort(), OPERATIONS.map((o) => o.name).sort()));
     check('registry', 'every tool has a description and an object input schema', tools.every((t) => t.description && t.inputSchema?.type === 'object'));
-    const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change'];
+    const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'get_attribution', 'set_attribution', 'get_context'];
     check('registry', 'original tools implemented so far are present', original.every((n) => names.includes(n)), original.filter((n) => !names.includes(n)).join(',') || 'all present');
   }
 
@@ -364,7 +368,7 @@ async function runE2e(argv) {
     const cs = await call(owner, 'create_change_set', { repo: env.repo, workspace: ws.id, title: 'MCP change set', mergePolicy: 'review' });
     console.log(`create_change_set -> ${cs.text} (x-forge-cost ${cs.cost})`);
     const restCs = await http(`${api}/changes/${cs.data?.number}`);
-    const csKeys = ['number', 'title', 'state', 'mergePolicy', 'kind', 'base', 'head', 'baseSha', 'headSha', 'author', 'createdAt'];
+    const csKeys = ['number', 'title', 'state', 'mergePolicy', 'kind', 'base', 'head', 'baseSha', 'headSha', 'author', 'createdAt', 'workspace'];
     const differing = Object.keys({ ...cs.data, ...restCs.json }).filter((k) => !eq(cs.data?.[k], restCs.json?.[k]));
     check(
       'VAL-MCP-007',
@@ -604,6 +608,149 @@ async function runE2e(argv) {
     const st = Object.fromEntries((fin.data?.workspaces ?? []).map((w) => [w.id, w.status]));
     console.log(`abandon ${losers[1]} -> ${ab.data?.status}; get_arena statuses=${JSON.stringify(st)} state=${fin.data?.state}`);
     check('VAL-CROSS-012', 'one loser abandoned; arena shows winner merged, other loser active; MCP equals REST', !ab.isError && st[winner] === 'merged' && st[losers[0]] === 'active' && st[losers[1]] === 'abandoned' && eq(fin.data, restFin.json));
+  });
+
+  // VAL-ATTR-001..006, VAL-DECISION-001..003
+  await scenario('attribution', 'private', async (repo) => {
+    const env = await seeded(repo);
+    const { api, dir, main } = env;
+    const HASH = 'c'.repeat(64);
+    const notesRef = 'refs/notes/forge-attribution';
+    const showNote = (cwd, sha) => {
+      const fetched = git(['fetch', '-q', env.url, `+${notesRef}:${notesRef}`], cwd);
+      const shown = git(['notes', '--ref=forge-attribution', 'show', sha], cwd);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(shown.out);
+      } catch {
+        parsed = null;
+      }
+      return { fetched: fetched.code, code: shown.code, out: shown.out, json: parsed };
+    };
+    const isIso = (s) => typeof s === 'string' && new Date(s).toISOString() === s;
+
+    // VAL-ATTR-001 / 002
+    const body = { agent: 'claude-code-1', session: 'sess-abc', promptHash: HASH, model: 'claude-sonnet-4' };
+    const set = await http(`${api}/commits/${main}/attribution`, { method: 'POST', json: body });
+    console.log(`POST commits/${main}/attribution -> ${set.status} ${set.text} (x-forge-cost ${set.cost})`);
+    const note = showNote(dir, main);
+    console.log(`git fetch ${notesRef} -> exit ${note.fetched}; git notes --ref=forge-attribution show ${main} -> exit ${note.code}: ${note.out}`);
+    check('VAL-ATTR-001', 'POST stores a JSON note with agent/session/promptHash/model/actor/at on the notes ref', [200, 201].includes(set.status) && note.json !== null && eq(note.json, { ...body, actor: OWNER, at: note.json.at }) && isIso(note.json.at));
+    const got = await http(`${api}/commits/${main}/attribution`);
+    console.log(`GET commits/${main}/attribution -> ${got.status} ${got.text} (x-forge-cost ${got.cost})`);
+    check('VAL-ATTR-002', 'GET returns the stored record exactly', got.status === 200 && eq(got.json, set.json) && eq(got.json, note.json));
+
+    // VAL-ATTR-003
+    const other = commitOn(dir, main, { 'other.txt': 'other\n' }, 'unattributed');
+    await pushRetry(dir, env.url, `${other}:refs/heads/other`);
+    const none = await http(`${api}/commits/${other}/attribution`);
+    console.log(`GET commits/${other}/attribution (never attributed) -> ${none.status} ${none.text}`);
+    check('VAL-ATTR-003', 'an unattributed commit answers 404 with no other commit data', none.status === 404 && !none.text.includes('claude-code-1'));
+
+    // VAL-ATTR-006
+    const mset = await call(owner, 'set_attribution', { repo: env.repo, sha: other, agent: 'mcp-agent-1', session: 'sess-mcp', promptHash: HASH });
+    const mget = await call(owner, 'get_attribution', { repo: env.repo, sha: other });
+    const rget = await http(`${api}/commits/${other}/attribution`);
+    console.log(`set_attribution -> ${mset.text} (x-forge-cost ${mset.cost})\nget_attribution -> ${mget.text}\nREST GET -> ${rget.status} ${rget.text}`);
+    check('VAL-ATTR-006', 'MCP set_attribution is read back identically by MCP get_attribution and REST', !mset.isError && !mget.isError && eq(mget.data, mset.data) && eq(rget.json, mset.data) && mset.data?.agent === 'mcp-agent-1');
+
+    // VAL-ATTR-004: a two-parent merge driven through MCP by the owner, then one by an agent token.
+    const mergeWith = async (conn, label, files, attribution) => {
+      const ws = (await call(conn, 'create_workspace', { repo: env.repo, task: `attr ${label}`, agent: 'mcp-agent-1' })).data;
+      mustGit(['fetch', '-q', env.url, '+refs/heads/main:refs/remotes/origin/main'], dir);
+      const base = mustGit(['rev-parse', 'origin/main'], dir);
+      await pushRetry(dir, env.url, `${commitOn(dir, base, files, `ws ${label}`)}:${ws.ref}`);
+      await pushRetry(dir, env.url, `${commitOn(dir, base, { [`main-${label}.txt`]: `${label}\n` }, `main ${label}`)}:refs/heads/main`);
+      const cs = (await call(conn, 'create_change_set', { repo: env.repo, workspace: ws.id, title: `attr ${label}`, mergePolicy: 'review' })).data;
+      const mg = await call(conn, 'merge_change', { repo: env.repo, number: cs?.number, ...(attribution ? { attribution } : {}) });
+      const change = await http(`${api}/changes/${cs?.number}`);
+      const sha = change.json?.mergeCommit;
+      const a = await http(`${api}/commits/${sha}/attribution`);
+      const n = showNote(dir, sha);
+      console.log(`merge_change #${cs?.number} (${label}) -> kind=${mg.data?.merge?.kind} (x-forge-cost ${mg.cost}); GET changes/${cs?.number} mergeCommit=${sha}\nGET attribution -> ${a.status} ${a.text}\ngit notes show ${sha} -> ${n.out}`);
+      return { mg, a, n };
+    };
+    const byOwner = await mergeWith(owner, 'owner', { 'src/owner.ts': 'export const owner = 1;\n' }, { agent: 'mcp-agent-1', session: 'sess-merge', promptHash: HASH });
+    check('VAL-ATTR-004', 'a Forge merge commit carries the merging actor and the request agent fields (REST and git notes agree)', byOwner.mg.data?.merge?.kind === 'merge' && byOwner.a.status === 200 && byOwner.a.json?.actor === OWNER && byOwner.a.json?.agent === 'mcp-agent-1' && eq(byOwner.a.json, byOwner.n.json));
+    const agentName = `mcp-attr-${TS}`;
+    const agent = await http('/api/v1/agents', { method: 'POST', json: { name: agentName } });
+    const minted = await http(`/api/v1/agents/${agent.json?.agent?.id}/tokens`, { method: 'POST', json: { repo: env.repo, role: 'write', refs: ['refs/heads/*'], expiresIn: 3600 } });
+    if (minted.status === 201) {
+      const agentConn = await connect(minted.json.token, 'mcp-agent-token');
+      try {
+        const byAgent = await mergeWith(agentConn, 'agent', { 'src/agent.ts': 'export const agent = 1;\n' }, null);
+        check('VAL-ATTR-004', 'a merge driven by an agent-token MCP session names the agent identity', byAgent.mg.data?.merge?.kind === 'merge' && byAgent.a.json?.agent === agentName && byAgent.a.json?.actor === OWNER && eq(byAgent.a.json, byAgent.n.json));
+      } finally {
+        await agentConn.close();
+      }
+    } else {
+      check('VAL-ATTR-004', 'agent token minted for the agent-session merge', false, `${agent.status} ${minted.status} ${minted.text}`);
+    }
+    if (agent.json?.agent?.id) await http(`/api/v1/agents/${agent.json.agent.id}`, { method: 'DELETE' });
+
+    // VAL-ATTR-005
+    const fresh = join(work, `${repo}-fresh`);
+    const cloned = git(['clone', '-q', env.url, fresh], work);
+    const plain = git(['notes', '--ref=forge-attribution', 'show', main], fresh);
+    const freshNote = showNote(fresh, main);
+    console.log(`git clone -> exit ${cloned.code}; notes before fetching the ref -> exit ${plain.code}; after git fetch origin ${notesRef} -> ${freshNote.out}`);
+    check('VAL-ATTR-005', 'a fresh clone fetches the notes ref and shows the VAL-ATTR-002 record', cloned.code === 0 && freshNote.fetched === 0 && eq(freshNote.json, got.json));
+
+    // VAL-DECISION-001
+    const d1 = { task: `task-${TS}`, paths: ['src/app.ts', 'src/lib/util.ts'], chosen: 'ws-b', rejected: ['ws-a', { id: 'ws-c', reason: 'breaks util tests' }], reason: 'ws-b keeps the public API' };
+    const rd1 = await http(`${api}/decisions`, { method: 'POST', json: d1 });
+    console.log(`POST decisions (task + paths) -> ${rd1.status} ${rd1.text} (x-forge-cost ${rd1.cost})`);
+    const byTask = await http(`${api}/context?task=${encodeURIComponent(d1.task)}`);
+    const byPaths = await Promise.all(d1.paths.map((p) => http(`${api}/context?path=${encodeURIComponent(p)}`)));
+    console.log(`GET context?task -> ${byTask.status} ${byTask.text} (x-forge-cost ${byTask.cost})`);
+    for (const [i, r] of byPaths.entries()) console.log(`GET context?path=${d1.paths[i]} -> ${r.status} ids=${JSON.stringify(r.json?.decisions?.map((d) => d.id))} (x-forge-cost ${r.cost})`);
+    const roundTrip = (d) => d && eq({ task: d.task, paths: d.paths, chosen: d.chosen, rejected: d.rejected, reason: d.reason }, d1) && d.actor === OWNER && isIso(d.at);
+    check('VAL-DECISION-001', 'POST decisions 201; read back by task and by each path with chosen/rejected/reason/actor/at round-tripping', rd1.status === 201 && roundTrip(rd1.json) && eq(byTask.json?.decisions, [rd1.json]) && byPaths.every((r) => eq(r.json?.decisions, [rd1.json])));
+    const d2 = { paths: ['docs/guide.md'], chosen: '#7', rejected: ['#6'], reason: 'paths-only decision' };
+    const rd2 = await http(`${api}/decisions`, { method: 'POST', json: d2 });
+    const byDoc = await http(`${api}/context?path=docs%2Fguide.md`);
+    check('VAL-DECISION-001', 'a paths-only decision is retrievable by its path', rd2.status === 201 && rd2.json?.task === null && eq(byDoc.json?.decisions, [rd2.json]));
+
+    // VAL-DECISION-002
+    const ct = await call(owner, 'get_context', { repo: env.repo, task: d1.task });
+    const cp = await call(owner, 'get_context', { repo: env.repo, path: ['src/lib/util.ts'] });
+    console.log(`get_context(task) -> ${ct.text} (x-forge-cost ${ct.cost})\nget_context(path) -> ${cp.text.slice(0, 400)} (x-forge-cost ${cp.cost})`);
+    const reasons = (d) => d?.chosen === 'ws-b' && eq(d?.rejected, d1.rejected) && d?.reason === d1.reason;
+    check('VAL-DECISION-002', 'get_context(task) and get_context(path) return the decision with chosen, rejected and rejection reasons', !ct.isError && !cp.isError && reasons(ct.data?.decisions?.[0]) && reasons(cp.data?.decisions?.[0]));
+    const emptyTask = await call(owner, 'get_context', { repo: env.repo, task: `no-such-task-${TS}` });
+    const emptyPath = await call(owner, 'get_context', { repo: env.repo, path: ['no/such/path.ts'] });
+    console.log(`get_context(empty task) -> ${emptyTask.text}; get_context(empty path) -> ${emptyPath.text}`);
+    check('VAL-DECISION-002', 'a task/path without decisions returns an empty decision list, not an error', !emptyTask.isError && !emptyPath.isError && eq(emptyTask.data?.decisions, []) && eq(emptyPath.data?.decisions, []));
+    const pageTask = `paged-${TS}`;
+    for (let i = 0; i < 3; i++) await http(`${api}/decisions`, { method: 'POST', json: { task: pageTask, chosen: `c${i}`, rejected: [`r${i}`], reason: `reason ${i}` } });
+    const p1 = await call(owner, 'get_context', { repo: env.repo, task: pageTask, limit: 2 });
+    const p2 = await call(owner, 'get_context', { repo: env.repo, task: pageTask, limit: 2, cursor: p1.data?.nextCursor ?? '' });
+    console.log(`get_context(limit 2) -> ${p1.data?.decisions?.length} decisions truncated=${p1.data?.truncated} nextCursor=${p1.data?.nextCursor}; next page -> ${p2.data?.decisions?.length} truncated=${p2.data?.truncated}`);
+    const pagedIds = [...(p1.data?.decisions ?? []), ...(p2.data?.decisions ?? [])].map((d) => d.id);
+    check('VAL-DECISION-002', 'over the cap: truncated:true + nextCursor, and the next page completes the set', p1.data?.truncated === true && typeof p1.data?.nextCursor === 'string' && p2.data?.truncated === false && new Set(pagedIds).size === 3);
+
+    // VAL-DECISION-003
+    if (BOT) {
+      const bot = await connect(BOT, 'mcp-agent-bot');
+      try {
+        const bt = await call(bot, 'get_context', { repo: env.repo, task: d1.task });
+        const ba = await call(bot, 'get_attribution', { repo: env.repo, sha: main });
+        const br = await http(`${api}/context?task=${encodeURIComponent(d1.task)}`, { token: BOT });
+        console.log(`forge-bot get_context -> isError=${bt.isError} ${bt.text}; get_attribution -> isError=${ba.isError} ${ba.text}; REST GET context -> ${br.status} ${br.text}`);
+        check('VAL-DECISION-003', 'forge-bot get_context/get_attribution → isError without data; REST denies; owner succeeds', bt.isError && ba.isError && !bt.text.includes('ws-b') && [401, 403, 404].includes(br.status) && !br.text.includes('ws-b') && !ct.isError);
+      } finally {
+        await bot.close();
+      }
+    } else {
+      check('VAL-DECISION-003', 'FORGE_PAT_BOT is set', false);
+    }
+    const tooMany = Array.from({ length: 21 }, (_, i) => `p${i}.ts`);
+    const om = await call(owner, 'get_context', { repo: env.repo, path: tooMany });
+    const orr = await http(`${api}/context?path=${tooMany.join(',')}`);
+    console.log(`get_context(21 paths) -> isError=${om.isError} ${om.text}; REST -> ${orr.status} ${orr.text}`);
+    check('VAL-DECISION-003', 'more paths than the cap → actionable 4xx {error, code}', om.isError && om.data?.code === 'TOO_MANY_PATHS' && orr.status === 400 && orr.json?.code === 'TOO_MANY_PATHS' && typeof orr.json?.error === 'string');
+    const cost = parseCost(byTask.cost);
+    check('VAL-DECISION-003', 'GET context work stays within the cost.md row (d1 <= 2, do = 0, art = 0)', cost.d1 <= 2 && cost.do === 0 && cost.art === 0, byTask.cost);
   });
 
   await owner.close();

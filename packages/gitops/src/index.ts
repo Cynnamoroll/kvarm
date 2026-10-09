@@ -23,6 +23,7 @@ export * from './receivePack';
 export * from './mergebase';
 export * from './merge3';
 export * from './compose';
+export * from './notes';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

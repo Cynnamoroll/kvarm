@@ -93,7 +93,7 @@ changesApi.patch('/repos/:owner/:repo/changes/:number', async (c) => {
 changesApi.post('/repos/:owner/:repo/changes/:number/merge', async (c) => {
   const w = await writeContext(c);
   if ('denied' in w) return w.denied;
-  const r = await svc.mergeChange(w.cx, c.req.param('number'));
+  const r = await svc.mergeChange(w.cx, c.req.param('number'), svc.defaultMergeDeps, await jsonBody(c));
   if (!r.ok) return failJson(c, r);
   return actorJson(c, { ...r.value.change, merge: r.value.merge });
 });
