@@ -22,6 +22,7 @@ import type { ServiceResult } from '../repos/service';
 import { credentialMayUpdateRef } from './authz';
 import { CHANGE_LIMITS, MERGE_POLICIES, mergeAuthor, normalizeBranch } from './changes';
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
+import { reconcileObserved } from './intents/forecast';
 import { normalizePath } from './intents/paths';
 import { FORGE_COMMITTER, MERGE_BUDGETS, artifactsMergeSources } from './merge';
 import { RefStoreUnavailable, lsRefs, readCommitInfo, type ResolveContext } from './refs';
@@ -383,10 +384,29 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
       return fail(502, `the composed workspace ref could not be created (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''})`, 'REF_CREATE_FAILED');
     }
 
+    // The ref's push event may be consumed before the row below exists and is then skipped by the
+    // intent index, so the registration seeds the observed set itself (guarded against newer pushes).
+    let observed: D1PreparedStatement[] = [];
+    try {
+      observed = (
+        await reconcileObserved(cx.env, {
+          repoId: cx.repo.id,
+          artifactsName: cx.repo.artifacts_name,
+          workspaceId: id,
+          baseSha,
+          headSha: commit.hash,
+          event: null,
+        })
+      ).statements;
+    } catch (err) {
+      console.warn(JSON.stringify({ composeObservedSeed: String(err).slice(0, 200) }));
+    }
+
     const now = Date.now();
     const compositionId = newId();
     await db.batch([
       workspaceInsertStatement(cx, { id, ref, task, agent: p.agent, base: p.base, baseSha }, now),
+      ...observed,
       db
         .prepare(
           `INSERT INTO compositions (id, repo_id, base_ref, base_sha, tree_sha, commit_sha, sources, workspace_id, checks, conflict_kind, created_by, agent_id, created_at)

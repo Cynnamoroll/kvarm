@@ -158,9 +158,10 @@ export async function getIntent(cx: IntentContext, id: string): Promise<ServiceR
 
 /**
  * POST workspaces/:id/intent {paths, prefixes?, ttlSeconds?}: replaces the
- * declaration in one guarded batch that also reads the row back. Only when
- * that write did not land (missing, inactive, or an agent acting on a
- * person's workspace) does a reason get worked out from the read-back row.
+ * declaration in one guarded batch that also reads the row back; when that
+ * write did not land (missing or inactive) the reason comes from the
+ * read-back row. An agent's ownership and token ref ceiling are checked on
+ * a row read before the write.
  */
 export async function declareIntent(cx: IntentContext, id: string, input: unknown): Promise<ServiceResult<IntentView>> {
   if (!WORKSPACE_ID_RE.test(id)) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
@@ -179,16 +180,23 @@ export async function declareIntent(cx: IntentContext, id: string, input: unknow
       row: (results[results.length - 1]?.results as IntentRow[] | undefined)?.[0] ?? null,
     };
   };
-  let r = await write(cx.actor?.agent?.agentId ?? null);
-  if (!r.landed) {
-    if (!r.row) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
-    if (r.row.status !== 'active') return fail(409, `the workspace is ${r.row.status}`, 'WORKSPACE_NOT_ACTIVE', { workspaceStatus: r.row.status });
-    const denied = agentOwnershipDenial(cx.actor, r.row);
+  if (cx.actor?.agent) {
+    // An agent's token ceiling decides before anything is written, its own workspaces included.
+    const row = await cx.env.DB.prepare(`${INTENT_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, id).first<IntentRow>();
+    if (!row) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
+    if (row.status !== 'active') return fail(409, `the workspace is ${row.status}`, 'WORKSPACE_NOT_ACTIVE', { workspaceStatus: row.status });
+    const denied = agentOwnershipDenial(cx.actor, row);
     if (denied) return fail(403, denied, 'WORKSPACE_NOT_OWNED');
-    r = await write(null);
+    const r = await write(row.agent_id);
     if (!r.landed || !r.row) return fail(409, 'the workspace left active meanwhile', 'WORKSPACE_NOT_ACTIVE');
+    return { ok: true, value: intentView(r.row, now) };
   }
-  return { ok: true, value: intentView(r.row!, now) };
+  const r = await write(null);
+  if (!r.landed || !r.row) {
+    if (!r.row) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
+    return fail(409, `the workspace is ${r.row.status}`, 'WORKSPACE_NOT_ACTIVE', { workspaceStatus: r.row.status });
+  }
+  return { ok: true, value: intentView(r.row, now) };
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +210,8 @@ export interface ObservedTarget {
   /** The workspace's base commit (its creation-time base head). */
   baseSha: string;
   headSha: string;
-  eventAt: number;
+  /** The push event being reconciled; null for a seed by the service that just created the ref (see `ObservedWrite.event`). */
+  event: { id: string; at: number } | null;
 }
 
 /**
@@ -226,19 +235,21 @@ export async function reconcileObserved(env: Env, t: ObservedTarget): Promise<{ 
       const diff = await changedPaths(ctx, base.tree, head.tree);
       const changed = new Set(diff.paths).size;
       const c = collapseObserved(diff.paths);
-      const reasons: string[] = [];
-      if (diff.truncated) reasons.push(`base→head diff incomplete: ${diff.truncatedReason ?? 'budget exhausted'}`);
-      if (c.truncated) reasons.push(`more than ${INTENT_LIMITS.observedMax} top-level entries changed; the first ${INTENT_LIMITS.observedMax} are kept`);
-      else if (c.collapsed) reasons.push(`${changed} changed paths collapsed into directory prefixes (cap ${INTENT_LIMITS.observedMax} entries)`);
+      const omitted: string[] = [];
+      if (diff.truncated) omitted.push(`base→head diff incomplete: ${diff.truncatedReason ?? 'budget exhausted'}`);
+      if (c.truncated) omitted.push(`more than ${INTENT_LIMITS.observedMax} top-level entries changed; the first ${INTENT_LIMITS.observedMax} are kept`);
+      const reasons = [...omitted];
+      if (!c.truncated && c.collapsed) reasons.push(`${changed} changed paths collapsed into directory prefixes (cap ${INTENT_LIMITS.observedMax} entries)`);
       const statements = observedWriteStatements(env.DB, {
         repoId: t.repoId,
         workspaceId: t.workspaceId,
         pathsJson: JSON.stringify(c.paths),
         baseSha: t.baseSha,
         headSha: t.headSha,
-        eventAt: t.eventAt,
+        event: t.event,
         now: Date.now(),
         truncated: reasons.length > 0 ? reasons.join('; ') : null,
+        omitted: omitted.length > 0 ? omitted.join('; ') : null,
         prefixes: c.paths.filter(isPrefix).length,
       });
       return { statements, detail: `${c.paths.length} observed entries for ${changed} changed paths (${diff.source})` };
@@ -291,6 +302,12 @@ export interface ForecastMatch {
   declaredExpiresAt: string | null;
 }
 
+/** An active workspace whose observed index omits some of its changed paths, so it may match without being reported. */
+export interface IncompleteIndex {
+  workspace: string;
+  reason: string;
+}
+
 export interface ForecastResponse {
   query: { paths: string[]; base: string | null; exclude: string | null };
   advisory: true;
@@ -298,8 +315,37 @@ export interface ForecastResponse {
   matches: ForecastMatch[];
   truncated: boolean;
   truncatedReason?: string;
+  /** In-scope workspaces with an incomplete observed index (on every page; absent when there are none). */
+  incomplete?: IncompleteIndex[];
   nextCursor: string | null;
   limit: number;
+}
+
+/**
+ * Active workspaces (on `base` when given, other than `exclude`) whose
+ * observed index omitted changed paths. Partial index on observed_omitted.
+ */
+function incompleteStatement(db: D1Database, repoId: string, base: string | null, exclude: string | null): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT w.id AS workspace, w.observed_omitted AS reason FROM workspaces w
+        WHERE w.repo_id = ?1 AND w.status = 'active' AND w.observed_omitted IS NOT NULL
+          AND (?2 IS NULL OR w.base_ref = ?2) AND (?3 IS NULL OR w.id != ?3)
+        ORDER BY w.id LIMIT ${INTENT_LIMITS.incompleteListMax + 1}`,
+    )
+    .bind(repoId, base, exclude);
+}
+
+/** The disclosed list and a reason for the response's truncatedReason, from `incompleteStatement`. */
+function incompleteOf(result: D1Result | undefined): { list: IncompleteIndex[]; reason: string } | null {
+  const rows = (result?.results as IncompleteIndex[] | undefined) ?? [];
+  if (rows.length === 0) return null;
+  const max = INTENT_LIMITS.incompleteListMax;
+  const count = rows.length > max ? `more than ${max}` : `${rows.length}`;
+  return {
+    list: rows.slice(0, max).map((r) => ({ workspace: r.workspace, reason: r.reason })),
+    reason: `the observed index of ${count} active workspace(s) is incomplete (changed paths were omitted), so they may overlap without being reported; see incomplete`,
+  };
 }
 
 interface ForecastRow {
@@ -393,26 +439,31 @@ export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<Ser
        AND (?6 IS NULL OR w.id != ?6)
      GROUP BY w.id ORDER BY w.id LIMIT ${limit + 1}`;
   const now = Date.now();
-  const rows =
-    (
-      await cx.env.DB.prepare(sql)
-        .bind(cx.repo.id, JSON.stringify([...exact]), now, base, cursor, exclude, ...ranges.flatMap((r) => [r, prefixUpper(r)]))
-        .all<ForecastRow>()
-    ).results ?? [];
+  const db = cx.env.DB;
+  const [hitRes, incompleteRes] = await db.batch([
+    db.prepare(sql).bind(cx.repo.id, JSON.stringify([...exact]), now, base, cursor, exclude, ...ranges.flatMap((r) => [r, prefixUpper(r)])),
+    incompleteStatement(db, cx.repo.id, base, exclude),
+  ]);
+  const rows = (hitRes?.results as ForecastRow[] | undefined) ?? [];
 
   const page = rows.slice(0, limit);
   const matches = page.map((row) => forecastMatch(row, paths));
   const more = rows.length > limit;
+  const incomplete = incompleteOf(incompleteRes);
+  const reasons: string[] = [];
+  if (more) reasons.push(`more than ${limit} matching workspaces; follow nextCursor for the rest`);
+  if (incomplete) reasons.push(incomplete.reason);
   const out: ForecastResponse = {
     query: { paths, base, exclude },
     advisory: true,
     advisoryNote: ADVISORY_NOTE,
     matches,
-    truncated: more,
+    truncated: reasons.length > 0,
     nextCursor: more ? (page[page.length - 1]?.id ?? null) : null,
     limit,
   };
-  if (more) out.truncatedReason = `more than ${limit} matching workspaces; follow nextCursor for the rest`;
+  if (reasons.length > 0) out.truncatedReason = reasons.join('; ');
+  if (incomplete) out.incomplete = incomplete.list;
   return { ok: true, value: out };
 }
 
@@ -483,8 +534,82 @@ export interface OverlapResponse {
   pairs: OverlapPair[];
   truncated: boolean;
   truncatedReason?: string;
+  /** Workspaces on `base` with an incomplete observed index (on every page; absent when there are none). */
+  incomplete?: IncompleteIndex[];
   nextCursor: string | null;
   limit: number;
+}
+
+export interface PairWork<H> {
+  /** `a:b` (sorted ids) → both sides and the shared paths. */
+  pairs: Map<string, { heads: Map<string, H>; paths: Set<string> }>;
+  /** Candidate pairs examined (the enumeration work done). */
+  visits: number;
+  reasons: string[];
+}
+
+/**
+ * Pairs from shared-path groups and collapsed-prefix hits, under a work
+ * budget: a group contributes pairs among its first
+ * `overlapGroupMembersMax` members by id, enumeration stops after
+ * `overlapPairVisitMax` candidate pairs, and at most `overlapPairMax`
+ * distinct pairs are kept. Every bound that cut work is named in `reasons`.
+ */
+export function collectPairs<H>(
+  groups: ReadonlyArray<{ path: string; members: readonly H[] }>,
+  hits: ReadonlyArray<{ path: string; a: H; b: H }>,
+  idOf: (h: H) => string,
+): PairWork<H> {
+  const L = INTENT_LIMITS;
+  const pairs: PairWork<H>['pairs'] = new Map();
+  let visits = 0;
+  let pairCapped = false;
+  let budgetSpent = false;
+  const wide: string[] = [];
+  const visit = (x: H, y: H, path: string): boolean => {
+    if (visits >= L.overlapPairVisitMax) {
+      budgetSpent = true;
+      return false;
+    }
+    visits++;
+    const [xi, yi] = [idOf(x), idOf(y)];
+    if (xi === yi) return true;
+    const [a, b, ai, bi] = xi < yi ? [x, y, xi, yi] : [y, x, yi, xi];
+    const key = `${ai}:${bi}`;
+    let p = pairs.get(key);
+    if (!p) {
+      if (pairs.size >= L.overlapPairMax) {
+        pairCapped = true;
+        return true;
+      }
+      p = { heads: new Map([[ai, a], [bi, b]]), paths: new Set() };
+      pairs.set(key, p);
+    }
+    p.paths.add(path);
+    return true;
+  };
+
+  run: {
+    for (const g of groups) {
+      const byId = new Map<string, H>();
+      for (const h of g.members) byId.set(idOf(h), h);
+      const members = [...byId.keys()].sort().map((id) => byId.get(id)!);
+      if (members.length > L.overlapGroupMembersMax) wide.push(g.path);
+      const kept = members.slice(0, L.overlapGroupMembersMax);
+      for (let i = 0; i < kept.length; i++) for (let j = i + 1; j < kept.length; j++) if (!visit(kept[i]!, kept[j]!, g.path)) break run;
+    }
+    for (const h of hits) if (!visit(h.a, h.b, h.path)) break run;
+  }
+
+  const reasons: string[] = [];
+  if (wide.length > 0) {
+    reasons.push(
+      `more than ${L.overlapGroupMembersMax} workspaces share ${wide.length} path(s) (first: ${wide[0]}); only pairs among the first ${L.overlapGroupMembersMax} of each, by id, are reported`,
+    );
+  }
+  if (budgetSpent) reasons.push(`the pair-visit budget of ${L.overlapPairVisitMax} was spent; pairs beyond it are not reported`);
+  if (pairCapped) reasons.push(`more than ${L.overlapPairMax} overlapping pairs; the rest are not reported`);
+  return { pairs, visits, reasons };
 }
 
 type HeadTuple = [string, string | null, number | null, string | null, string | null];
@@ -514,13 +639,16 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
   }
 
   const db = cx.env.DB;
-  const [groups, prefixHits] = await db.batch([
+  // A group aggregates at most one member beyond the per-group cap, so collectPairs can tell it was cut.
+  const [groups, prefixHits, incompleteRes] = await db.batch([
     db
       .prepare(
-        `SELECT p.path, json_group_array(${HEAD_JSON('w')}) AS ws
-           FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
-          WHERE p.repo_id = ?1 AND p.kind = 'observed' AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
-          GROUP BY p.path HAVING COUNT(*) > 1 ORDER BY p.path LIMIT ${INTENT_LIMITS.overlapGroupMax + 1}`,
+        `SELECT path, json_group_array(json(head)) AS ws FROM (
+           SELECT p.path, ${HEAD_JSON('w')} AS head, ROW_NUMBER() OVER (PARTITION BY p.path ORDER BY w.id) AS rn
+             FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
+            WHERE p.repo_id = ?1 AND p.kind = 'observed' AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2)
+          WHERE rn <= ${INTENT_LIMITS.overlapGroupMembersMax + 1}
+          GROUP BY path HAVING COUNT(*) > 1 ORDER BY path LIMIT ${INTENT_LIMITS.overlapGroupMax + 1}`,
       )
       .bind(cx.repo.id, base),
     db
@@ -535,43 +663,31 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
           ORDER BY b.path, wa.id, wb.id LIMIT ${INTENT_LIMITS.overlapPrefixHitMax + 1}`,
       )
       .bind(cx.repo.id, base),
+    incompleteStatement(db, cx.repo.id, base, null),
   ]);
 
   const reasons: string[] = [];
-  const pairs = new Map<string, { heads: Map<string, OverlapHead>; paths: Set<string> }>();
-  let pairCapped = false;
-  const add = (x: OverlapHead, y: OverlapHead, path: string) => {
-    if (x.workspace === y.workspace) return;
-    const [a, b] = x.workspace < y.workspace ? [x, y] : [y, x];
-    const key = `${a.workspace}:${b.workspace}`;
-    let p = pairs.get(key);
-    if (!p) {
-      if (pairs.size >= INTENT_LIMITS.overlapPairMax) {
-        pairCapped = true;
-        return;
-      }
-      p = { heads: new Map([[a.workspace, a], [b.workspace, b]]), paths: new Set() };
-      pairs.set(key, p);
-    }
-    p.paths.add(path);
-  };
-
   const groupRows = (groups?.results as Array<{ path: string; ws: string }> | undefined) ?? [];
   if (groupRows.length > INTENT_LIMITS.overlapGroupMax) {
     reasons.push(`more than ${INTENT_LIMITS.overlapGroupMax} shared paths; pairs beyond them are not reported`);
-  }
-  for (const g of groupRows.slice(0, INTENT_LIMITS.overlapGroupMax)) {
-    const heads = (JSON.parse(g.ws) as HeadTuple[]).map(headOf);
-    for (let i = 0; i < heads.length; i++) for (let j = i + 1; j < heads.length; j++) add(heads[i]!, heads[j]!, g.path);
   }
   const prefixRows = (prefixHits?.results as Array<{ path: string; wa: string; wb: string }> | undefined) ?? [];
   if (prefixRows.length > INTENT_LIMITS.overlapPrefixHitMax) {
     reasons.push(`more than ${INTENT_LIMITS.overlapPrefixHitMax} paths below collapsed prefixes; pairs beyond them are not reported`);
   }
-  for (const h of prefixRows.slice(0, INTENT_LIMITS.overlapPrefixHitMax)) {
-    add(headOf(JSON.parse(h.wa) as HeadTuple), headOf(JSON.parse(h.wb) as HeadTuple), h.path);
-  }
-  if (pairCapped) reasons.push(`more than ${INTENT_LIMITS.overlapPairMax} overlapping pairs; the rest are not reported`);
+  const work = collectPairs(
+    groupRows.slice(0, INTENT_LIMITS.overlapGroupMax).map((g) => ({ path: g.path, members: (JSON.parse(g.ws) as HeadTuple[]).map(headOf) })),
+    prefixRows.slice(0, INTENT_LIMITS.overlapPrefixHitMax).map((h) => ({
+      path: h.path,
+      a: headOf(JSON.parse(h.wa) as HeadTuple),
+      b: headOf(JSON.parse(h.wb) as HeadTuple),
+    })),
+    (h) => h.workspace,
+  );
+  const pairs = work.pairs;
+  reasons.push(...work.reasons);
+  const incomplete = incompleteOf(incompleteRes);
+  if (incomplete) reasons.push(incomplete.reason);
 
   const sorted = [...pairs.keys()].sort();
   const start = cursor === null ? 0 : sorted.findIndex((k) => k > cursor);
@@ -603,6 +719,7 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
     limit,
   };
   if (reasons.length > 0) out.truncatedReason = reasons.join('; ');
+  if (incomplete) out.incomplete = incomplete.list;
   return { ok: true, value: out };
 }
 
@@ -656,36 +773,40 @@ export function setOverlapStatements(db: D1Database, repoId: string, ids: readon
           ORDER BY b.path, a.workspace_id, b.workspace_id LIMIT ${INTENT_LIMITS.overlapPrefixHitMax + 1}`,
       )
       .bind(repoId, members),
+    db
+      .prepare(
+        `SELECT w.id AS workspace, w.observed_omitted AS reason FROM workspaces w
+          WHERE w.repo_id = ?1 AND w.id IN (SELECT value FROM json_each(?2)) AND w.status = 'active' AND w.observed_omitted IS NOT NULL
+          ORDER BY w.id`,
+      )
+      .bind(repoId, members),
   ];
 }
 
 /** Pairs and per-member counts from the results of `setOverlapStatements`, in order. */
 export function setOverlap(ids: readonly string[], results: readonly (D1Result | undefined)[]): SetOverlap {
   const reasons: string[] = [];
-  const pairs = new Map<string, Set<string>>();
-  const add = (x: string, y: string, path: string) => {
-    if (x === y) return;
-    const key = x < y ? `${x}:${y}` : `${y}:${x}`;
-    let p = pairs.get(key);
-    if (!p) pairs.set(key, (p = new Set()));
-    p.add(path);
-  };
   const groups = (results[0]?.results as Array<{ path: string; ws: string }> | undefined) ?? [];
   if (groups.length > INTENT_LIMITS.overlapGroupMax) reasons.push(`more than ${INTENT_LIMITS.overlapGroupMax} shared paths; paths beyond them are not counted`);
-  for (const g of groups.slice(0, INTENT_LIMITS.overlapGroupMax)) {
-    const ws = [...new Set(JSON.parse(g.ws) as string[])];
-    for (let i = 0; i < ws.length; i++) for (let j = i + 1; j < ws.length; j++) add(ws[i]!, ws[j]!, g.path);
-  }
   const hits = (results[1]?.results as Array<{ path: string; a: string; b: string }> | undefined) ?? [];
   if (hits.length > INTENT_LIMITS.overlapPrefixHitMax) {
     reasons.push(`more than ${INTENT_LIMITS.overlapPrefixHitMax} paths below collapsed prefixes; paths beyond them are not counted`);
   }
-  for (const h of hits.slice(0, INTENT_LIMITS.overlapPrefixHitMax)) add(h.a, h.b, h.path);
+  const work = collectPairs(
+    groups.slice(0, INTENT_LIMITS.overlapGroupMax).map((g) => ({ path: g.path, members: JSON.parse(g.ws) as string[] })),
+    hits.slice(0, INTENT_LIMITS.overlapPrefixHitMax),
+    (id) => id,
+  );
+  reasons.push(...work.reasons);
+  const incomplete = ((results[2]?.results as IncompleteIndex[] | undefined) ?? []).map((r) => r.workspace);
+  if (incomplete.length > 0) {
+    reasons.push(`the observed index of ${incomplete.join(', ')} is incomplete (changed paths were omitted), so overlap with them may be under-reported`);
+  }
 
   const shared = new Map<string, { with: Set<string>; paths: Set<string> }>(ids.map((id) => [id, { with: new Set(), paths: new Set() }]));
-  const out: SetOverlapPair[] = [...pairs.keys()].sort().map((key) => {
+  const out: SetOverlapPair[] = [...work.pairs.keys()].sort().map((key) => {
     const [a, b] = key.split(':') as [string, string];
-    const all = [...pairs.get(key)!].sort();
+    const all = [...work.pairs.get(key)!.paths].sort();
     for (const [me, other] of [
       [a, b],
       [b, a],

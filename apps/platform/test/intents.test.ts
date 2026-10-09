@@ -9,10 +9,12 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines } from '@forge/gitops';
+import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines, sha256Hex } from '@forge/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { INTENT_LIMITS, collapseObserved, normalizeDeclaration } from '../src/services/intents/paths';
+import { collectPairs } from '../src/services/intents/forecast';
+import { COMPARE_BUDGETS } from '../src/services/compare';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -187,6 +189,27 @@ describe('path normalization (pure)', () => {
     }
   });
 
+  it('bounds overlap pair enumeration by group membership and a pair-visit budget, and says so', () => {
+    const ids = (n: number, p = 'w') => Array.from({ length: n }, (_, i) => `${p}${String(i).padStart(3, '0')}`);
+    const one = collectPairs([{ path: 'hot.ts', members: ids(100) }], [], (h) => h);
+    const m = INTENT_LIMITS.overlapGroupMembersMax;
+    expect(one.visits).toBe((m * (m - 1)) / 2);
+    expect(one.visits).toBeLessThan((100 * 99) / 2);
+    expect(one.reasons.join(' ')).toMatch(/more than \d+ workspaces/);
+
+    const many = collectPairs(
+      Array.from({ length: 50 }, (_, g) => ({ path: `p${String(g).padStart(2, '0')}`, members: ids(m, `g${g}-`) })),
+      [{ path: 'z', a: 'x', b: 'y' }],
+      (h) => h,
+    );
+    expect(many.visits).toBe(INTENT_LIMITS.overlapPairVisitMax);
+    expect(many.reasons.join(' ')).toMatch(/budget/);
+    expect(many.pairs.size).toBeLessThanOrEqual(INTENT_LIMITS.overlapPairMax);
+
+    const small = collectPairs([{ path: 'a', members: ['x', 'y', 'z'] }], [{ path: 'b/c', a: 'x', b: 'y' }], (h) => h);
+    expect([small.visits, small.reasons, [...small.pairs.keys()].sort()]).toEqual([4, [], ['x:y', 'x:z', 'y:z']]);
+  });
+
   it('collapses wide observed sets into bounded directory prefixes', () => {
     const many = Array.from({ length: 40 }, (_, i) => `gen/part${i % 4}/f${i}.ts`).concat(['README.md']);
     const c = collapseObserved(many, 10);
@@ -346,6 +369,101 @@ describe('observed index', () => {
     expect(got).toMatchObject({ observedPaths: ['one.txt', 'two.txt'], headSha: c2.sha });
   });
 
+  it('equal-timestamp pushes completing in reverse order leave the observed set at the current ref position', async () => {
+    const repo = await seedRepo('equal-ts');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('equal-ts', { task: 'eq', agent: 'a' })).json;
+    const c1 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n' }, [main.sha]);
+    const c2 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n', 'two.txt': '2\n' }, [c1.sha]);
+    await gitPush('equal-ts', tok.owner, [`${main.sha} ${c2.sha} ${ws.ref}`]);
+    // Same event time; the ingest tiebreak (event id) makes the c1→c2 push the current one.
+    const at = (clock += 1000);
+    const sourceIds = ['eq-x', 'eq-y'];
+    const ranked = await Promise.all(sourceIds.map(async (s) => [s, await sha256Hex(`source:default:${s}`)] as const));
+    ranked.sort((a, b) => (a[1] < b[1] ? -1 : 1));
+    const older = { ...pushEvent('equal-ts', ws.ref, main.sha, c1.sha, at), id: ranked[0]![0] };
+    const newer = { ...pushEvent('equal-ts', ws.ref, c1.sha, c2.sha, at), id: ranked[1]![0] };
+
+    // The older event ingests first and its reconciliation is held until the newer one has completed.
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const paused = new Promise<void>((r) => (reached = r));
+    repo.hook = async (call) => {
+      if (call === `readCommit:${c1.sha}`) {
+        reached();
+        await gate;
+      }
+    };
+    const first = deliver(older);
+    await paused;
+    await deliver(newer);
+    release();
+    await first;
+    repo.hook = null;
+
+    const current = await env.DB.prepare('SELECT f.sha FROM repo_refs f JOIN repos r ON r.id = f.repo_id WHERE r.name = ? AND f.ref = ?')
+      .bind('equal-ts', ws.ref)
+      .first<{ sha: string }>();
+    expect(current?.sha).toBe(c2.sha);
+    const got = (await getIntent('equal-ts', ws.id)).json;
+    expect(got).toMatchObject({ observedPaths: ['one.txt', 'two.txt'], headSha: c2.sha, observedCurrent: true });
+    expect((await forecast('equal-ts', 'paths=two.txt')).json.matches.map((m: any) => m.workspace)).toEqual([ws.id]);
+  });
+
+  it('paths dropped from an observed index make forecast and overlap report incompleteness even with no match', async () => {
+    const repo = await seedRepo('omitted');
+    const main = await based(repo, BASE_FILES);
+    const wide = (await createWs('omitted', { task: 'wide', agent: 'a' })).json;
+    const files: Files = { ...BASE_FILES };
+    for (let i = 0; i <= INTENT_LIMITS.observedMax; i++) files[`f${String(i).padStart(3, '0')}.txt`] = `${i}\n`;
+    await push('omitted', repo, wide, main.sha, files);
+    const last = `f${String(INTENT_LIMITS.observedMax).padStart(3, '0')}.txt`;
+    expect((await getIntent('omitted', wide.id)).json.observedPaths).not.toContain(last);
+
+    const other = (await createWs('omitted', { task: 'other', agent: 'b' })).json;
+    await push('omitted', repo, other, main.sha, { ...BASE_FILES, [last]: 'other\n' });
+
+    const f = (await forecast('omitted', `paths=${last}&exclude=${other.id}`)).json;
+    expect(f.matches).toEqual([]);
+    expect(f.truncated).toBe(true);
+    expect(f.truncatedReason).toMatch(/incomplete/);
+    expect(f.incomplete).toEqual([{ workspace: wide.id, reason: expect.stringMatching(/top-level/) }]);
+    expect(f.nextCursor).toBeNull();
+
+    const o = await overlap('omitted');
+    expect(o.json.pairs).toEqual([]);
+    expect(o.json.truncated).toBe(true);
+    expect(o.json.truncatedReason).toMatch(/incomplete/);
+    expect(o.json.incomplete).toEqual([{ workspace: wide.id, reason: expect.any(String) }]);
+    expect(o.cost).toMatchObject({ d1: 2, art: 0, do: 0 });
+
+    // A complete index elsewhere stays complete, and abandoning the incomplete workspace clears the disclosure.
+    expect((await abandon('omitted', wide.id)).status).toBe(200);
+    const after = (await forecast('omitted', `paths=${last}`)).json;
+    expect(after).toMatchObject({ truncated: false, matches: [{ workspace: other.id }] });
+    expect(after.incomplete).toBeUndefined();
+    expect((await overlap('omitted')).json.truncated).toBe(false);
+  });
+
+  it('a spent tree-walk budget is disclosed as an incomplete index', async () => {
+    const repo = await seedRepo('walk-budget');
+    const main = await based(repo, BASE_FILES);
+    const ws = (await createWs('walk-budget', { task: 'deep', agent: 'a' })).json;
+    const budgets = COMPARE_BUDGETS as { maxTreeReads: number };
+    const saved = budgets.maxTreeReads;
+    budgets.maxTreeReads = 2;
+    try {
+      await push('walk-budget', repo, ws, main.sha, { ...BASE_FILES, 'deep/a/b/c.ts': 'c\n', 'src/app.ts': 'changed\n' });
+    } finally {
+      budgets.maxTreeReads = saved;
+    }
+    expect((await getIntent('walk-budget', ws.id)).json.observedTruncated).toBe(true);
+    const f = (await forecast('walk-budget', 'paths=deep/a/b/c.ts')).json;
+    expect(f.truncated).toBe(true);
+    expect(f.incomplete).toEqual([{ workspace: ws.id, reason: expect.stringMatching(/diff incomplete/) }]);
+  });
+
   it('collapses a wide edit into bounded prefixes that still forecast and overlap', async () => {
     const repo = await seedRepo('wide');
     const main = await based(repo, BASE_FILES);
@@ -362,6 +480,8 @@ describe('observed index', () => {
     await push('wide', repo, narrow, main.sha, { ...BASE_FILES, 'gen/d1/f1.ts': 'other\n' });
     const f = (await forecast('wide', 'paths=gen/d1/f1.ts')).json;
     expect(f.matches.map((m: any) => [m.workspace, m.matchKind]).sort()).toEqual([[narrow.id, 'observed'], [wide.id, 'observed']].sort());
+    // Collapsed prefixes still cover every changed file: nothing was omitted.
+    expect(f.truncated).toBe(false);
     const o = (await overlap('wide')).json;
     expect(o.pairs).toHaveLength(1);
     expect(o.pairs[0].workspaces).toEqual([narrow.id, wide.id].sort());
@@ -566,5 +686,32 @@ describe('active-workspace overlap', () => {
     expect(pages).toBe(2);
     expect(seen).toEqual(full.pairs.map((p: any) => p.workspaces.join(':')));
     expect((await overlap('overlap-page', 'base=main&limit=0')).json.code).toBe('INVALID_LIMIT');
+  });
+
+  it('bounds the pair work of one widely shared path and discloses it', async () => {
+    await seedRepo('overlap-hot');
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('overlap-hot').first<{ id: string }>())!.id;
+    const n = INTENT_LIMITS.overlapGroupMembersMax + 20;
+    const now = Date.now();
+    const ids = Array.from({ length: n }, (_, i) => `hot${String(i).padStart(3, '0')}`);
+    await env.DB.batch(
+      ids.flatMap((id) => [
+        env.DB.prepare(
+          `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at,
+             observed_paths, observed_head_sha, observed_at)
+           VALUES (?1, ?2, 'x', ?1, 'a', 'active', 'refs/heads/agents/' || ?1 || '/t', 'main', ?3, ?4, ?4, '["hot.ts"]', ?3, ?4)`,
+        ).bind(id, repoId, '1'.repeat(40), now),
+        env.DB.prepare(`INSERT INTO workspace_paths (repo_id, kind, path, workspace_id) VALUES (?, 'observed', 'hot.ts', ?)`).bind(repoId, id),
+      ]),
+    );
+    const r = await overlap('overlap-hot', 'base=main&limit=100');
+    expect(r.status).toBe(200);
+    expect(r.json.truncated).toBe(true);
+    expect(r.json.truncatedReason).toMatch(/more than \d+ workspaces/);
+    // Only pairs among the first members (by id) were enumerated.
+    const m = INTENT_LIMITS.overlapGroupMembersMax;
+    const kept = new Set(ids.slice(0, m));
+    for (const p of r.json.pairs) for (const w of p.workspaces) expect(kept.has(w)).toBe(true);
+    expect(r.cost).toMatchObject({ d1: 2, art: 0, do: 0 });
   });
 });

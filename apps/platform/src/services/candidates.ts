@@ -254,6 +254,15 @@ function leaves(body: CompareBody): Map<string, { base: Leaf; head: Leaf }> {
 
 const fileType = (mode: string) => (mode === '120000' ? 'link' : mode === '160000' ? 'gitlink' : mode === '40000' ? 'tree' : 'file');
 
+const isTreeMode = (mode: string | null) => mode === '40000' || mode === '040000';
+
+/**
+ * Whether a vs-base list has a directory/file replacement. Compare lists one
+ * at the ancestor path only, so its descendants' head entries are not in the
+ * list and cannot be derived from it.
+ */
+const hasStructuralChange = (body: CompareBody) => body.files.some((f) => isTreeMode(f.oldMode) || isTreeMode(f.newMode));
+
 /** Head-to-head differences of two candidates over the same base, from their vs-base lists alone. */
 function derivePair(a: CompareBody, b: CompareBody): { files: PairFile[]; identical: number } {
   const la = leaves(a);
@@ -394,7 +403,7 @@ async function compareSet(
         const b = bodies[j]!;
         const ids: [string, string] = [members[i]!.row.id, members[j]!.row.id];
         let pair: PairDiff;
-        if (!a.truncated && !b.truncated) {
+        if (!a.truncated && !b.truncated && !hasStructuralChange(a) && !hasStructuralChange(b)) {
           const d = derivePair(a, b);
           pair = { workspaces: ids, source: 'vs-base', files: d.files, fileCount: d.files.length, identical: d.identical, truncated: false };
         } else {

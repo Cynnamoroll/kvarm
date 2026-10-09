@@ -13,7 +13,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { getRepoById } from '../src/db/repos';
 import { deleteRepo } from '../src/repos/service';
-import { compose, type ComposeContext } from '../src/services/compositions';
+import { compose, defaultComposeDeps, type ComposeContext, type ComposeDeps } from '../src/services/compositions';
 import type { ChecksGate } from '../src/services/checksGate';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
@@ -218,6 +218,24 @@ describe('candidates', () => {
     expect(again.cost.d1).toBe(2);
     const again2 = await cands('cmp', [a.id, b.id, c.id]);
     expect(again2.cost.d1).toBe(again.cost.d1);
+  });
+
+  it('pairwise entries under a directory/file replacement are the heads’ actual entries', async () => {
+    const repo = await seedRepo('cmp-struct');
+    const main = await based(repo);
+    const a = (await createWs('cmp-struct', 'docs becomes a file')).json;
+    const b = (await createWs('cmp-struct', 'edit the guide')).json;
+    const { 'docs/guide.md': _dir, ...rest } = BASE;
+    await push('cmp-struct', repo, a, main.sha, { ...rest, docs: 'docs as a file\n' });
+    await push('cmp-struct', repo, b, main.sha, { ...BASE, 'docs/guide.md': 'guide v2\n' });
+
+    const r = await cands('cmp-struct', [a.id, b.id]);
+    expect(r.status).toBe(200);
+    // a has no docs/guide.md at all, so it is never reported as modified between the heads: the
+    // difference is the replacement itself, from the real head-to-head tree diff.
+    expect(r.json.pairwise).toEqual([
+      expect.objectContaining({ source: 'tree-pair', files: [{ path: 'docs', status: 'typechange' }], fileCount: 1, truncated: false }),
+    ]);
   });
 
   it('places a candidate whose required check fails below a passing one', async () => {
@@ -521,6 +539,63 @@ describe('composition', () => {
     expect(r.value.checks.state).toBe('failure');
     const read = await call('GET', `${R('compose-sem')}/compositions/${r.value.id}`, tok.owner);
     expect(read.json.conflict).toEqual({ kind: 'semantic', checks: ['test'], treeSha: composedTree });
+  });
+
+  it('a composed workspace joins the Nexus index even when its push event is consumed before it is registered', async () => {
+    const { a, b } = await setup('compose-nx', { ...BASE, 'x.txt': 'x\n' }, { ...BASE, 'y.txt': 'y\n' });
+    const row = await env.DB.prepare('SELECT * FROM repos WHERE artifacts_name = ?').bind(`${OWNER}--compose-nx`).first<any>();
+    const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(ownerId).first<any>();
+    const consumed: string[] = [];
+    const deps: ComposeDeps = {
+      ...defaultComposeDeps,
+      pusher: (e, r) => {
+        const real = defaultComposeDeps.pusher(e, r);
+        return {
+          ...real,
+          updateRef: async (u, objects) => {
+            const res = await real.updateRef(u, objects);
+            // The push consumer handles the composed ref's event before the workspace row exists.
+            if (res.status === 'ok') {
+              await deliver('compose-nx', u.ref, u.oldOid, u.newOid);
+              consumed.push(u.ref);
+            }
+            return res;
+          },
+        };
+      },
+    };
+    const ctx = createExecutionContext();
+    const cx: ComposeContext = { env, repo: row, actor: { user, via: 'pat', scopes: FULL }, origin: ORIGIN, waitUntil: (p) => ctx.waitUntil(p) };
+    const r = await compose(cx, { workspaces: [a.id, b.id] }, deps);
+    await waitOnExecutionContext(ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ws = r.value.workspace!;
+    expect(consumed).toEqual([ws.ref]);
+    const skipped = await env.DB.prepare(
+      `SELECT x.detail FROM push_event_effects x JOIN push_events p ON p.id = x.event_id
+        WHERE p.repo_id = ? AND p.ref = ? AND x.effect = 'intent-index'`,
+    )
+      .bind(row.id, ws.ref)
+      .first<{ detail: string }>();
+    expect(skipped?.detail).toMatch(/no workspace/);
+
+    const intent = await call('GET', `${R('compose-nx')}/workspaces/${ws.id}/intent`, tok.owner);
+    expect(intent.json).toMatchObject({ observedPaths: ['x.txt', 'y.txt'], headSha: r.value.commitSha, observedCurrent: true });
+    const f = await call('GET', `${R('compose-nx')}/forecast?paths=y.txt`, tok.owner);
+    expect(f.json.matches.map((m: any) => m.workspace).sort()).toEqual([b.id, ws.id].sort());
+    const o = await call('GET', `${R('compose-nx')}/workspaces/overlap?base=main`, tok.owner);
+    expect(o.json.pairs.map((p: any) => p.workspaces.join(':')).sort()).toEqual(
+      [[a.id, ws.id].sort().join(':'), [b.id, ws.id].sort().join(':')].sort(),
+    );
+
+    // A later push to the composed workspace still moves the observed set forward.
+    const repo = fakeRepos.get(`${OWNER}--compose-nx`)!;
+    const next = await push('compose-nx', repo, ws, r.value.commitSha, { ...BASE, 'x.txt': 'x\n', 'y.txt': 'y\n', 'z.txt': 'z\n' });
+    expect((await call('GET', `${R('compose-nx')}/workspaces/${ws.id}/intent`, tok.owner)).json).toMatchObject({
+      observedPaths: ['x.txt', 'y.txt', 'z.txt'],
+      headSha: next,
+    });
   });
 });
 

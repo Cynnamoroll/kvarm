@@ -513,7 +513,16 @@ function parseCreate(input: unknown): ServiceResult<CreateInput> {
  * are one D1 batch: the number is MAX+1 inside the INSERT, and
  * UNIQUE(repo_id, number) guards concurrent creates.
  */
-export function createChange(cx: ChangeContext, input: unknown): Promise<ServiceResult<ChangeDetail>> {
+export interface CreateChangeOptions {
+  /**
+   * Runs once the change row exists and before an `auto` change may merge;
+   * a failure is returned as is and nothing is published. Workspaces link
+   * their change set here so admission is decided before publication.
+   */
+  admit?: (change: { id: string; number: number }) => Promise<Extract<ServiceResult<never>, { ok: false }> | null>;
+}
+
+export function createChange(cx: ChangeContext, input: unknown, opts: CreateChangeOptions = {}): Promise<ServiceResult<ChangeDetail>> {
   return guarded(async () => {
     const parsed = parseCreate(input);
     if (!parsed.ok) return parsed;
@@ -579,6 +588,10 @@ export function createChange(cx: ChangeContext, input: unknown): Promise<Service
     ]);
     let row = (read?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(500, 'change could not be created', 'CREATE_FAILED');
+    if (opts.admit) {
+      const refused = await opts.admit({ id: row.id, number: row.number });
+      if (refused) return refused;
+    }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
     return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks: [] } };
   });
@@ -744,12 +757,42 @@ function mergeRefusal(row: ChangeRow | null, mode: MergeMode, headSha?: string):
   return null;
 }
 
+interface HeadWorkspace {
+  status: string;
+  change_set_id: string | null;
+}
+
+/** The agent workspace whose ref is the change's head branch, if any. */
+function headWorkspaceSelect(db: D1Database, repoId: string, number: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT w.status, w.change_set_id FROM workspaces w
+        WHERE w.repo_id = ?1 AND w.ref = (SELECT 'refs/heads/' || c.head_ref FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2)`,
+    )
+    .bind(repoId, number);
+}
+
+/**
+ * A change from a workspace branch publishes only while that workspace is
+ * active and not linked to a different change set: the workspace's one
+ * change set is the only way its content reaches a base.
+ */
+function workspaceAdmissionRefusal(row: ChangeRow, ws: HeadWorkspace | null): Fail | null {
+  if (!ws) return null;
+  if (ws.status !== 'active') return fail(409, `the change's workspace is ${ws.status}`, 'WORKSPACE_NOT_ACTIVE');
+  if (ws.change_set_id !== null && ws.change_set_id !== row.id) {
+    return fail(409, "the change's workspace is linked to another change set", 'WORKSPACE_LINKED_ELSEWHERE');
+  }
+  return null;
+}
+
 /**
  * Merges an open change's recorded head into its base branch: plan against
  * the base tip read fresh, check branch rules against the checks-gate answer
  * for the exact merge tree, prepare the push (write token and pack), re-read
  * the change immediately before sending (state, policy and head must still
- * allow this merge), publish one ref with the tip as expected old value,
+ * allow this merge, and a head workspace must still admit this change),
+ * publish one ref with the tip as expected old value,
  * then mark the change merged only while its head is still the published
  * one and it is not a draft. A moved base re-plans once. A change edited
  * between that last read and the send is not caught here; the guarded
@@ -791,7 +834,11 @@ async function performMerge(
       // The last change read runs after every asynchronous preparation step (checks, write token, pack).
       const verdict: { refusal: Fail | null } = { refusal: null };
       const beforeSend = async () => {
-        verdict.refusal = mergeRefusal(await readChange(cx.env, cx.repo.id, row.number), mode, headSha);
+        const [change, ws] = await cx.env.DB.batch([changeSelect(cx.env.DB, cx.repo.id, row.number), headWorkspaceSelect(cx.env.DB, cx.repo.id, row.number)]);
+        const current = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
+        verdict.refusal =
+          mergeRefusal(current, mode, headSha) ??
+          workspaceAdmissionRefusal(current!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null);
         return verdict.refusal === null;
       };
       const published = await publishMerge({ pusher, gate, beforeSend }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);

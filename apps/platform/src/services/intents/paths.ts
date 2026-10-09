@@ -24,9 +24,15 @@ export const INTENT_LIMITS = {
   /** Shared-path groups and prefix hits read per overlap request. */
   overlapGroupMax: 500,
   overlapPrefixHitMax: 2_000,
+  /** Workspaces taken per shared path (by id); pairs among the rest of a wider group are not enumerated. */
+  overlapGroupMembersMax: 40,
+  /** Workspace pairs visited per overlap request, across all shared paths and prefix hits. */
+  overlapPairVisitMax: 4_000,
   /** Distinct pairs derived per overlap request. */
   overlapPairMax: 1_000,
   overlapPathsPerPair: 50,
+  /** Workspaces with an incomplete observed index listed per forecast/overlap response. */
+  incompleteListMax: 20,
 } as const;
 
 export type PathResult = { ok: true; value: string } | { ok: false; error: string };

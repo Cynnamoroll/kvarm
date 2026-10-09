@@ -253,3 +253,65 @@ describe('selectTree', () => {
     expect(got.treeHash).toBe(await writeTree(store, rest));
   });
 });
+
+describe('selected structural replacements', () => {
+  const blobAt = (tree: string, path: string) => {
+    const r = spawnSync('git', ['--git-dir', repo, 'cat-file', '-p', `${tree}:${path}`], { env: GIT_ENV });
+    return r.status === 0 ? r.stdout.toString() : null;
+  };
+  const other = () => writeTree(store, { ...BASE, 'src/extra.ts': 'extra by B\n' });
+
+  it('a fully selected directory-to-file replacement installs the file, as git composes it', async () => {
+    const { 'docs/b.md': _dir, ...rest } = BASE;
+    const head = await writeTree(store, { ...rest, docs: 'docs is a file now\n' });
+    const sel = await selectTree(store, base, head, ['docs', 'docs/']);
+    expect(sel).toMatchObject({ treeHash: head, truncated: false, matched: ['docs', 'docs/'] });
+
+    const b = await other();
+    const got = await composeTrees(store, base, [
+      { name: 'A', baseTree: base, headTree: head, paths: ['docs', 'docs/'] },
+      { name: 'B', baseTree: base, headTree: b },
+    ]);
+    const expected = gitMerge(base, head, b);
+    expect(expected.clean).toBe(true);
+    expect(got).toMatchObject({ clean: true, conflicts: [], unmatched: [] });
+    expect(got.treeHash).toBe(expected.clean ? expected.tree : null);
+    sync(got.objects);
+    expect(blobAt(got.treeHash!, 'docs')).toBe('docs is a file now\n');
+    expect(blobAt(got.treeHash!, 'docs/b.md')).toBeNull();
+  });
+
+  it('a fully selected file-to-directory replacement deletes the file and adds the directory, as git composes it', async () => {
+    const { 'README.md': _file, ...rest } = BASE;
+    const head = await writeTree(store, { ...rest, 'README.md/index.md': 'readme dir\n' });
+    const sel = await selectTree(store, base, head, ['README.md', 'README.md/']);
+    expect(sel).toMatchObject({ treeHash: head, truncated: false, matched: ['README.md', 'README.md/'] });
+
+    const b = await other();
+    const got = await composeTrees(store, base, [
+      { name: 'A', baseTree: base, headTree: head, paths: ['README.md', 'README.md/'] },
+      { name: 'B', baseTree: base, headTree: b },
+    ]);
+    const expected = gitMerge(base, head, b);
+    expect(expected.clean).toBe(true);
+    expect(got).toMatchObject({ clean: true, conflicts: [], unmatched: [] });
+    expect(got.treeHash).toBe(expected.clean ? expected.tree : null);
+    sync(got.objects);
+    expect(blobAt(got.treeHash!, 'README.md/index.md')).toBe('readme dir\n');
+  });
+
+  it('refuses a partial structural selection in either direction', async () => {
+    const { 'docs/b.md': _dir, 'README.md': _file, ...rest } = BASE;
+    const head = await writeTree(store, { ...rest, docs: 'file\n', 'README.md/index.md': 'dir\n' });
+    // The replacement without the removal it needs would leave a path both a file and a directory.
+    for (const paths of [['docs'], ['README.md/'], ['docs', 'docs/', 'README.md/']]) {
+      const got = await composeTrees(store, base, [
+        { name: 'A', baseTree: base, headTree: head, paths },
+        { name: 'B', baseTree: base, headTree: await other() },
+      ]);
+      expect(got.clean, paths.join(',')).toBe(false);
+      expect(got.treeHash).toBeNull();
+      expect(got.conflicts).toEqual([expect.objectContaining({ piece: 'A', kind: 'file-directory' })]);
+    }
+  });
+});

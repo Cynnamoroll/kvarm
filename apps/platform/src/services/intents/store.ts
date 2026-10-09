@@ -52,35 +52,50 @@ export interface ObservedWrite {
   pathsJson: string;
   baseSha: string;
   headSha: string;
-  /** Push event time; a reconciliation never replaces one from a newer event. */
-  eventAt: number;
+  /**
+   * The push event this set reflects: it lands only while that event still
+   * holds the ref position in `repo_refs` (event time, then event id), so a
+   * reconciliation finishing after a newer push of the same ref, equal event
+   * times included, writes nothing. null: a seed by the service that created
+   * the ref, which lands only before any push was reconciled and while the
+   * ref position, if any, is still `headSha`.
+   */
+  event: { id: string; at: number } | null;
   now: number;
   truncated: string | null;
+  /** Why changed paths are missing from the set (not merely collapsed); null when every one is covered. */
+  omitted: string | null;
   prefixes: number;
 }
 
 /** Records an active workspace's observed set and swaps its observed index rows, unless a newer push already did. */
 export function observedWriteStatements(db: D1Database, o: ObservedWrite): D1PreparedStatement[] {
+  const eventAt = o.event?.at ?? 0;
   const guard = `EXISTS (SELECT 1 FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?2 AND w.status = 'active'
                    AND w.observed_event_at = ?3 AND w.observed_head_sha = ?4)`;
+  const order = o.event
+    ? `COALESCE(observed_event_at, 0) <= ?3
+       AND EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = ?1 AND f.ref = workspaces.ref AND f.event_id = ?11)`
+    : `?11 IS NULL AND observed_event_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = ?1 AND f.ref = workspaces.ref AND f.sha != ?4)`;
   return [
     db
       .prepare(
         `UPDATE workspaces
             SET observed_paths = ?5, observed_base_sha = ?6, observed_head_sha = ?4, observed_event_at = ?3,
-                observed_at = ?7, observed_truncated = ?8, observed_prefixes = ?9
-          WHERE repo_id = ?1 AND id = ?2 AND status = 'active' AND COALESCE(observed_event_at, 0) <= ?3`,
+                observed_at = ?7, observed_truncated = ?8, observed_prefixes = ?9, observed_omitted = ?10
+          WHERE repo_id = ?1 AND id = ?2 AND status = 'active' AND ${order}`,
       )
-      .bind(o.repoId, o.workspaceId, o.eventAt, o.headSha, o.pathsJson, o.baseSha, o.now, o.truncated, o.prefixes),
+      .bind(o.repoId, o.workspaceId, eventAt, o.headSha, o.pathsJson, o.baseSha, o.now, o.truncated, o.prefixes, o.omitted, o.event?.id ?? null),
     db
       .prepare(`DELETE FROM workspace_paths WHERE repo_id = ?1 AND workspace_id = ?2 AND kind = 'observed' AND ${guard}`)
-      .bind(o.repoId, o.workspaceId, o.eventAt, o.headSha),
+      .bind(o.repoId, o.workspaceId, eventAt, o.headSha),
     db
       .prepare(
         `INSERT OR IGNORE INTO workspace_paths (repo_id, kind, path, workspace_id)
          SELECT ?1, 'observed', j.value, ?2 FROM json_each(?5) j WHERE ${guard}`,
       )
-      .bind(o.repoId, o.workspaceId, o.eventAt, o.headSha, o.pathsJson),
+      .bind(o.repoId, o.workspaceId, eventAt, o.headSha, o.pathsJson),
   ];
 }
 

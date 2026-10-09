@@ -467,6 +467,123 @@ describe('agent tokens are bound to real workspaces', () => {
   });
 });
 
+describe('ownership intersects the agent token ref ceiling', () => {
+  it('an owning agent token limited to one workspace cannot abandon, open a change set on or declare intent for its sibling', async () => {
+    const repo = await seedRepo('agent-ceiling');
+    const main = await based(repo);
+    const a = await agentToken('agent-ceiling', 'ws-ceiling-a');
+    const wsA = (await createWs('agent-ceiling', { task: 'a' }, a.token)).json;
+    const wsB = (await createWs('agent-ceiling', { task: 'b' }, a.token)).json;
+    const minted = await call('POST', `/api/v1/agents/${a.agentId}/tokens`, tok.owner, {
+      repo: `${OWNER}/agent-ceiling`,
+      role: 'write',
+      refs: [`refs/heads/agents/${wsB.id}/*`],
+    });
+    expect(minted.status).toBe(201);
+    const narrow = minted.json.token as string;
+
+    // git already refuses the sibling ref for this token; the REST mutations must agree.
+    const del = await gitPush('agent-ceiling', narrow, [`${main.sha} ${ZERO_OID} ${wsA.ref}`]);
+    expect(del.report[1]).toMatch(new RegExp(`^ng ${wsA.ref} `));
+    const ab = await abandon('agent-ceiling', wsA.id, narrow);
+    expect([ab.status, ab.json.code]).toEqual([403, 'WORKSPACE_NOT_OWNED']);
+    const cs = await openChange('agent-ceiling', wsA.id, { title: 'x' }, narrow);
+    expect([cs.status, cs.json.code]).toEqual([403, 'WORKSPACE_NOT_OWNED']);
+    const intent = await call('POST', wsPath('agent-ceiling', `/${wsA.id}/intent`), narrow, { paths: ['x.txt'] });
+    expect([intent.status, intent.json.code]).toEqual([403, 'WORKSPACE_NOT_OWNED']);
+    expect(repo.refs.get(wsA.ref)).toBe(main.sha);
+    expect((await getWs('agent-ceiling', wsA.id)).json).toMatchObject({ status: 'active', changeSet: null, declaredPaths: [] });
+
+    // The workspace the token does grant stays fully usable.
+    const own = await call('POST', wsPath('agent-ceiling', `/${wsB.id}/intent`), narrow, { paths: ['b.txt'] });
+    expect(own.status).toBe(200);
+    expect((await abandon('agent-ceiling', wsB.id, narrow)).status).toBe(200);
+    expect(repo.refs.has(wsB.ref)).toBe(false);
+  });
+});
+
+describe('workspace admission comes before automatic publication', () => {
+  /** Pauses the first fake-Artifacts call `pick` selects until `release()`; `reached` settles when it is paused. */
+  function pauseAt(repo: FakeRepo, pick: (call: string) => boolean) {
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const at = new Promise<void>((r) => (reached = r));
+    let armed = true;
+    repo.hook = async (call) => {
+      if (armed && pick(call)) {
+        armed = false;
+        reached();
+        await gate;
+      }
+    };
+    return { reached: at, release };
+  }
+
+  async function workspaceWithWork(name: string) {
+    const repo = await seedRepo(name);
+    const main = await based(repo);
+    const ws = (await createWs(name, { task: 'race', agent: 'x' })).json;
+    const c = await commit(repo, { 'README.md': 'readme\n', 'race.txt': 'r\n' }, [main.sha]);
+    expect((await gitPush(name, tok.owner, [`${main.sha} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
+    return { repo, main, ws, head: c.sha };
+  }
+
+  it('a concurrent review change set loses to an auto change set that is preparing its merge', async () => {
+    const { repo, ws, head } = await workspaceWithWork('admit-review');
+    const pause = pauseAt(repo, (c) => c.startsWith('receivePack:refs/heads/main:'));
+    const auto = openChange('admit-review', ws.id, { title: 'auto', mergePolicy: 'auto' });
+    await pause.reached;
+    const review = await openChange('admit-review', ws.id, { title: 'review' });
+    pause.release();
+    const won = await auto;
+    repo.hook = null;
+    expect([review.status, review.json.code]).toEqual([409, 'CHANGE_SET_EXISTS']);
+    expect(won.status).toBe(201);
+    expect(repo.refs.get('refs/heads/main')).toBe(head);
+    expect((await getWs('admit-review', ws.id)).json).toMatchObject({ status: 'merged', changeSet: won.json.number });
+    const all = await call('GET', `/api/v1/repos/${OWNER}/admit-review/changes?state=all`, tok.owner);
+    expect(all.json.changes.map((c: any) => [c.number, c.state])).toEqual([[won.json.number, 'merged']]);
+  });
+
+  it('an abandon while the auto change prepares its merge closes it and nothing is published', async () => {
+    const { repo, main, ws } = await workspaceWithWork('admit-abandon');
+    let lsRefs = 0;
+    // The second ls-refs of the request is the merge's fresh read of the base, before it prepares and sends.
+    const pause = pauseAt(repo, (c) => c === 'lsRefs' && ++lsRefs === 2);
+    const auto = openChange('admit-abandon', ws.id, { title: 'auto', mergePolicy: 'auto' });
+    await pause.reached;
+    const ab = await abandon('admit-abandon', ws.id);
+    pause.release();
+    const res = await auto;
+    repo.hook = null;
+    expect(ab.status).toBe(200);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:refs/heads/main:')).toBe(0);
+    expect((await getWs('admit-abandon', ws.id)).json).toMatchObject({ status: 'abandoned' });
+    const all = await call('GET', `/api/v1/repos/${OWNER}/admit-abandon/changes?state=all`, tok.owner);
+    expect(all.json.changes.map((c: any) => c.state)).toEqual(['closed']);
+    expect(res.status === 201 || res.status === 409).toBe(true);
+  });
+
+  it('the send-time check refuses an auto change on a workspace branch linked to another change set', async () => {
+    const { repo, main, ws } = await workspaceWithWork('admit-send');
+    const linked = await openChange('admit-send', ws.id, { title: 'linked review' });
+    expect(linked.status).toBe(201);
+    const branch = ws.ref.slice('refs/heads/'.length);
+    const direct = await call('POST', `/api/v1/repos/${OWNER}/admit-send/changes`, tok.owner, {
+      title: 'side door',
+      base: 'main',
+      head: branch,
+      mergePolicy: 'auto',
+    });
+    expect(direct.status).toBe(201);
+    expect(direct.json.state).toBe('open');
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await getWs('admit-send', ws.id)).json).toMatchObject({ status: 'active', changeSet: linked.json.number });
+  });
+});
+
 describe('repo delete', () => {
   it('removes the repo workspaces with the repo row', async () => {
     const repo = await seedRepo('delete');

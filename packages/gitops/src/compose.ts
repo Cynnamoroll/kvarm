@@ -114,9 +114,10 @@ class SelectionClash extends Error {}
 
 /**
  * The base tree with the head's leaf changes under `paths` applied. A
- * selection that would leave a path both a file and a directory (a
- * directory-to-file change selected on one side only) is refused as
- * with `treeHash` null and `truncated` false.
+ * directory/file replacement applies when both of its sides are selected
+ * (the file and the directory prefix). A selection that would leave a path
+ * both a file and a directory (one side of such a replacement only) is
+ * refused with `treeHash` null and `truncated` false.
  */
 export async function selectTree(
   reader: TreeReader,
@@ -181,9 +182,16 @@ export async function selectTree(
         }
         continue;
       }
-      if (existing && !isTreeMode(existing.mode)) throw new SelectionClash(name);
-      const sub = await build(existing ? existing.hash : null, child);
-      if (sub === null) entries.delete(name);
+      // A node with both an entry change and changes below it is a structural
+      // replacement: file→directory selects the file's deletion, directory→file
+      // must remove every descendant before the file can take the path.
+      const under = existing && !isTreeMode(existing.mode) && child.self === null ? undefined : existing;
+      if (under && !isTreeMode(under.mode)) throw new SelectionClash(name);
+      const sub = await build(under ? under.hash : null, child);
+      if (child.self) {
+        if (sub !== null) throw new SelectionClash(name);
+        entries.set(name, { ...child.self, name });
+      } else if (sub === null) entries.delete(name);
       else entries.set(name, { mode: '40000', name, hash: sub });
     }
     if (entries.size === 0) return null;

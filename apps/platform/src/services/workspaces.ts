@@ -217,12 +217,13 @@ export function workspaceIdOf(ref: string): string | null {
 
 /**
  * Why an agent actor may not act on the workspace (null: it may): an
- * agent-owned workspace belongs to that agent only; a person's workspace is
- * open to agent tokens whose ref patterns grant its ref.
+ * agent-owned workspace belongs to that agent only, and in every case the
+ * token's ref patterns must grant the workspace ref. Ownership narrows the
+ * token's ceiling; it never widens it.
  */
 export function agentOwnershipDenial(actor: Actor | null, row: Pick<WorkspaceRow, 'agent_id' | 'ref'>): string | null {
   if (!actor?.agent) return null;
-  if (row.agent_id !== null) return row.agent_id === actor.agent.agentId ? null : 'workspace owned by another agent';
+  if (row.agent_id !== null && row.agent_id !== actor.agent.agentId) return 'workspace owned by another agent';
   return row.ref && credentialMayUpdateRef(actor, row.ref) ? null : 'workspace outside agent token grant';
 }
 
@@ -456,8 +457,10 @@ export async function listWorkspaces(
  * POST workspaces/:id/change-set {title, body?, base?, mergePolicy?}: opens
  * a change from the workspace branch into `base` (default: the repo's
  * default branch) with the policy as given (default `review`), through
- * services/changes.ts, then links it in one batch. A concurrent second
- * call loses the link and its change is closed in that same batch.
+ * services/changes.ts, and links it in one batch right after the change row
+ * is written, before an `auto` change may merge. A concurrent second call
+ * loses the link and its change is closed in that same batch, unpublished;
+ * the merge's send-time check re-reads the workspace admission.
  */
 export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown): Promise<ServiceResult<ChangeDetail & { workspace: string }>> {
   return guarded(async () => {
@@ -471,6 +474,25 @@ export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown):
     if (row.change_set_id) {
       return fail(409, `the workspace already has change set #${row.change_number}`, 'CHANGE_SET_EXISTS', { changeSet: row.change_number });
     }
+    // The link is won before an `auto` change may publish; a change that loses it is closed unpublished.
+    const admit = async (change: { id: string; number: number }) => {
+      const now = Date.now();
+      const [link] = await cx.env.DB.batch([
+        cx.env.DB.prepare(
+          `UPDATE workspaces SET change_set_id = ?3, updated_at = ?4
+            WHERE repo_id = ?1 AND id = ?2 AND change_set_id IS NULL AND status = 'active'`,
+        ).bind(cx.repo.id, row.id, change.id, now),
+        cx.env.DB.prepare(
+          `UPDATE change_sets SET state = 'closed', updated_at = ?4
+            WHERE repo_id = ?1 AND id = ?3 AND state = 'open'
+              AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?2 AND w.change_set_id = change_sets.id)`,
+        ).bind(cx.repo.id, row.id, change.id, now),
+      ]);
+      if (link?.meta.changes) return null;
+      return fail(409, 'the workspace got a change set or left active meanwhile; this change was closed', 'CHANGE_SET_EXISTS', {
+        closedChange: change.number,
+      });
+    };
     const created = await createChange(
       { env: cx.env, repo: cx.repo, actor: cx.actor, branchRules: cx.branchRules ?? [], waitUntil: cx.waitUntil },
       {
@@ -480,39 +502,10 @@ export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown):
         head: row.ref,
         ...(b.mergePolicy !== undefined ? { mergePolicy: b.mergePolicy } : {}),
       },
+      { admit },
     );
     if (!created.ok) return created;
-    const change = created.value;
-    const now = Date.now();
-    const csId = 'SELECT c.id FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2';
-    const [link] = await cx.env.DB.batch([
-      // An auto change can merge inside createChange, before it is linked.
-      cx.env.DB.prepare(
-        `UPDATE workspaces
-            SET change_set_id = (${csId}), updated_at = ?3,
-                status = CASE WHEN (SELECT state FROM change_sets WHERE repo_id = ?1 AND number = ?2) = 'merged' THEN 'merged' ELSE status END,
-                merged_at = CASE WHEN (SELECT state FROM change_sets WHERE repo_id = ?1 AND number = ?2) = 'merged' THEN ?3 ELSE merged_at END,
-                head_sha = CASE WHEN (SELECT state FROM change_sets WHERE repo_id = ?1 AND number = ?2) = 'merged'
-                                THEN (SELECT head_sha FROM change_sets WHERE repo_id = ?1 AND number = ?2) ELSE head_sha END
-          WHERE repo_id = ?1 AND id = ?4 AND change_set_id IS NULL AND status = 'active'`,
-      ).bind(cx.repo.id, change.number, now, row.id),
-      cx.env.DB.prepare(
-        `UPDATE change_sets SET state = 'closed', updated_at = ?3
-          WHERE repo_id = ?1 AND number = ?2 AND state = 'open'
-            AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?4 AND w.change_set_id = change_sets.id)`,
-      ).bind(cx.repo.id, change.number, now, row.id),
-      // An auto change that merged right away took the workspace out of the active index.
-      cx.env.DB.prepare(
-        `DELETE FROM workspace_paths WHERE repo_id = ?1 AND workspace_id = ?2
-            AND EXISTS (SELECT 1 FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?2 AND w.status = 'merged')`,
-      ).bind(cx.repo.id, row.id),
-    ]);
-    if (!link?.meta.changes) {
-      return fail(409, 'the workspace got a change set or left active meanwhile; this change was closed', 'CHANGE_SET_EXISTS', {
-        closedChange: change.number,
-      });
-    }
-    return { ok: true, value: { ...change, workspace: row.id } };
+    return { ok: true, value: { ...created.value, workspace: row.id } };
   });
 }
 

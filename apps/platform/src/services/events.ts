@@ -326,7 +326,7 @@ const intentIndexEffect: PushEffect = {
       workspaceId: workspace.id,
       baseSha: workspace.baseSha,
       headSha: event.after,
-      eventAt: ctx.eventAt,
+      event: { id: ctx.eventId, at: ctx.eventAt },
     });
     return { state: 'done', detail: r.detail, statements: r.statements };
   },
