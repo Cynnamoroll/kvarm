@@ -381,6 +381,58 @@ export const OPERATIONS = Object.freeze([
     destructive: true,
   }),
 
+  // --- dependencies: pinned draft dependencies between workspaces -------------
+  define({
+    name: 'add_dependency',
+    command: ['deps', 'add'],
+    family: 'dependencies',
+    description:
+      "Pin a workspace to another live workspace of the same repository at its exact current revision. The dependent's change cannot merge until the pinned revision lands (an enqueued dependent waits in the train). Chains are limited to 4 workspaces and cycles are refused with the path.",
+    method: 'POST',
+    path: '/repos/{repo}/workspaces/{workspace}/dependencies',
+    params: [
+      REPO,
+      WORKSPACE,
+      body('onWorkspace', 'string', 'Source workspace id (same repository)', { required: true }),
+      body('revision', 'string', "The source's current head commit (40 hex); refused 422 REVISION_NOT_CURRENT naming currentRevision otherwise", { required: true }),
+    ],
+  }),
+  define({
+    name: 'list_dependencies',
+    command: ['deps', 'list'],
+    family: 'dependencies',
+    description: "A workspace's pins with their state (active, stale, broken or satisfied), reason, depth and the source's current head.",
+    method: 'GET',
+    path: '/repos/{repo}/workspaces/{workspace}/dependencies',
+    params: [REPO, WORKSPACE],
+  }),
+  define({
+    name: 'repin_dependency',
+    command: ['deps', 'repin'],
+    family: 'dependencies',
+    description:
+      "Explicitly recover a stale or broken pin: move it to the current revision of the same source or of another live workspace. The platform never repins on its own; the dependent's ref and commits are untouched. Reports the previous pin.",
+    method: 'POST',
+    path: '/repos/{repo}/workspaces/{workspace}/dependencies/{dependency}/repin',
+    params: [
+      REPO,
+      WORKSPACE,
+      pathArg('dependency', 'Dependency id from list_dependencies'),
+      body('revision', 'string', "The source's current head commit (40 hex)", { required: true }),
+      body('onWorkspace', 'string', 'Another live source workspace (default: keep the source)'),
+    ],
+  }),
+  define({
+    name: 'detach_dependency',
+    command: ['deps', 'detach'],
+    family: 'dependencies',
+    description: "Remove a pin explicitly; the dependent then publishes without that constraint. The dependent's ref, base and change are untouched.",
+    method: 'DELETE',
+    path: '/repos/{repo}/workspaces/{workspace}/dependencies/{dependency}',
+    params: [REPO, WORKSPACE, pathArg('dependency', 'Dependency id from list_dependencies')],
+    destructive: true,
+  }),
+
   // --- changes --------------------------------------------------------------
   define({
     name: 'create_change',
@@ -498,6 +550,16 @@ export const OPERATIONS = Object.freeze([
     method: 'GET',
     path: '/repos/{repo}/queue',
     params: [REPO, query('base', 'string', 'Only this target branch'), LIMIT(100), CURSOR],
+  }),
+  define({
+    name: 'get_train',
+    command: ['train', 'status'],
+    family: 'queue',
+    description:
+      'Integration train status: active entries per target branch with their pins and, for an entry held back by an unresolved pin, a machine-readable waiting reason {code, message, dependencies}.',
+    method: 'GET',
+    path: '/repos/{repo}/train',
+    params: [REPO, query('base', 'string', 'Only this target branch'), LIMIT(100)],
   }),
 
   // --- reviews: exact-head approvals, policy and human escalations -----------

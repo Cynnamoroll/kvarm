@@ -53,7 +53,7 @@ describe('operation registry', () => {
 
   it('covers every implemented operation family', () => {
     const families = new Set(OPERATIONS.map((o) => o.family));
-    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'queue', 'tasks']) {
+    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'queue', 'tasks', 'reviews', 'dependencies']) {
       expect(families, f).toContain(f);
     }
     expect(findOperation('list_tasks')).toMatchObject({ command: ['task', 'list'], method: 'GET', path: '/repos/{repo}/tasks', readOnly: true });
@@ -80,6 +80,33 @@ describe('operation registry', () => {
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
     const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40) });
     expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40) }]);
+  });
+
+  it('registers the dependency, train status and recovery operations', () => {
+    const deps = '/repos/{repo}/workspaces/{workspace}/dependencies';
+    expect(findOperation('add_dependency')).toMatchObject({ command: ['deps', 'add'], method: 'POST', path: deps, family: 'dependencies', readOnly: false });
+    expect(findOperation('list_dependencies')).toMatchObject({ command: ['deps', 'list'], method: 'GET', path: deps, readOnly: true });
+    expect(findOperation('repin_dependency')).toMatchObject({ command: ['deps', 'repin'], method: 'POST', path: `${deps}/{dependency}/repin` });
+    expect(findOperation('detach_dependency')).toMatchObject({ command: ['deps', 'detach'], method: 'DELETE', path: `${deps}/{dependency}`, destructive: true });
+    expect(findOperation('get_train')).toMatchObject({ command: ['train', 'status'], method: 'GET', path: '/repos/{repo}/train', family: 'queue', readOnly: true });
+    const sha = 'c'.repeat(40);
+    expect(buildRequest(findOperation('add_dependency')!, { repo: 'o/r', workspace: 'ab12', onWorkspace: 'cd34', revision: sha })).toEqual({
+      method: 'POST',
+      path: '/api/v1/repos/o/r/workspaces/ab12/dependencies',
+      query: '',
+      body: { onWorkspace: 'cd34', revision: sha },
+    });
+    expect(() => buildRequest(findOperation('add_dependency')!, { repo: 'o/r', workspace: 'ab12', revision: sha })).toThrow(/onWorkspace.*required/);
+    expect(buildRequest(findOperation('repin_dependency')!, { repo: 'o/r', workspace: 'ab12', dependency: 'e1', revision: sha })).toMatchObject({
+      path: '/api/v1/repos/o/r/workspaces/ab12/dependencies/e1/repin',
+      body: { revision: sha },
+    });
+    expect(buildRequest(findOperation('detach_dependency')!, { repo: 'o/r', workspace: 'ab12', dependency: 'e1' })).toMatchObject({
+      method: 'DELETE',
+      path: '/api/v1/repos/o/r/workspaces/ab12/dependencies/e1',
+      body: undefined,
+    });
+    expect(requestTarget(buildRequest(findOperation('get_train')!, { repo: 'o/r', base: 'main', limit: 5 }))).toBe('/api/v1/repos/o/r/train?base=main&limit=5');
   });
 
   it('declares every path placeholder as a path parameter and documents every parameter', () => {

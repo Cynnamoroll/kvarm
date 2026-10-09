@@ -156,6 +156,33 @@ export function parseOperationArgs(op, argv) {
 }
 
 /**
+ * The explicit recovery commands for a refusal caused by a pinned dependency.
+ *
+ * @param {string} code
+ * @param {Record<string, unknown>} body
+ * @param {Record<string, unknown>} args
+ * @returns {string | null}
+ */
+function dependencyRecovery(code, body, args) {
+  const repo = typeof args.repo === 'string' ? args.repo : '<owner/repo>';
+  if (code === 'REVISION_NOT_CURRENT' && typeof body.currentRevision === 'string') {
+    return `the source's current revision is ${body.currentRevision}; retry with --revision ${body.currentRevision}`;
+  }
+  if (!['DEPENDENCY_BROKEN', 'DEPENDENCY_STALE', 'DEPENDENCY_PENDING'].includes(code) || !Array.isArray(body.dependencies)) return null;
+  const dep = /** @type {Record<string, unknown> | undefined} */ (body.dependencies[0]);
+  if (!dep || typeof dep.id !== 'string' || typeof dep.workspaceId !== 'string') return null;
+  const at = `${repo} ${dep.workspaceId} ${dep.id}`;
+  const list = `inspect with "forge deps list ${repo} ${dep.workspaceId}"`;
+  const detach = `"forge deps detach ${at}"`;
+  if (code === 'DEPENDENCY_PENDING') return `${list}; land workspace ${dep.onWorkspace}'s change first, or ${detach}`;
+  const repin =
+    code === 'DEPENDENCY_STALE' && typeof dep.sourceHead === 'string'
+      ? `forge deps repin ${at} --revision ${dep.sourceHead}`
+      : `forge deps repin ${at} --on-workspace <live-workspace> --revision <its-head>`;
+  return `${list}, then recover explicitly: "${repin}" or ${detach}`;
+}
+
+/**
  * @param {Operation} op
  * @param {number} status
  * @param {Record<string, unknown>} body
@@ -165,6 +192,8 @@ export function parseOperationArgs(op, argv) {
 function hint(op, status, body, args, retryAfter) {
   const code = typeof body.code === 'string' ? body.code : '';
   const cmd = `forge ${op.command.join(' ')}`;
+  const recovery = dependencyRecovery(code, body, args);
+  if (recovery) return recovery;
   if (status === 401) return 'set FORGE_PAT to a valid personal access token with the api scope (or an unexpired agent token)';
   if (status === 403 && code === 'INSUFFICIENT_SCOPE') return 'the token lacks the api scope or role this needs; use a token minted with the api scope';
   if (status === 403) return `your account or token lacks the role this needs${args.repo ? ` on ${args.repo}` : ''}; ask an admin for a grant`;
@@ -193,9 +222,36 @@ export async function runOperation(op, argv, io) {
     io.stdout(commandHelp(op));
     return 0;
   }
+  const res = await callOperation(op, parsed.args, io);
+  if (res.ok) {
+    io.stdout(parsed.json ? JSON.stringify(res.data) : JSON.stringify(res.data, null, 2));
+    return 0;
+  }
+  return reportFailure(op, parsed.args, res, parsed.json, io);
+}
+
+/**
+ * @typedef {object} OperationReply
+ * @property {boolean} ok
+ * @property {number} status
+ * @property {unknown} data parsed JSON (or the raw text of a non-JSON reply)
+ * @property {string} text
+ * @property {string | null} retryAfter
+ */
+
+/**
+ * Sends one registry operation and reads its reply. Usage problems throw
+ * CliError (exit 2); an unreachable platform throws CliError (exit 1).
+ *
+ * @param {Operation} op
+ * @param {Record<string, unknown>} args
+ * @param {OpsIo} io
+ * @returns {Promise<OperationReply>}
+ */
+export async function callOperation(op, args, io) {
   let built;
   try {
-    built = buildRequest(op, parsed.args);
+    built = buildRequest(op, args);
   } catch (err) {
     if (err instanceof OperationInputError) throw new CliError(err.message, 2);
     throw err;
@@ -228,17 +284,27 @@ export async function runOperation(op, argv, io) {
   } catch {
     // non-JSON reply
   }
-  if (res.ok) {
-    io.stdout(parsed.json ? JSON.stringify(data) : JSON.stringify(data, null, 2));
-    return 0;
-  }
+  return { ok: res.ok, status: res.status, data, text, retryAfter: res.headers.get('retry-after') };
+}
+
+/**
+ * Prints a failed reply (code, cause, details and a next step) and returns exit code 1.
+ *
+ * @param {Operation} op
+ * @param {Record<string, unknown>} args
+ * @param {OperationReply} res
+ * @param {boolean} json
+ * @param {OpsIo} io
+ * @param {string} [label] the command shown in the message (default: the operation's)
+ */
+export function reportFailure(op, args, res, json, io, label = `forge ${op.command.join(' ')}`) {
+  const { data, text } = res;
   /** @type {Record<string, unknown>} */
   const body = data && typeof data === 'object' && !Array.isArray(data) ? /** @type {Record<string, unknown>} */ (data) : { error: text.slice(0, 200) };
-  if (parsed.json) io.stdout(JSON.stringify({ status: res.status, ...body }));
+  if (json) io.stdout(JSON.stringify({ status: res.status, ...body }));
   const { error, code, ...details } = body;
-  const cmd = `forge ${op.command.join(' ')}`;
-  io.stderr(`${cmd}: ${code ? `${code} ` : ''}(HTTP ${res.status}): ${typeof error === 'string' ? error : 'request failed'}`);
+  io.stderr(`${label}: ${code ? `${code} ` : ''}(HTTP ${res.status}): ${typeof error === 'string' ? error : 'request failed'}`);
   if (Object.keys(details).length > 0) io.stderr(`details: ${JSON.stringify(details)}`);
-  io.stderr(`hint: ${hint(op, res.status, body, parsed.args, res.headers.get('retry-after'))}`);
+  io.stderr(`hint: ${hint(op, res.status, body, args, res.retryAfter)}`);
   return 1;
 }

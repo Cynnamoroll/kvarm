@@ -48,6 +48,7 @@ import {
   branchPolicyBlock,
   branchRef,
   defaultMergeDeps,
+  dependencyRefusal,
   fail,
   guarded,
   headWorkspaceSelect,
@@ -65,6 +66,19 @@ import {
   type MergePolicy,
 } from './changes';
 import type { ChecksGate, RequiredChecks } from './checksGate';
+import {
+  blockFromRows,
+  changeDependenciesStatement,
+  changeNumberDependenciesStatement,
+  dependencyRowsStatement,
+  dependencyView,
+  noBlockedPinCondition,
+  settleLanded,
+  type DependencyBlock,
+  type DependencyRow,
+  type DependencyView,
+  type LandedRow,
+} from './dependencyGate';
 import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
 import { artifactsMergeSources, prepareMerge, type MergeSources, type PreparedMerge } from './merge';
@@ -94,6 +108,11 @@ export const TRAIN_LIMITS = {
   runClaimMs: 300_000,
   /** Passes per run (each pass composes at most `window` entries). */
   maxPasses: 12,
+  /**
+   * Entries a pass reads: the window plus room for entries that wait on a
+   * pinned dependency (skipped without composing, never ejected).
+   */
+  readAhead: 16,
   backoffBaseSeconds: 5,
   backoffMaxSeconds: 300,
   /** Backoff kicks for an entry before the train stops retrying on its own (a later kick resumes it). */
@@ -142,12 +161,41 @@ interface EntryRow {
   reason_code: string | null;
   reason: string | null;
   cost: string | null;
+  principal: string | null;
 }
 
 const ENTRY_COLUMNS = `q.id, q.repo_id, q.target_ref, q.seq, q.change_set_id, q.change_number, q.state, q.active, q.head_sha,
   q.merge_policy, q.enqueued_by, q.enqueuer_login, q.agent_meta, q.attribution, q.enqueued_at, q.updated_at, q.base_sha,
   q.tree_sha, q.config_id, q.checks_state, q.generation, q.attempts, q.retry_at, q.lease_generation, q.merge_commit,
-  q.previous_sha, q.reason_code, q.reason, q.cost`;
+  q.previous_sha, q.reason_code, q.reason, q.cost, q.principal`;
+
+/**
+ * Per-principal fairness of one pass's read-ahead (arrival order in, train
+ * order out). Entries already composed (preparing/checking/ready/publishing)
+ * keep their place so earlier compositions stay valid; the queued rest is
+ * ordered by (how many entries of the same principal precede it, arrival), so
+ * a burst from one principal cannot hold another principal's entry behind
+ * the whole burst. Each principal's own entries stay in arrival order, and
+ * entries beyond the read-ahead keep plain arrival order.
+ */
+export function fairOrder<T extends { seq: number; state: string; principal: string | null; id: string }>(rows: readonly T[]): T[] {
+  const inFlight = rows.filter((r) => r.state !== 'queued');
+  const seen = new Map<string, number>();
+  for (const r of inFlight) {
+    const p = r.principal ?? `entry:${r.id}`;
+    seen.set(p, (seen.get(p) ?? 0) + 1);
+  }
+  const ranked = rows
+    .filter((r) => r.state === 'queued')
+    .map((r) => {
+      const p = r.principal ?? `entry:${r.id}`;
+      const rank = seen.get(p) ?? 0;
+      seen.set(p, rank + 1);
+      return { r, rank };
+    })
+    .sort((a, b) => a.rank - b.rank || a.r.seq - b.r.seq);
+  return [...inFlight, ...ranked.map((x) => x.r)];
+}
 const RETURNING_COLUMNS = ENTRY_COLUMNS.replace(/\bq\./g, '');
 
 export interface QueueEntryView {
@@ -371,6 +419,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
     const id = crypto.randomUUID();
     const now = Date.now();
     const agent = cx.actor?.agent ? JSON.stringify({ agentId: cx.actor.agent.agentId, agentName: cx.actor.agent.agentName, tokenId: cx.actor.agent.tokenId }) : null;
+    const principal = cx.actor?.agent ? `agent:${cx.actor.agent.agentId}` : cx.actor ? `user:${cx.actor.user.id}` : null;
     const seq = now * 1000 + Math.floor(Math.random() * 1000);
     // `target` null: the branch rules are unread and the guard admits only a repo without rules.
     const tryInsert = async (target: BranchPolicy | null): Promise<EntryRow | 'full' | undefined> => {
@@ -378,13 +427,14 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
         const res = await db
           .prepare(
             `INSERT OR IGNORE INTO merge_queue (id, repo_id, target_ref, seq, change_set_id, change_number, state, active, head_sha, merge_policy,
-               enqueued_by, enqueuer_login, agent_meta, attribution, enqueued_at, updated_at, admission_capacity)
+               enqueued_by, enqueuer_login, agent_meta, attribution, enqueued_at, updated_at, admission_capacity, principal)
              SELECT ?3, c.repo_id, 'refs/heads/' || c.base_ref, ?12, c.id, c.number, 'queued', 1, c.head_sha, c.merge_policy,
-                    ?4, ?5, ?6, ?7, ?8, ?8, ?11
+                    ?4, ?5, ?6, ?7, ?8, ?8, ?11, ?15
                FROM change_sets c
               WHERE c.repo_id = ?1 AND c.number = ?2 AND c.state = 'open' AND c.merge_policy != 'draft' AND c.head_sha IS NOT NULL
                 AND (?9 IS NULL OR c.head_sha = ?9) AND (?10 IS NULL OR c.merge_policy = ?10)
                 AND ${reviewGuardCondition('c', '?13', '?14')}
+                AND ${noBlockedPinCondition('c')}
              RETURNING ${RETURNING_COLUMNS}`,
           )
           .bind(
@@ -402,6 +452,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
             seq,
             target ? target.requiredApprovals : null,
             target?.protected ? 1 : 0,
+            principal,
           )
           .all<EntryRow>();
         return res.results?.[0];
@@ -428,7 +479,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
     });
     const first = await tryInsert(null);
     if (first && first !== 'full') return admitted(first);
-    const [readRes, rulesRes] = await db.batch([
+    const [readRes, rulesRes, pinsRes] = await db.batch([
       db
         .prepare(
           `SELECT c.id AS c_id, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.base_ref AS c_base,
@@ -445,6 +496,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
              FROM branch_rules b WHERE b.repo_id = ?1 LIMIT 50`,
         )
         .bind(cx.repo.id),
+      changeNumberDependenciesStatement(db, cx.repo.id, number),
     ]);
     const row = (readRes?.results as (EnqueueReadRow & Partial<EntryRow> & ReviewFactsRow)[] | undefined)?.[0];
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
@@ -455,6 +507,9 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
     }
     const refused = refusal(row, input);
     if (refused) return refused;
+    // A stale or broken pin keeps the change out of the queue; a pending one is admitted and waits in the train.
+    const pinned = dependencyRefusal(pinsRes?.results as DependencyRow[] | undefined, 'enqueue');
+    if (pinned) return pinned;
     // Enqueue approves the head for the merge policy; it never stands in for the reviews or the human a policy requires.
     const rules = ((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow);
     const target = effectivePolicy(rules, branchRef(row.c_base));
@@ -618,6 +673,78 @@ export async function listQueue(env: Env, repo: RepoRow, q: { limit?: string; cu
   };
 }
 
+export interface TrainStatusEntry extends QueueEntryView {
+  /** Why the entry cannot publish yet because of its pins (null: nothing to wait for). */
+  waiting: { code: string; message: string; dependencies: string[] } | null;
+  dependencies: DependencyView[];
+}
+
+export interface TrainStatus {
+  entries: TrainStatusEntry[];
+  /** Every pin of the listed entries' workspaces. */
+  dependencies: DependencyView[];
+  truncated: boolean;
+  limits: QueuePage['limits'];
+}
+
+/**
+ * GET train?base=&limit= — the live train with each entry's pins and the
+ * reason it waits: one batch of two indexed reads (the active entries and
+ * their workspaces' edges); never writes and never kicks.
+ */
+export async function trainStatus(env: Env, repo: RepoRow, q: { limit?: string; base?: string }): Promise<ServiceResult<TrainStatus>> {
+  let limit = TRAIN_LIMITS.listDefault;
+  if (q.limit !== undefined) {
+    if (!/^\d{1,3}$/.test(q.limit) || Number(q.limit) < 1 || Number(q.limit) > TRAIN_LIMITS.listMax) {
+      return fail(400, `limit must be 1-${TRAIN_LIMITS.listMax}`, 'INVALID_LIMIT');
+    }
+    limit = Number(q.limit);
+  }
+  const base = q.base ? (q.base.startsWith('refs/heads/') ? q.base : branchRef(q.base)) : null;
+  const db = env.DB;
+  const live = `SELECT q.change_set_id FROM merge_queue q WHERE q.repo_id = ?1 AND q.active = 1 AND (?2 IS NULL OR q.target_ref = ?2)
+                 ORDER BY q.target_ref, q.seq LIMIT ?3`;
+  const [entriesRes, pinsRes] = await db.batch([
+    db
+      .prepare(
+        `SELECT ${ENTRY_COLUMNS} FROM merge_queue q
+          WHERE q.repo_id = ?1 AND q.active = 1 AND (?2 IS NULL OR q.target_ref = ?2)
+          ORDER BY q.target_ref, q.seq LIMIT ?3`,
+      )
+      .bind(repo.id, base, limit + 1),
+    dependencyRowsStatement(db, repo.id, { where: `w.change_set_id IN (${live})`, byChange: true }, base, limit),
+  ]);
+  const rows = ((entriesRes?.results as EntryRow[] | undefined) ?? []).slice(0, limit);
+  const pins = pinsByChange(pinsRes?.results as DependencyRow[] | undefined);
+  const all: DependencyView[] = [];
+  let pos = 0;
+  let ref: string | null = null;
+  const entries = rows.map((r): TrainStatusEntry => {
+    if (r.target_ref !== ref) {
+      ref = r.target_ref;
+      pos = 0;
+    }
+    pos += 1;
+    const edges = (pins.get(r.change_set_id) ?? []).map(dependencyView);
+    all.push(...edges);
+    const block = blockFromRows(pins.get(r.change_set_id), 'publish');
+    return {
+      ...entryView(r, pos),
+      waiting: block ? { code: block.code, message: block.error, dependencies: block.dependencies.map((d) => d.id) } : null,
+      dependencies: edges,
+    };
+  });
+  return {
+    ok: true,
+    value: {
+      entries,
+      dependencies: all,
+      truncated: (entriesRes?.results?.length ?? 0) > limit,
+      limits: { window: TRAIN_LIMITS.window, runnerCapacity: TRAIN_LIMITS.runnerCapacity, admissionCapacity: TRAIN_LIMITS.admissionCapacity },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Speculative composition
 // ---------------------------------------------------------------------------
@@ -736,8 +863,27 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
           WHERE q.repo_id = ?1 AND q.active = 1 AND q.target_ref = ?2
           ORDER BY q.seq LIMIT ?3`,
       )
-      .bind(repoId, ref, TRAIN_LIMITS.window),
+      .bind(repoId, ref, TRAIN_LIMITS.readAhead),
+    // The pins of the entries read above (their workspaces' dependency edges with their states).
+    dependencyRowsStatement(
+      db,
+      repoId,
+      { where: 'w.change_set_id IN (SELECT q.change_set_id FROM merge_queue q WHERE q.repo_id = ?1 AND q.active = 1 AND q.target_ref = ?2 ORDER BY q.seq LIMIT ?3)', byChange: true },
+      ref,
+      TRAIN_LIMITS.readAhead,
+    ),
   ];
+}
+
+function pinsByChange(rows: readonly DependencyRow[] | undefined): Map<string, DependencyRow[]> {
+  const out = new Map<string, DependencyRow[]>();
+  for (const r of rows ?? []) {
+    if (!r.ws_change_set_id) continue;
+    const list = out.get(r.ws_change_set_id) ?? [];
+    list.push(r);
+    out.set(r.ws_change_set_id, list);
+  }
+  return out;
 }
 
 interface Plan {
@@ -750,6 +896,8 @@ interface Plan {
   checks?: RequiredChecks;
   code?: string;
   message?: string;
+  /** The unresolved pin the entry waits on (it stays queued, skipped, never ejected). */
+  wait?: DependencyBlock;
   /** False when this pass's guarded write for the entry did not apply. */
   current: boolean;
 }
@@ -786,6 +934,7 @@ async function trainPass(
   rules: BranchRule[],
   ref: string,
   rows: WindowRow[],
+  pins: Map<string, DependencyRow[]>,
   pass: number,
   owner: string,
   deps: TrainDeps,
@@ -895,6 +1044,14 @@ async function trainPass(
       continue;
     }
 
+    // An unresolved pin: the entry keeps its place and waits for its source; the entries behind it go on.
+    const wait = blockFromRows(pins.get(e.change_set_id), 'publish');
+    if (wait) {
+      plan.next = 'queued';
+      plan.wait = wait;
+      continue;
+    }
+
     if (out.prepared >= TRAIN_LIMITS.window) break;
     const p = await prepareMerge(sources, {
       targetSha: base!,
@@ -948,19 +1105,35 @@ async function trainPass(
     const e = plan.e;
     if (plan.next === 'ejected' || plan.next === 'stale') continue;
     const pv = plan.prepared;
+    const waitCode = plan.wait?.code ?? null;
     const changed =
       plan.next !== e.state ||
       plan.generation !== e.generation ||
+      waitCode !== e.reason_code ||
+      (plan.wait && plan.wait.error.slice(0, 500) !== e.reason) ||
       (pv ? pv.targetSha !== e.base_sha || pv.treeSha !== e.tree_sha || plan.checks?.state !== e.checks_state : e.base_sha !== null);
     if (!changed) continue;
     push(
       plan,
       db
         .prepare(
-          `UPDATE merge_queue SET state = ?3, base_sha = ?4, tree_sha = ?5, config_id = ?6, checks_state = ?7, updated_at = ?8
+          `UPDATE merge_queue SET state = ?3, base_sha = ?4, tree_sha = ?5, config_id = ?6, checks_state = ?7, updated_at = ?8,
+                  reason_code = ?10, reason = ?11
             WHERE repo_id = ?9 AND id = ?1 AND generation = ?2 AND active = 1`,
         )
-        .bind(e.id, plan.generation, plan.next, pv?.targetSha ?? null, pv?.treeSha ?? null, plan.checks?.configId ?? null, plan.checks?.state ?? null, now, e.repo_id),
+        .bind(
+          e.id,
+          plan.generation,
+          plan.next,
+          pv?.targetSha ?? null,
+          pv?.treeSha ?? null,
+          plan.checks?.configId ?? null,
+          plan.checks?.state ?? null,
+          now,
+          e.repo_id,
+          waitCode,
+          plan.wait ? plan.wait.error.slice(0, 500) : null,
+        ),
     );
   }
   if (writes.length > 0) {
@@ -981,7 +1154,7 @@ async function trainPass(
   // Publish ready candidates from the head while each sits on the published tip.
   let tip = target;
   for (const plan of plans) {
-    if (plan.next === 'ejected' || plan.next === 'stale') continue;
+    if (plan.next === 'ejected' || plan.next === 'stale' || plan.wait) continue;
     if (plan.next !== 'ready' || !plan.prepared || !plan.current || plan.prepared.targetSha !== tip) {
       if (plan.next === 'checking' || plan.next === 'preparing') out.waiting = true;
       break;
@@ -1098,7 +1271,7 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
   const now = deps.now();
   const claimedGen = plan.generation + 1;
   const agentMeta = parseJson<{ tokenId: string }>(e.agent_meta);
-  const [claim, change, ws, facts, agentRes, rulesRes, reviewRes] = await db.batch([
+  const [claim, change, ws, facts, agentRes, rulesRes, reviewRes, pinsRes] = await db.batch([
     db
       .prepare(
         `UPDATE merge_queue SET state = 'publishing', generation = generation + 1, updated_at = ?3
@@ -1129,6 +1302,7 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
       )
       .bind(repo.id),
     reviewFactsSelectById(db, e.change_set_id),
+    changeDependenciesStatement(db, repo.id, e.change_set_id),
   ]);
   if ((claim?.results?.length ?? 0) === 0) return { kind: 'lost' };
   const fenced = { repoId: repo.id, id: e.id, generation: claimedGen };
@@ -1157,6 +1331,12 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
   // Approvals, escalations and the human requirement are revalidated for the exact head right before publication.
   const review = await reviewRefusal(env, e.change_set_id, parseReviewFacts((reviewRes?.results as ReviewFactsRow[] | undefined)?.[0]), effectivePolicy(rules, ref));
   if (review) return exit(review.code ?? 'REVIEWS_REQUIRED', review.error);
+  const wait = blockFromRows(pinsRes?.results as DependencyRow[] | undefined, 'publish');
+  if (wait) {
+    // A pin turned unresolved since the pass: back to waiting in place (the next pass records why).
+    await back('queued');
+    return { kind: 'lost' };
+  }
   const checks = await deps.gate(env).requiredChecksFor({ id: repo.id }, pv.treeSha, null);
   deps.observe?.({ type: 'checks', number: e.change_number, treeSha: pv.treeSha, baseSha: pv.targetSha, state: checks.state, leaseHeld: false, phase: 'publish' });
   const block = branchPolicyBlock(effectivePolicy(rules, ref), checks);
@@ -1208,7 +1388,14 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
   const mergedAt = deps.now();
   const cost = costDelta(start, meterSnapshot());
   const recordCost = cost ? { ...cost, d1: (cost.d1 ?? 0) + 1 } : null;
-  const [entryWrite, changeWrite] = await db.batch([
+  const record = mergedRecordStatements(
+    db,
+    repo.id,
+    { id: e.change_set_id, number: e.change_number },
+    { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha: e.head_sha },
+    mergedAt,
+  );
+  const recorded = await db.batch([
     db
       .prepare(
         `UPDATE merge_queue SET state = 'published', active = 0, merge_commit = ?3, previous_sha = ?4, lease_generation = ?5, cost = ?6,
@@ -1216,8 +1403,12 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
           WHERE repo_id = ?8 AND id = ?1 AND generation = ?2 AND state = 'publishing'`,
       )
       .bind(e.id, claimedGen, pv.mergeCommit, pv.targetSha, acq.generation, recordCost ? JSON.stringify(recordCost) : null, mergedAt, repo.id),
-    ...mergedRecordStatements(db, repo.id, { id: e.change_set_id, number: e.change_number }, { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha: e.head_sha }, mergedAt),
+    ...record,
   ]);
+  const [entryWrite, changeWrite] = recorded;
+  await settleLanded(db, artifactsMergeSources(ctx), repo.id, recorded[record.length]?.results as LandedRow[] | undefined, pv.mergeCommit, (r, reason) =>
+    deps.kick(env, repo.id, r, reason),
+  );
   if (!entryWrite?.meta.changes || !changeWrite?.meta.changes) {
     console.warn(JSON.stringify({ trainRecord: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, entry: entryWrite?.meta.changes, change: changeWrite?.meta.changes } }));
   }
@@ -1258,7 +1449,7 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
   try {
     for (let pass = 0; pass < TRAIN_LIMITS.maxPasses; pass++) {
       result.passes = pass + 1;
-      const [repoRes, rulesRes, windowRes] = await env.DB.batch(windowStatements(env.DB, repoId, ref));
+      const [repoRes, rulesRes, windowRes, pinsRes] = await env.DB.batch(windowStatements(env.DB, repoId, ref));
       const repo = (repoRes?.results as RepoRow[] | undefined)?.[0];
       const rows = (windowRes?.results as WindowRow[] | undefined) ?? [];
       if (!repo || rows.length === 0) {
@@ -1271,7 +1462,18 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
       let outcome: PassOutcome;
       try {
         outcome = await withLazyRepo(env, repo.artifacts_name, (artifacts) =>
-          trainPass(env, resolveCtx({ env, repo, waitUntil: (p) => waitUntil.push(p) }, artifacts), repo, rules, ref, rows, pass, owner, deps),
+          trainPass(
+            env,
+            resolveCtx({ env, repo, waitUntil: (p) => waitUntil.push(p) }, artifacts),
+            repo,
+            rules,
+            ref,
+            fairOrder(rows),
+            pinsByChange(pinsRes?.results as DependencyRow[] | undefined),
+            pass,
+            owner,
+            deps,
+          ),
         );
       } catch (err) {
         if (!(err instanceof RefStoreUnavailable)) throw err;

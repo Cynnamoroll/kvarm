@@ -27,6 +27,17 @@ import { effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type 
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
 import { treePairRating } from './compare';
 import {
+  blockFromRows,
+  changeDependenciesStatement,
+  changeNumberDependenciesStatement,
+  landedDependentsStatement,
+  satisfyLandedStatement,
+  settleLanded,
+  type DependencyRow,
+  type DependencyView,
+  type LandedRow,
+} from './dependencyGate';
+import {
   conflictTransition,
   conflictViews,
   markConflictedStatements,
@@ -60,6 +71,7 @@ import {
   type ReviewFactsRow,
 } from './reviewGate';
 import type { ChangeRating } from './risk';
+import { kickTrain } from './trainKick';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -302,10 +314,17 @@ export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
   checks?: RequiredChecks;
   ref?: string;
   review?: ReviewBlockDetail;
+  dependencies?: DependencyView[];
 };
 
 export function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
   return { ok: false, status, error, code, ...extra };
+}
+
+/** The pin refusal (services/dependencyGate.ts) for the rows of a change's workspace pins, or null. */
+export function dependencyRefusal(rows: readonly DependencyRow[] | undefined, mode: 'enqueue' | 'publish' = 'publish'): Fail | null {
+  const block = blockFromRows(rows, mode);
+  return block ? fail(block.status, block.error, block.code, { dependencies: block.dependencies }) : null;
 }
 
 export function resolveCtx(cx: Pick<ChangeContext, 'env' | 'repo' | 'waitUntil'>, artifacts: LazyRepo): ResolveContext {
@@ -913,6 +932,9 @@ export function mergedRecordStatements(
       .bind(repoId, row.id, mergedAt, pub.headSha, pub.mergeCommit),
     changeSignalCleanup(db, repoId, row.id),
     retireConflictTaskStatement(db, repoId, row.number, mergedAt),
+    // Pins of the landed head are satisfied with the merge; the last statement finds the rest and the waiting dependents.
+    satisfyLandedStatement(db, repoId, row.id, pub, mergedAt),
+    landedDependentsStatement(db, repoId, row.id, mergedAt),
   ];
 }
 
@@ -973,18 +995,20 @@ async function performMerge(
       // The last change read runs after every asynchronous preparation step (checks, write token, pack).
       const verdict: { refusal: Fail | null; facts: ReviewFacts | null } = { refusal: null, facts: null };
       const beforeSend = async () => {
-        const [change, ws, reviews] = await cx.env.DB.batch([
+        const [change, ws, reviews, pins] = await cx.env.DB.batch([
           changeSelect(cx.env.DB, cx.repo.id, row.number),
           headWorkspaceSelect(cx.env.DB, cx.repo.id, row.number),
           // Approvals are revalidated against the exact head immediately before publication.
           reviewFactsSelect(cx.env.DB, cx.repo.id, row.number),
+          changeDependenciesStatement(cx.env.DB, cx.repo.id, row.id),
         ]);
         const current = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
         verdict.facts = parseReviewFacts((reviews?.results as ReviewFactsRow[] | undefined)?.[0]);
         verdict.refusal =
           mergeRefusal(current, mode, headSha) ??
           workspaceAdmissionRefusal(current!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null) ??
-          reviewGate(verdict.facts, policy).block;
+          reviewGate(verdict.facts, policy).block ??
+          dependencyRefusal(pins?.results as DependencyRow[] | undefined);
         return verdict.refusal === null;
       };
       const published = await publishMerge({ pusher, gate, beforeSend }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);
@@ -1006,12 +1030,18 @@ async function performMerge(
       }
       const pv = prepared.value;
       const mergedAt = Date.now();
-      const recorded = await cx.env.DB.batch([
-        ...mergedRecordStatements(cx.env.DB, cx.repo.id, row, { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha }, mergedAt),
-        changeSelect(cx.env.DB, cx.repo.id, row.number),
-      ]);
+      const record = mergedRecordStatements(cx.env.DB, cx.repo.id, row, { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha }, mergedAt);
+      const recorded = await cx.env.DB.batch([...record, changeSelect(cx.env.DB, cx.repo.id, row.number)]);
       const update = recorded[0];
       const read = recorded[recorded.length - 1];
+      await settleLanded(
+        cx.env.DB,
+        sources,
+        cx.repo.id,
+        recorded[record.length - 1]?.results as LandedRow[] | undefined,
+        pv.mergeCommit,
+        (ref, reason) => kickTrain(cx.env, cx.repo.id, ref, reason),
+      );
       if (pv.kind === 'merge') {
         // The merge commit is Forge's own, so it carries the merging principal; a fast-forward publishes the author's commit untouched.
         await attributeMerge(cx, artifacts, pusher, { changeNumber: row.number, mergeCommit: pv.mergeCommit, input: attribution });
@@ -1082,15 +1112,24 @@ export function mergeChange(
     }
     let row: ChangeRow | null = null;
     let facts: ReviewFacts | undefined;
+    let pins: DependencyRow[] | undefined;
     if (number !== null) {
-      const [change, reviews] = await cx.env.DB.batch([changeSelect(cx.env.DB, cx.repo.id, number), reviewFactsSelect(cx.env.DB, cx.repo.id, number)]);
+      const [change, reviews, deps] = await cx.env.DB.batch([
+        changeSelect(cx.env.DB, cx.repo.id, number),
+        reviewFactsSelect(cx.env.DB, cx.repo.id, number),
+        changeNumberDependenciesStatement(cx.env.DB, cx.repo.id, number),
+      ]);
       row = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
       facts = parseReviewFacts((reviews?.results as ReviewFactsRow[] | undefined)?.[0]);
+      pins = deps?.results as DependencyRow[] | undefined;
     }
     const refused = mergeRefusal(row, 'explicit');
     if (refused || !row) return refused ?? fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const denied = agentMergeDenial(cx.actor, row.base_ref, 'merge');
     if (denied) return denied;
+    // A pinned dependency lands first: the explicit merge of a dependent waits for its source like the train does.
+    const pinned = dependencyRefusal(pins);
+    if (pinned) return pinned;
     return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
   });
 }

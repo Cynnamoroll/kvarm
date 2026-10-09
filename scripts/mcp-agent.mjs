@@ -9,7 +9,8 @@
  *   node scripts/mcp-agent.mjs call <tool> ['<json args>']
  *       one tools/call; prints the /mcp HTTP status, x-forge-cost, isError
  *       and the result JSON
- *   node scripts/mcp-agent.mjs e2e [--keep] [--only auth,registry,parity,visibility,cost,two-agent,arena,attribution,dispatch]
+ *   node scripts/mcp-agent.mjs e2e [--keep] [--api-doc <library/api.md>]
+ *         [--only auth,registry,parity,visibility,cost,two-agent,dependencies,arena,attribution,dispatch]
  *       live checks for the MCP surface (VAL-MCP-001..010, VAL-COST-017,
  *       VAL-CROSS-012, VAL-ATTR-001..006, VAL-DECISION-001..003, the repo
  *       lifecycle tools fork_repo/delete_repo/import_repo in parity,
@@ -41,6 +42,18 @@
  * enqueue_change and polls get_change until the integration train merged
  * it.
  *
+ * The registry section checks VAL-MCP-003: the 15 original tool names, a
+ * description and input schema on every tool and, with --api-doc, that
+ * tools/list equals the registry of record table in library/api.md in both
+ * directions.
+ *
+ * The dependencies scenario (VAL-CROSS-007, VAL-CLI-004) has two agents
+ * declare intents, read the forecast, pin the consumer to the interface
+ * workspace with add_dependency, enqueue the consumer first and the
+ * interface second, and watch get_train report the consumer waiting until
+ * both land in order; forecast, train, dependency reads and induced
+ * failures are compared with the REST equivalents.
+ *
  * The dispatch scenario builds three genuine src/app.ts conflicts (draft,
  * review and auto policies). Agents list, claim and complete the
  * resolve-conflict tasks through MCP after pushing a resolution (origin/main
@@ -51,7 +64,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -170,7 +183,7 @@ async function runCall(tool, rawArgs) {
 // ---------------------------------------------------------------------------
 
 async function runE2e(argv) {
-  const { values: opts } = parseArgs({ args: argv, options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } } });
+  const { values: opts } = parseArgs({ args: argv, options: { keep: { type: 'boolean', default: false }, only: { type: 'string' }, 'api-doc': { type: 'string' } } });
   const PAT = process.env.FORGE_PAT || die('FORGE_PAT is not set');
   const BOT = process.env.FORGE_PAT_BOT || '';
   const TS = Math.floor(Date.now() / 1000);
@@ -330,6 +343,20 @@ async function runE2e(argv) {
     check('registry', 'every existing repos-family route is a tool (incl. delete, fork, import)', lifecycle.every((n) => names.includes(n)), lifecycle.filter((n) => !names.includes(n)).join(',') || 'all present');
     const del = tools.find((t) => t.name === 'delete_repo');
     check('registry', 'delete_repo is annotated destructive', del?.annotations?.destructiveHint === true);
+    // VAL-MCP-003: the 15 original names, and tools/list = the library/api.md registry of record both ways.
+    const fifteen = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'list_tasks', 'claim_task', 'complete_task', 'get_attribution', 'set_attribution'];
+    check('VAL-MCP-003', 'all 15 original tool names are listed', fifteen.every((n) => names.includes(n)), fifteen.filter((n) => !names.includes(n)).join(',') || 'all 15 present');
+    const schemaless = tools.filter((t) => !(typeof t.description === 'string' && t.description.trim() && t.inputSchema?.type === 'object' && t.inputSchema.properties)).map((t) => t.name);
+    check('VAL-MCP-003', 'every tool carries a description and an input schema', schemaless.length === 0, schemaless.join(',') || `${tools.length} tools checked`);
+    if (opts['api-doc']) {
+      const documented = [...readFileSync(opts['api-doc'], 'utf8').matchAll(/^\| [a-z-]+ \| `([a-z_]+)` \| `forge [a-z-]+ [a-z-]+` \|/gm)].map((m) => m[1]);
+      const missing = documented.filter((n) => !names.includes(n));
+      const undocumented = names.filter((n) => !documented.includes(n));
+      console.log(`registry of record ${opts['api-doc']}: ${documented.length} entries; documented but not listed: ${missing.join(',') || 'none'}; listed but undocumented: ${undocumented.join(',') || 'none'}`);
+      check('VAL-MCP-003', 'tools/list equals the library/api.md registry in both directions', missing.length === 0 && undocumented.length === 0 && documented.length === names.length && fifteen.every((n) => documented.includes(n)));
+    } else {
+      console.log('(--api-doc not given: skipping the library/api.md comparison)');
+    }
   }
 
   await scenario('parity', 'public', async (repo) => {
@@ -647,6 +674,95 @@ async function runE2e(argv) {
     } finally {
       await a1.close();
       await a2.close();
+    }
+  });
+
+  // VAL-CROSS-007 and VAL-CLI-004: intent → forecast → pin → dependency-ordered publication, MCP against REST.
+  await scenario('dependencies', 'public', async (repo) => {
+    const env = await seeded(repo);
+    const iface = await connect(PAT, 'agent-interface');
+    const consumer = await connect(PAT, 'agent-consumer');
+    const restErr = (r) => ({ status: r.status, code: r.json?.code });
+    const mcpErr = (r) => ({ status: r.data?.status, code: r.data?.code });
+    try {
+      const wa = (await call(iface, 'create_workspace', { repo: env.repo, task: 'greeter interface', agent: 'agent-interface', intent: { paths: ['src/greet.ts'] } })).data;
+      const wb = (await call(consumer, 'create_workspace', { repo: env.repo, task: 'greeter consumer', agent: 'agent-consumer', intent: { paths: ['src/app.ts', 'src/greet.ts'] } })).data;
+      const ra = commitOn(env.dir, env.main, { 'src/greet.ts': 'export interface Greeter {\n  greet(name: string): string;\n}\n' }, 'greeter interface');
+      await pushRetry(env.dir, env.url, `${ra}:${wa.ref}`);
+      // The consumer builds on the interface commit.
+      const rb = commitOn(env.dir, ra, { 'src/app.ts': "import type { Greeter } from './greet';\nexport const app = (g: Greeter) => g.greet('forge');\n" }, 'greeter consumer');
+      await pushRetry(env.dir, env.url, `${rb}:${wb.ref}`);
+
+      // The forecast shows A's declared and observed match on src/greet.ts once its push is reconciled.
+      let fc = null;
+      let mine = null;
+      for (let i = 0; i < 30; i++) {
+        fc = await call(consumer, 'forecast', { repo: env.repo, paths: ['src/greet.ts'], exclude: wb.id });
+        mine = fc.data?.matches?.find((m) => m.workspace === wa.id);
+        if (mine?.matchKinds?.includes('declared') && mine.matchKinds.includes('observed')) break;
+        await sleep(2000);
+      }
+      const fcRest = await http(`${env.api}/forecast?paths=src/greet.ts&exclude=${wb.id}`);
+      console.log(`forecast (MCP) -> A ${wa.id} matchKinds=${JSON.stringify(mine?.matchKinds)} revision=${mine?.observedHeadSha} (x-forge-cost ${fc?.cost}); REST forecast -> ${fcRest.status} (x-forge-cost ${fcRest.cost})`);
+      check('VAL-CROSS-007', "the forecast shows A's declared and observed match on the interface path", !fc.isError && mine?.matchKinds?.includes('declared') && mine.matchKinds.includes('observed') && mine.observedHeadSha === ra);
+      check('VAL-CLI-004', 'forecast: MCP state = REST state', fcRest.status === 200 && eq(fc.data?.matches, fcRest.json?.matches));
+
+      // Induced failures: the same {status, code} on both surfaces.
+      const ghost = '0123456789abcdef';
+      const failures = [
+        ['pin at a stale revision', await call(consumer, 'add_dependency', { repo: env.repo, workspace: wb.id, onWorkspace: wa.id, revision: env.main }), await http(`${env.api}/workspaces/${wb.id}/dependencies`, { method: 'POST', json: { onWorkspace: wa.id, revision: env.main } })],
+        ['pin on a nonexistent source', await call(consumer, 'add_dependency', { repo: env.repo, workspace: wb.id, onWorkspace: ghost, revision: ra }), await http(`${env.api}/workspaces/${wb.id}/dependencies`, { method: 'POST', json: { onWorkspace: ghost, revision: ra } })],
+        ['list pins of a nonexistent workspace', await call(consumer, 'list_dependencies', { repo: env.repo, workspace: ghost }), await http(`${env.api}/workspaces/${ghost}/dependencies`)],
+        ['claim a nonexistent task', await call(consumer, 'claim_task', { repo: env.repo, task: ghost }), await http(`${env.api}/tasks/${ghost}/claim`, { method: 'POST', json: {} })],
+        ['dequeue a nonexistent change', await call(consumer, 'dequeue_change', { repo: env.repo, number: 9999 }), await http(`${env.api}/changes/9999/enqueue`, { method: 'DELETE' })],
+      ];
+      for (const [label, m, r] of failures) console.log(`${label}: MCP isError=${m.isError} ${m.text.slice(0, 200)} | REST ${r.status} ${r.text.slice(0, 200)}`);
+      check('VAL-CLI-004', 'induced failures: MCP isError with the same {status, code} and message as REST', failures.every(([, m, r]) => m.isError && r.status >= 400 && r.json?.code && eq(mcpErr(m), restErr(r)) && m.data?.error === r.json?.error));
+      check('VAL-CLI-004', 'the stale-revision failure names the current revision on both surfaces', failures[0][1].data?.code === 'REVISION_NOT_CURRENT' && failures[0][1].data?.currentRevision === ra && failures[0][2].json?.currentRevision === ra);
+
+      const edge = await call(consumer, 'add_dependency', { repo: env.repo, workspace: wb.id, onWorkspace: wa.id, revision: ra });
+      const edgeRest = await http(`${env.api}/workspaces/${wb.id}/dependencies`);
+      console.log(`add_dependency B→A@${ra} -> ${edge.text} (x-forge-cost ${edge.cost})`);
+      check('VAL-CROSS-007', 'B pins A at its current revision R through MCP; REST lists exactly that edge', !edge.isError && edge.data?.state === 'active' && edge.data?.revision === ra && eq(edgeRest.json?.dependencies, [edge.data]));
+
+      const ca = (await call(iface, 'create_change_set', { repo: env.repo, workspace: wa.id, title: 'greeter interface', mergePolicy: 'review' })).data;
+      const cb = (await call(consumer, 'create_change_set', { repo: env.repo, workspace: wb.id, title: 'greeter consumer', mergePolicy: 'review' })).data;
+      const qb = await call(consumer, 'enqueue_change', { repo: env.repo, number: cb.number, headSha: rb });
+      await sleep(5000);
+      const tm = await call(owner, 'get_train', { repo: env.repo });
+      const tr = await http(`${env.api}/train`);
+      const waiting = tm.data?.entries?.find((e) => e.number === cb.number);
+      console.log(`enqueue_change B #${cb?.number} -> isError=${qb.isError} ${qb.data?.entry?.state}; get_train -> B state=${waiting?.state} waiting=${JSON.stringify(waiting?.waiting)} (x-forge-cost ${tm.cost}); REST GET train -> ${tr.status} (x-forge-cost ${tr.cost})`);
+      check('VAL-CROSS-007', 'B enqueued first waits in the train with a machine-readable reason naming its pin', !qb.isError && waiting?.state === 'queued' && waiting.waiting?.code === 'DEPENDENCY_PENDING' && eq(waiting.waiting.dependencies, [edge.data?.id]));
+      // A train pass between the two reads may bump these.
+      const volatile = (t) => (t?.entries ?? []).map(({ updatedAt: _u, attempts: _a, generation: _g, ...e }) => e);
+      check('VAL-CLI-004', 'queue/status: get_train (MCP) = GET train (REST)', tr.status === 200 && eq(volatile(tm.data), volatile(tr.json)));
+      const qa = await call(iface, 'enqueue_change', { repo: env.repo, number: ca.number, headSha: ra });
+      check('VAL-CROSS-007', 'A enqueued after B', !qa.isError, qa.text.slice(0, 200));
+
+      const merged = {};
+      const t0 = Date.now();
+      while (Date.now() - t0 < 180_000 && !(merged.a && merged.b)) {
+        for (const [k, n] of [['a', ca.number], ['b', cb.number]]) {
+          if (merged[k]) continue;
+          const g = await call(owner, 'get_change', { repo: env.repo, number: n });
+          if (g.data?.state === 'merged') merged[k] = g.data;
+        }
+        await sleep(3000);
+      }
+      mustGit(['fetch', '-q', env.url, '+refs/heads/main:refs/remotes/origin/main'], env.dir);
+      const log = mustGit(['log', '--first-parent', '--format=%H %s', 'origin/main'], env.dir).split('\n');
+      const pos = (sha) => log.findIndex((l) => l.startsWith(sha ?? '-'));
+      const stat = mustGit(['diff', '--stat', env.main, 'origin/main'], env.dir);
+      const satM = await call(owner, 'list_dependencies', { repo: env.repo, workspace: wb.id });
+      const satR = await http(`${env.api}/workspaces/${wb.id}/dependencies`);
+      console.log(`poll get_change -> A ${merged.a?.mergeCommit ?? 'not merged'} B ${merged.b?.mergeCommit ?? 'not merged'} after ${Math.round((Date.now() - t0) / 1000)} s\ngit log --first-parent origin/main:\n  ${log.join('\n  ')}\ngit diff --stat ${env.main.slice(0, 10)} origin/main:\n${stat}\nlist_dependencies B -> ${satM.text}`);
+      check('VAL-CROSS-007', 'A then B published through the queue with distinct merge commits; A before B on first-parent main', merged.a && merged.b && merged.a.mergeCommit !== merged.b.mergeCommit && pos(merged.a.mergeCommit) > pos(merged.b.mergeCommit) && pos(merged.b.mergeCommit) === 0);
+      check('VAL-CROSS-007', "B's pin satisfied; the final tree has both the interface and the consumer", satM.data?.dependencies?.[0]?.state === 'satisfied' && /src\/greet\.ts/.test(stat) && /src\/app\.ts/.test(stat) && git(['merge-base', '--is-ancestor', ra, merged.b?.mergeCommit ?? 'x'], env.dir).code === 0);
+      check('VAL-CLI-004', 'dependencies: list_dependencies (MCP) = GET dependencies (REST)', satR.status === 200 && eq(satM.data, satR.json));
+    } finally {
+      await iface.close();
+      await consumer.close();
     }
   });
 

@@ -3,11 +3,13 @@ import { parseArgs } from 'node:util';
 import { findCommand } from '@forge/ops';
 import { CliError, checkout } from './checkout.js';
 import { commandHelp, commandUsage, groupCommands, operationsOverview, runOperation } from './ops.js';
+import { STATUS_HELP, runStatus } from './status.js';
 
 const USAGE = `usage: forge <command> [args]
 
 commands:
   checkout <owner/repo> <ref> <dir>   materialize <ref> into <dir> from a snapshot, or git clone
+  status <owner/repo> [--json]        read-only status: active workspaces with their pins, the train, open tasks
   help [command]                      show help (for API commands: help <group> <verb>)
 
 environment:
@@ -55,12 +57,13 @@ export async function main(argv, io) {
   const [command, ...rest] = argv;
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     const op = rest.length >= 2 ? findCommand(rest.slice(0, 2)) : undefined;
-    io.stdout(rest[0] === 'checkout' ? CHECKOUT_HELP : op ? commandHelp(op) : usage());
+    io.stdout(rest[0] === 'checkout' ? CHECKOUT_HELP : rest[0] === 'status' ? STATUS_HELP : op ? commandHelp(op) : usage());
     return command ? 0 : 2;
   }
   let label = command;
   try {
     if (command === 'checkout') return await runCheckout(rest, io);
+    if (command === 'status') return await runStatus(rest, { env: io.env, stdout: io.stdout, stderr: io.stderr, apiFetch: io.apiFetch });
     const verbs = groupCommands(command);
     if (verbs.length === 0) {
       io.stderr(`forge: unknown command "${command}"\n\n${usage()}`);

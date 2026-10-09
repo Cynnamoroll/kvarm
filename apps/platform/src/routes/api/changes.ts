@@ -15,6 +15,7 @@
  *   POST  changes/:number/enqueue       {headSha?, mergePolicy?, attribution?} → 201 new | 200 already queued
  *   DELETE changes/:number/enqueue
  *   GET   queue?limit=&cursor=&base=
+ *   GET   train?limit=&base=               live train with each entry's pins and waiting reason
  *   GET   tasks?status=&kind=&limit=&cursor=   agent tasks (resolve-conflict)
  *   GET   tasks/:id
  *   POST  tasks/:id/claim               {agent?, ttlSeconds?} → {task, workspace, lease}
@@ -134,6 +135,14 @@ changesApi.get('/repos/:owner/:repo/queue', async (c) => {
   const rd = await readContext(c);
   if ('denied' in rd) return rd.denied;
   const r = await queue.listQueue(c.env, rd.cx.repo, { limit: c.req.query('limit'), cursor: c.req.query('cursor'), base: c.req.query('base') });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+changesApi.get('/repos/:owner/:repo/train', async (c) => {
+  const rd = await readContext(c);
+  if ('denied' in rd) return rd.denied;
+  const r = await queue.trainStatus(c.env, rd.cx.repo, { limit: c.req.query('limit'), base: c.req.query('base') });
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

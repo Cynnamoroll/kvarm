@@ -275,6 +275,11 @@ describe('MCP handshake and registry', () => {
     expect(r.status).toBe(200);
     const tools = r.json.result.tools as Array<{ name: string; description: string; inputSchema: any; annotations?: any }>;
     expect(tools.map((t) => t.name)).toEqual(OPERATIONS.map((o) => o.name));
+    const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'list_tasks', 'claim_task', 'complete_task', 'get_attribution', 'set_attribution'];
+    const dependencies = ['add_dependency', 'list_dependencies', 'repin_dependency', 'detach_dependency', 'get_train'];
+    for (const n of [...original, ...dependencies]) expect(tools.map((t) => t.name), n).toContain(n);
+    expect(tools.find((t) => t.name === 'detach_dependency')!.annotations).toMatchObject({ destructiveHint: true });
+    expect([...tools.find((t) => t.name === 'add_dependency')!.inputSchema.required].sort()).toEqual(['onWorkspace', 'repo', 'revision', 'workspace']);
     for (const t of tools) {
       expect(t.description.length, t.name).toBeGreaterThan(20);
       expect(t.inputSchema.type, t.name).toBe('object');

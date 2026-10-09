@@ -21,6 +21,8 @@ let base = '';
 const seen: Seen[] = [];
 /** Next reply; reset to 200 {ok:true} after each request. */
 let reply: { status: number; body: unknown } = { status: 200, body: { ok: true } };
+/** Fixed replies by path (without the query), for commands that send several requests. */
+const byPath = new Map<string, { status: number; body: unknown }>();
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -33,8 +35,9 @@ function readBody(req: IncomingMessage): Promise<string> {
 beforeAll(async () => {
   server = createServer(async (req, res) => {
     seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization, contentType: req.headers['content-type'], body: await readBody(req) });
-    const r = reply;
-    reply = { status: 200, body: { ok: true } };
+    const routed = byPath.get((req.url ?? '').split('?')[0]!);
+    const r = routed ?? reply;
+    if (!routed) reply = { status: 200, body: { ok: true } };
     res.writeHead(r.status, { 'content-type': 'application/json' }).end(JSON.stringify(r.body));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -158,9 +161,84 @@ describe('forge operations', () => {
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/changes/3/merge', body: '' });
   });
 
+  it('maps the dependency and train commands onto their REST routes', async () => {
+    const sha = 'c'.repeat(40);
+    await forge(['deps', 'add', 'o/r', 'ab12', '--on-workspace', 'cd34', '--revision', sha]);
+    expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies' });
+    expect(JSON.parse(last().body)).toEqual({ onWorkspace: 'cd34', revision: sha });
+    await forge(['deps', 'list', 'o/r', 'ab12']);
+    expect(last()).toMatchObject({ method: 'GET', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies' });
+    await forge(['deps', 'repin', 'o/r', 'ab12', 'e1', '--revision', sha, '--on-workspace', 'ef56']);
+    expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies/e1/repin' });
+    expect(JSON.parse(last().body)).toEqual({ revision: sha, onWorkspace: 'ef56' });
+    await forge(['deps', 'detach', 'o/r', 'ab12', 'e1']);
+    expect(last()).toMatchObject({ method: 'DELETE', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies/e1', body: '' });
+    await forge(['train', 'status', 'o/r', '--base', 'main']);
+    expect(last()).toMatchObject({ method: 'GET', url: '/api/v1/repos/o/r/train?base=main' });
+  });
+
   it('works without FORGE_PAT (anonymous public reads)', async () => {
     await forge(['repo', 'get', 'o/r'], { FORGE_BASE_URL: base });
     expect(last().auth).toBeUndefined();
+  });
+});
+
+describe('forge status', () => {
+  it('composes the active workspaces with their pins, the train and the open tasks from reads only', async () => {
+    const edge = { id: 'e1', workspaceId: 'ab12', onWorkspace: 'cd34', revision: 'a'.repeat(40), state: 'active' };
+    byPath.set('/api/v1/repos/o/r/workspaces', { status: 200, body: { workspaces: [{ id: 'ab12', status: 'active' }, { id: 'cd34', status: 'active' }], nextCursor: null } });
+    byPath.set('/api/v1/repos/o/r/workspaces/ab12/dependencies', { status: 200, body: { dependencies: [edge] } });
+    byPath.set('/api/v1/repos/o/r/workspaces/cd34/dependencies', { status: 200, body: { dependencies: [] } });
+    byPath.set('/api/v1/repos/o/r/train', { status: 200, body: { entries: [{ number: 2, position: 1 }], dependencies: [edge], truncated: false } });
+    byPath.set('/api/v1/repos/o/r/tasks', { status: 200, body: { tasks: [], nextCursor: null } });
+    try {
+      const before = seen.length;
+      const r = await forge(['status', 'o/r', '--json']);
+      expect(r.code, r.stderr).toBe(0);
+      expect(r.stdout.split('\n')).toHaveLength(1);
+      const sent = seen.slice(before);
+      expect(sent.every((s) => s.method === 'GET')).toBe(true);
+      expect(sent.map((s) => s.url).sort()).toEqual(
+        [
+          '/api/v1/repos/o/r/workspaces?status=active&limit=100',
+          '/api/v1/repos/o/r/train?limit=100',
+          '/api/v1/repos/o/r/tasks?status=open&limit=100',
+          '/api/v1/repos/o/r/workspaces/ab12/dependencies',
+          '/api/v1/repos/o/r/workspaces/cd34/dependencies',
+        ].sort(),
+      );
+      expect(JSON.parse(r.stdout)).toEqual({
+        repo: 'o/r',
+        workspaces: [
+          { id: 'ab12', status: 'active', dependencies: [edge] },
+          { id: 'cd34', status: 'active', dependencies: [] },
+        ],
+        workspacesTruncated: false,
+        train: { entries: [{ number: 2, position: 1 }], dependencies: [edge], truncated: false },
+        tasks: { tasks: [], nextCursor: null },
+      });
+      const again = await forge(['status', 'o/r', '--json']);
+      expect(again.stdout).toBe(r.stdout);
+      expect((await forge(['status', '--help'], {})).stdout).toMatch(/usage: forge status <repo> \[--json\]/);
+      expect((await forge(['--help'], {})).stdout).toMatch(/\n  status <owner\/repo>/);
+    } finally {
+      byPath.clear();
+    }
+  });
+
+  it('fails with the first failing read, its code and a next step', async () => {
+    byPath.set('/api/v1/repos/o/private/workspaces', { status: 404, body: { error: 'not found', code: 'NOT_FOUND' } });
+    try {
+      const r = await forge(['status', 'o/private', '--json']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('NOT_FOUND');
+      expect(r.stderr).toContain('o/private does not exist or is private to you');
+      expect(JSON.parse(r.stdout)).toMatchObject({ status: 404, code: 'NOT_FOUND' });
+      expect(r.stdout + r.stderr).not.toContain(PAT);
+      expect((await forge(['status'])).code).toBe(2);
+    } finally {
+      byPath.clear();
+    }
   });
 });
 
@@ -195,6 +273,25 @@ describe('forge failures', () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('HEAD_MOVED');
     expect(r.stderr).toContain('"headSha":"abc"');
+  });
+
+  it('names the recovery commands for a blocked dependency and the current revision for a stale one', async () => {
+    const dep = { id: 'e1', workspaceId: 'ab12', onWorkspace: 'cd34', revision: 'a'.repeat(40), state: 'broken', sourceHead: null };
+    reply = { status: 409, body: { error: 'workspace ab12 depends on workspace cd34, which is broken', code: 'DEPENDENCY_BROKEN', dependencies: [dep] } };
+    const broken = await forge(['queue', 'add', 'o/r', '4']);
+    expect(broken.code).toBe(1);
+    expect(broken.stderr).toContain('DEPENDENCY_BROKEN');
+    expect(broken.stderr).toContain('forge deps list o/r ab12');
+    expect(broken.stderr).toContain('forge deps repin o/r ab12 e1 --on-workspace <live-workspace> --revision <its-head>');
+    expect(broken.stderr).toContain('forge deps detach o/r ab12 e1');
+    const head = 'b'.repeat(40);
+    reply = { status: 409, body: { error: 'stale', code: 'DEPENDENCY_STALE', dependencies: [{ ...dep, state: 'stale', sourceHead: head }] } };
+    expect((await forge(['change', 'merge', 'o/r', '4'])).stderr).toContain(`forge deps repin o/r ab12 e1 --revision ${head}`);
+    reply = { status: 422, body: { error: 'not the current revision', code: 'REVISION_NOT_CURRENT', currentRevision: head } };
+    const stale = await forge(['deps', 'repin', 'o/r', 'ab12', 'e1', '--revision', 'f'.repeat(40)]);
+    expect(stale.code).toBe(1);
+    expect(stale.stderr).toContain(`hint: the source's current revision is ${head}; retry with --revision ${head}`);
+    expect(broken.stderr + stale.stderr).not.toContain(PAT);
   });
 
   it('exits 2 for usage errors and names the problem', async () => {

@@ -14,6 +14,7 @@ import { reviewsApi } from './routes/api/reviews';
 import { intentsApi } from './routes/api/intents';
 import { candidatesApi } from './routes/api/candidates';
 import { workspacesApi } from './routes/api/workspaces';
+import { dependenciesApi } from './routes/api/dependencies';
 import { attributionApi } from './routes/api/attribution';
 import { handleEventBatch } from './services/events';
 import { handleMcp } from './mcp/server';
@@ -65,6 +66,7 @@ app.route('/api/v1', changesApi);
 app.route('/api/v1', reviewsApi);
 // Before workspacesApi: `workspaces/overlap` would otherwise match `workspaces/:id`.
 app.route('/api/v1', intentsApi);
+app.route('/api/v1', dependenciesApi);
 app.route('/api/v1', workspacesApi);
 app.route('/api/v1', candidatesApi);
 app.route('/api/v1', attributionApi);
