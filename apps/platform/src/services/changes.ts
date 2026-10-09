@@ -774,13 +774,18 @@ function headWorkspaceSelect(db: D1Database, repoId: string, number: number): D1
 
 /**
  * A change from a workspace branch publishes only while that workspace is
- * active and not linked to a different change set: the workspace's one
- * change set is the only way its content reaches a base.
+ * active and linked to this very change set: the workspace's one change set
+ * is the only way its content reaches a base. An unlinked workspace refuses
+ * too, because a change set row is visible to the push-event publisher
+ * before its admission links it.
  */
 function workspaceAdmissionRefusal(row: ChangeRow, ws: HeadWorkspace | null): Fail | null {
   if (!ws) return null;
   if (ws.status !== 'active') return fail(409, `the change's workspace is ${ws.status}`, 'WORKSPACE_NOT_ACTIVE');
-  if (ws.change_set_id !== null && ws.change_set_id !== row.id) {
+  if (ws.change_set_id === null) {
+    return fail(409, "the change's workspace is not linked to it; open changes from a workspace with its change-set route", 'WORKSPACE_NOT_LINKED');
+  }
+  if (ws.change_set_id !== row.id) {
     return fail(409, "the change's workspace is linked to another change set", 'WORKSPACE_LINKED_ELSEWHERE');
   }
   return null;

@@ -13,6 +13,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { getRepoById } from '../src/db/repos';
 import { deleteRepo } from '../src/repos/service';
+import { createChange, onHeadPushed, type ChangeContext } from '../src/services/changes';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
@@ -581,6 +582,51 @@ describe('workspace admission comes before automatic publication', () => {
     expect(direct.json.state).toBe('open');
     expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
     expect((await getWs('admit-send', ws.id)).json).toMatchObject({ status: 'active', changeSet: linked.json.number });
+  });
+
+  it('a push-event auto publisher running between the change insert and the workspace admission publishes nothing', async () => {
+    const { repo, main, ws, head } = await workspaceWithWork('admit-push-event');
+    const repoRow = (await getRepoById(env.DB, repoIds['admit-push-event']!))!;
+    const ctx = createExecutionContext();
+    const waitUntil = (p: Promise<unknown>) => ctx.waitUntil(p);
+    const cx: ChangeContext = { env, repo: repoRow, actor: null, branchRules: [], waitUntil };
+    const during: { detail: string; main: string | undefined }[] = [];
+    const created = await createChange(
+      cx,
+      { title: 'auto', base: 'main', head: ws.ref.slice('refs/heads/'.length), mergePolicy: 'auto' },
+      {
+        admit: async (change) => {
+          // The committed open auto change is visible to the push consumer before it is linked.
+          const r = await onHeadPushed(env, repoRow.id, [{ id: change.id, number: change.number, policy: 'auto', headSha: head }], head, waitUntil);
+          during.push({ detail: r.detail, main: repo.refs.get('refs/heads/main') });
+          const [link] = await env.DB.batch([
+            env.DB.prepare('UPDATE workspaces SET change_set_id = ?3 WHERE repo_id = ?1 AND id = ?2 AND change_set_id IS NULL').bind(repoRow.id, ws.id, change.id),
+          ]);
+          return link?.meta.changes ? null : { ok: false as const, status: 409, error: 'lost', code: 'CHANGE_SET_EXISTS' };
+        },
+      },
+    );
+    await waitOnExecutionContext(ctx);
+    expect(during).toEqual([{ detail: expect.stringMatching(/auto-merged none/), main: main.sha }]);
+    // Once admitted, the initiating request's own auto merge publishes and the linked workspace follows it.
+    expect(created.ok && created.value.state).toBe('merged');
+    expect(repo.refs.get('refs/heads/main')).toBe(head);
+    expect((await getWs('admit-push-event', ws.id)).json).toMatchObject({ status: 'merged' });
+  });
+
+  it('a change opened outside the change-set route from an unlinked workspace branch never publishes', async () => {
+    const { repo, main, ws } = await workspaceWithWork('admit-unlinked');
+    const direct = await call('POST', `/api/v1/repos/${OWNER}/admit-unlinked/changes`, tok.owner, {
+      title: 'side door',
+      base: 'main',
+      head: ws.ref.slice('refs/heads/'.length),
+      mergePolicy: 'auto',
+    });
+    expect([direct.status, direct.json.state]).toEqual([201, 'open']);
+    const merge = await call('POST', `/api/v1/repos/${OWNER}/admit-unlinked/changes/${direct.json.number}/merge`, tok.owner);
+    expect([merge.status, merge.json.code]).toEqual([409, 'WORKSPACE_NOT_LINKED']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await getWs('admit-unlinked', ws.id)).json).toMatchObject({ status: 'active', changeSet: null });
   });
 });
 

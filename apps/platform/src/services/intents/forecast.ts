@@ -322,14 +322,21 @@ export interface ForecastResponse {
 }
 
 /**
- * Active workspaces (on `base` when given, other than `exclude`) whose
- * observed index omitted changed paths. Partial index on observed_omitted.
+ * Whether workspace `w`'s observed index omits changed paths. A row
+ * reconciled before observed_omitted existed has it NULL and its omission
+ * reasons only in observed_truncated, where they come first; the only
+ * non-omission reason (collapse into prefixes) starts with the changed-path
+ * count, so any other non-null observed_truncated there is an omission.
  */
+const INDEX_INCOMPLETE = `(w.observed_omitted IS NOT NULL OR (w.observed_truncated IS NOT NULL AND w.observed_truncated NOT GLOB '[0-9]*'))`;
+const INCOMPLETE_REASON = 'COALESCE(w.observed_omitted, w.observed_truncated)';
+
+/** Active workspaces (on `base` when given, other than `exclude`) whose observed index omitted changed paths. */
 function incompleteStatement(db: D1Database, repoId: string, base: string | null, exclude: string | null): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT w.id AS workspace, w.observed_omitted AS reason FROM workspaces w
-        WHERE w.repo_id = ?1 AND w.status = 'active' AND w.observed_omitted IS NOT NULL
+      `SELECT w.id AS workspace, ${INCOMPLETE_REASON} AS reason FROM workspaces w
+        WHERE w.repo_id = ?1 AND w.status = 'active' AND ${INDEX_INCOMPLETE}
           AND (?2 IS NULL OR w.base_ref = ?2) AND (?3 IS NULL OR w.id != ?3)
         ORDER BY w.id LIMIT ${INTENT_LIMITS.incompleteListMax + 1}`,
     )
@@ -775,8 +782,8 @@ export function setOverlapStatements(db: D1Database, repoId: string, ids: readon
       .bind(repoId, members),
     db
       .prepare(
-        `SELECT w.id AS workspace, w.observed_omitted AS reason FROM workspaces w
-          WHERE w.repo_id = ?1 AND w.id IN (SELECT value FROM json_each(?2)) AND w.status = 'active' AND w.observed_omitted IS NOT NULL
+        `SELECT w.id AS workspace, ${INCOMPLETE_REASON} AS reason FROM workspaces w
+          WHERE w.repo_id = ?1 AND w.id IN (SELECT value FROM json_each(?2)) AND w.status = 'active' AND ${INDEX_INCOMPLETE}
           ORDER BY w.id`,
       )
       .bind(repoId, members),

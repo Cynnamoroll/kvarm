@@ -99,6 +99,21 @@ export function observedWriteStatements(db: D1Database, o: ObservedWrite): D1Pre
   ];
 }
 
+/**
+ * Marks a just-registered active workspace's observed set as not computed
+ * (an omission, so forecast and overlap disclose it) when the creating
+ * service could not seed it. Lands only before any push was reconciled; the
+ * next reconciled push replaces the set and its omission.
+ */
+export function observedSeedFailedStatement(db: D1Database, repoId: string, workspaceId: string, reason: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE workspaces SET observed_truncated = ?3, observed_omitted = ?3
+        WHERE repo_id = ?1 AND id = ?2 AND status = 'active' AND observed_event_at IS NULL`,
+    )
+    .bind(repoId, workspaceId, reason);
+}
+
 /** Drops a workspace's index rows once it is no longer active (abandon). Code, refs and the row's history stay. */
 export function workspaceSignalCleanup(db: D1Database, repoId: string, workspaceId: string): D1PreparedStatement {
   return db

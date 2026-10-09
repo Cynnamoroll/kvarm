@@ -597,6 +597,69 @@ describe('composition', () => {
       headSha: next,
     });
   });
+
+  it('a composed workspace whose Nexus seed read fails once discloses an incomplete index until a later push reconciles it', async () => {
+    const { a, b } = await setup('compose-seedfail', { ...BASE, 'x.txt': 'x\n' }, { ...BASE, 'y.txt': 'y\n' });
+    const repo = fakeRepos.get(`${OWNER}--compose-seedfail`)!;
+    const row = await env.DB.prepare('SELECT * FROM repos WHERE artifacts_name = ?').bind(`${OWNER}--compose-seedfail`).first<any>();
+    const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(ownerId).first<any>();
+    const failed: string[] = [];
+    const deps: ComposeDeps = {
+      ...defaultComposeDeps,
+      pusher: (e, r) => {
+        const real = defaultComposeDeps.pusher(e, r);
+        return {
+          ...real,
+          updateRef: async (u, objects) => {
+            const res = await real.updateRef(u, objects);
+            if (res.status === 'ok') {
+              // The early event is consumed before registration, then the seed's first storage read fails once.
+              await deliver('compose-seedfail', u.ref, u.oldOid, u.newOid);
+              repo.hook = async (call) => {
+                if (failed.length === 0 && call.startsWith('readCommit:')) {
+                  failed.push(call);
+                  throw new Error('storage unavailable');
+                }
+              };
+            }
+            return res;
+          },
+        };
+      },
+    };
+    const ctx = createExecutionContext();
+    const cx: ComposeContext = { env, repo: row, actor: { user, via: 'pat', scopes: FULL }, origin: ORIGIN, waitUntil: (p) => ctx.waitUntil(p) };
+    const r = await compose(cx, { workspaces: [a.id, b.id] }, deps);
+    await waitOnExecutionContext(ctx);
+    repo.hook = null;
+    expect(failed).toHaveLength(1);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ws = r.value.workspace!;
+    expect(r.value.changeSet).toEqual(expect.any(Number));
+
+    const intent = (await call('GET', `${R('compose-seedfail')}/workspaces/${ws.id}/intent`, tok.owner)).json;
+    expect(intent).toMatchObject({ observedPaths: [], observedTruncated: true, observedCurrent: false });
+    expect(intent.observedTruncatedReason).toMatch(/seed/);
+    const f = (await call('GET', `${R('compose-seedfail')}/forecast?paths=y.txt`, tok.owner)).json;
+    expect(f.matches.map((m: any) => m.workspace)).toEqual([b.id]);
+    expect(f.truncated).toBe(true);
+    expect(f.incomplete).toEqual([{ workspace: ws.id, reason: expect.stringMatching(/seed/) }]);
+    const o = (await call('GET', `${R('compose-seedfail')}/workspaces/overlap?base=main`, tok.owner)).json;
+    expect(o.truncated).toBe(true);
+    expect(o.incomplete).toEqual([{ workspace: ws.id, reason: expect.stringMatching(/seed/) }]);
+
+    // A later push reconciles the observed set and clears the disclosure.
+    const next = await push('compose-seedfail', repo, ws, r.value.commitSha, { ...BASE, 'x.txt': 'x\n', 'y.txt': 'y\n', 'z.txt': 'z\n' });
+    expect((await call('GET', `${R('compose-seedfail')}/workspaces/${ws.id}/intent`, tok.owner)).json).toMatchObject({
+      observedPaths: ['x.txt', 'y.txt', 'z.txt'],
+      headSha: next,
+      observedTruncated: false,
+    });
+    const after = (await call('GET', `${R('compose-seedfail')}/forecast?paths=y.txt`, tok.owner)).json;
+    expect(after.matches.map((m: any) => m.workspace).sort()).toEqual([b.id, ws.id].sort());
+    expect([after.truncated, after.incomplete]).toEqual([false, undefined]);
+  });
 });
 
 describe('repo delete', () => {

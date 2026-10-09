@@ -13,7 +13,7 @@ import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines, sha256Hex } from '@forge/g
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { INTENT_LIMITS, collapseObserved, normalizeDeclaration } from '../src/services/intents/paths';
-import { collectPairs } from '../src/services/intents/forecast';
+import { collectPairs, setOverlap, setOverlapStatements } from '../src/services/intents/forecast';
 import { COMPARE_BUDGETS } from '../src/services/compare';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
@@ -444,6 +444,47 @@ describe('observed index', () => {
     expect(after).toMatchObject({ truncated: false, matches: [{ workspace: other.id }] });
     expect(after.incomplete).toBeUndefined();
     expect((await overlap('omitted')).json.truncated).toBe(false);
+  });
+
+  it('an observation recorded before observed_omitted existed still discloses its omitted paths, with no new push', async () => {
+    const repo = await seedRepo('legacy-omitted');
+    const main = await based(repo, BASE_FILES);
+    const wide = (await createWs('legacy-omitted', { task: 'wide', agent: 'a' })).json;
+    const files: Files = { ...BASE_FILES };
+    for (let i = 0; i <= INTENT_LIMITS.observedMax; i++) files[`f${String(i).padStart(3, '0')}.txt`] = `${i}\n`;
+    await push('legacy-omitted', repo, wide, main.sha, files);
+    const last = `f${String(INTENT_LIMITS.observedMax).padStart(3, '0')}.txt`;
+    const collapsed = (await createWs('legacy-omitted', { task: 'collapsed', agent: 'c' })).json;
+    const genFiles: Files = { ...BASE_FILES };
+    for (let i = 0; i < INTENT_LIMITS.observedMax + 10; i++) genFiles[`gen/d${i % 3}/f${i}.ts`] = `${i}\n`;
+    await push('legacy-omitted', repo, collapsed, main.sha, genFiles);
+    const other = (await createWs('legacy-omitted', { task: 'other', agent: 'b' })).json;
+    await push('legacy-omitted', repo, other, main.sha, { ...BASE_FILES, [last]: 'other\n' });
+
+    // The pre-repair row shape: the omission reason lives only in observed_truncated.
+    await env.DB.prepare('UPDATE workspaces SET observed_omitted = NULL WHERE id IN (?, ?)').bind(wide.id, collapsed.id).run();
+    const legacy = await env.DB.prepare('SELECT observed_truncated, observed_omitted FROM workspaces WHERE id = ?').bind(wide.id).first<any>();
+    expect(legacy).toMatchObject({ observed_truncated: expect.stringMatching(/top-level/), observed_omitted: null });
+
+    const f = (await forecast('legacy-omitted', `paths=${last}&exclude=${other.id}`)).json;
+    expect(f.matches).toEqual([]);
+    expect(f.truncated).toBe(true);
+    expect(f.truncatedReason).toMatch(/incomplete/);
+    // A collapse-only observation covers every changed path and stays complete.
+    expect(f.incomplete).toEqual([{ workspace: wide.id, reason: expect.stringMatching(/top-level/) }]);
+
+    const o = await overlap('legacy-omitted');
+    expect(o.json.truncated).toBe(true);
+    expect(o.json.incomplete).toEqual([{ workspace: wide.id, reason: expect.stringMatching(/top-level/) }]);
+    expect(o.cost).toMatchObject({ d1: 2, art: 0, do: 0 });
+
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE artifacts_name = ?').bind(`${OWNER}--legacy-omitted`).first<{ id: string }>())!.id;
+    const members = [wide.id, collapsed.id, other.id];
+    const set = setOverlap(members, await env.DB.batch(setOverlapStatements(env.DB, repoId, members)));
+    expect(set.truncated).toBe(true);
+    expect(set.truncatedReason).toContain(`the observed index of ${wide.id} is incomplete`);
+    const complete = setOverlap([collapsed.id, other.id], await env.DB.batch(setOverlapStatements(env.DB, repoId, [collapsed.id, other.id])));
+    expect(complete.truncatedReason ?? '').not.toMatch(/incomplete/);
   });
 
   it('a spent tree-walk budget is disclosed as an incomplete index', async () => {

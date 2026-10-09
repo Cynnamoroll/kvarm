@@ -23,6 +23,7 @@ import { credentialMayUpdateRef } from './authz';
 import { CHANGE_LIMITS, MERGE_POLICIES, mergeAuthor, normalizeBranch } from './changes';
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
 import { reconcileObserved } from './intents/forecast';
+import { observedSeedFailedStatement } from './intents/store';
 import { normalizePath } from './intents/paths';
 import { FORGE_COMMITTER, MERGE_BUDGETS, artifactsMergeSources } from './merge';
 import { RefStoreUnavailable, lsRefs, readCommitInfo, type ResolveContext } from './refs';
@@ -386,7 +387,8 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
 
     // The ref's push event may be consumed before the row below exists and is then skipped by the
     // intent index, so the registration seeds the observed set itself (guarded against newer pushes).
-    let observed: D1PreparedStatement[] = [];
+    // A failed seed is recorded as an omission so forecasts disclose it until a push reconciles the set.
+    let observed: D1PreparedStatement[];
     try {
       observed = (
         await reconcileObserved(cx.env, {
@@ -400,6 +402,14 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
       ).statements;
     } catch (err) {
       console.warn(JSON.stringify({ composeObservedSeed: String(err).slice(0, 200) }));
+      observed = [
+        observedSeedFailedStatement(
+          db,
+          cx.repo.id,
+          id,
+          'observed set not computed: the composed workspace seed read failed; the next push to the workspace reconciles it',
+        ),
+      ];
     }
 
     const now = Date.now();
