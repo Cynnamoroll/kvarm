@@ -31,14 +31,7 @@ function git(args: string[], input?: Uint8Array | string): string {
     cwd: dir,
     input,
     maxBuffer: 64 * 1024 * 1024,
-    env: {
-      ...process.env,
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_AUTHOR_NAME: 't',
-      GIT_AUTHOR_EMAIL: 't@example.test',
-      GIT_COMMITTER_NAME: 't',
-      GIT_COMMITTER_EMAIL: 't@example.test',
-    },
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' },
   });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr.toString()}`);
   return r.stdout.toString();

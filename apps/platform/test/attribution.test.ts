@@ -357,8 +357,7 @@ describe('decisions and context', () => {
       const byPath = await context('decide', `path=${encodeURIComponent(p)}`);
       expect(byPath.json.decisions).toEqual([r.json]);
     }
-    // Several paths in one query: comma-separated or repeated, one entry per decision.
-    expect((await context('decide', `path=${decision.paths.join(',')}`)).json.decisions).toEqual([r.json]);
+    // Several paths in one query: repeated path parameters, one entry per decision.
     expect((await context('decide', decision.paths.map((p) => `path=${p}`).join('&'))).json.decisions).toEqual([r.json]);
 
     // A paths-only decision (no task) is found by path; unknown task and path return empty lists.
@@ -389,7 +388,7 @@ describe('decisions and context', () => {
     }
     const q: Array<[string, string]> = [
       ['', 'CONTEXT_QUERY_REQUIRED'],
-      [`path=${Array.from({ length: 21 }, (_, i) => `p${i}`).join(',')}`, 'TOO_MANY_PATHS'],
+      [Array.from({ length: 21 }, (_, i) => `path=p${i}`).join('&'), 'TOO_MANY_PATHS'],
       ['task=x&limit=0', 'INVALID_LIMIT'],
       ['task=x&limit=51', 'INVALID_LIMIT'],
       ['task=x&cursor=garbage', 'INVALID_CURSOR'],
@@ -432,6 +431,86 @@ describe('decisions and context', () => {
     expect(all.json.decisions).toHaveLength(5);
     expect(all.cost.d1).toBeLessThanOrEqual(2);
     expect(all.cost.do).toBe(0);
+  });
+
+  it('round-trips literal comma-containing paths: a path value is never split', async () => {
+    await seedRepo('decide-comma');
+    const comma = await decide('decide-comma', { paths: ['src/a,b.ts'], chosen: 'ws-1', rejected: [], reason: 'comma path' });
+    expect(comma.status).toBe(201);
+    expect(comma.json.paths).toEqual(['src/a,b.ts']);
+    const a = await decide('decide-comma', { paths: ['src/a'], chosen: 'ws-2', rejected: [], reason: 'one half of the split' });
+    const b = await decide('decide-comma', { paths: ['b.ts'], chosen: 'ws-3', rejected: [], reason: 'other half of the split' });
+    for (const q of ['path=src%2Fa%2Cb.ts', 'path=src/a,b.ts']) {
+      const r = await context('decide-comma', q);
+      expect(r.status, q).toBe(200);
+      expect(r.json.decisions, q).toEqual([comma.json]);
+    }
+    expect((await context('decide-comma', 'path=src/a')).json.decisions).toEqual([a.json]);
+    const both = await context('decide-comma', 'path=src%2Fa%2Cb.ts&path=b.ts');
+    expect(both.json.decisions.map((d: { id: string }) => d.id).sort()).toEqual([comma.json.id, b.json.id].sort());
+  });
+
+  it('bounds the context query by the page size, not the history, across several paths', async () => {
+    await seedRepo('decide-history');
+    const repoId = repoIds['decide-history']!;
+    const N = 3000;
+    const t0 = Date.UTC(2026, 0, 1);
+    // Decision i: at = t0 + floor(i/2) (pairs tie on `at`, ordered by id), id h<i>, so newest-first is i descending.
+    // Every 11th names only an unrequested path; every 4th also carries a task.
+    await env.DB.prepare(
+      `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < ${N - 1})
+       INSERT INTO agent_decisions (id, repo_id, task_id, paths, chosen_candidate, rejected_candidates, reason, actor, agent_id, agent_name, at)
+       SELECT printf('h%06d', i), ?1, CASE WHEN i % 4 = 0 THEN 'hist-task' END,
+              CASE WHEN i % 11 = 0 THEN '["hist/z.ts"]' WHEN i % 5 = 0 THEN '["hist/a.ts","hist/b.ts"]'
+                   WHEN i % 2 = 0 THEN '["hist/a.ts"]' ELSE '["hist/b.ts"]' END,
+              'c', '[]', 'r', ?2, NULL, NULL, ?3 + i / 2
+         FROM n`,
+    )
+      .bind(repoId, OWNER, t0)
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO agent_decision_paths (decision_id, repo_id, path, at)
+       SELECT d.id, d.repo_id, j.value, d.at FROM agent_decisions d, json_each(d.paths) j WHERE d.repo_id = ?1`,
+    )
+      .bind(repoId)
+      .run();
+    const id = (i: number) => `h${String(i).padStart(6, '0')}`;
+    const newestFirst = (match: (i: number) => boolean) =>
+      Array.from({ length: N }, (_, k) => N - 1 - k)
+        .filter(match)
+        .map(id);
+
+    // [query, index branches, expected ids newest first]
+    const cases: Array<[string, number, string[]]> = [
+      ['path=hist/a.ts&path=hist/b.ts', 2, newestFirst((i) => i % 11 !== 0)],
+      ['task=hist-task&path=hist/a.ts&path=hist/b.ts&path=hist/none.ts', 4, newestFirst((i) => i % 11 !== 0 || i % 4 === 0)],
+    ];
+    // rows_read also counts the bounded sorts of each branch, the union and the hydration, so a page
+    // costs a small multiple of branches x (limit + 1); a history-sized plan reads every matching
+    // path row (over three thousand here) on every page.
+    const pageBound = (branches: number, limit: number) => 5 * branches * (limit + 1) + 2 * (limit + 1) + 20;
+    for (const [q, branches, expected] of cases) {
+      const first = await context('decide-history', `${q}&limit=1`);
+      expect(first.json.decisions.map((d: { id: string }) => d.id), q).toEqual([expected[0]]);
+      expect(first.json.truncated).toBe(true);
+      expect(first.cost.d1).toBeLessThanOrEqual(2);
+      expect(first.cost.rr, q).toBeLessThanOrEqual(pageBound(branches, 1));
+
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      let maxRows = 0;
+      let pages = 0;
+      do {
+        const r: Reply = await context('decide-history', `${q}&limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+        expect(r.status).toBe(200);
+        seen.push(...r.json.decisions.map((d: { id: string }) => d.id));
+        maxRows = Math.max(maxRows, r.cost.rr);
+        cursor = r.json.nextCursor;
+        pages++;
+      } while (cursor && pages < 200);
+      expect(seen, q).toEqual(expected);
+      expect(maxRows, q).toBeLessThanOrEqual(pageBound(branches, 50));
+    }
   });
 
   it('is permission-checked by the shared authority', async () => {

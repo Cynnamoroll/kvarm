@@ -196,6 +196,35 @@ function principalResponse(pat: PATInfo | null): Response | null {
   return null;
 }
 
+/**
+ * The body's bytes, or null once more than `max` bytes have arrived. Counts
+ * incoming bytes as they stream in, so a body without Content-Length (or with
+ * a false one) is never buffered past the cap; the rest is cancelled unread.
+ */
+async function readBodyCapped(stream: ReadableStream<Uint8Array> | null, max: number): Promise<Uint8Array | null> {
+  if (!stream) return new Uint8Array(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
 export async function handleMcp(request: Request, env: Env, dispatch: Dispatch): Promise<Response> {
   if (request.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'method not allowed; POST JSON-RPC to /mcp', code: 'METHOD_NOT_ALLOWED' }), {
@@ -212,11 +241,11 @@ export async function handleMcp(request: Request, env: Env, dispatch: Dispatch):
 
   const length = Number(request.headers.get('content-length') ?? '0');
   if (length > MAX_BODY_BYTES) return jsonRpcError(413, -32600, 'request body too large');
-  const raw = await request.text();
-  if (raw.length > MAX_BODY_BYTES) return jsonRpcError(413, -32600, 'request body too large');
+  const bytes = await readBodyCapped(request.body, MAX_BODY_BYTES);
+  if (!bytes) return jsonRpcError(413, -32600, 'request body too large');
   let body: unknown;
   try {
-    body = JSON.parse(raw);
+    body = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
     return jsonRpcError(400, -32700, 'Parse error: invalid JSON');
   }

@@ -115,6 +115,62 @@ async function tool(name: string, args: Record<string, unknown>, token = tok.own
   return { status: r.status, isError: result.isError === true, data, cost: r.cost };
 }
 
+interface Streamed {
+  stream: ReadableStream<Uint8Array>;
+  pulled: () => number;
+  cancelled: () => boolean;
+}
+
+/** A pull-driven body: chunks are produced only as the server reads them. */
+function streamOf(parts: Iterable<Uint8Array>): Streamed {
+  const it = parts[Symbol.iterator]();
+  let pulled = 0;
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(c) {
+        const n = it.next();
+        if (n.done) {
+          c.close();
+          return;
+        }
+        pulled += n.value.byteLength;
+        c.enqueue(n.value);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { stream, pulled: () => pulled, cancelled: () => cancelled };
+}
+
+function* chunked(bytes: Uint8Array, size: number): Generator<Uint8Array> {
+  for (let i = 0; i < bytes.byteLength; i += size) yield bytes.slice(i, i + size);
+}
+
+/** POST /mcp with a streamed body and no Content-Length. */
+async function mcpStream(s: Streamed, token = tok.owner): Promise<{ status: number; json: any }> {
+  const ctx = createExecutionContext();
+  const req = new Request(`${ORIGIN}/mcp`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json', ...ACCEPT },
+    body: s.stream,
+  });
+  expect(req.headers.get('content-length')).toBeNull();
+  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+  const text = await res.text();
+  await waitOnExecutionContext(ctx);
+  let json: any = text;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // non-JSON body
+  }
+  return { status: res.status, json };
+}
+
 const R = (repo: string) => `/repos/${OWNER}/${repo}`;
 const shas: Record<string, string> = {};
 
@@ -158,6 +214,42 @@ describe('POST /mcp authentication', () => {
     const call = await mcp(rpc('tools/call', { name: 'get_repo', arguments: { repo: `${OWNER}/main-repo` } }), tok.gitOnly);
     expect(call.status).toBe(403);
     expect(JSON.stringify(call.json)).not.toContain('defaultBranch');
+  });
+
+  it('counts incoming bytes, not characters: a chunked multibyte body over 1 MiB without Content-Length is 413', async () => {
+    // 600,000 two-byte characters: about 1.2 MB of UTF-8 but only 600 k UTF-16 code units.
+    const json = JSON.stringify(rpc('tools/list', { pad: 'é'.repeat(600_000) }));
+    const s = streamOf(chunked(new TextEncoder().encode(json), 65_536));
+    const r = await mcpStream(s);
+    expect(r.status).toBe(413);
+    expect(r.json).toEqual({ jsonrpc: '2.0', error: { code: -32600, message: 'request body too large' }, id: null });
+  });
+
+  it('stops reading an oversized chunked body at the cap and cancels the stream', async () => {
+    const CHUNK = 64 * 1024;
+    const prefix = new TextEncoder().encode('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"');
+    const filler = new Uint8Array(CHUNK).fill(0x61);
+    const s = streamOf(
+      (function* () {
+        yield prefix;
+        for (let i = 0; i < 128; i++) yield filler; // 8 MiB, never terminated
+      })(),
+    );
+    const r = await mcpStream(s);
+    expect(r.status).toBe(413);
+    expect(s.pulled()).toBeLessThanOrEqual(1024 * 1024 + 2 * CHUNK);
+    expect(s.cancelled()).toBe(true);
+  });
+
+  it('accepts a chunked body without Content-Length whose multibyte characters straddle chunk boundaries', async () => {
+    const reason = 'naïve café: 漢字 and 🚀 survive byte-sized chunks';
+    const json = JSON.stringify(
+      rpc('tools/call', { name: 'record_decision', arguments: { repo: `${OWNER}/main-repo`, task: 'utf8', chosen: 'ws-1', rejected: [], reason } }),
+    );
+    const r = await mcpStream(streamOf(chunked(new TextEncoder().encode(json), 1)));
+    expect(r.status).toBe(200);
+    expect(r.json.result.isError).toBeUndefined();
+    expect(JSON.parse(r.json.result.content[0].text)).toMatchObject({ task: 'utf8', reason });
   });
 
   it('answers 405 for GET and DELETE (stateless server, no SSE stream)', async () => {
@@ -307,6 +399,40 @@ describe('MCP tools match REST', () => {
       expect(t.isError, name).toBe(true);
       expect(t.data, name).toEqual({ status: 404, error: 'not found', code: 'NOT_FOUND' });
     }
+  });
+
+  it('record_decision and get_context keep commas inside paths, like REST', async () => {
+    await seedRepo('comma');
+    const repo = `${OWNER}/comma`;
+    const rec = await tool('record_decision', { repo, paths: ['src/a,b.ts'], chosen: 'ws-1', rejected: [], reason: 'comma path' });
+    expect(rec.isError, JSON.stringify(rec.data)).toBe(false);
+    expect(rec.data.paths).toEqual(['src/a,b.ts']);
+    const half = await tool('record_decision', { repo, paths: ['src/a'], chosen: 'ws-2', rejected: [], reason: 'one half of the split' });
+    const got = await tool('get_context', { repo, path: ['src/a,b.ts'] });
+    expect(got.data).toEqual({ decisions: [rec.data], truncated: false, nextCursor: null });
+    expect((await rest('GET', `${R('comma')}/context?path=${encodeURIComponent('src/a,b.ts')}`)).json).toEqual(got.data);
+    expect((await tool('get_context', { repo, path: ['src/a'] })).data.decisions).toEqual([half.data]);
+  });
+
+  it('delete_repo, fork_repo and import_repo reach the existing repository lifecycle routes', async () => {
+    await seedRepo('doomed');
+    const repo = `${OWNER}/doomed`;
+    const denied = await tool('delete_repo', { repo }, tok.outsider);
+    expect(denied).toMatchObject({ isError: true, data: { status: 404, error: 'not found', code: 'NOT_FOUND' } });
+
+    const fork = await tool('fork_repo', { repo, name: 'bad name!' });
+    const restFork = await rest('POST', `${R('doomed')}/forks`, tok.owner, { name: 'bad name!' });
+    expect(restFork.status).toBe(400);
+    expect(fork).toMatchObject({ isError: true, data: { status: 400, ...restFork.json } });
+
+    const imp = await tool('import_repo', { url: 'http://example.test/src.git', name: 'src' });
+    const restImp = await rest('POST', '/import', tok.owner, { url: 'http://example.test/src.git', name: 'src' });
+    expect(restImp.status).toBe(400);
+    expect(imp).toMatchObject({ isError: true, data: { status: 400, ...restImp.json } });
+
+    const del = await tool('delete_repo', { repo });
+    expect(del).toMatchObject({ isError: false, data: { deleted: true } });
+    expect((await rest('GET', R('doomed'))).status).toBe(404);
   });
 
   it('compose_candidates returns the composed commit as the new workspace head', async () => {

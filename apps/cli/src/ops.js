@@ -48,7 +48,8 @@ export function commandUsage(op) {
 export function commandHelp(op) {
   const rows = op.params.map((p) => {
     const left = p.positional ? `<${p.name}>` : `--${kebab(p.name)}${p.type === 'boolean' ? '' : ` ${placeholder(p)}`}`;
-    const extra = p.type === 'string[]' ? ' (repeat the flag or separate with commas)' : '';
+    const extra =
+      p.type !== 'string[]' ? '' : p.literal ? ' (repeat the flag once per path; commas are part of the path)' : ' (repeat the flag or separate with commas)';
     return `  ${left.padEnd(28)} ${p.description}${p.required && !p.positional ? ' (required)' : ''}${extra}`;
   });
   rows.push(`  ${'--json'.padEnd(28)} print the reply as one line of JSON (default: indented JSON)`);
@@ -106,7 +107,8 @@ export function parseOperationArgs(op, argv) {
         return;
       case 'string[]': {
         const list = /** @type {string[]} */ (args[p.name] ?? []);
-        list.push(...raw.split(',').filter((s) => s.length > 0));
+        if (p.literal) list.push(raw);
+        else list.push(...raw.split(',').filter((s) => s.length > 0));
         args[p.name] = list;
         return;
       }

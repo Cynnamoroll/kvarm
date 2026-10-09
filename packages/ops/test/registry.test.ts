@@ -111,6 +111,38 @@ describe('buildRequest', () => {
     expect(r.query).toBe('paths=a.ts%2Csrc%2F');
   });
 
+  it('sends literal path lists as one repeated parameter per path, so commas stay part of a path', () => {
+    const ctx = buildRequest(op('get_context'), { repo: 'o/r', path: ['src/a,b.ts', 'c.md'] });
+    expect(ctx.query).toBe('path=src%2Fa%2Cb.ts&path=c.md');
+    expect(new URLSearchParams(ctx.query).getAll('path')).toEqual(['src/a,b.ts', 'c.md']);
+    const rec = buildRequest(op('record_decision'), { repo: 'o/r', paths: ['src/a,b.ts'], chosen: 'c', rejected: [], reason: 'r' });
+    expect(rec.body).toMatchObject({ paths: ['src/a,b.ts'] });
+    expect(op('get_context').params.find((p) => p.name === 'path')?.literal).toBe(true);
+    expect(op('record_decision').params.find((p) => p.name === 'paths')?.literal).toBe(true);
+  });
+
+  it('registers the existing repository lifecycle routes as thin entries', () => {
+    const del = op('delete_repo');
+    expect(del).toMatchObject({ command: ['repo', 'delete'], family: 'repos', method: 'DELETE', path: '/repos/{repo}', destructive: true, readOnly: false });
+    expect(buildRequest(del, { repo: 'o/r' })).toEqual({ method: 'DELETE', path: '/api/v1/repos/o/r', query: '', body: undefined });
+
+    const fork = op('fork_repo');
+    expect(fork).toMatchObject({ command: ['repo', 'fork'], family: 'repos', method: 'POST', path: '/repos/{repo}/forks' });
+    expect(buildRequest(fork, { repo: 'o/r', name: 'r2' })).toEqual({ method: 'POST', path: '/api/v1/repos/o/r/forks', query: '', body: { name: 'r2' } });
+    expect(buildRequest(fork, { repo: 'o/r' }).body).toBeUndefined();
+
+    const imp = op('import_repo');
+    expect(imp).toMatchObject({ command: ['repo', 'import'], family: 'repos', method: 'POST', path: '/import' });
+    expect(imp.params.find((p) => p.name === 'url')).toMatchObject({ in: 'body', required: true, positional: true });
+    expect(buildRequest(imp, { url: 'https://example.test/x.git', name: 'x', branch: 'main', visibility: 'public' })).toEqual({
+      method: 'POST',
+      path: '/api/v1/import',
+      query: '',
+      body: { url: 'https://example.test/x.git', name: 'x', branch: 'main', visibility: 'public' },
+    });
+    expect(() => buildRequest(imp, { url: 'https://example.test/x.git', visibility: 'internal' })).toThrow(/visibility.*one of/);
+  });
+
   it('collects body parameters into one JSON object', () => {
     const r = buildRequest(op('create_workspace'), { repo: 'o/r', task: 'fix it', agent: 'bot', intent: { paths: ['a'] } });
     expect(r.method).toBe('POST');
@@ -132,7 +164,7 @@ describe('buildRequest', () => {
     expect(set).toMatchObject({ method: 'POST', path: `/api/v1/repos/o/r/commits/${sha}/attribution`, body: { agent: 'a', session: 's', promptHash: 'h', model: 'm' } });
     expect(requestTarget(buildRequest(op('get_attribution'), { repo: 'o/r', sha }))).toBe(`/api/v1/repos/o/r/commits/${sha}/attribution`);
     const ctx = buildRequest(op('get_context'), { repo: 'o/r', task: 't1', path: ['src/a.ts', 'b.md'], limit: 5 });
-    expect(requestTarget(ctx)).toBe('/api/v1/repos/o/r/context?task=t1&path=src%2Fa.ts%2Cb.md&limit=5');
+    expect(requestTarget(ctx)).toBe('/api/v1/repos/o/r/context?task=t1&path=src%2Fa.ts&path=b.md&limit=5');
     const rec = buildRequest(op('record_decision'), { repo: 'o/r', task: 't1', paths: ['a'], chosen: 'c1', rejected: ['c2', { id: 'c3', reason: 'r' }], reason: 'why' });
     expect(rec).toMatchObject({ method: 'POST', path: '/api/v1/repos/o/r/decisions', body: { task: 't1', paths: ['a'], chosen: 'c1', rejected: ['c2', { id: 'c3', reason: 'r' }], reason: 'why' } });
     expect(findCommand(['attribution', 'set'])?.name).toBe('set_attribution');

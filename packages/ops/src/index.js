@@ -24,6 +24,8 @@
  * @property {boolean} [positional] CLI positional argument (in declaration order) instead of a --flag
  * @property {readonly string[]} [enum]
  * @property {'repo'} [format] `owner/name`, expanded to two encoded path segments
+ * @property {boolean} [literal] `string[]` whose items may contain commas (Git paths): sent as one repeated
+ *   query parameter per item, and the CLI takes one item per repeated flag without splitting on commas
  *
  * @typedef {'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'} HttpMethod
  *
@@ -178,6 +180,39 @@ export const OPERATIONS = Object.freeze([
       REPO,
       body('description', 'string', 'New description'),
       body('visibility', 'string', 'public or private', { enum: ['public', 'private'] }),
+    ],
+  }),
+  define({
+    name: 'delete_repo',
+    command: ['repo', 'delete'],
+    family: 'repos',
+    description: 'Delete a repository with its git data, workspaces, changes and snapshots. Needs the admin role; agent tokens are refused.',
+    method: 'DELETE',
+    path: '/repos/{repo}',
+    params: [REPO],
+    destructive: true,
+  }),
+  define({
+    name: 'fork_repo',
+    command: ['repo', 'fork'],
+    family: 'repos',
+    description: 'Fork a repository you can read into a new private repository owned by you. Agent tokens are refused.',
+    method: 'POST',
+    path: '/repos/{repo}/forks',
+    params: [REPO, body('name', 'string', 'Fork name (default <name>-fork)')],
+  }),
+  define({
+    name: 'import_repo',
+    command: ['repo', 'import'],
+    family: 'repos',
+    description: 'Import an HTTPS git remote into a new repository owned by you (status importing). Agent tokens are refused.',
+    method: 'POST',
+    path: '/import',
+    params: [
+      body('url', 'string', 'HTTPS git remote to import', { required: true, positional: true }),
+      body('name', 'string', 'Repository name (default: the last segment of the URL)'),
+      body('branch', 'string', 'Branch to import (optional)'),
+      body('visibility', 'string', 'public or private (default private)', { enum: ['public', 'private'] }),
     ],
   }),
 
@@ -807,7 +842,7 @@ export const OPERATIONS = Object.freeze([
     params: [
       REPO,
       body('task', 'string', 'Task id the decision belongs to (task and/or paths)'),
-      body('paths', 'string[]', 'Repository paths the decision covers (at most 100)'),
+      body('paths', 'string[]', 'Repository paths the decision covers (at most 100)', { literal: true }),
       body('chosen', 'string', 'Chosen candidate, workspace or change id', { required: true }),
       body('rejected', 'json', 'Rejected candidates: ids or {id, reason} objects (at most 50)', { required: true }),
       body('reason', 'string', 'Why the chosen candidate won', { required: true }),
@@ -824,7 +859,7 @@ export const OPERATIONS = Object.freeze([
     params: [
       REPO,
       query('task', 'string', 'Task id'),
-      query('path', 'string[]', 'Repository paths (at most 20)'),
+      query('path', 'string[]', 'Repository paths (at most 20)', { literal: true }),
       LIMIT(50),
       CURSOR,
     ],
@@ -983,7 +1018,8 @@ export function buildRequest(op, args) {
       const segment = p.format === 'repo' ? s.split('/').map(encodeURIComponent).join('/') : encodeURIComponent(s);
       path = path.replace(`{${p.name}}`, segment);
     } else if (p.in === 'query') {
-      search.set(p.name, Array.isArray(v) ? v.join(',') : String(v));
+      if (Array.isArray(v) && p.literal) for (const item of v) search.append(p.name, item);
+      else search.set(p.name, Array.isArray(v) ? v.join(',') : String(v));
     } else {
       json[p.name] = v;
       hasBody = true;

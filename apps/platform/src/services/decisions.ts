@@ -189,7 +189,7 @@ export async function recordDecision(cx: DecisionContext, input: unknown): Promi
 
 export interface ContextQuery {
   task?: string | undefined;
-  /** Raw `path` query values; each may hold several comma-separated paths. */
+  /** Raw `path` query values, one literal path each (commas belong to the path). */
   paths?: string[];
   limit?: string | undefined;
   cursor?: string | undefined;
@@ -217,7 +217,7 @@ export async function readContext(cx: DecisionContext, q: ContextQuery): Promise
   const task = q.task && q.task.length > 0 ? q.task : null;
   if (task !== null && task.length > L.taskMax) return fail(400, 'INVALID_TASK', `task is at most ${L.taskMax} characters`);
   const paths: string[] = [];
-  for (const raw of (q.paths ?? []).flatMap((p) => p.split(','))) {
+  for (const raw of q.paths ?? []) {
     if (raw === '') continue;
     const norm = raw.length <= L.pathMax ? normalizeRepoPath(raw) : null;
     if (!norm) return fail(400, 'INVALID_PATH', `invalid path ${JSON.stringify(raw).slice(0, 120)}`);
@@ -227,7 +227,7 @@ export async function readContext(cx: DecisionContext, q: ContextQuery): Promise
     }
   }
   if (task === null && paths.length === 0) {
-    return fail(400, 'CONTEXT_QUERY_REQUIRED', 'name a task (task=) and/or paths (path=a,b or repeated path=)');
+    return fail(400, 'CONTEXT_QUERY_REQUIRED', 'name a task (task=) and/or paths (one path= parameter per path)');
   }
   let limit: number = L.pageDefault;
   if (q.limit !== undefined && q.limit !== '') {
@@ -241,32 +241,36 @@ export async function readContext(cx: DecisionContext, q: ContextQuery): Promise
     if (!after) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this endpoint');
   }
 
-  // Each branch walks its own index (task, or path) in (at, id) order and stops after one page plus one;
-  // the union is re-ordered and capped. A decision's path rows share its `at`, so DISTINCT dedupes them.
-  const page = after ? 'AND (at < ?3 OR (at = ?3 AND id < ?4))' : '';
-  const pathPage = after ? 'AND (p.at < ?3 OR (p.at = ?3 AND p.decision_id < ?4))' : '';
+  // One branch for the task and one per path, each an equality seek on its own (repo, key, at DESC, id DESC)
+  // index that stops after one page plus one. Only those at most (branches x (limit + 1)) candidates are
+  // unioned (a decision's path rows share its `at`, so UNION dedupes them), ordered and capped, and only
+  // the selected ids are hydrated by primary key (CROSS JOIN keeps the selection as the outer loop, so the
+  // planner cannot drive the read from the repo's whole decision index instead). The row-value cursor
+  // seeks the index at the previous page's last (at, id) rather than filtering from the newest entry.
+  const cap = limit + 1;
+  const page = after ? 'AND (at, id) < (?3, ?4)' : '';
+  const pathPage = after ? 'AND (at, decision_id) < (?3, ?4)' : '';
   const branches: string[] = [];
   if (task !== null) {
     branches.push(
-      `SELECT id FROM (SELECT id FROM agent_decisions WHERE repo_id = ?1 AND task_id = ?2 ${page}
-        ORDER BY at DESC, id DESC LIMIT ${limit + 1})`,
+      `SELECT * FROM (SELECT id, at FROM agent_decisions WHERE repo_id = ?1 AND task_id = ?2 ${page}
+        ORDER BY at DESC, id DESC LIMIT ${cap})`,
     );
   }
-  if (paths.length > 0) {
+  paths.forEach((_, i) => {
     branches.push(
-      `SELECT id FROM (SELECT DISTINCT p.decision_id AS id, p.at FROM agent_decision_paths p
-        WHERE p.repo_id = ?1 AND p.path IN (SELECT value FROM json_each(?5)) ${pathPage}
-        ORDER BY p.at DESC, p.decision_id DESC LIMIT ${limit + 1})`,
+      `SELECT * FROM (SELECT decision_id AS id, at FROM agent_decision_paths WHERE repo_id = ?1 AND path = ?${5 + i} ${pathPage}
+        ORDER BY at DESC, decision_id DESC LIMIT ${cap})`,
     );
-  }
+  });
   const sql = `SELECT d.id, d.task_id, d.paths, d.chosen_candidate, d.rejected_candidates, d.reason, d.actor, d.agent_id, d.agent_name, d.at
-    FROM agent_decisions d
-   WHERE d.repo_id = ?1 AND d.id IN (${branches.join(' UNION ')})
-   ORDER BY d.at DESC, d.id DESC
-   LIMIT ${limit + 1}`;
+    FROM (SELECT id, at FROM (${branches.join(' UNION ')}) ORDER BY at DESC, id DESC LIMIT ${cap}) s
+   CROSS JOIN agent_decisions d ON d.id = s.id
+   WHERE d.repo_id = ?1
+   ORDER BY d.at DESC, d.id DESC`;
   // D1 refuses more bind values than the statement's highest ?N.
-  const binds = [cx.repo.id, task, after?.at ?? null, after?.id ?? null, JSON.stringify(paths)];
-  const used = Math.max(...[...sql.matchAll(/\?(\d)/g)].map((m) => Number(m[1])));
+  const binds = [cx.repo.id, task, after?.at ?? null, after?.id ?? null, ...paths];
+  const used = Math.max(...[...sql.matchAll(/\?(\d+)/g)].map((m) => Number(m[1])));
   const rows = (
     await cx.env.DB.prepare(sql)
       .bind(...binds.slice(0, used))

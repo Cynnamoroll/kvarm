@@ -11,7 +11,10 @@
  *       and the result JSON
  *   node scripts/mcp-agent.mjs e2e [--keep] [--only auth,registry,parity,visibility,cost,two-agent,arena,attribution]
  *       live checks for the MCP surface (VAL-MCP-001..010, VAL-COST-017,
- *       VAL-CROSS-012, VAL-ATTR-001..006, VAL-DECISION-001..003). Each
+ *       VAL-CROSS-012, VAL-ATTR-001..006, VAL-DECISION-001..003, the repo
+ *       lifecycle tools fork_repo/delete_repo/import_repo in parity, and
+ *       comma-containing decision paths across REST, MCP and the forge CLI
+ *       in attribution). Each
  *       scenario runs in a fresh repo owned by
  *       FORGE_USER, named `mcp-agent-<purpose>-<timestamp>`, seeded by real
  *       git pushes and deleted afterwards (unless --keep).
@@ -51,6 +54,7 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
 const OWNER = process.env.FORGE_USER ?? 'cynthia';
 const PLATFORM_DIR = fileURLToPath(new URL('../apps/platform/', import.meta.url));
+const CLI_BIN = fileURLToPath(new URL('../apps/cli/bin/forge.js', import.meta.url));
 const eq = isDeepStrictEqual;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -302,6 +306,10 @@ async function runE2e(argv) {
     check('registry', 'every tool has a description and an object input schema', tools.every((t) => t.description && t.inputSchema?.type === 'object'));
     const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'get_attribution', 'set_attribution', 'get_context'];
     check('registry', 'original tools implemented so far are present', original.every((n) => names.includes(n)), original.filter((n) => !names.includes(n)).join(',') || 'all present');
+    const lifecycle = ['list_repos', 'get_repo', 'create_repo', 'update_repo', 'delete_repo', 'fork_repo', 'import_repo'];
+    check('registry', 'every existing repos-family route is a tool (incl. delete, fork, import)', lifecycle.every((n) => names.includes(n)), lifecycle.filter((n) => !names.includes(n)).join(',') || 'all present');
+    const del = tools.find((t) => t.name === 'delete_repo');
+    check('registry', 'delete_repo is annotated destructive', del?.annotations?.destructiveHint === true);
   }
 
   await scenario('parity', 'public', async (repo) => {
@@ -421,6 +429,43 @@ async function runE2e(argv) {
     check('compose', 'compose_candidates workspace.headSha is the composed commit (not the base)', !comp.isError && comp.data?.workspace?.headSha === comp.data?.commitSha && advertised === comp.data?.commitSha && comp.data?.commitSha !== main2);
     const compRead = await call(owner, 'get_composition', { repo: env.repo, id: comp.data?.id });
     check('compose', 'get_composition readback keeps the composed head', compRead.data?.workspace?.headSha === comp.data?.commitSha);
+
+    // Repository lifecycle tools over the existing routes: fork, read back, delete; import refuses like REST.
+    const forkName = `${repo}-fork`;
+    try {
+      const fk = await call(owner, 'fork_repo', { repo: env.repo, name: forkName });
+      const fkRest = await http(`/api/v1/repos/${OWNER}/${forkName}`);
+      const parentTree = await call(owner, 'get_tree', { repo: env.repo, ref: 'main' });
+      let fkTree = null;
+      for (let i = 0; i < 5 && !(fkTree && !fkTree.isError); i++) {
+        if (i > 0) await sleep(2000);
+        fkTree = await call(owner, 'get_tree', { repo: `${OWNER}/${forkName}`, ref: 'main' });
+      }
+      console.log(`fork_repo -> ${fk.text} (x-forge-cost ${fk.cost}); REST GET fork -> ${fkRest.status} visibility=${fkRest.json?.repo?.visibility}; fork main=${fkTree?.data?.sha} parent main=${parentTree.data?.sha}`);
+      check('lifecycle', 'fork_repo creates a private fork with the parent main that REST reads back', !fk.isError && fk.data?.repo?.name === forkName && fkRest.status === 200 && fkRest.json?.repo?.visibility === 'private' && fkTree?.data?.sha === parentTree.data?.sha);
+      if (BOT) {
+        const bot = await connect(BOT, 'mcp-agent-bot');
+        try {
+          const bd = await call(bot, 'delete_repo', { repo: `${OWNER}/${forkName}` });
+          const still = await http(`/api/v1/repos/${OWNER}/${forkName}`);
+          console.log(`forge-bot delete_repo -> isError=${bd.isError} ${bd.text}; owner REST GET -> ${still.status}`);
+          check('lifecycle', 'delete_repo by an outsider is refused and the repository stays', bd.isError && [403, 404].includes(bd.data?.status) && still.status === 200);
+        } finally {
+          await bot.close();
+        }
+      }
+      const del = await call(owner, 'delete_repo', { repo: `${OWNER}/${forkName}` });
+      const gone = await http(`/api/v1/repos/${OWNER}/${forkName}`);
+      console.log(`delete_repo -> ${del.text} (x-forge-cost ${del.cost}); REST GET -> ${gone.status}`);
+      check('lifecycle', 'delete_repo deletes the fork (REST readback 404)', !del.isError && del.data?.deleted === true && gone.status === 404);
+    } finally {
+      await http(`/api/v1/repos/${OWNER}/${forkName}`, { method: 'DELETE' });
+    }
+    const badImport = { url: 'http://example.invalid/src.git', name: `${repo}-import` };
+    const imp = await call(owner, 'import_repo', badImport);
+    const impRest = await http('/api/v1/import', { method: 'POST', json: badImport });
+    console.log(`import_repo (non-HTTPS remote) -> ${imp.text}; REST POST /import -> ${impRest.status} ${impRest.text}`);
+    check('lifecycle', 'import_repo answers exactly like REST POST /import (non-HTTPS remote refused)', imp.isError && impRest.status === 400 && eq(imp.data, { status: 400, ...impRest.json }));
   });
 
   // VAL-MCP-010
@@ -711,6 +756,32 @@ async function runE2e(argv) {
     const byDoc = await http(`${api}/context?path=docs%2Fguide.md`);
     check('VAL-DECISION-001', 'a paths-only decision is retrievable by its path', rd2.status === 201 && rd2.json?.task === null && eq(byDoc.json?.decisions, [rd2.json]));
 
+    // Literal comma-containing Git paths round-trip through REST, MCP and the forge CLI (never split).
+    const forge = (args) => {
+      const r = spawnSync(process.execPath, [CLI_BIN, ...args, '--json'], { env: { ...process.env, FORGE_BASE_URL: BASE }, encoding: 'utf8' });
+      let data = null;
+      try {
+        data = JSON.parse(r.stdout);
+      } catch {
+        data = null;
+      }
+      return { code: r.status, data, err: (r.stderr ?? '').trim() };
+    };
+    const d3 = { paths: ['src/a,b.ts'], chosen: 'ws-comma', rejected: [], reason: 'literal comma path' };
+    const rd3 = await http(`${api}/decisions`, { method: 'POST', json: d3 });
+    const restComma = await http(`${api}/context?path=${encodeURIComponent('src/a,b.ts')}`);
+    const restHalves = await http(`${api}/context?path=src%2Fa&path=b.ts`);
+    const mcpComma = await call(owner, 'get_context', { repo: env.repo, path: ['src/a,b.ts'] });
+    const cliComma = forge(['decision', 'context', env.repo, '--path', 'src/a,b.ts']);
+    console.log(`POST decisions paths=["src/a,b.ts"] -> ${rd3.status} (x-forge-cost ${rd3.cost}); REST context?path=src%2Fa%2Cb.ts -> ids=${JSON.stringify(restComma.json?.decisions?.map((d) => d.id))} (x-forge-cost ${restComma.cost}); path=src/a&path=b.ts -> ${JSON.stringify(restHalves.json?.decisions)}; MCP -> ids=${JSON.stringify(mcpComma.data?.decisions?.map((d) => d.id))}; CLI exit ${cliComma.code} ids=${JSON.stringify(cliComma.data?.decisions?.map((d) => d.id))} ${cliComma.err}`);
+    check('VAL-DECISION-001', 'a comma-containing path recorded by REST is read back intact by REST, MCP and the CLI (and not by its comma halves)', rd3.status === 201 && eq(rd3.json?.paths, d3.paths) && eq(restComma.json?.decisions, [rd3.json]) && eq(mcpComma.data?.decisions, [rd3.json]) && cliComma.code === 0 && eq(cliComma.data?.decisions, [rd3.json]) && eq(restHalves.json?.decisions, []));
+    const cliRec = forge(['decision', 'record', env.repo, '--paths', 'docs/x,y.md', '--paths', 'docs/z.md', '--chosen', 'ws-cli', '--rejected', '[]', '--reason', 'recorded by forge']);
+    const mcpBack = await call(owner, 'record_decision', { repo: env.repo, paths: ['docs/q,r.md'], chosen: 'ws-mcp', rejected: [], reason: 'recorded by MCP' });
+    const restCli = await http(`${api}/context?path=${encodeURIComponent('docs/x,y.md')}&path=docs%2Fz.md`);
+    const cliMcp = forge(['decision', 'context', env.repo, '--path', 'docs/q,r.md']);
+    console.log(`forge decision record --paths docs/x,y.md --paths docs/z.md -> exit ${cliRec.code} paths=${JSON.stringify(cliRec.data?.paths)}; REST context -> ids=${JSON.stringify(restCli.json?.decisions?.map((d) => d.id))}; record_decision docs/q,r.md -> ${mcpBack.data?.id}; forge decision context --path docs/q,r.md -> ids=${JSON.stringify(cliMcp.data?.decisions?.map((d) => d.id))}`);
+    check('VAL-DECISION-001', 'comma paths recorded by the CLI and by MCP are read back by REST and the CLI', cliRec.code === 0 && eq(cliRec.data?.paths, ['docs/x,y.md', 'docs/z.md']) && eq(restCli.json?.decisions, [cliRec.data]) && !mcpBack.isError && cliMcp.code === 0 && eq(cliMcp.data?.decisions, [mcpBack.data]));
+
     // VAL-DECISION-002
     const ct = await call(owner, 'get_context', { repo: env.repo, task: d1.task });
     const cp = await call(owner, 'get_context', { repo: env.repo, path: ['src/lib/util.ts'] });
@@ -746,7 +817,7 @@ async function runE2e(argv) {
     }
     const tooMany = Array.from({ length: 21 }, (_, i) => `p${i}.ts`);
     const om = await call(owner, 'get_context', { repo: env.repo, path: tooMany });
-    const orr = await http(`${api}/context?path=${tooMany.join(',')}`);
+    const orr = await http(`${api}/context?${tooMany.map((p) => `path=${encodeURIComponent(p)}`).join('&')}`);
     console.log(`get_context(21 paths) -> isError=${om.isError} ${om.text}; REST -> ${orr.status} ${orr.text}`);
     check('VAL-DECISION-003', 'more paths than the cap → actionable 4xx {error, code}', om.isError && om.data?.code === 'TOO_MANY_PATHS' && orr.status === 400 && orr.json?.code === 'TOO_MANY_PATHS' && typeof orr.json?.error === 'string');
     const cost = parseCost(byTask.cost);

@@ -126,6 +126,33 @@ describe('forge operations', () => {
     expect(last().url).toBe('/api/v1/repos/o/r/forecast?paths=a.ts%2Csrc%2F');
   });
 
+  it('keeps commas inside decision paths: repeated flags, one literal path each', async () => {
+    await forge(['decision', 'record', 'o/r', '--paths', 'src/a,b.ts', '--paths', 'c.md', '--chosen', 'ws-b', '--rejected', '[]', '--reason', 'r']);
+    expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/decisions' });
+    expect(JSON.parse(last().body)).toEqual({ paths: ['src/a,b.ts', 'c.md'], chosen: 'ws-b', rejected: [], reason: 'r' });
+    await forge(['decision', 'context', 'o/r', '--path', 'src/a,b.ts', '--path=c.md']);
+    expect(last().url).toBe('/api/v1/repos/o/r/context?path=src%2Fa%2Cb.ts&path=c.md');
+    const help = await forge(['decision', 'context', '--help'], {});
+    expect(help.stdout).toMatch(/--path <list>.*repeat the flag once per path; commas are part of the path/);
+  });
+
+  it('maps the repository lifecycle commands onto their REST routes', async () => {
+    reply = { status: 200, body: { deleted: true } };
+    const del = await forge(['repo', 'delete', 'o/r', '--json']);
+    expect(del.code).toBe(0);
+    expect(last()).toMatchObject({ method: 'DELETE', url: '/api/v1/repos/o/r', body: '' });
+    expect(JSON.parse(del.stdout)).toEqual({ deleted: true });
+    await forge(['repo', 'fork', 'o/r', '--name', 'r-copy']);
+    expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/forks' });
+    expect(JSON.parse(last().body)).toEqual({ name: 'r-copy' });
+    await forge(['repo', 'import', 'https://example.test/src.git', '--name', 'src', '--branch', 'main', '--visibility', 'public']);
+    expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/import' });
+    expect(JSON.parse(last().body)).toEqual({ url: 'https://example.test/src.git', name: 'src', branch: 'main', visibility: 'public' });
+    const missing = await forge(['repo', 'import']);
+    expect(missing.code).toBe(2);
+    expect(missing.stderr).toMatch(/url.*required/);
+  });
+
   it('sends no body for a POST without body parameters', async () => {
     await forge(['change', 'merge', 'o/r', '3']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/changes/3/merge', body: '' });
