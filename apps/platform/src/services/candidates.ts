@@ -16,7 +16,9 @@
  * (services/intents/forecast.ts), never computed here.
  *
  * Nothing here selects, merges or closes anything: an arena selection is a
- * recorded choice and the winner still merges through its own change set.
+ * recorded choice and the winner still merges through its own change set,
+ * after a human confirms the selection (a final-selection escalation,
+ * services/reviewGate.ts). Ranking and composition never approve anything.
  */
 
 import { withLazyRepo } from '../artifacts/repo';
@@ -28,6 +30,7 @@ import { treePairBody, type CompareBody, type CompareFile } from './compare';
 import { ADVISORY_NOTE, setOverlap, setOverlapStatements, type SetOverlap, type SetOverlapPair } from './intents/forecast';
 import { runPool } from './pool';
 import { RefStoreUnavailable, resolveCommitish, type ResolveContext } from './refs';
+import { finalSelectionEscalation } from './reviewGate';
 import {
   WORKSPACE_ID_RE,
   arenaWorkspacesStatement,
@@ -703,8 +706,9 @@ export async function listArenas(cx: CandidatesContext, q: { limit?: string; cur
 /**
  * POST arenas/:id/select {workspace}: records the caller's choice of winner.
  * It merges, closes and abandons nothing; the winner merges through its own
- * change set under the normal policy, and the other candidates stay open
- * until someone abandons them.
+ * change set under the normal policy once a human closes the final-selection
+ * escalation it opens there, and the other candidates stay open until
+ * someone abandons them.
  */
 export async function selectArena(cx: CandidatesContext, id: string, input: unknown): Promise<ServiceResult<ArenaView>> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
@@ -719,10 +723,13 @@ export async function selectArena(cx: CandidatesContext, id: string, input: unkn
   }
   const by = JSON.stringify({ login: cx.actor?.user.login ?? null, agent: cx.actor?.agent?.agentName ?? null });
   const db = cx.env.DB;
-  const [, arena, rows] = await db.batch([
+  const now = Date.now();
+  const [, , arena, rows] = await db.batch([
     db
       .prepare(`UPDATE arenas SET state = 'selected', selected_workspace = ?3, selected_by = ?4, selected_at = ?5 WHERE repo_id = ?1 AND id = ?2`)
-      .bind(cx.repo.id, a.row.id, ws, by, Date.now()),
+      .bind(cx.repo.id, a.row.id, ws, by, now),
+    // A final selection is confirmed by a human before the winner's change set publishes.
+    finalSelectionEscalation(db, cx.repo.id, ws, now),
     ...arenaStatements(db, cx.repo.id, a.row.id),
   ]);
   const row = (arena?.results as ArenaRow[] | undefined)?.[0] ?? a.row;

@@ -24,6 +24,7 @@ import { patHash } from '../auth/pat';
 import type { ServiceResult } from '../repos/service';
 import { resolveRepoAccessAs } from './access';
 import type { Actor } from './authz';
+import { parseModelFamily } from './reviewGate';
 
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const AGENT_DESCRIPTION_MAX = 500;
@@ -45,6 +46,7 @@ export interface AgentRow {
   created_by_login: string | null;
   created_at: number;
   revoked_at: number | null;
+  model_family: string | null;
 }
 
 export interface AgentTokenListRow {
@@ -100,10 +102,12 @@ export interface CreateAgentInput {
   owner: string;
   name: string;
   description: string | null;
+  /** Model family of the agent (reviews prefer a different family than the author's); unvalidated input. */
+  modelFamily?: unknown;
 }
 
 const AGENT_SELECT = `SELECT a.id, a.owner_kind, a.owner_id, a.owner_login, a.name, a.description, a.created_by,
-       u.login AS created_by_login, a.created_at, a.revoked_at
+       u.login AS created_by_login, a.created_at, a.revoked_at, a.model_family
   FROM agents a LEFT JOIN users u ON u.id = a.created_by`;
 
 export async function createAgent(env: Env, actor: Actor, input: CreateAgentInput): Promise<ServiceResult<AgentRow>> {
@@ -113,28 +117,31 @@ export async function createAgent(env: Env, actor: Actor, input: CreateAgentInpu
   if (input.description !== null && input.description.length > AGENT_DESCRIPTION_MAX) {
     return fail(400, `description must be at most ${AGENT_DESCRIPTION_MAX} characters`, 'INVALID_DESCRIPTION');
   }
+  const family = parseModelFamily(input.modelFamily);
+  if (!family.ok) return family;
+  const modelFamily = family.value;
   const now = Date.now();
   const id = crypto.randomUUID();
   const personal = sameLogin(input.owner, actor.user.login);
   const insert = personal
     ? env.DB.prepare(
-        `INSERT INTO agents (id, owner_kind, owner_id, owner_login, name, description, created_by, created_at)
-         VALUES (?1, 'user', ?4, ?6, ?2, ?3, ?4, ?5)
+        `INSERT INTO agents (id, owner_kind, owner_id, owner_login, name, description, created_by, created_at, model_family)
+         VALUES (?1, 'user', ?4, ?6, ?2, ?3, ?4, ?5, ?7)
          ON CONFLICT (owner_id, name) DO NOTHING`,
-      ).bind(id, input.name, input.description, actor.user.id, now, actor.user.login)
+      ).bind(id, input.name, input.description, actor.user.id, now, actor.user.login, modelFamily)
     : env.DB.prepare(
-        `INSERT INTO agents (id, owner_kind, owner_id, owner_login, name, description, created_by, created_at)
-         SELECT ?1, 'org', o.id, o.login, ?2, ?3, ?4, ?5 FROM orgs o
+        `INSERT INTO agents (id, owner_kind, owner_id, owner_login, name, description, created_by, created_at, model_family)
+         SELECT ?1, 'org', o.id, o.login, ?2, ?3, ?4, ?5, ?7 FROM orgs o
           WHERE o.login = ?6
             AND EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = o.id AND m.user_id = ?4 AND m.role = 'owner')
          ON CONFLICT (owner_id, name) DO NOTHING`,
-      ).bind(id, input.name, input.description, actor.user.id, now, input.owner);
+      ).bind(id, input.name, input.description, actor.user.id, now, input.owner, modelFamily);
   const [, , created, diag] = await env.DB.batch([
     insert,
     auditEvent(
       env.DB,
       'agent.created',
-      { agentId: id, owner: input.owner, name: input.name, actor: actor.user.login },
+      { agentId: id, owner: input.owner, name: input.name, modelFamily, actor: actor.user.login },
       now,
       'EXISTS (SELECT 1 FROM agents WHERE id = ?4)',
       [id, now],
@@ -417,6 +424,7 @@ export function agentJson(a: AgentRow) {
     ownerKind: a.owner_kind,
     name: a.name,
     description: a.description,
+    modelFamily: a.model_family ?? null,
     createdBy: a.created_by_login,
     createdAt: iso(a.created_at),
     revokedAt: iso(a.revoked_at),

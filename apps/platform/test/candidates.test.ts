@@ -409,6 +409,15 @@ describe('arenas', () => {
     expect((await call('GET', `${R('arena-rank')}/arenas/${arena.id}`, tok.owner)).json.selection.selectedWorkspace).toBe(a.id);
     expect((await call('POST', `${R('arena-rank')}/arenas/${arena.id}/select`, tok.owner, { workspace: 'feedfeed' })).json.code).toBe('NOT_ARENA_CANDIDATE');
 
+    // A final selection escalates to a human; the winner's merge waits until one acts.
+    const waiting = await call('POST', `${R('arena-rank')}/changes/${changeA.number}/merge`, tok.owner);
+    expect([waiting.status, waiting.json.code, waiting.json.review?.openEscalations]).toEqual([409, 'ESCALATION_OPEN', ['final-selection']]);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    const packet = (await call('GET', `${R('arena-rank')}/changes/${changeA.number}/reviews`, tok.owner)).json;
+    const finalSel = packet.escalations.find((e: any) => e.reason === 'final-selection');
+    expect(finalSel).toMatchObject({ state: 'open', openedBy: 'system' });
+    expect((await call('POST', `${R('arena-rank')}/changes/${changeA.number}/escalations/${finalSel.id}/resolve`, tok.owner, {})).status).toBe(200);
+
     // The winner merges through its change set; losers stay live (B edited the same file, so it now conflicts), then one is abandoned.
     const merged = await call('POST', `${R('arena-rank')}/changes/${changeA.number}/merge`, tok.owner);
     expect(merged.status).toBe(200);

@@ -10,6 +10,7 @@ import { contentsApi } from './routes/api/contents';
 import { eventsApi } from './routes/api/events';
 import { snapshotsApi } from './routes/api/snapshots';
 import { changesApi } from './routes/api/changes';
+import { reviewsApi } from './routes/api/reviews';
 import { intentsApi } from './routes/api/intents';
 import { candidatesApi } from './routes/api/candidates';
 import { workspacesApi } from './routes/api/workspaces';
@@ -61,6 +62,7 @@ app.route('/api/v1', contentsApi);
 app.route('/api/v1', eventsApi);
 app.route('/api/v1', snapshotsApi);
 app.route('/api/v1', changesApi);
+app.route('/api/v1', reviewsApi);
 // Before workspacesApi: `workspaces/overlap` would otherwise match `workspaces/:id`.
 app.route('/api/v1', intentsApi);
 app.route('/api/v1', workspacesApi);

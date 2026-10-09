@@ -49,6 +49,16 @@ import {
   type MergeWork,
 } from './merge';
 import { RefStoreUnavailable, isValidRefName, lsRefs, resolveCommitish, type ResolveContext } from './refs';
+import {
+  parseReviewFacts,
+  recordMissingEscalation,
+  reviewFactsSelect,
+  reviewFactsSelectById,
+  reviewGate,
+  type ReviewBlockDetail,
+  type ReviewFacts,
+  type ReviewFactsRow,
+} from './reviewGate';
 import type { ChangeRating } from './risk';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
@@ -291,6 +301,7 @@ export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
   conflicts?: ConflictView[];
   checks?: RequiredChecks;
   ref?: string;
+  review?: ReviewBlockDetail;
 };
 
 export function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
@@ -644,6 +655,10 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       ),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
       ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
+      // A change into a ref covered by a branch rule asks a human from the start.
+      ...(cx.branchRules && effectivePolicy(cx.branchRules, branchRef(p.base)).protected
+        ? [recordMissingEscalation(cx.env.DB, id, 'protected-path', now)]
+        : []),
       cx.env.DB.prepare(`${CHANGE_SELECT} WHERE c.id = ?`).bind(id),
     ]);
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
@@ -771,15 +786,12 @@ export function memoGate(inner: ChecksGate): ChecksGate {
   };
 }
 
-/** Branch-rule requirements on the target ref that the checks-gate answer does not satisfy. */
+/**
+ * Required checks of the target ref's branch rules that the checks-gate
+ * answer does not satisfy. Approvals are the review gate's
+ * (services/reviewGate.ts).
+ */
 export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks): Fail | null {
-  if (policy.requiredApprovals > 0) {
-    return fail(
-      409,
-      `${policy.ref} requires ${policy.requiredApprovals} approving review(s) before a merge`,
-      'APPROVALS_REQUIRED',
-    );
-  }
   for (const name of policy.requiredChecks) {
     const found = checks.required.find((c) => c.name === name);
     if (found?.state === 'failure') {
@@ -790,6 +802,19 @@ export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks):
     }
   }
   return null;
+}
+
+/**
+ * The review gate's refusal for publishing `change` into `policy.ref`, or
+ * null. Escalations the gate finds missing are recorded first (one batch).
+ */
+export async function reviewRefusal(env: Env, changeId: string, facts: ReviewFacts, policy: BranchPolicy): Promise<Fail | null> {
+  const gate = reviewGate(facts, policy);
+  if (gate.missing.length > 0) {
+    const now = Date.now();
+    await env.DB.batch(gate.missing.map((reason) => recordMissingEscalation(env.DB, changeId, reason, now)));
+  }
+  return gate.block;
 }
 
 export interface MergeDeps {
@@ -910,11 +935,15 @@ async function performMerge(
   deps: MergeDeps,
   mode: MergeMode,
   attribution: AttributionInput | null = null,
+  reviewFacts?: ReviewFacts,
 ): Promise<ServiceResult<MergeOutcome>> {
   if (!row.head_sha) return fail(409, 'the change has no head commit', 'NO_HEAD');
   const headSha = row.head_sha;
   const targetRef = branchRef(row.base_ref);
   const policy = effectivePolicy(cx.branchRules ?? [], targetRef);
+  const facts = reviewFacts ?? parseReviewFacts(await reviewFactsSelectById(cx.env.DB, row.id).first<ReviewFactsRow>());
+  const reviewBlock = await reviewRefusal(cx.env, row.id, facts, policy);
+  if (reviewBlock) return reviewBlock;
   const gate = memoGate(deps.gate(cx.env));
   const pusher = deps.pusher(cx.env, cx.repo);
 
@@ -942,17 +971,28 @@ async function performMerge(
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
       // The last change read runs after every asynchronous preparation step (checks, write token, pack).
-      const verdict: { refusal: Fail | null } = { refusal: null };
+      const verdict: { refusal: Fail | null; facts: ReviewFacts | null } = { refusal: null, facts: null };
       const beforeSend = async () => {
-        const [change, ws] = await cx.env.DB.batch([changeSelect(cx.env.DB, cx.repo.id, row.number), headWorkspaceSelect(cx.env.DB, cx.repo.id, row.number)]);
+        const [change, ws, reviews] = await cx.env.DB.batch([
+          changeSelect(cx.env.DB, cx.repo.id, row.number),
+          headWorkspaceSelect(cx.env.DB, cx.repo.id, row.number),
+          // Approvals are revalidated against the exact head immediately before publication.
+          reviewFactsSelect(cx.env.DB, cx.repo.id, row.number),
+        ]);
         const current = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
+        verdict.facts = parseReviewFacts((reviews?.results as ReviewFactsRow[] | undefined)?.[0]);
         verdict.refusal =
           mergeRefusal(current, mode, headSha) ??
-          workspaceAdmissionRefusal(current!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null);
+          workspaceAdmissionRefusal(current!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null) ??
+          reviewGate(verdict.facts, policy).block;
         return verdict.refusal === null;
       };
       const published = await publishMerge({ pusher, gate, beforeSend }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);
-      if (verdict.refusal) return verdict.refusal;
+      if (verdict.refusal) {
+        // A review refusal records the escalations it found missing.
+        if (verdict.refusal.review && verdict.facts) return (await reviewRefusal(cx.env, row.id, verdict.facts, policy)) ?? verdict.refusal;
+        return verdict.refusal;
+      }
       let ok = published.ok;
       if (!published.ok && published.code === 'PUBLISH_UNKNOWN') {
         // The update may have landed: the ref decides.
@@ -1040,12 +1080,18 @@ export function mergeChange(
         attribution = parsed.value;
       }
     }
-    const row = number === null ? null : await readChange(cx.env, cx.repo.id, number);
+    let row: ChangeRow | null = null;
+    let facts: ReviewFacts | undefined;
+    if (number !== null) {
+      const [change, reviews] = await cx.env.DB.batch([changeSelect(cx.env.DB, cx.repo.id, number), reviewFactsSelect(cx.env.DB, cx.repo.id, number)]);
+      row = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
+      facts = parseReviewFacts((reviews?.results as ReviewFactsRow[] | undefined)?.[0]);
+    }
     const refused = mergeRefusal(row, 'explicit');
     if (refused || !row) return refused ?? fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const denied = agentMergeDenial(cx.actor, row.base_ref, 'merge');
     if (denied) return denied;
-    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution);
+    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
   });
 }
 
@@ -1245,6 +1291,9 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM merge_trains WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM merge_admission WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM agent_tasks WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM change_reviews WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM change_escalations WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM review_policies WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),
   ];
 }

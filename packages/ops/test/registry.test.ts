@@ -66,6 +66,22 @@ describe('operation registry', () => {
     expect(findOperation('rank_arena')?.path).toBe('/repos/{repo}/arenas/{id}/candidates');
   });
 
+  it('registers review, approval and escalation operations', () => {
+    expect(findOperation('review_change')).toMatchObject({ command: ['review', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/reviews', family: 'reviews' });
+    expect(findOperation('review_change')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'verdict', 'headSha', 'body']);
+    expect(findOperation('approve_change')).toMatchObject({ command: ['review', 'approve'], method: 'POST', path: '/repos/{repo}/changes/{number}/approve' });
+    expect(findOperation('request_changes')).toMatchObject({ command: ['review', 'request-changes'], method: 'POST', path: '/repos/{repo}/changes/{number}/request-changes' });
+    expect(findOperation('get_reviews')).toMatchObject({ command: ['review', 'get'], method: 'GET', path: '/repos/{repo}/changes/{number}/reviews', readOnly: true });
+    expect(findOperation('list_pending_reviews')).toMatchObject({ command: ['review', 'pending'], path: '/repos/{repo}/reviews/pending', readOnly: true });
+    expect(findOperation('assign_reviewer')).toMatchObject({ command: ['review', 'assign'], path: '/repos/{repo}/changes/{number}/reviewers/assign' });
+    expect(findOperation('resolve_escalation')).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });
+    expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });
+    expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
+    expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
+    const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40) });
+    expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40) }]);
+  });
+
   it('declares every path placeholder as a path parameter and documents every parameter', () => {
     for (const op of OPERATIONS) {
       const placeholders = [...op.path.matchAll(/\{([a-zA-Z]+)\}/g)].map((m) => m[1]);

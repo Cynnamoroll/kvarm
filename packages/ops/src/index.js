@@ -500,6 +500,114 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, query('base', 'string', 'Only this target branch'), LIMIT(100), CURSOR],
   }),
 
+  // --- reviews: exact-head approvals, policy and human escalations -----------
+  define({
+    name: 'get_reviews',
+    command: ['review', 'get'],
+    family: 'reviews',
+    description:
+      'The review packet of a change: required and counted approvals of the current head, reviews with principal, model family and differentFamily, blockers and escalations.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/reviews',
+    params: [REPO, CHANGE],
+  }),
+  define({
+    name: 'review_change',
+    command: ['review', 'submit'],
+    family: 'reviews',
+    description:
+      "Review the change's current head (approve or request-changes) as a human or agent principal other than the author. A request-changes, or an approval next to one, escalates to a human.",
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/reviews',
+    params: [
+      REPO,
+      CHANGE,
+      body('verdict', 'string', 'Review verdict', { required: true, enum: ['approve', 'request-changes'] }),
+      body('headSha', 'string', 'The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
+      body('body', 'string', 'Review comment'),
+    ],
+  }),
+  define({
+    name: 'approve_change',
+    command: ['review', 'approve'],
+    family: 'reviews',
+    description: "Approve the change's current head. The approval is bound to that exact head; a head movement stales it.",
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/approve',
+    params: [
+      REPO,
+      CHANGE,
+      body('headSha', 'string', 'The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
+      body('body', 'string', 'Review comment'),
+    ],
+  }),
+  define({
+    name: 'request_changes',
+    command: ['review', 'request-changes'],
+    family: 'reviews',
+    description: "Request changes on the change's current head. Publication is blocked and escalated to a human until one approves or resolves it.",
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/request-changes',
+    params: [
+      REPO,
+      CHANGE,
+      body('headSha', 'string', 'The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
+      body('body', 'string', 'Review comment'),
+    ],
+  }),
+  define({
+    name: 'list_pending_reviews',
+    command: ['review', 'pending'],
+    family: 'reviews',
+    description: 'Live changes still short of the required approvals of their current head or with an open escalation, newest first.',
+    method: 'GET',
+    path: '/repos/{repo}/reviews/pending',
+    params: [REPO, LIMIT(100), CURSOR],
+  }),
+  define({
+    name: 'assign_reviewer',
+    command: ['review', 'assign'],
+    family: 'reviews',
+    description:
+      'Pick a reviewer among the agents holding a live write token for the repository (or the given ones), preferring a different model family than the author; reports whether the preference was met.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/reviewers/assign',
+    params: [REPO, CHANGE, body('candidates', 'string[]', 'Only consider these agent ids')],
+  }),
+  define({
+    name: 'resolve_escalation',
+    command: ['review', 'resolve'],
+    family: 'reviews',
+    description: 'Close an open escalation as a human (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human resolves every open escalation too.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve',
+    params: [
+      REPO,
+      CHANGE,
+      pathArg('id', 'Escalation id from get_reviews'),
+      body('resolution', 'string', 'How the escalation was handled (default resolve)', { enum: ['acknowledge', 'resolve'] }),
+      body('note', 'string', 'Note recorded with the resolution'),
+    ],
+  }),
+  define({
+    name: 'get_review_policy',
+    command: ['review-policy', 'get'],
+    family: 'reviews',
+    description: 'The repository review policy: approving reviews required per change from distinct principals other than the author.',
+    method: 'GET',
+    path: '/repos/{repo}/review-policy',
+    params: [REPO],
+  }),
+  define({
+    name: 'set_review_policy',
+    command: ['review-policy', 'set'],
+    family: 'reviews',
+    description: 'Set how many approving reviews of the current head (humans or agents, distinct, not the author) a change needs (repo admins only).',
+    method: 'PUT',
+    path: '/repos/{repo}/review-policy',
+    params: [REPO, body('requiredReviews', 'integer', 'Required approving reviews (0-10)', { required: true, positional: true })],
+  }),
+
   // --- tasks: work Forge dispatches to agents --------------------------------
   define({
     name: 'list_tasks',
@@ -851,6 +959,7 @@ export const OPERATIONS = Object.freeze([
       body('name', 'string', 'Agent name (lowercase, unique per owner)', { required: true, positional: true }),
       body('owner', 'string', 'Your login or an org login (default: you)'),
       body('description', 'string', 'Description (at most 500 characters)'),
+      body('modelFamily', 'string', 'Model family of the agent (e.g. claude, gpt); reviewer assignment prefers a different family than the author'),
     ],
   }),
   define({

@@ -32,6 +32,7 @@ agentsApi.post('/agents', async (c) => {
     owner: str(body.owner) ?? actor.user.login,
     name: str(body.name) ?? '',
     description: str(body.description),
+    modelFamily: body.modelFamily,
   });
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { agent: agents.agentJson(res.value) }, 201);

@@ -40,7 +40,7 @@ import { toUserRow, type UserRow } from '../db/users';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, isOrgRole, isRepoNeed, repoRole, type Actor } from './authz';
-import { effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
+import { effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   HEAD_MOVED_HOOKS,
   MERGE_POLICIES,
@@ -55,6 +55,7 @@ import {
   mergedRecordStatements,
   parseNumber,
   resolveCtx,
+  reviewRefusal,
   workspaceAdmissionRefusal,
   type ChangeContext,
   type ChangeRow,
@@ -68,6 +69,7 @@ import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
 import { artifactsMergeSources, prepareMerge, type MergeSources, type PreparedMerge } from './merge';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
+import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewFactsSelectById, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
 
 // ---------------------------------------------------------------------------
@@ -347,13 +349,16 @@ export interface EnqueueOutcome {
 
 /**
  * POST changes/:number/enqueue {headSha?, mergePolicy?, attribution?}.
- * Enqueue is the explicit approval of the change's current head. One D1
- * statement on success: the guarded insert (open, not a draft, at the
- * expected head/policy, not already queued; its merge_queue_admit trigger
- * takes the admission slot or aborts it beyond capacity) returning the new
- * entry. A refusal or an already queued change costs one more read that
- * explains it (an already queued change returns its entry, never a
- * duplicate).
+ * Enqueue is the explicit approval of the change's current head; it never
+ * stands in for the reviews, escalations or human approvals the review gate
+ * requires. One D1 statement on success in a repo without branch rules: the
+ * guarded insert (open, not a draft, at the expected head/policy, not already
+ * queued, review gate satisfied; its merge_queue_admit trigger takes the
+ * admission slot or aborts it beyond capacity) returning the new entry. A
+ * refusal or an already queued change costs one more batch that explains it
+ * and reads the branch rules (an already queued change returns its entry,
+ * never a duplicate); a repo with branch rules then retries the insert once
+ * with the target's human requirement bound.
  */
 export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknown, deps: Pick<TrainDeps, 'kick'> = defaultTrainDeps): Promise<ServiceResult<EnqueueOutcome>> {
   return guarded<EnqueueOutcome>(async () => {
@@ -367,40 +372,45 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
     const now = Date.now();
     const agent = cx.actor?.agent ? JSON.stringify({ agentId: cx.actor.agent.agentId, agentName: cx.actor.agent.agentName, tokenId: cx.actor.agent.tokenId }) : null;
     const seq = now * 1000 + Math.floor(Math.random() * 1000);
-    let inserted: D1Result<EntryRow> | undefined;
-    try {
-      inserted = await db
-        .prepare(
-          `INSERT OR IGNORE INTO merge_queue (id, repo_id, target_ref, seq, change_set_id, change_number, state, active, head_sha, merge_policy,
-             enqueued_by, enqueuer_login, agent_meta, attribution, enqueued_at, updated_at, admission_capacity)
-           SELECT ?3, c.repo_id, 'refs/heads/' || c.base_ref, ?12, c.id, c.number, 'queued', 1, c.head_sha, c.merge_policy,
-                  ?4, ?5, ?6, ?7, ?8, ?8, ?11
-             FROM change_sets c
-            WHERE c.repo_id = ?1 AND c.number = ?2 AND c.state = 'open' AND c.merge_policy != 'draft' AND c.head_sha IS NOT NULL
-              AND (?9 IS NULL OR c.head_sha = ?9) AND (?10 IS NULL OR c.merge_policy = ?10)
-           RETURNING ${RETURNING_COLUMNS}`,
-        )
-        .bind(
-          cx.repo.id,
-          number,
-          id,
-          cx.actor?.user.id ?? null,
-          cx.actor?.user.login ?? null,
-          agent,
-          input.attribution ? JSON.stringify(input.attribution) : null,
-          now,
-          input.headSha,
-          input.mergePolicy,
-          TRAIN_LIMITS.admissionCapacity,
-          seq,
-        )
-        .all<EntryRow>();
-    } catch (err) {
-      if (!String(err).includes('FORGE_QUEUE_FULL')) throw err;
-      inserted = undefined;
-    }
-    const created = inserted?.results?.[0];
-    if (created) {
+    // `target` null: the branch rules are unread and the guard admits only a repo without rules.
+    const tryInsert = async (target: BranchPolicy | null): Promise<EntryRow | 'full' | undefined> => {
+      try {
+        const res = await db
+          .prepare(
+            `INSERT OR IGNORE INTO merge_queue (id, repo_id, target_ref, seq, change_set_id, change_number, state, active, head_sha, merge_policy,
+               enqueued_by, enqueuer_login, agent_meta, attribution, enqueued_at, updated_at, admission_capacity)
+             SELECT ?3, c.repo_id, 'refs/heads/' || c.base_ref, ?12, c.id, c.number, 'queued', 1, c.head_sha, c.merge_policy,
+                    ?4, ?5, ?6, ?7, ?8, ?8, ?11
+               FROM change_sets c
+              WHERE c.repo_id = ?1 AND c.number = ?2 AND c.state = 'open' AND c.merge_policy != 'draft' AND c.head_sha IS NOT NULL
+                AND (?9 IS NULL OR c.head_sha = ?9) AND (?10 IS NULL OR c.merge_policy = ?10)
+                AND ${reviewGuardCondition('c', '?13', '?14')}
+             RETURNING ${RETURNING_COLUMNS}`,
+          )
+          .bind(
+            cx.repo.id,
+            number,
+            id,
+            cx.actor?.user.id ?? null,
+            cx.actor?.user.login ?? null,
+            agent,
+            input.attribution ? JSON.stringify(input.attribution) : null,
+            now,
+            input.headSha,
+            input.mergePolicy,
+            TRAIN_LIMITS.admissionCapacity,
+            seq,
+            target ? target.requiredApprovals : null,
+            target?.protected ? 1 : 0,
+          )
+          .all<EntryRow>();
+        return res.results?.[0];
+      } catch (err) {
+        if (!String(err).includes('FORGE_QUEUE_FULL')) throw err;
+        return 'full';
+      }
+    };
+    const admitted = async (created: EntryRow): Promise<ServiceResult<EnqueueOutcome>> => {
       // An agent token may approve a merge only into a ref it may update.
       const denied = agentMergeDenial(cx.actor, branchName(created.target_ref), 'merge');
       if (denied) {
@@ -411,29 +421,57 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
         console.warn(JSON.stringify({ trainKickFailed: String(err).slice(0, 200) }));
       });
       return { ok: true, value: { created: true, entry: entryView(created) } };
-    }
-    const row = await db
-      .prepare(
-        `SELECT c.id AS c_id, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.base_ref AS c_base,
-                a.active AS a_active, ${ENTRY_COLUMNS}
-           FROM change_sets c
-           LEFT JOIN merge_queue q ON q.change_set_id = c.id AND q.active = 1
-           LEFT JOIN merge_admission a ON a.repo_id = c.repo_id
-          WHERE c.repo_id = ?1 AND c.number = ?2`,
-      )
-      .bind(cx.repo.id, number)
-      .first<EnqueueReadRow & Partial<EntryRow>>();
+    };
+    const queueFull = (): QueueFail => ({
+      ...fail(429, `the merge queue of this repository is full (${TRAIN_LIMITS.admissionCapacity} active entries); retry later`, 'QUEUE_FULL'),
+      retryAfter: TRAIN_LIMITS.retryAfterSeconds,
+    });
+    const first = await tryInsert(null);
+    if (first && first !== 'full') return admitted(first);
+    const [readRes, rulesRes] = await db.batch([
+      db
+        .prepare(
+          `SELECT c.id AS c_id, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.base_ref AS c_base,
+                  a.active AS a_active, ${ENTRY_COLUMNS}, ${reviewFactsColumns('c')}
+             FROM change_sets c
+             LEFT JOIN merge_queue q ON q.change_set_id = c.id AND q.active = 1
+             LEFT JOIN merge_admission a ON a.repo_id = c.repo_id
+            WHERE c.repo_id = ?1 AND c.number = ?2`,
+        )
+        .bind(cx.repo.id, number),
+      db
+        .prepare(
+          `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+             FROM branch_rules b WHERE b.repo_id = ?1 LIMIT 50`,
+        )
+        .bind(cx.repo.id),
+    ]);
+    const row = (readRes?.results as (EnqueueReadRow & Partial<EntryRow> & ReviewFactsRow)[] | undefined)?.[0];
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (row.id) {
       const denied = agentMergeDenial(cx.actor, row.c_base, 'merge');
       if (denied) return denied;
       return { ok: true, value: { created: false, entry: entryView(row as EntryRow) } };
     }
-    return refusal(row, input);
+    const refused = refusal(row, input);
+    if (refused) return refused;
+    // Enqueue approves the head for the merge policy; it never stands in for the reviews or the human a policy requires.
+    const rules = ((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow);
+    const target = effectivePolicy(rules, branchRef(row.c_base));
+    const review = await reviewRefusal(cx.env, row.c_id, parseReviewFacts(row), target);
+    if (review) return review;
+    if (first === 'full' || (row.a_active ?? 0) >= TRAIN_LIMITS.admissionCapacity) return queueFull();
+    // A repo with branch rules is admitted once the rules are known and its review gate holds.
+    if (rules.length > 0) {
+      const second = await tryInsert(target);
+      if (second === 'full') return queueFull();
+      if (second) return admitted(second);
+    }
+    return fail(409, 'the change could not be enqueued; retry', 'ENQUEUE_CONFLICT');
   });
 }
 
-function refusal(row: EnqueueReadRow, input: EnqueueInput): QueueFail {
+function refusal(row: EnqueueReadRow, input: EnqueueInput): QueueFail | null {
   if (row.c_state === 'merged') return fail(409, 'the change is already merged', 'ALREADY_MERGED');
   if (row.c_state === 'closed') return fail(409, 'a closed change cannot be enqueued; reopen it first', 'CHANGE_CLOSED');
   if (row.c_state === 'conflicted') {
@@ -450,13 +488,7 @@ function refusal(row: EnqueueReadRow, input: EnqueueInput): QueueFail {
   if (input.mergePolicy !== null && row.c_policy !== input.mergePolicy) {
     return fail(409, `the change's mergePolicy is ${row.c_policy}, not the expected ${input.mergePolicy}`, 'POLICY_CHANGED');
   }
-  if ((row.a_active ?? 0) >= TRAIN_LIMITS.admissionCapacity) {
-    return {
-      ...fail(429, `the merge queue of this repository is full (${TRAIN_LIMITS.admissionCapacity} active entries); retry later`, 'QUEUE_FULL'),
-      retryAfter: TRAIN_LIMITS.retryAfterSeconds,
-    };
-  }
-  return fail(409, 'the change could not be enqueued; retry', 'ENQUEUE_CONFLICT');
+  return null;
 }
 
 export interface DequeueOutcome {
@@ -621,7 +653,7 @@ function overlaySources(inner: MergeSources, objects: Map<string, GitObject>): M
 // Train run
 // ---------------------------------------------------------------------------
 
-interface WindowRow extends EntryRow {
+interface WindowRow extends EntryRow, ReviewFactsRow {
   c_state: string;
   c_policy: MergePolicy;
   c_head: string | null;
@@ -698,7 +730,8 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
       .bind(repoId),
     db
       .prepare(
-        `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title, c.head_ref AS c_head_ref
+        `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title, c.head_ref AS c_head_ref,
+                ${reviewFactsColumns('c')}
            FROM merge_queue q JOIN change_sets c ON c.id = q.change_set_id
           WHERE q.repo_id = ?1 AND q.active = 1 AND q.target_ref = ?2
           ORDER BY q.seq LIMIT ?3`,
@@ -854,6 +887,14 @@ async function trainPass(
       out.progress = true;
     }
 
+    // Reviews and escalations of the head being composed; an unmet requirement ejects (review and enqueue again).
+    const review = reviewGate(parseReviewFacts(e), policy);
+    if (review.block) {
+      for (const reason of review.missing) push(null, recordMissingEscalation(db, e.change_set_id, reason, now));
+      exit(review.block.code, review.block.error);
+      continue;
+    }
+
     if (out.prepared >= TRAIN_LIMITS.window) break;
     const p = await prepareMerge(sources, {
       targetSha: base!,
@@ -882,10 +923,6 @@ async function trainPass(
     const ruleBlock = branchPolicyBlock(policy, checks);
     if (checks.state === 'failure' || ruleBlock?.code === 'REQUIRED_CHECKS_FAILED') {
       exit('CHECKS_FAILED', ruleBlock?.error ?? 'a required check failed on the composed tree');
-      continue;
-    }
-    if (ruleBlock?.code === 'APPROVALS_REQUIRED') {
-      exit('APPROVALS_REQUIRED', ruleBlock.error);
       continue;
     }
     const pending = checks.state === 'pending' || ruleBlock?.code === 'REQUIRED_CHECKS_PENDING';
@@ -1061,7 +1098,7 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
   const now = deps.now();
   const claimedGen = plan.generation + 1;
   const agentMeta = parseJson<{ tokenId: string }>(e.agent_meta);
-  const [claim, change, ws, facts, agentRes, rulesRes] = await db.batch([
+  const [claim, change, ws, facts, agentRes, rulesRes, reviewRes] = await db.batch([
     db
       .prepare(
         `UPDATE merge_queue SET state = 'publishing', generation = generation + 1, updated_at = ?3
@@ -1091,6 +1128,7 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
            FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
       )
       .bind(repo.id),
+    reviewFactsSelectById(db, e.change_set_id),
   ]);
   if ((claim?.results?.length ?? 0) === 0) return { kind: 'lost' };
   const fenced = { repoId: repo.id, id: e.id, generation: claimedGen };
@@ -1116,11 +1154,13 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
   const who = enqueuerActor(repo, ref, (facts?.results as FactsRow[] | undefined)?.[0], (agentRes?.results as AgentRow[] | undefined)?.[0], e, now);
   if (who.denied) return exit('AUTHORIZATION_REVOKED', who.denied);
   const rules = ((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow);
+  // Approvals, escalations and the human requirement are revalidated for the exact head right before publication.
+  const review = await reviewRefusal(env, e.change_set_id, parseReviewFacts((reviewRes?.results as ReviewFactsRow[] | undefined)?.[0]), effectivePolicy(rules, ref));
+  if (review) return exit(review.code ?? 'REVIEWS_REQUIRED', review.error);
   const checks = await deps.gate(env).requiredChecksFor({ id: repo.id }, pv.treeSha, null);
   deps.observe?.({ type: 'checks', number: e.change_number, treeSha: pv.treeSha, baseSha: pv.targetSha, state: checks.state, leaseHeld: false, phase: 'publish' });
   const block = branchPolicyBlock(effectivePolicy(rules, ref), checks);
   if (checks.state === 'failure' || block?.code === 'REQUIRED_CHECKS_FAILED') return exit('CHECKS_FAILED', block?.error ?? 'a required check failed on the composed tree');
-  if (block?.code === 'APPROVALS_REQUIRED') return exit('APPROVALS_REQUIRED', block.error);
   if (checks.state === 'pending' || block) {
     await back('checking');
     return { kind: 'pending' };
