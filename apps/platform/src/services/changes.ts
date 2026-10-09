@@ -87,6 +87,7 @@ export interface ChangeRow {
   risk_reasons: string | null;
   kind: string;
   source_change_id: string | null;
+  /** State of the change's active merge-queue entry (services/queue.ts), null when not queued. */
   queue_state: string | null;
   /** The agent workspace linked to this change set (services/workspaces.ts), if any. */
   workspace_id: string | null;
@@ -94,7 +95,8 @@ export interface ChangeRow {
 
 const CHANGE_SELECT = `SELECT c.id, c.repo_id, c.number, c.title, c.body, c.base_ref, c.head_ref, c.head_sha, c.base_sha,
        c.state, c.author_id, u.login AS author_login, c.agent_meta, c.merge_commit, c.merged_at, c.created_at,
-       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.queue_state,
+       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id,
+       (SELECT q.state FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queue_state,
        (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1) AS workspace_id
   FROM change_sets c LEFT JOIN users u ON u.id = c.author_id`;
 
@@ -141,6 +143,8 @@ export interface ChangeView {
   updatedAt: string;
   /** Id of the agent workspace this change set was opened from, or null. */
   workspace: string | null;
+  /** State of the change's merge-queue entry (`GET queue`), null when it is not queued. */
+  queueState: string | null;
 }
 
 export interface MergeabilityView {
@@ -195,6 +199,7 @@ export function changeView(row: ChangeRow): ChangeView {
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at ?? row.created_at)!,
     workspace: row.workspace_id ?? null,
+    queueState: row.queue_state ?? null,
   };
 }
 
@@ -254,21 +259,21 @@ export interface ChangeContext {
   waitUntil(p: Promise<unknown>): void;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }> & {
+export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
   conflicts?: Array<Pick<MergeConflict, 'path' | 'kind'>>;
   checks?: RequiredChecks;
   ref?: string;
 };
 
-function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
+export function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
   return { ok: false, status, error, code, ...extra };
 }
 
-function resolveCtx(cx: Pick<ChangeContext, 'env' | 'repo' | 'waitUntil'>, artifacts: LazyRepo): ResolveContext {
+export function resolveCtx(cx: Pick<ChangeContext, 'env' | 'repo' | 'waitUntil'>, artifacts: LazyRepo): ResolveContext {
   return { env: cx.env, repo: cx.repo, artifacts, bypass: false, waitUntil: cx.waitUntil };
 }
 
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
+export async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
   try {
     return await fn();
   } catch (err) {
@@ -289,7 +294,7 @@ export function normalizeBranch(input: unknown): string | null {
   return name;
 }
 
-const branchRef = (name: string) => `refs/heads/${name}`;
+export const branchRef = (name: string) => `refs/heads/${name}`;
 
 function isPolicy(v: unknown): v is MergePolicy {
   return typeof v === 'string' && (MERGE_POLICIES as readonly string[]).includes(v);
@@ -307,7 +312,7 @@ function validBody(v: unknown): string | null | undefined {
   return v;
 }
 
-function parseNumber(raw: string): number | null {
+export function parseNumber(raw: string): number | null {
   return /^[1-9]\d{0,8}$/.test(raw) ? Number(raw) : null;
 }
 
@@ -315,11 +320,11 @@ function parseNumber(raw: string): number | null {
 // Reads
 // ---------------------------------------------------------------------------
 
-function changeSelect(db: D1Database, repoId: string, number: number): D1PreparedStatement {
+export function changeSelect(db: D1Database, repoId: string, number: number): D1PreparedStatement {
   return db.prepare(`${CHANGE_SELECT} WHERE c.repo_id = ? AND c.number = ?`).bind(repoId, number);
 }
 
-async function readChange(env: Env, repoId: string, number: number): Promise<ChangeRow | null> {
+export async function readChange(env: Env, repoId: string, number: number): Promise<ChangeRow | null> {
   return changeSelect(env.DB, repoId, number).first<ChangeRow>();
 }
 
@@ -696,7 +701,7 @@ export interface MergeOutcome {
 }
 
 /** The gate's answer per tree, asked once per merge attempt. */
-function memoGate(inner: ChecksGate): ChecksGate {
+export function memoGate(inner: ChecksGate): ChecksGate {
   const seen = new Map<string, Promise<RequiredChecks>>();
   return {
     requiredChecksFor(repo, treeSha, configId) {
@@ -712,7 +717,7 @@ function memoGate(inner: ChecksGate): ChecksGate {
 }
 
 /** Branch-rule requirements on the target ref that the checks-gate answer does not satisfy. */
-function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks): Fail | null {
+export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks): Fail | null {
   if (policy.requiredApprovals > 0) {
     return fail(
       409,
@@ -748,7 +753,7 @@ const RETRYABLE: ReadonlySet<MergeErrorCode | string> = new Set(['STALE_TARGET']
 type MergeMode = 'explicit' | 'auto';
 
 /** Why the change, as it is now, may not be merged at `headSha` (null: it may). */
-function mergeRefusal(row: ChangeRow | null, mode: MergeMode, headSha?: string): Fail | null {
+export function mergeRefusal(row: ChangeRow | null, mode: MergeMode, headSha?: string): Fail | null {
   if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
   if (row.state === 'merged') return fail(409, 'the change is already merged', 'ALREADY_MERGED');
   if (row.state === 'closed') return fail(409, 'a closed change cannot be merged; reopen it first', 'CHANGE_CLOSED');
@@ -764,13 +769,13 @@ function mergeRefusal(row: ChangeRow | null, mode: MergeMode, headSha?: string):
   return null;
 }
 
-interface HeadWorkspace {
+export interface HeadWorkspace {
   status: string;
   change_set_id: string | null;
 }
 
 /** The agent workspace whose ref is the change's head branch, if any. */
-function headWorkspaceSelect(db: D1Database, repoId: string, number: number): D1PreparedStatement {
+export function headWorkspaceSelect(db: D1Database, repoId: string, number: number): D1PreparedStatement {
   return db
     .prepare(
       `SELECT w.status, w.change_set_id FROM workspaces w
@@ -786,7 +791,7 @@ function headWorkspaceSelect(db: D1Database, repoId: string, number: number): D1
  * too, because a change set row is visible to the push-event publisher
  * before its admission links it.
  */
-function workspaceAdmissionRefusal(row: ChangeRow, ws: HeadWorkspace | null): Fail | null {
+export function workspaceAdmissionRefusal(row: ChangeRow, ws: HeadWorkspace | null): Fail | null {
   if (!ws) return null;
   if (ws.status !== 'active') return fail(409, `the change's workspace is ${ws.status}`, 'WORKSPACE_NOT_ACTIVE');
   if (ws.change_set_id === null) {
@@ -796,6 +801,38 @@ function workspaceAdmissionRefusal(row: ChangeRow, ws: HeadWorkspace | null): Fa
     return fail(409, "the change's workspace is linked to another change set", 'WORKSPACE_LINKED_ELSEWHERE');
   }
   return null;
+}
+
+/**
+ * Records a confirmed publication: the change is marked merged only while
+ * it is still open at the published head and not a draft; its workspace and
+ * index rows follow only when that guarded write landed. The first
+ * statement's `meta.changes` tells whether the change was recorded.
+ */
+export function mergedRecordStatements(
+  db: D1Database,
+  repoId: string,
+  row: Pick<ChangeRow, 'id' | 'number'>,
+  pub: { mergeCommit: string; targetSha: string; headSha: string },
+  mergedAt: number,
+): D1PreparedStatement[] {
+  return [
+    db
+      .prepare(
+        `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5
+          WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft'`,
+      )
+      .bind(repoId, row.number, pub.mergeCommit, mergedAt, pub.targetSha, pub.headSha),
+    // The workspace the change was opened from (services/workspaces.ts) follows it, only when the guarded write above landed.
+    db
+      .prepare(
+        `UPDATE workspaces SET status = 'merged', merged_at = ?3, updated_at = ?3, head_sha = ?4
+          WHERE repo_id = ?1 AND change_set_id = ?2 AND status = 'active'
+            AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?2 AND c.state = 'merged' AND c.merge_commit = ?5 AND c.merged_at = ?3)`,
+      )
+      .bind(repoId, row.id, mergedAt, pub.headSha, pub.mergeCommit),
+    changeSignalCleanup(db, repoId, row.id),
+  ];
 }
 
 /**
@@ -870,17 +907,7 @@ async function performMerge(
       const pv = prepared.value;
       const mergedAt = Date.now();
       const [update, , , read] = await cx.env.DB.batch([
-        cx.env.DB.prepare(
-          `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5
-            WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft'`,
-        ).bind(cx.repo.id, row.number, pv.mergeCommit, mergedAt, pv.targetSha, headSha),
-        // The workspace the change was opened from (services/workspaces.ts) follows it, only when the guarded write above landed.
-        cx.env.DB.prepare(
-          `UPDATE workspaces SET status = 'merged', merged_at = ?3, updated_at = ?3, head_sha = ?4
-            WHERE repo_id = ?1 AND change_set_id = ?2 AND status = 'active'
-              AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?2 AND c.state = 'merged' AND c.merge_commit = ?5 AND c.merged_at = ?3)`,
-        ).bind(cx.repo.id, row.id, mergedAt, headSha, pv.mergeCommit),
-        changeSignalCleanup(cx.env.DB, cx.repo.id, row.id),
+        ...mergedRecordStatements(cx.env.DB, cx.repo.id, row, { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha }, mergedAt),
         changeSelect(cx.env.DB, cx.repo.id, row.number),
       ]);
       if (pv.kind === 'merge') {
@@ -912,7 +939,7 @@ async function performMerge(
  * A merge moves the base branch, so an agent token may merge, or opt a
  * change into `auto`, only when its ref patterns allow updating that branch.
  */
-function agentMergeDenial(actor: Actor | null, base: string, what: MergePolicy | 'merge'): Fail | null {
+export function agentMergeDenial(actor: Actor | null, base: string, what: MergePolicy | 'merge'): Fail | null {
   if (!actor?.agent || (what !== 'merge' && what !== 'auto')) return null;
   if (credentialMayUpdateRef(actor, branchRef(base))) return null;
   const action = what === 'merge' ? 'merge into' : 'set mergePolicy auto on a change into';
@@ -968,6 +995,8 @@ export function mergeChange(
  */
 export async function autoMerge(cx: ChangeContext, row: ChangeRow, deps: MergeDeps = defaultMergeDeps): Promise<ChangeRow | null> {
   if (row.merge_policy !== 'auto' || row.state !== 'open') return null;
+  // A queued change publishes through the integration train (services/queue.ts) only.
+  if (row.queue_state !== null) return null;
   if (agentMergeDenial(cx.actor, row.base_ref, 'merge')) {
     console.log(JSON.stringify({ autoMerge: { repo: cx.repo.id, number: row.number, ok: false, code: 'AGENT_REF_FORBIDDEN' } }));
     return null;
@@ -994,6 +1023,8 @@ export interface ChangeOnRef {
   number: number;
   policy: MergePolicy;
   headSha: string | null;
+  /** The head its active merge-queue entry approved, when the change is queued. */
+  queuedHead?: string | null;
 }
 
 export interface HeadMoved {
@@ -1101,6 +1132,9 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM comments WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
     db.prepare('DELETE FROM check_runs WHERE repo_id = ?').bind(repoId),
     db.prepare('UPDATE workspaces SET change_set_id = NULL WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM merge_queue WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM merge_trains WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM merge_admission WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),
   ];
 }

@@ -12,12 +12,16 @@
  *   POST  changes/:number/merge
  *   GET   changes/:number/mergeability
  *   GET   changes/:number/checks
+ *   POST  changes/:number/enqueue       {headSha?, mergePolicy?, attribution?} → 201 new | 200 already queued
+ *   DELETE changes/:number/enqueue
+ *   GET   queue?limit=&cursor=&base=
  */
 
 import { Hono, type Context } from 'hono';
 import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
 import * as svc from '../../services/changes';
+import * as queue from '../../services/queue';
 
 export const changesApi = new Hono<App>();
 
@@ -96,6 +100,36 @@ changesApi.post('/repos/:owner/:repo/changes/:number/merge', async (c) => {
   const r = await svc.mergeChange(w.cx, c.req.param('number'), svc.defaultMergeDeps, await jsonBody(c));
   if (!r.ok) return failJson(c, r);
   return actorJson(c, { ...r.value.change, merge: r.value.merge });
+});
+
+changesApi.post('/repos/:owner/:repo/changes/:number/enqueue', async (c) => {
+  const d = await authorizeRoute(c, 'write');
+  if (!d.ok) return denyJson(c, d);
+  const cx: svc.ChangeContext = { env: c.env, repo: d.repo, actor: d.actor, waitUntil: (p) => c.executionCtx.waitUntil(p) };
+  const r = await queue.enqueueChange(cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) {
+    const retryAfter = (r as { retryAfter?: unknown }).retryAfter;
+    if (r.status === 429 && typeof retryAfter === 'number') c.header('Retry-After', String(retryAfter));
+    return failJson(c, r);
+  }
+  return actorJson(c, r.value, r.value.created ? 201 : 200);
+});
+
+changesApi.delete('/repos/:owner/:repo/changes/:number/enqueue', async (c) => {
+  const d = await authorizeRoute(c, 'write');
+  if (!d.ok) return denyJson(c, d);
+  const cx: svc.ChangeContext = { env: c.env, repo: d.repo, actor: d.actor, waitUntil: (p) => c.executionCtx.waitUntil(p) };
+  const r = await queue.dequeueChange(cx, c.req.param('number'));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+changesApi.get('/repos/:owner/:repo/queue', async (c) => {
+  const rd = await readContext(c);
+  if ('denied' in rd) return rd.denied;
+  const r = await queue.listQueue(c.env, rd.cx.repo, { limit: c.req.query('limit'), cursor: c.req.query('cursor'), base: c.req.query('base') });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
 });
 
 changesApi.get('/repos/:owner/:repo/changes/:number/mergeability', async (c) => {

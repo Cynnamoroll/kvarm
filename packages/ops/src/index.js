@@ -462,6 +462,42 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, CHANGE],
   }),
 
+  // --- merge queue / integration train --------------------------------------
+  define({
+    name: 'enqueue_change',
+    command: ['queue', 'add'],
+    family: 'queue',
+    description:
+      "Enqueue a change set for the integration train. Enqueue approves the change's current head; the train merges it once the exact composed tree passes required checks. Drafts are refused (409); a full queue answers 429 with Retry-After.",
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/enqueue',
+    params: [
+      REPO,
+      CHANGE,
+      body('headSha', 'string', 'Expected head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
+      body('mergePolicy', 'string', 'Expected merge policy; refused 409 POLICY_CHANGED if it differs', { enum: MERGE_POLICIES }),
+      body('attribution', 'json', 'Attribution note for a two-parent merge commit: {agent?, session?, promptHash?, model?}; omitted fields name the enqueuing principal'),
+    ],
+  }),
+  define({
+    name: 'dequeue_change',
+    command: ['queue', 'remove'],
+    family: 'queue',
+    description: 'Take a change set out of the merge queue (not while it is being published). The change itself stays open.',
+    method: 'DELETE',
+    path: '/repos/{repo}/changes/{number}/enqueue',
+    params: [REPO, CHANGE],
+  }),
+  define({
+    name: 'get_queue',
+    command: ['queue', 'list'],
+    family: 'queue',
+    description: 'Active merge-queue entries in train order per target branch: position, state, approved head, exact composition identity and reason.',
+    method: 'GET',
+    path: '/repos/{repo}/queue',
+    params: [REPO, query('base', 'string', 'Only this target branch'), LIMIT(100), CURSOR],
+  }),
+
   // --- nexus: intents, forecast, overlap ------------------------------------
   define({
     name: 'get_intent',

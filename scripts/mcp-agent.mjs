@@ -36,9 +36,11 @@
  * The attribution scenario mints (and afterwards revokes) a short-lived agent
  * token for FORGE_USER to drive one merge as an agent session.
  *
- * The conflict-dispatch flow (enqueue_change, list_tasks, claim_task,
- * complete_task) needs operations that are not in the registry yet; the
- * feature adding them extends this driver.
+ * The two-agent scenario (VAL-CROSS-001) lands the winner with
+ * enqueue_change and polls get_change until the integration train merged
+ * it. The conflict-dispatch flow (list_tasks, claim_task, complete_task)
+ * needs operations that are not in the registry yet; the feature adding
+ * them extends this driver.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -304,7 +306,7 @@ async function runE2e(argv) {
     console.log(`listTools names (${names.length}): ${names.join(', ')}`);
     check('registry', 'tools/list equals the shared operation registry', eq([...names].sort(), OPERATIONS.map((o) => o.name).sort()));
     check('registry', 'every tool has a description and an object input schema', tools.every((t) => t.description && t.inputSchema?.type === 'object'));
-    const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'get_attribution', 'set_attribution', 'get_context'];
+    const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'get_attribution', 'set_attribution', 'get_context'];
     check('registry', 'original tools implemented so far are present', original.every((n) => names.includes(n)), original.filter((n) => !names.includes(n)).join(',') || 'all present');
     const lifecycle = ['list_repos', 'get_repo', 'create_repo', 'update_repo', 'delete_repo', 'fork_repo', 'import_repo'];
     check('registry', 'every existing repos-family route is a tool (incl. delete, fork, import)', lifecycle.every((n) => names.includes(n)), lifecycle.filter((n) => !names.includes(n)).join(',') || 'all present');
@@ -573,7 +575,7 @@ async function runE2e(argv) {
     check('VAL-COST-017', 'warm read by commit SHA: identical counters, cache hit, art=0', ['d1', 'art', 'r2b', 'do'].every((k) => parseCost(ms.cost)[k] === parseCost(rs.cost)[k]) && parseCost(ms.cost).art === 0 && parseCost(ms.cost).cache === 'hit');
   });
 
-  // Two agents work through MCP only (plus git push); the caller lands the winner.
+  // VAL-CROSS-001: two agents work through MCP only (plus git push); the caller lands the winner through the queue.
   await scenario('two-agent', 'public', async (repo) => {
     const env = await seeded(repo);
     const a1 = await connect(PAT, 'agent-one');
@@ -592,13 +594,36 @@ async function runE2e(argv) {
       const cands = await call(owner, 'list_candidates', { repo: env.repo, workspaces: [w1.id, w2.id] });
       console.log(`change sets #${c1?.number} #${c2?.number}; list_candidates -> ${cands.isError ? cands.text : JSON.stringify(cands.data?.candidates?.map((c) => ({ workspace: c.workspace, totals: c.vsBase?.totals })))}`);
       check('two-agent', 'both agents created workspaces and change sets through MCP; candidates compared', w1?.id && w2?.id && c1?.state === 'open' && c2?.state === 'open' && !cands.isError);
-      const mg = await call(owner, 'merge_change', { repo: env.repo, number: c1.number });
+      // Agent one records its session on its own commit (a fast-forward publishes that commit as is).
+      const at = await call(a1, 'set_attribution', { repo: env.repo, sha: s1, agent: 'agent-one', session: `two-agent-${TS}`, promptHash: 'a'.repeat(64) });
+      const ranked = await http(`${env.api}/candidates?base=main&workspaces=${w1.id},${w2.id}`);
+      console.log(`set_attribution ${s1} -> isError=${at.isError} ${at.isError ? at.text.slice(0, 200) : ''}; GET candidates -> ${ranked.status} ${JSON.stringify(ranked.json?.candidates?.map((c) => ({ workspace: c.workspace, rank: c.rank, score: c.score })) ?? ranked.text.slice(0, 200))}`);
+      // The caller lands the winner through the queue: with review policy the enqueue approves the current head.
+      const eq1 = await call(owner, 'enqueue_change', { repo: env.repo, number: c1.number, headSha: s1, attribution: { agent: 'agent-one', session: `two-agent-${TS}` } });
+      const q1 = await call(owner, 'get_queue', { repo: env.repo });
+      console.log(`enqueue_change #${c1.number} -> isError=${eq1.isError} ${eq1.text.slice(0, 300)} (x-forge-cost ${eq1.cost})\nget_queue -> ${q1.text.slice(0, 300)} (x-forge-cost ${q1.cost})`);
+      const listed = (q1.data?.entries ?? []).some((e) => e.number === c1.number);
+      const early = !listed && (await call(owner, 'get_change', { repo: env.repo, number: c1.number })).data?.state === 'merged';
+      check('VAL-CROSS-001', 'enqueue_change through MCP queues the winner; get_queue lists it (or the train already merged it)', !eq1.isError && eq1.data?.entry?.number === c1.number && (listed || early));
+      let landed = null;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 120_000) {
+        const g = await call(owner, 'get_change', { repo: env.repo, number: c1.number });
+        if (g.data?.state === 'merged') {
+          landed = g.data;
+          break;
+        }
+        await sleep(3000);
+      }
       const loser = await call(owner, 'get_change', { repo: env.repo, number: c2.number });
-      const mergeability = await call(owner, 'get_mergeability', { repo: env.repo, number: c2.number });
       mustGit(['fetch', '-q', env.url, '+refs/heads/main:refs/remotes/origin/main'], env.dir);
+      const tip = mustGit(['rev-parse', 'origin/main'], env.dir);
       const util = mustGit(['show', 'origin/main:src/lib/util.ts'], env.dir);
-      console.log(`merge_change #${c1.number} -> ${mg.data?.state} ${mg.data?.mergeCommit}; loser #${c2.number} state=${loser.data?.state}; loser mergeability=${mergeability.text.slice(0, 200)}; origin/main util.ts: ${JSON.stringify(util)}`);
-      check('two-agent', 'winner lands on main via merge_change; loser stays open (no auto-close)', !mg.isError && mg.data?.state === 'merged' && util.includes('agent one') && loser.data?.state === 'open');
+      console.log(`poll get_change #${c1.number} -> ${landed ? `merged ${landed.mergeCommit} after ${Math.round((Date.now() - t0) / 1000)} s` : 'not merged within 120 s'}; origin/main ${tip}; loser #${c2.number} state=${loser.data?.state}; origin/main util.ts: ${JSON.stringify(util)}`);
+      check('VAL-CROSS-001', 'winner merged by the train with no merge call; merge commit is origin/main; loser stays open', Boolean(landed) && landed.mergeCommit === tip && util.includes('agent one') && loser.data?.state === 'open');
+      const attr = await call(owner, 'get_attribution', { repo: env.repo, sha: tip });
+      console.log(`get_attribution ${tip} -> ${attr.text}`);
+      check('VAL-CROSS-001', 'get_attribution on the landed commit names the winning agent', !attr.isError && attr.data?.agent === 'agent-one', attr.text.slice(0, 200));
       const ab = await call(a2, 'abandon_workspace', { repo: env.repo, workspace: w2.id });
       check('two-agent', 'loser explicitly abandoned through MCP', !ab.isError && ab.data?.status === 'abandoned', ab.text.slice(0, 200));
     } finally {

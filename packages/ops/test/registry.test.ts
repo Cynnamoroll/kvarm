@@ -18,6 +18,7 @@ const ORIGINAL_AVAILABLE = [
   'create_change_set',
   'get_change',
   'merge_change',
+  'enqueue_change',
   'get_attribution',
   'set_attribution',
   'get_context',
@@ -49,7 +50,7 @@ describe('operation registry', () => {
 
   it('covers every implemented operation family', () => {
     const families = new Set(OPERATIONS.map((o) => o.family));
-    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution']) {
+    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'queue']) {
       expect(families, f).toContain(f);
     }
     // Arena ranking is reachable as a tool (VAL-CROSS-012).

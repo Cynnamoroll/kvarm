@@ -27,6 +27,8 @@ import { CostMeter, runWithMeter } from '../cost/meter';
 import type { ServiceResult } from '../repos/service';
 import { onHeadPushed, type ChangeOnRef } from './changes';
 import { reconcileObserved } from './intents/forecast';
+import { runTrain, type TrainRunResult } from './queue';
+import { isTrainMessage } from './trainKick';
 
 export interface PushEvent {
   namespace: string;
@@ -212,7 +214,8 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
       .prepare(
         `SELECT r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,
            (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done,
-           (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'policy', c.merge_policy, 'headSha', c.head_sha))
+           (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'policy', c.merge_policy, 'headSha', c.head_sha,
+                     'queuedHead', (SELECT q.head_sha FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)))
               FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state = 'open') AS changes,
            (SELECT json_object('id', w.id, 'status', w.status, 'baseSha', w.base_sha)
               FROM workspaces w WHERE w.repo_id = r.id AND w.ref = ?5) AS workspace
@@ -356,7 +359,7 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect,
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry';
+export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
 export function retryDelaySeconds(attempts: number): number {
@@ -368,9 +371,14 @@ interface MessageResult {
   eventId?: string;
   effects?: Record<string, string>;
   error?: string;
+  train?: TrainRunResult & { reason: string };
 }
 
 async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
+  if (isTrainMessage(msg.body)) {
+    const run = await runTrain(env, msg.body.repoId, msg.body.ref);
+    return { outcome: 'train', train: { reason: msg.body.reason, ...run } };
+  }
   const event = parsePushEvent(msg.body);
   if (!event) return { outcome: 'ignored' };
   const eventId = await eventIdentity(event, msg.id);
@@ -461,6 +469,7 @@ export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): 
         wf: counters.wf,
         ...(result.eventId ? { eventId: result.eventId } : {}),
         ...(result.effects ? { effects: result.effects } : {}),
+        ...(result.train ? { train: result.train } : {}),
         ...(result.error ? { error: result.error } : {}),
       }),
     );
