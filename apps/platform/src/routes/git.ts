@@ -27,6 +27,7 @@ import { withPrivateCacheControl } from '../cache/scope';
 import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
+import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type WorkspaceOwner } from '../services/workspaces';
 import { directPushDenial, type BranchRule } from '../services/branchRules';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
 
@@ -154,14 +155,23 @@ export async function handleGitRequest(
     return new Response('method not allowed\n', { status: 405 });
   }
 
-  // Agent tokens are confined to their granted refs, and protected refs refuse
+  // Agent tokens are confined to their granted refs (workspace refs also to
+  // an active workspace the agent may use), and protected refs refuse
   // direct pushes from everyone (instance admin included). The push command
   // list is checked before any upstream token mint or byte of the pack is
   // forwarded; pushes to repos without branch rules stay unparsed for humans.
   let pushBody: ReadableStream<Uint8Array> | null = null;
   if (subpath === 'git-receive-pack' && (actor?.agent || branchRules.length > 0)) {
-    const gate = await gateReceivePack(c.req.raw, (cmd) => {
-      if (actor?.agent && !credentialMayUpdateRef(actor, cmd.ref)) return 'ref outside agent token grant';
+    let owners: Promise<Map<string, WorkspaceOwner>> | null = null;
+    const gate = await gateReceivePack(c.req.raw, async (cmd, commands) => {
+      if (actor?.agent) {
+        if (!credentialMayUpdateRef(actor, cmd.ref)) return 'ref outside agent token grant';
+        if (cmd.ref.startsWith(WORKSPACE_REF_PREFIX)) {
+          owners ??= workspaceOwners(env, repo.id, commands);
+          const denied = agentWorkspaceDenial(actor, cmd, await owners);
+          if (denied) return denied;
+        }
+      }
       return directPushDenial(branchRules, cmd.ref);
     });
     if (!gate.ok) return gate.response;

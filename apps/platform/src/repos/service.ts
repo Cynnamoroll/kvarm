@@ -15,6 +15,7 @@ import {
 import { purgeGitTokens } from '../artifacts/tokens';
 import { deleteSnapshotObjects, snapshotCleanupStatements } from '../services/snapshots';
 import { changeCleanupStatements } from '../services/changes';
+import { workspaceCleanupStatements } from '../services/workspaces';
 
 export type ServiceResult<T> =
   | { ok: true; value: T }
@@ -152,15 +153,16 @@ export async function deleteRepo(
   } catch (err) {
     return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}` };
   }
-  // One batch: the repo row with its change and snapshot rows, returning the
-  // tarball keys. Change rows reference the repo, so they go first.
-  const changeStmts = changeCleanupStatements(env.DB, repo.id);
+  // One batch: the repo row with its workspace, change and snapshot rows,
+  // returning the tarball keys. Those rows reference the repo (and workspaces
+  // their change sets), so they go first.
+  const before = [...workspaceCleanupStatements(env.DB, repo.id), ...changeCleanupStatements(env.DB, repo.id)];
   const results = await env.DB.batch<{ r2_key: string }>([
-    ...changeStmts,
+    ...before,
     deleteRepoRowStatement(env.DB, repo.id),
     ...snapshotCleanupStatements(env.DB, repo.id),
   ]);
-  const keys = results[changeStmts.length + 1];
+  const keys = results[before.length + 1];
   await purgeGitTokens(repo.artifacts_name);
   try {
     await deleteSnapshotObjects(env, (keys?.results ?? []).map((r) => r.r2_key));

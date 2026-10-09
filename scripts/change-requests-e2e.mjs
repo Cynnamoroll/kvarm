@@ -116,13 +116,11 @@ async function pushRetry(dir, url, refspecs) {
   throw new Error(`push ${refspecs.join(' ')} kept failing`);
 }
 
-/** A local repo with an identity, for building branches. */
+/** A local repo for building branches; commits use the configured git identity. */
 function localRepo(name) {
   const dir = join(work, name);
   mkdirSync(dir);
   mustGit(['init', '-q', '-b', 'main'], dir);
-  mustGit(['config', 'user.name', 'E2E'], dir);
-  mustGit(['config', 'user.email', 'e2e@forge.invalid'], dir);
   return dir;
 }
 

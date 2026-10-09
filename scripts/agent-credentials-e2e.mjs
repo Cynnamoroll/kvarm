@@ -2,8 +2,9 @@
 /**
  * Live driver for agent credentials (VAL-AGENT-001, VAL-AGENT-002).
  *
- * Creates two private repos owned by the non-admin human `forge-bot`, a
- * durable agent and repo/ref-scoped tokens, then checks:
+ * Creates two private repos owned by the non-admin human `forge-bot`, two
+ * workspaces (ws1, ws2) through the workspaces API, a durable agent and
+ * repo/ref-scoped tokens for ws1's namespace, then checks:
  *  - the granted workspace ref push succeeds (git CLI + owner readback);
  *  - base, sibling-workspace, create, delete and multi-ref escapes are denied
  *    (parsed report-status + unchanged owner readback), the other repo is
@@ -186,10 +187,8 @@ try {
   mkdirSync(repoDir);
   git(['init', '-q', '-b', 'main'], null);
   const base = commit('base');
-  git(['branch', 'agents/ws1/task']);
-  git(['branch', 'agents/ws2/task']);
   for (const [repo, specs] of [
-    [mainRepo, ['main', 'agents/ws1/task', 'agents/ws2/task']],
+    [mainRepo, ['main']],
     [otherRepo, ['main']],
   ]) {
     let ok = false;
@@ -200,8 +199,20 @@ try {
     }
     if (!ok) die(`seed push to ${repo} failed`);
   }
+  // Agent pushes below refs/heads/agents/<id>/ need a real, active workspace <id>.
+  const wsRes = [];
+  for (const task of ['ws1 task', 'ws2 task']) {
+    const r = await api('POST', `/repos/${mainRepo}/workspaces`, OWNER_PAT, { task, agent: `e2e-${ts}` });
+    if (r.status !== 201) die(`create workspace: ${r.status} ${r.text}`);
+    wsRes.push(r.json);
+  }
+  const [ws1, ws2] = wsRes;
+  const WS1 = ws1.ref;
+  const WS2 = ws2.ref;
+  const WS1_EXTRA = `refs/heads/agents/${ws1.id}/extra`;
+  console.log(`workspaces: ws1 ${WS1}, ws2 ${WS2}`);
   const seeded = await refsOf(mainRepo);
-  check('seed refs present', seeded['refs/heads/main'] === base && seeded['refs/heads/agents/ws1/task'] === base);
+  check('seed refs present', seeded['refs/heads/main'] === base && seeded[WS1] === base && seeded[WS2] === base);
 
   // --- agent + token -------------------------------------------------------
   const agentRes = await api('POST', '/agents', OWNER_PAT, { name: `e2e-${ts}`, description: 'agent-credentials e2e' });
@@ -210,7 +221,7 @@ try {
   const mintRes = await api('POST', `/agents/${agentId}/tokens`, OWNER_PAT, {
     repo: mainRepo,
     role: 'write',
-    refs: ['refs/heads/agents/ws1/*'],
+    refs: [`refs/heads/agents/${ws1.id}/*`],
     expiresIn: 900,
     name: 'ws1',
   });
@@ -223,14 +234,14 @@ try {
   // --- VAL-AGENT-001: permitted operation ---------------------------------
   const read = await api('GET', `/repos/${mainRepo}`, agentTok);
   check('agent REST read of granted repo', read.status === 200, `x-forge-cost ${read.cost}`);
-  git(['checkout', '-q', 'agents/ws1/task']);
+  git(['checkout', '-q', '-b', 'ws1-work']);
   const ws1New = commit('agent work on ws1');
-  const okPush = git(['push', `${BASE}/${mainRepo}.git`, `HEAD:refs/heads/agents/ws1/task`, `HEAD:refs/heads/agents/ws1/extra`], agentTok, { allowFail: true });
+  const okPush = git(['push', `${BASE}/${mainRepo}.git`, `HEAD:${WS1}`, `HEAD:${WS1_EXTRA}`], agentTok, { allowFail: true });
   const afterOk = await refsOf(mainRepo);
   check(
     'agent git push to granted workspace refs',
-    okPush.status === 0 && afterOk['refs/heads/agents/ws1/task'] === ws1New && afterOk['refs/heads/agents/ws1/extra'] === ws1New,
-    `exit ${okPush.status}; readback ws1/task=${afterOk['refs/heads/agents/ws1/task']}`,
+    okPush.status === 0 && afterOk[WS1] === ws1New && afterOk[WS1_EXTRA] === ws1New,
+    `exit ${okPush.status}; readback ws1=${afterOk[WS1]}`,
   );
 
   // --- VAL-AGENT-001: denied ref escapes -----------------------------------
@@ -243,13 +254,13 @@ try {
   const Z = '0'.repeat(40);
   const denials = [
     ['update base', [`${before['refs/heads/main']} ${escapeTip} refs/heads/main`], `${escapeTip}\n^${before['refs/heads/main']}\n`],
-    ['update sibling workspace', [`${before['refs/heads/agents/ws2/task']} ${escapeTip} refs/heads/agents/ws2/task`], `${escapeTip}\n^${base}\n`],
+    ['update sibling workspace', [`${before[WS2]} ${escapeTip} ${WS2}`], `${escapeTip}\n^${base}\n`],
     ['create outside grant', [`${Z} ${escapeTip} refs/heads/escape-${ts}`], `${escapeTip}\n^${base}\n`],
     ['delete base', [`${before['refs/heads/main']} ${Z} refs/heads/main`], null],
     [
       'multi-ref escape (granted + base)',
       [
-        `${before['refs/heads/agents/ws1/task']} ${escapeTip} refs/heads/agents/ws1/task`,
+        `${before[WS1]} ${escapeTip} ${WS1}`,
         `${before['refs/heads/main']} ${escapeTip} refs/heads/main`,
       ],
       `${escapeTip}\n^${ws1New}\n`,
@@ -262,7 +273,7 @@ try {
   }
   const after = await refsOf(mainRepo);
   const unchanged = Object.keys(before).every((k) => before[k] === after[k]) && Object.keys(after).length === Object.keys(before).length;
-  check('refs unchanged after denied pushes', unchanged, `main=${after['refs/heads/main']} ws1/task=${after['refs/heads/agents/ws1/task']} ws2/task=${after['refs/heads/agents/ws2/task']} escape=${after[`refs/heads/escape-${ts}`] ?? 'absent'}`);
+  check('refs unchanged after denied pushes', unchanged, `main=${after['refs/heads/main']} ws1=${after[WS1]} ws2=${after[WS2]} escape=${after[`refs/heads/escape-${ts}`] ?? 'absent'}`);
 
   // --- VAL-AGENT-001: other repo + credential / grant / membership escapes ---
   const otherRest = await api('GET', `/repos/${otherRepo}`, agentTok);
@@ -303,7 +314,7 @@ try {
   );
 
   // --- VAL-AGENT-002: revocation of a warmed token -------------------------
-  const rev = await api('POST', `/agents/${agentId}/tokens`, OWNER_PAT, { repo: mainRepo, role: 'write', refs: ['refs/heads/agents/ws1/*'], expiresIn: 600 });
+  const rev = await api('POST', `/agents/${agentId}/tokens`, OWNER_PAT, { repo: mainRepo, role: 'write', refs: [`refs/heads/agents/${ws1.id}/*`], expiresIn: 600 });
   const revTok = rev.json.token;
   await api('GET', `/repos/${mainRepo}`, revTok);
   const warm = await api('GET', `/repos/${mainRepo}`, revTok);
@@ -316,13 +327,13 @@ try {
   check('first REST request after revoke denied without content', afterRevoke.status === 401 && !afterRevoke.text.includes(mainName), `${afterRevoke.status} ${afterRevoke.text} cost ${afterRevoke.cost}`);
   const revGit = git(['ls-remote', `${BASE}/${mainRepo}.git`], revTok, { allowFail: true });
   check('first git request after revoke denied', revGit.status !== 0, (revGit.stderr.split('\n')[0] ?? '').trim());
-  const revPush = await rawPush(mainRepo, revTok, [`${revBefore['refs/heads/agents/ws1/task']} ${escapeTip} refs/heads/agents/ws1/task`], `${escapeTip}\n^${ws1New}\n`);
+  const revPush = await rawPush(mainRepo, revTok, [`${revBefore[WS1]} ${escapeTip} ${WS1}`], `${escapeTip}\n^${ws1New}\n`);
   const revAfter = await refsOf(mainRepo);
-  check('revoked token push denied, ref unchanged', revPush.http === 401 && revAfter['refs/heads/agents/ws1/task'] === revBefore['refs/heads/agents/ws1/task'], `HTTP ${revPush.http}`);
+  check('revoked token push denied, ref unchanged', revPush.http === 401 && revAfter[WS1] === revBefore[WS1], `HTTP ${revPush.http}`);
 
   // --- VAL-AGENT-002: expiry -------------------------------------------------
   if (!opts['skip-expiry']) {
-    const exp = await api('POST', `/agents/${agentId}/tokens`, OWNER_PAT, { repo: mainRepo, role: 'write', refs: ['refs/heads/agents/ws1/*'], expiresIn: 60 });
+    const exp = await api('POST', `/agents/${agentId}/tokens`, OWNER_PAT, { repo: mainRepo, role: 'write', refs: [`refs/heads/agents/${ws1.id}/*`], expiresIn: 60 });
     const expTok = exp.json.token;
     console.log(`short-lived token: prefix ${exp.json.prefix}, expiresAt ${exp.json.expiresAt} (minimum expiresIn 60 s)`);
     const pre = await api('GET', `/repos/${mainRepo}`, expTok);
@@ -336,9 +347,9 @@ try {
     check('first REST request after expiry denied', post.status === 401 && !post.text.includes(mainName), `${post.status} ${post.text} at ${new Date().toISOString()}`);
     const postGit = git(['ls-remote', `${BASE}/${mainRepo}.git`], expTok, { allowFail: true });
     check('git request after expiry denied', postGit.status !== 0, (postGit.stderr.split('\n')[0] ?? '').trim());
-    const expPush = await rawPush(mainRepo, expTok, [`${expBefore['refs/heads/agents/ws1/task']} ${escapeTip} refs/heads/agents/ws1/task`], `${escapeTip}\n^${ws1New}\n`);
+    const expPush = await rawPush(mainRepo, expTok, [`${expBefore[WS1]} ${escapeTip} ${WS1}`], `${escapeTip}\n^${ws1New}\n`);
     const expAfter = await refsOf(mainRepo);
-    check('expired token push denied, ref unchanged', expPush.http === 401 && expAfter['refs/heads/agents/ws1/task'] === expBefore['refs/heads/agents/ws1/task'], `HTTP ${expPush.http}`);
+    check('expired token push denied, ref unchanged', expPush.http === 401 && expAfter[WS1] === expBefore[WS1], `HTTP ${expPush.http}`);
     const listing = await api('GET', `/agents/${agentId}/tokens`, OWNER_PAT);
     check('listing reports expired status', listing.json.tokens.find((t) => t.id === exp.json.id)?.status === 'expired');
   }

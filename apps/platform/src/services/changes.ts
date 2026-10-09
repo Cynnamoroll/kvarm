@@ -808,11 +808,17 @@ async function performMerge(
       }
       const pv = prepared.value;
       const mergedAt = Date.now();
-      const [update, read] = await cx.env.DB.batch([
+      const [update, , read] = await cx.env.DB.batch([
         cx.env.DB.prepare(
           `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5
             WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft'`,
         ).bind(cx.repo.id, row.number, pv.mergeCommit, mergedAt, pv.targetSha, headSha),
+        // The workspace the change was opened from (services/workspaces.ts) follows it, only when the guarded write above landed.
+        cx.env.DB.prepare(
+          `UPDATE workspaces SET status = 'merged', merged_at = ?3, updated_at = ?3, head_sha = ?4
+            WHERE repo_id = ?1 AND change_set_id = ?2 AND status = 'active'
+              AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?2 AND c.state = 'merged' AND c.merge_commit = ?5 AND c.merged_at = ?3)`,
+        ).bind(cx.repo.id, row.id, mergedAt, headSha, pv.mergeCommit),
         changeSelect(cx.env.DB, cx.repo.id, row.number),
       ]);
       if (!update?.meta.changes) {

@@ -14,8 +14,12 @@ import {
   type RefCommand,
 } from '@forge/gitops';
 
-/** Returns null when the command is allowed, otherwise the `ng` reason. */
-export type RefCheck = (cmd: RefCommand) => string | null;
+/**
+ * Returns null when the command is allowed, otherwise the `ng` reason. It
+ * also sees the whole command list, so a check that needs D1 can look every
+ * command up in one query.
+ */
+export type RefCheck = (cmd: RefCommand, commands: readonly RefCommand[]) => string | null | Promise<string | null>;
 
 export type GateResult =
   | { ok: true; body: ReadableStream<Uint8Array>; commands: RefCommand[] }
@@ -49,7 +53,13 @@ export async function gateReceivePack(request: Request, check: RefCheck, limits?
     return { ok: false, response: plain(status, `push request rejected: ${parsed.reason}`) };
   }
 
-  const verdicts = parsed.commands.map((cmd) => ({ cmd, reason: check(cmd) }));
+  let verdicts: Array<{ cmd: RefCommand; reason: string | null }>;
+  try {
+    verdicts = await Promise.all(parsed.commands.map(async (cmd) => ({ cmd, reason: await check(cmd, parsed.commands) })));
+  } catch (err) {
+    await prefix.cancel();
+    throw err;
+  }
   if (verdicts.every((v) => v.reason === null)) {
     return { ok: true, body: framed(prefix.forward(), request.headers.get('content-length')), commands: parsed.commands };
   }

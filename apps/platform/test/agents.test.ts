@@ -182,6 +182,14 @@ beforeAll(async () => {
   await seedRepo(logins.orgowner, 'mine', 'private');
   await seedRepo(ORG, 'orgwork', 'private');
   await seedRepo(ORG, 'orgother', 'private');
+  // Agent pushes below refs/heads/agents/<id>/ need a real, active workspace <id>.
+  await env.DB.prepare(
+    `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, created_at)
+     SELECT 'ws1', r.id, r.artifacts_name, 'task', 'builder', 'active', 'refs/heads/agents/ws1/task', 'main', ?
+       FROM repos r WHERE r.owner_login = ? AND r.name = 'work'`,
+  )
+    .bind(Date.now(), logins.owner)
+    .run();
   userAgent = await agentId('owner', { name: 'builder', description: 'test agent' });
   orgAgent = await agentId('orgowner', { owner: ORG, name: 'ci' });
   writeTok = await minted('owner', userAgent, {

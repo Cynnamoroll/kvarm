@@ -9,6 +9,7 @@ import { compareApi } from './routes/api/compare';
 import { eventsApi } from './routes/api/events';
 import { snapshotsApi } from './routes/api/snapshots';
 import { changesApi } from './routes/api/changes';
+import { workspacesApi } from './routes/api/workspaces';
 import { handleEventBatch } from './services/events';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
@@ -54,6 +55,7 @@ app.route('/api/v1', compareApi);
 app.route('/api/v1', eventsApi);
 app.route('/api/v1', snapshotsApi);
 app.route('/api/v1', changesApi);
+app.route('/api/v1', workspacesApi);
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
