@@ -81,7 +81,7 @@ export function actorJson(c: Context<App>, data: unknown, status = 200): Respons
 export async function authorizeRoute(
   c: Context<App>,
   need: RepoNeed,
-  opts: { requireActor?: boolean; allowAgent?: boolean } = {},
+  opts: { requireActor?: boolean; allowAgent?: boolean; branchRules?: boolean } = {},
 ): Promise<RepoAccess> {
   return resolveRepoAccess(c.env, {
     owner: c.req.param('owner') ?? '',
@@ -92,6 +92,7 @@ export async function authorizeRoute(
     clientIp: clientIp(c),
     requireActor: opts.requireActor,
     allowAgent: opts.allowAgent,
+    branchRules: opts.branchRules,
   });
 }
 

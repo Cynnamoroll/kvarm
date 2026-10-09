@@ -6,9 +6,10 @@
  *
  *  1. One ingest D1 batch records the event (insert or ignore, delivery
  *     count), advances `repos.pushed_at` monotonically, moves the ref position
- *     only for a newer event, and reads back the repo, the current ref
- *     position and the effects already completed for this event. Events for
- *     repos the platform does not know are acked and ignored.
+ *     only for a newer event, moves the head of open change requests on a
+ *     pushed branch to that position, and reads back the repo, the current
+ *     ref position, those changes and the effects already completed for this
+ *     event. Events for repos the platform does not know are acked and ignored.
  *  2. Every effect still missing for the event runs independently. Completed
  *     effects are recorded in one completion batch, so a redelivery (queue
  *     at-least-once, or a retry after a failed effect) runs only what is
@@ -24,6 +25,7 @@ import { sha256Hex, ZERO_OID } from '@forge/gitops';
 import { bumpRefGeneration } from '../cache/compare';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import type { ServiceResult } from '../repos/service';
+import { onHeadPushed, type ChangeOnRef } from './changes';
 
 export interface PushEvent {
   namespace: string;
@@ -107,6 +109,7 @@ interface IngestRow {
   deliveries: number;
   head_event_id: string | null;
   done: string;
+  changes: string | null;
 }
 
 export interface Ingested {
@@ -116,6 +119,20 @@ export interface Ingested {
   /** True when a newer event of the same ref already holds the ref position. */
   superseded: boolean;
   done: Set<string>;
+  /** Open change requests whose head is the pushed branch, after the head refresh. */
+  changes: ChangeOnRef[];
+}
+
+const BRANCH_PREFIX = 'refs/heads/';
+
+function parseChanges(json: string | null): ChangeOnRef[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as ChangeOnRef[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -129,6 +146,9 @@ export interface Ingested {
 async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: string, now: number): Promise<Ingested | null> {
   const eventAt = Number.isFinite(ev.eventAt) ? ev.eventAt : now;
   const persistedAt = 'SELECT p.event_at FROM push_events p WHERE p.id = ?2 AND p.repo_id = r.id';
+  // Change requests name their head by branch; other refs match no change.
+  const branch = ev.ref.startsWith(BRANCH_PREFIX) ? ev.ref.slice(BRANCH_PREFIX.length) : null;
+  const currentRef = 'FROM repo_refs f WHERE f.repo_id = change_sets.repo_id AND f.ref = ?2';
   const results = await db.batch([
     db
       .prepare(
@@ -158,18 +178,37 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
             OR (excluded.event_at = repo_refs.event_at AND excluded.event_id > repo_refs.event_id)`,
       )
       .bind(ev.repoName, id, ev.ref, ev.after, now),
+    // Head refresh: open changes on this branch follow the ref position just
+    // reconciled above, and only when it is newer than the event that last
+    // set their head (creation time at first), so an old delivery never
+    // rolls a head back. A deleted branch leaves the head where it was.
+    db
+      .prepare(
+        `UPDATE change_sets
+            SET head_sha = (SELECT f.sha ${currentRef}),
+                head_event_at = (SELECT f.event_at ${currentRef}),
+                updated_at = ?4
+          WHERE repo_id = (SELECT r.id FROM repos r WHERE r.artifacts_name = ?1)
+            AND head_ref = ?3 AND state IN ('open', 'conflicted')
+            AND EXISTS (SELECT 1 ${currentRef}
+                         AND f.sha != '${ZERO_OID}' AND f.event_at > COALESCE(change_sets.head_event_at, 0)
+                         AND f.sha IS NOT change_sets.head_sha)`,
+      )
+      .bind(ev.repoName, ev.ref, branch, now),
     db
       .prepare(
         `SELECT r.id AS repo_id, r.default_branch, p.deliveries, f.event_id AS head_event_id,
-           (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done
+           (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done,
+           (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'policy', c.merge_policy, 'headSha', c.head_sha))
+              FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state = 'open') AS changes
          FROM repos r
          JOIN push_events p ON p.id = ?2 AND p.repo_id = r.id
          LEFT JOIN repo_refs f ON f.repo_id = r.id AND f.ref = ?3
          WHERE r.artifacts_name = ?1`,
       )
-      .bind(ev.repoName, id, ev.ref),
+      .bind(ev.repoName, id, ev.ref, branch),
   ]);
-  const row = (results[4]?.results as IngestRow[] | undefined)?.[0];
+  const row = (results[5]?.results as IngestRow[] | undefined)?.[0];
   if (!row) return null;
   return {
     repoId: row.repo_id,
@@ -177,6 +216,7 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
     deliveries: row.deliveries,
     superseded: row.head_event_id !== id,
     done: new Set(JSON.parse(row.done || '[]') as string[]),
+    changes: parseChanges(row.changes),
   };
 }
 
@@ -191,6 +231,8 @@ export interface EffectContext {
   repoId: string;
   defaultBranch: string;
   superseded: boolean;
+  /** Open change requests whose head is the pushed branch (from the ingest batch). */
+  changes: ChangeOnRef[];
   /** Counts SnapshotBuilder instance creations for the per-message log line. */
   counters: { wf: number };
 }
@@ -255,7 +297,25 @@ const intentIndexEffect: PushEffect = {
   },
 };
 
-export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect];
+/**
+ * Change requests on the pushed branch (services/changes.ts): their head
+ * already moved in the ingest batch; this runs the head-moved hooks and
+ * merges ready `auto` changes. No D1 when no open change uses the branch.
+ */
+const changeHooksEffect: PushEffect = {
+  name: 'change-hooks',
+  async run(ctx) {
+    if (!ctx.event.ref.startsWith(BRANCH_PREFIX)) return { state: 'skipped', detail: 'not a branch' };
+    const pending: Promise<unknown>[] = [];
+    try {
+      return await onHeadPushed(ctx.env, ctx.repoId, ctx.changes, ctx.event.after, (p) => pending.push(p));
+    } finally {
+      await Promise.allSettled(pending);
+    }
+  },
+};
+
+export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect, changeHooksEffect];
 
 // ---------------------------------------------------------------------------
 // Dispatcher
@@ -295,6 +355,7 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
     repoId: state.repoId,
     defaultBranch: state.defaultBranch,
     superseded: state.superseded,
+    changes: state.changes,
     counters,
   };
   const settled = await Promise.allSettled(pending.map((e) => e.run(ctx)));

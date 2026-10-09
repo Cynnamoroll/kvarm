@@ -209,6 +209,7 @@ describe('queue dispatcher', () => {
       purge: { state: 'done' },
       snapshot: { state: 'done', detail: `created ${snapshotInstanceId(repo.id, A)}` },
       'intent-index': { state: 'skipped' },
+      'change-hooks': { state: 'skipped', detail: 'no open changes' },
     });
     expect([...wf.instances.keys()]).toEqual([snapshotInstanceId(repo.id, A)]);
 
@@ -274,6 +275,7 @@ describe('queue dispatcher', () => {
     expect(await effects(ev!.id)).toEqual({
       purge: { state: 'done', detail: null },
       'intent-index': expect.objectContaining({ state: 'skipped' }) as unknown,
+      'change-hooks': { state: 'skipped', detail: 'no open changes' },
     });
     const gen = await refGeneration(repo.id);
 
@@ -540,7 +542,7 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     expect(list[2]!.eventAt).toBe(iso(T0 + 1000));
     expect(list[0]!.id).not.toBe(list[2]!.id);
     expect(list[0]!.completedAt).toMatch(/Z$/);
-    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['intent-index', 'purge', 'snapshot']);
+    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['change-hooks', 'intent-index', 'purge', 'snapshot']);
     expect(r.body.nextCursor).toBeNull();
     expect(r.cost.d1).toBeLessThanOrEqual(2);
     expect(r.cost.art).toBe(0);

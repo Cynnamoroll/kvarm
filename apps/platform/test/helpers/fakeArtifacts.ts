@@ -5,13 +5,18 @@
  * `artifacts.invalid`, counted as subrequests like the real one.
  */
 
+import * as zlib from 'node:zlib';
 import {
   FLUSH_PKT,
   buildBlob,
   buildCommit,
+  buildReportStatus,
   buildTree,
   concat,
   decode,
+  gitOid,
+  negotiatedSideband,
+  parseReceivePackCommands,
   parseTree,
   pktLine,
   readPktLines,
@@ -40,6 +45,8 @@ export class FakeRepo {
   maxOpenBytes = 0;
   /** Whole-blob materializations (arrayBuffer/bytes) by the caller. */
   materialized = 0;
+  /** When set, receive-pack answers with this HTTP status and applies nothing. */
+  receivePackStatus: number | null = null;
 
   count(prefix: string): number {
     return this.calls.filter((c) => c.startsWith(prefix)).length;
@@ -170,7 +177,12 @@ function handle(name: string): ArtifactsRepo {
   } as unknown as ArtifactsRepo;
 }
 
-export const fakeArtifacts = { get: async (name: string) => handle(name) } as unknown as Artifacts;
+export const fakeArtifacts = {
+  get: async (name: string) => handle(name),
+  delete: async (name: string) => {
+    fakeRepos.delete(name);
+  },
+} as unknown as Artifacts;
 
 /** ls-refs over the fake refs, honoring ref-prefix like git upload-pack v2. */
 function lsRefsResponse(repo: FakeRepo, body: Uint8Array): Response {
@@ -189,12 +201,73 @@ function lsRefsResponse(repo: FakeRepo, body: Uint8Array): Response {
 export const lsRefsCalls: string[] = [];
 const originalFetch = globalThis.fetch;
 
-/** Routes artifacts.invalid upload-pack requests to the fake repos. */
+const PACK_TYPES: Record<number, Obj['type']> = { 1: 'commit', 2: 'tree', 3: 'blob' };
+
+/** Objects of an undeltified pack (what the gitops pack writer produces). */
+export function readPack(pack: Uint8Array): Array<{ type: Obj['type']; content: Uint8Array }> {
+  if (pack.length < 32 || decode(pack.subarray(0, 4)) !== 'PACK') throw new Error('not a pack');
+  const count = new DataView(pack.buffer, pack.byteOffset).getUint32(8);
+  const out: Array<{ type: Obj['type']; content: Uint8Array }> = [];
+  let off = 12;
+  for (let i = 0; i < count; i++) {
+    let byte = pack[off++]!;
+    const type = PACK_TYPES[(byte >> 4) & 7];
+    if (!type) throw new Error(`unsupported pack entry type ${(byte >> 4) & 7}`);
+    let size = byte & 0x0f;
+    let shift = 4;
+    while (byte & 0x80) {
+      byte = pack[off++]!;
+      size += (byte & 0x7f) * 2 ** shift;
+      shift += 7;
+    }
+    const r = zlib.inflateSync(pack.subarray(off), { info: true }) as unknown as { buffer: Uint8Array; engine: { bytesWritten: number } };
+    if (r.buffer.length !== size) throw new Error('pack entry size mismatch');
+    out.push({ type, content: new Uint8Array(r.buffer) });
+    off += r.engine.bytesWritten;
+  }
+  return out;
+}
+
+/**
+ * receive-pack on a fake repo: one compare-and-swap per command, the pack's
+ * objects stored only when every command applies, report-status like git.
+ */
+async function receivePack(repo: FakeRepo, body: Uint8Array): Promise<Response> {
+  const parsed = parseReceivePackCommands(body);
+  if (parsed.status !== 'done') return new Response('bad request', { status: 400 });
+  repo.calls.push(`receivePack:${parsed.commands.map((c) => `${c.ref}:${c.oldOid}->${c.newOid}`).join(',')}`);
+  if (repo.receivePackStatus !== null) return new Response('unavailable', { status: repo.receivePackStatus });
+  const stale = parsed.commands.filter((c) => (repo.refs.get(c.ref) ?? ZERO) !== c.oldOid);
+  const results = parsed.commands.map((c) => ({ ref: c.ref, ok: stale.length === 0, ...(stale.includes(c) ? { reason: 'stale ref' } : {}) }));
+  if (stale.length === 0) {
+    const rest = body.subarray(parsed.end);
+    for (const o of rest.length > 0 ? readPack(rest) : []) {
+      repo.objects.set(await gitOid(o.type, o.content), o);
+    }
+    for (const c of parsed.commands) {
+      if (/^0+$/.test(c.newOid)) repo.refs.delete(c.ref);
+      else repo.refs.set(c.ref, c.newOid);
+    }
+  }
+  return new Response(buildReportStatus(results, negotiatedSideband(parsed.capabilities)), {
+    headers: { 'content-type': 'application/x-git-receive-pack-result' },
+  });
+}
+
+const ZERO = '0'.repeat(40);
+
+/** Routes artifacts.invalid upload-pack (ls-refs) and receive-pack requests to the fake repos. */
 export function installFakeGitRemote(): void {
   globalThis.fetch = countingFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = new Request(input, init);
     const url = new URL(req.url);
     if (url.hostname !== 'artifacts.invalid') return originalFetch(input, init);
+    const rp = /^\/git\/default\/(.+)\.git\/git-receive-pack$/.exec(url.pathname);
+    if (rp) {
+      const target = fakeRepos.get(rp[1]!);
+      if (!target || req.method !== 'POST') return new Response('bad', { status: 404 });
+      return receivePack(target, new Uint8Array(await req.arrayBuffer()));
+    }
     const m = /^\/git\/default\/(.+)\.git\/git-upload-pack$/.exec(url.pathname);
     const repo = m ? fakeRepos.get(m[1]!) : undefined;
     if (!repo || req.headers.get('git-protocol') !== 'version=2') return new Response('bad', { status: 400 });

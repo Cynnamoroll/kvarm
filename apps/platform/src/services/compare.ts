@@ -488,6 +488,16 @@ async function loadCompareBody(ctx: Ctx, baseTree: string, headTree: string): Pr
   return { body: JSON.parse(serialized) as CompareBody, cache: ctx.bypass ? 'bypass' : 'miss' };
 }
 
+/**
+ * The rating `compare` reports for a tree pair, from the same cached body, so
+ * a change request and `compare/<base>...<head>` agree on identical trees.
+ */
+export async function treePairRating(ctx: Ctx, baseTree: string, headTree: string): Promise<ChangeRating> {
+  const { body, cache } = await loadCompareBody(ctx, baseTree, headTree);
+  markOutcome(cache);
+  return body.rating;
+}
+
 function encodeCursor(offset: number, baseTree: string, headTree: string): string {
   return btoa(`v1:${offset}:${baseTree.slice(0, 12)}${headTree.slice(0, 12)}`).replace(/=+$/, '');
 }
