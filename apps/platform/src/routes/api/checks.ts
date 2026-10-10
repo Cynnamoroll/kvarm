@@ -45,3 +45,16 @@ checksApi.post('/repos/:owner/:repo/check-runs', async (c) => {
   }
   return actorJson(c, { run: r.value.run, change: change ? { number: change.number } : null }, 201);
 });
+
+checksApi.patch('/repos/:owner/:repo/check-runs/:id', async (c) => {
+  const d = await authorizeRoute(c, 'write', { requireActor: true, allowAgent: true, transport: 'ci' });
+  if (!d.ok) return denyJson(c, d);
+  const body = await c.req.json().catch(() => undefined);
+  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
+  const r = await checks.updateCheckRun(c.env, d.repo, c.req.param('id'), body);
+  if (!r.ok) return failJson(c, r);
+  if (r.value.change && r.value.run.status !== 'queued' && r.value.run.status !== 'running') {
+    c.executionCtx.waitUntil(resumeAfterCheck(c.env, d.repo.id, r.value.change, (p) => c.executionCtx.waitUntil(p)));
+  }
+  return actorJson(c, { run: r.value.run, change: r.value.change ? { number: r.value.change.number } : null });
+});

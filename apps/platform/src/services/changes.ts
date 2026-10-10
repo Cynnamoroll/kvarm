@@ -16,7 +16,7 @@
  * the gate has no producers).
  */
 
-import type { MergeResolution } from '@forge/gitops';
+import { ZERO_OID, type MergeResolution } from '@forge/gitops';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import type { RepoRow } from '../db/repos';
@@ -78,6 +78,7 @@ import {
 } from './reviewGate';
 import type { ChangeRating } from './risk';
 import { kickTrain } from './trainKick';
+import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -684,6 +685,8 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
     });
     if (!resolved.ok) return resolved;
     const { baseSha, headSha, headTree, rating, m, guard, guardStarted } = resolved.value;
+    const ciConfig = await hasCiJobs(cx.env, cx.repo.artifacts_name, headSha);
+    if (!ciConfig.ok) return ciConfig;
 
     const now = Date.now();
     const id = crypto.randomUUID();
@@ -744,6 +747,21 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
     if (opts.admit) {
       const refused = await opts.admit({ id: row.id, number: row.number });
       if (refused) return refused;
+    }
+    if (row.head_sha) {
+      const queued = await queueChangeCi(cx.env, cx.repo, row.id, row.head_sha, row.head_sha === headSha ? headTree : undefined);
+      // A newer head may have raced the create after the observed head's
+      // config was validated. queueChangeCi records forge/ci-config failure
+      // on that persisted head, so return the created, blocked change rather
+      // than an error that suggests no change exists.
+      if (!queued.ok && row.head_sha === headSha) return queued;
+      if (queued.ok && queued.value.jobs > 0) {
+        const read = await listChangeChecks(cx.env, cx.repo, String(row.number));
+        if (read.ok) checks = read.value.checks;
+      } else if (!queued.ok) {
+        const read = await listChangeChecks(cx.env, cx.repo, String(row.number));
+        if (read.ok) checks = read.value.checks;
+      }
     }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
     return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks } };
@@ -1085,6 +1103,47 @@ async function performMerge(
         }
         return fail(prepared.status, prepared.error, prepared.code, prepared.conflicts ? { conflicts: conflictViews(prepared.conflicts).conflicts } : {});
       }
+      let ciCheckRef: string | null = null;
+      if (prepared.value.kind === 'merge') {
+        const configured = await hasCiJobs(cx.env, cx.repo.artifacts_name, prepared.value.headSha);
+        if (!configured.ok) return configured;
+        if (configured.value) {
+          const checkRef = `refs/heads/forge-ci/${row.id}/${prepared.value.treeSha}`;
+          ciCheckRef = checkRef;
+          const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
+          if (live) {
+            const expected = await cx.env.DB.prepare(
+              'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
+            )
+              .bind(cx.repo.id, row.id, prepared.value.treeSha)
+              .first<string>('head_sha');
+            const staged = await sources.readCommit(live);
+            if (
+              live !== expected ||
+              !staged ||
+              staged.treeHash !== prepared.value.treeSha ||
+              staged.parents.length !== 2 ||
+              staged.parents[0] !== prepared.value.targetSha ||
+              staged.parents[1] !== prepared.value.headSha
+            ) {
+              return fail(503, 'the prepared CI commit identity is invalid', 'CI_PREPARED_COMMIT_INVALID');
+            }
+            prepared.value.mergeCommit = live;
+          } else {
+            const staged = await pusher.updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: prepared.value.mergeCommit }, prepared.value.objects);
+            if (staged.status !== 'ok') return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
+          }
+          const queued = await queueExactTreeCi(
+            cx.env,
+            cx.repo,
+            row.id,
+            prepared.value.headSha,
+            prepared.value.mergeCommit,
+            prepared.value.treeSha,
+          );
+          if (!queued.ok) return queued;
+        }
+      }
       const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null, { headSha: prepared.value.headSha });
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
@@ -1167,6 +1226,16 @@ async function performMerge(
           409,
           `the change was updated while it merged (head, policy or state); ${targetRef} now points at ${pv.mergeCommit}, which merged head ${headSha}, and the change was not marked merged`,
           'CHANGE_UPDATED_DURING_MERGE',
+        );
+      }
+      if (ciCheckRef) {
+        cx.waitUntil(
+          pusher
+            .updateRef({ ref: ciCheckRef, oldOid: pv.mergeCommit, newOid: ZERO_OID }, [])
+            .then((r) => {
+              if (r.status !== 'ok') console.warn(JSON.stringify({ ciPreparedRefCleanup: { repo: cx.repo.id, ref: ciCheckRef, status: r.status } }));
+            })
+            .catch((err) => console.warn(JSON.stringify({ ciPreparedRefCleanup: { repo: cx.repo.id, ref: ciCheckRef, error: String(err) } }))),
         );
       }
       const merged = (read?.results as ChangeRow[] | undefined)?.[0] ?? row;
@@ -1324,6 +1393,10 @@ export type HeadMovedHook = (e: HeadMoved) => Promise<void>;
 export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
   async (e) => {
     await recordGuard(e.env, e.repoId, e.change.id, e.headSha);
+  },
+  async (e) => {
+    const repo = await e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId).first<RepoRow>();
+    if (repo) await queueChangeCi(e.env, repo, e.change.id, e.headSha);
   },
 ];
 
@@ -1515,6 +1588,7 @@ export async function onHeadPushed(
 export function changeCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
   return [
     db.prepare('DELETE FROM comments WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
+    ciCleanupStatement(db, repoId),
     db.prepare('DELETE FROM check_runs WHERE repo_id = ?').bind(repoId),
     db.prepare('UPDATE workspaces SET change_set_id = NULL WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM merge_queue WHERE repo_id = ?').bind(repoId),

@@ -31,7 +31,7 @@
  * polling the lease.
  */
 
-import type { GitObject } from '@forge/gitops';
+import { ZERO_OID, type GitObject } from '@forge/gitops';
 import type { AgentGrant } from '../auth/agentTokens';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { currentMeter, type CostCounters } from '../cost/meter';
@@ -92,6 +92,7 @@ import { artifactsMergeSources, overlaySources, prepareMerge, type PreparedMerge
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
 import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewFactsSelectById, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
+import { hasCiJobs, queueExactTreeCi } from './ci';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -893,6 +894,8 @@ interface Plan {
   wait?: DependencyBlock;
   /** Satisfied pins (id@revision) whose revision the prepared merge commit was checked to contain. */
   verifiedPins?: Set<string>;
+  /** This exact prepared merge commit is retained by a temporary CI ref. */
+  ciPrepared?: boolean;
   /** False when this pass's guarded write for the entry did not apply. */
   current: boolean;
 }
@@ -1091,6 +1094,51 @@ async function trainPass(
       blocked = true;
       plan.next = 'queued';
       continue;
+    }
+    if (p.value.kind === 'merge') {
+      const configured = await hasCiJobs(env, repo.artifacts_name, p.value.headSha);
+      if (!configured.ok) {
+        exit(configured.code ?? 'INVALID_CI_CONFIG', configured.error);
+        continue;
+      }
+      if (configured.value) {
+        plan.ciPrepared = true;
+        // Reuse the immutable prepared commit staged by an earlier pass. A
+        // freshly prepared commit can have the same tree and parents but a
+        // different timestamp, while the completed checks name the staged SHA.
+        const checkRef = `refs/heads/forge-ci/${e.id}/${p.value.treeSha}`;
+        const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
+        if (live !== null) {
+          const expected = await env.DB.prepare(
+            'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
+          )
+            .bind(repo.id, e.change_set_id, p.value.treeSha)
+            .first<string>('head_sha');
+          const staged = await sources.readCommit(live);
+          if (
+            live !== expected ||
+            !staged ||
+            staged.treeHash !== p.value.treeSha ||
+            staged.parents.length !== 2 ||
+            staged.parents[0] !== p.value.targetSha ||
+            staged.parents[1] !== p.value.headSha
+          ) {
+            throw new RefStoreUnavailable(`prepared CI ref ${checkRef} has an invalid commit identity`);
+          }
+          p.value.mergeCommit = live;
+        } else {
+          const staged = await deps.pusher(env, repo).updateRef(
+            { ref: checkRef, oldOid: ZERO_OID, newOid: p.value.mergeCommit },
+            p.value.objects,
+          );
+          if (staged.status !== 'ok') throw new RefStoreUnavailable(`prepared CI ref could not be created: ${staged.reason ?? staged.status}`);
+        }
+        const queued = await queueExactTreeCi(env, repo, e.change_set_id, p.value.headSha, p.value.mergeCommit, p.value.treeSha);
+        if (!queued.ok) {
+          exit(queued.code ?? 'CI_QUEUE_FAILED', queued.error);
+          continue;
+        }
+      }
     }
     let kept: Awaited<ReturnType<typeof preservationRefusal>>;
     try {
@@ -1556,6 +1604,18 @@ async function publishCandidate(
       mergeCommit: pv.mergeCommit,
       input,
     });
+    if (plan.ciPrepared) {
+      const checkRef = `refs/heads/forge-ci/${e.id}/${pv.treeSha}`;
+      ctx.waitUntil(
+        deps
+          .pusher(env, repo)
+          .updateRef({ ref: checkRef, oldOid: pv.mergeCommit, newOid: ZERO_OID }, [])
+          .then((r) => {
+            if (r.status !== 'ok') console.warn(JSON.stringify({ ciPreparedRefCleanup: { repo: repo.id, ref: checkRef, status: r.status } }));
+          })
+          .catch((err) => console.warn(JSON.stringify({ ciPreparedRefCleanup: { repo: repo.id, ref: checkRef, error: String(err) } }))),
+      );
+    }
   }
   return { kind: 'published' };
 }

@@ -440,6 +440,14 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     ]);
 
     const change = await openChangeSet(cx, id, { title: task, base: p.base, mergePolicy: p.mergePolicy });
+    // Opening the composed change may register CI jobs for this exact tree.
+    // Persist the post-registration gate answer, rather than the provisional
+    // answer taken before the immutable composed ref existed.
+    const currentChecks = await gate.requiredChecksFor({ id: cx.repo.id }, treeSha, null, { headSha: commit.hash });
+    await db
+      .prepare(`UPDATE compositions SET checks = ?3, conflict_kind = ?4 WHERE repo_id = ?1 AND id = ?2`)
+      .bind(cx.repo.id, compositionId, JSON.stringify(currentChecks), semanticConflict(currentChecks) ? 'semantic' : null)
+      .run();
     const read = await readComposition(cx, compositionId);
     if (!read) return fail(500, 'composition could not be read back', 'CREATE_FAILED');
     if (!change.ok) {

@@ -20,7 +20,7 @@ import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, resto
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://forge.test';
-const FULL: Scope[] = ['read', 'write', 'api'];
+const FULL: Scope[] = ['read', 'write', 'api', 'ci'];
 const OWNER = 'cand-owner';
 
 class FakeWorkflow {
@@ -36,6 +36,7 @@ const env = {
   ...baseEnv,
   ARTIFACTS: fakeArtifacts,
   SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
+  CI_PIPELINE: new FakeWorkflow() as unknown as Env['CI_PIPELINE'],
 } as Env;
 
 const tok = { owner: '', outsider: '' };
@@ -458,7 +459,7 @@ describe('composition', () => {
       baseSha: main.sha,
       treeSha: expectedTree,
       conflict: null,
-      checks: { state: 'pending', required: [{ name: 'forge/guard', state: 'pending', producer: 'check-runs' }] },
+      checks: { state: 'success', required: [{ name: 'forge/guard', state: 'success', producer: 'check-runs' }] },
       sources: [
         { workspace: a.id, mergeBase: main.sha, paths: null },
         { workspace: b.id, mergeBase: main.sha, paths: null },
@@ -555,6 +556,46 @@ describe('composition', () => {
     expect(r.value.checks.state).toBe('failure');
     const read = await call('GET', `${R('compose-sem')}/compositions/${r.value.id}`, tok.owner);
     expect(read.json.conflict).toEqual({ kind: 'semantic', checks: ['test'], treeSha: composedTree });
+  });
+
+  it('records a runner failure on the exact composed tree as a semantic conflict and blocks merge (VAL-COMPOSE-003)', async () => {
+    const ci = `${JSON.stringify({ jobs: [{ name: 'semantic', run: 'test ! -f a.txt -o ! -f b.txt', required: true }] })}\n`;
+    const base = { ...BASE, '.forge/ci.json': ci };
+    const repo = await seedRepo('compose-ci');
+    const main = await based(repo, base);
+    const a = (await createWs('compose-ci', 'a')).json;
+    const b = (await createWs('compose-ci', 'b')).json;
+    await push('compose-ci', repo, a, main.sha, { ...base, 'a.txt': 'a\n' });
+    await push('compose-ci', repo, b, main.sha, { ...base, 'b.txt': 'b\n' });
+
+    const composed = await call('POST', `${R('compose-ci')}/candidates/compose`, tok.owner, {
+      base: 'main',
+      workspaces: [a.id, b.id],
+      mergePolicy: 'review',
+    });
+    expect(composed.status).toBe(201);
+    expect(composed.json.checks.state).toBe('pending');
+    expect(composed.json.checks.required.find((c: any) => c.name === 'semantic')).toMatchObject({
+      name: 'semantic',
+      state: 'pending',
+      producer: 'check-runs',
+    });
+    const claim = await call('POST', `${R('compose-ci')}/ci/jobs/claim`, tok.owner, { runnerId: 'compose-runner' });
+    expect(claim.json.job).toMatchObject({ name: 'semantic', sha: composed.json.commitSha, treeSha: composed.json.treeSha });
+    const report = await call('POST', `${R('compose-ci')}/ci/jobs/${claim.json.job.id}/report`, tok.owner, {
+      runnerId: 'compose-runner',
+      generation: claim.json.job.generation,
+      conclusion: 'failure',
+      summary: { exitCode: 1 },
+    });
+    expect(report.status).toBe(200);
+
+    const read = await call('GET', `${R('compose-ci')}/compositions/${composed.json.id}`, tok.owner);
+    expect(read.json.conflict).toEqual({ kind: 'semantic', checks: ['semantic'], treeSha: composed.json.treeSha });
+    expect(read.json.checks.state).toBe('failure');
+    const merge = await call('POST', `${R('compose-ci')}/changes/${composed.json.changeSet}/merge`, tok.owner);
+    expect([merge.status, merge.json.code]).toEqual([409, 'REQUIRED_CHECKS_FAILED']);
+    expect(merge.json.error).toContain('semantic');
   });
 
   it('a composed workspace joins the Nexus index even when its push event is consumed before it is registered', async () => {

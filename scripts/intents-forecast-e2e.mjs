@@ -447,16 +447,29 @@ await scenario('forecast', async (repo) => {
   const ch1 = await http(`${api}/changes`, { method: 'POST', json: { title: 'touch never', base: 'main', head: 'feat-x', mergePolicy: 'auto' } });
   console.log(`POST changes (auto, no required checks) -> ${ch1.status} state=${ch1.json?.state}`);
   check('VAL-FORECAST-003', 'auto change on that path merges (nothing in the forecast blocks it)', ch1.status === 201 && ch1.json?.state === 'merged');
-  const rule = await http(`${api}/branch-rules`, { method: 'POST', json: { pattern: 'main', requiredChecks: ['ci'] } });
-  const y = commitOn(dir, x, { 'never/touched.txt': 'y\n' }, 'touch never again');
+  const y = commitOn(
+    dir,
+    x,
+    {
+      'never/touched.txt': 'y\n',
+      '.forge/ci.json': `${JSON.stringify({ jobs: [{ name: 'forecast-fail', run: 'exit 1', required: true }] })}\n`,
+    },
+    'touch never again',
+  );
   await pushRetry(dir, url, [`${y}:refs/heads/feat-y`]);
   const ch2 = await http(`${api}/changes`, { method: 'POST', json: { title: 'touch never again', base: 'main', head: 'feat-y', mergePolicy: 'auto' } });
+  const runner = spawnSync(process.execPath, ['apps/cli/bin/forge.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, FORGE_BASE_URL: BASE, FORGE_PAT: PAT },
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
   const mg = await http(`${api}/changes/${ch2.json?.number}/merge`, { method: 'POST' });
-  console.log(`branch rule ${rule.status}; POST changes -> ${ch2.status} state=${ch2.json?.state}; merge -> ${mg.status} ${mg.json?.code}`);
+  console.log(`POST changes -> ${ch2.status} state=${ch2.json?.state}; runner -> ${runner.status} ${runner.stdout.trim()}; merge -> ${mg.status} ${mg.json?.code}`);
   check(
     'VAL-FORECAST-003',
-    'with a required check not passed the change stays open and merge is refused 409 (the forecast approves nothing)',
-    rule.status === 201 && ch2.json?.state === 'open' && mg.status === 409 && (mg.json?.code ?? '').startsWith('REQUIRED_CHECKS_'),
+    'with a failing required CI check the change stays open and merge is REQUIRED_CHECKS_FAILED (the forecast approves nothing)',
+    ch2.json?.state === 'open' && runner.status === 0 && mg.status === 409 && mg.json?.code === 'REQUIRED_CHECKS_FAILED' && /forecast-fail/.test(mg.json?.error ?? ''),
   );
 });
 

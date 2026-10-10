@@ -985,11 +985,11 @@ async function runE2e(argv) {
       return (all.json?.workspaces ?? []).filter((w) => (w.task ?? '').includes(`(task ${id})`));
     };
     /** The agent's resolution: origin/main merged into the change head, src/app.ts carrying both sides. */
-    const resolve = (head, content, msg) => {
+    const resolve = (head, content, msg, extra = {}) => {
       mustGit(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main'], dir);
       mustGit(['checkout', '-q', '--detach', head], dir);
       const merged = git(['merge', '--no-edit', '-q', 'origin/main'], dir);
-      writeFiles(dir, { 'src/app.ts': content });
+      writeFiles(dir, { ...extra, 'src/app.ts': content });
       mustGit(['add', '-A'], dir);
       mustGit(['commit', '-q', '-m', msg], dir);
       return { sha: mustGit(['rev-parse', 'HEAD'], dir), mergeExit: merged.code, base: mustGit(['rev-parse', 'origin/main'], dir) };
@@ -1098,7 +1098,9 @@ async function runE2e(argv) {
     const gen2 = reclaim.data?.lease?.generation;
     console.log(`after expiry GET tasks/${aTask?.id} -> status=${lapsed?.status} lease=${JSON.stringify(lapsed?.lease)}\nforge task claim (agent-two) -> exit ${reclaim.code} claimedBy=${reclaim.data?.task?.claimedBy} lease=${JSON.stringify(reclaim.data?.lease)} workspace=${reclaim.data?.workspace?.id} ${reclaim.err}`);
     check('VAL-WORKFLOW-001', 'after expiry the task is open again and the CLI reclaim gets generation n+1 with agent-two as claimant and the same workspace', lapsed?.status === 'open' && reclaim.code === 0 && gen2 === gen1 + 1 && reclaim.data?.task?.claimedBy === 'agent-two' && reclaim.data?.workspace?.id === a1.data?.workspace?.id);
-    const aRes = resolve(heads.auto, 'export const app = 100 + 3 + 4; // main + review + auto\n', 'resolve auto conflict');
+    const aRes = resolve(heads.auto, 'export const app = 100 + 3 + 4; // main + review + auto\n', 'resolve auto conflict', {
+      '.forge/ci.json': `${JSON.stringify({ jobs: [{ name: 'resolution-ci', run: 'test -f src/app.ts', required: true }] })}\n`,
+    });
     const notPushed = forge(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two']);
     console.log(`forge task complete before the push -> exit ${notPushed.code} ${JSON.stringify(notPushed.data)?.slice(0, 250)}`);
     await pushRetry(dir, url, `${aRes.sha}:${reclaim.data?.workspace?.ref}`);
@@ -1109,7 +1111,12 @@ async function runE2e(argv) {
     console.log(`agent-one stale complete_task (generation ${gen1}) -> isError=${stale.isError} ${stale.text.slice(0, 250)}\nGET tasks/${aTask?.id} -> status=${afterStale?.status} claimedBy=${afterStale?.claimedBy} workspace=${afterStale?.workspace}; GET changes/${changes.auto.number} head=${changeAfterStale?.headSha} state=${changeAfterStale?.state}`);
     check('VAL-WORKFLOW-002', 'the stale generation completion is refused 409 STALE_GENERATION; task and change unchanged', stale.isError && stale.data?.code === 'STALE_GENERATION' && afterStale?.status === 'claimed' && afterStale?.claimedBy === 'agent-two' && afterStale?.workspace === a1.data?.workspace?.id && changeAfterStale?.headSha === before?.headSha && changeAfterStale?.headSha === heads.auto && changeAfterStale?.state === 'conflicted');
     const done = forge(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two', '--sha', aRes.sha]);
-    console.log(`git push ${aRes.sha} -> ${reclaim.data?.workspace?.ref}; forge task complete (generation ${gen2}) -> exit ${done.code} task=${done.data?.task?.status} change=${JSON.stringify({ state: done.data?.change?.state, head: done.data?.change?.headSha })} ${done.err}`);
+    const runner = spawnSync(process.execPath, [CLI_BIN, 'runner', '--repo', env.repo, '--once'], {
+      env: { ...process.env, FORGE_BASE_URL: BASE },
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    console.log(`git push ${aRes.sha} -> ${reclaim.data?.workspace?.ref}; forge task complete (generation ${gen2}) -> exit ${done.code} task=${done.data?.task?.status} change=${JSON.stringify({ state: done.data?.change?.state, head: done.data?.change?.headSha })}; forge runner -> exit ${runner.status} ${(runner.stdout ?? '').trim()} ${done.err}`);
     let merged = null;
     const t0 = Date.now();
     while (Date.now() - t0 < 120_000) {
@@ -1127,12 +1134,14 @@ async function runE2e(argv) {
     const finalTask = await restTask(aTask?.id);
     const wsCount = (await taskWorkspaces(aTask?.id)).length;
     const runs = await http(`${api}/changes/${changes.auto.number}/checks`);
+    const currentRuns = (runs.json?.checks ?? runs.json?.runs ?? []).filter((r) => r.headSha === merged?.headSha);
+    const currentCiRuns = currentRuns.filter((r) => r.name === 'resolution-ci');
     const twice = await call(owner, 'complete_task', { repo: env.repo, task: aTask?.id, agent: 'agent-two', generation: gen2, sha: aRes.sha });
-    console.log(`get_change #${changes.auto.number} -> ${merged ? `merged ${merged.mergeCommit} after ${Math.round((Date.now() - t0) / 1000)} s` : 'not merged within 120 s'}\ngit log origin/main -1 -> ${tip}\ngit show origin/main:src/app.ts -> ${JSON.stringify(appOnMain)}\nget_attribution ${tip} -> ${attr.text}\nGET tasks/${aTask?.id} -> status=${finalTask?.status} generation=${finalTask?.generation} completedBy=${finalTask?.completedBy} resolution=${finalTask?.resolutionSha}\nworkspaces for the task=${wsCount}; check runs on the change=${JSON.stringify(runs.json)?.slice(0, 200)}\ncomplete_task again -> isError=${twice.isError} ${twice.text.slice(0, 160)}`);
+    console.log(`get_change #${changes.auto.number} -> ${merged ? `merged ${merged.mergeCommit} after ${Math.round((Date.now() - t0) / 1000)} s` : 'not merged within 120 s'}\ngit log origin/main -1 -> ${tip}\ngit show origin/main:src/app.ts -> ${JSON.stringify(appOnMain)}\nget_attribution ${tip} -> ${attr.text}\nGET tasks/${aTask?.id} -> status=${finalTask?.status} generation=${finalTask?.generation} completedBy=${finalTask?.completedBy} resolution=${finalTask?.resolutionSha}\nworkspaces for the task=${wsCount}; current-head check runs=${currentRuns.length}; check runs on the change=${JSON.stringify(runs.json)?.slice(0, 200)}\ncomplete_task again -> isError=${twice.isError} ${twice.text.slice(0, 160)}`);
     check('VAL-WORKFLOW-003', 'a completion before the resolution push is refused 409 (CLI)', notPushed.code !== 0 && notPushed.data?.status === 409 && notPushed.data?.code === 'RESOLUTION_NOT_PUSHED');
-    check('VAL-DISPATCH-004', 'the resolved auto change merges with no further action; resolved src/app.ts on main', done.code === 0 && Boolean(merged) && merged.mergeCommit === tip && appOnMain === 'export const app = 100 + 3 + 4; // main + review + auto');
+    check('VAL-DISPATCH-004', 'the resolved auto change runs required CI and merges through the train with no further action; resolved src/app.ts on main', done.code === 0 && runner.status === 0 && Boolean(merged) && merged.mergeCommit === tip && appOnMain === 'export const app = 100 + 3 + 4; // main + review + auto');
     check('VAL-CROSS-004', 'list → claim → push → complete → merged; the landed commit carries the resolving agent attribution; task completed', Boolean(merged) && !attr.isError && attr.data?.agent === 'agent-two' && finalTask?.status === 'completed');
-    check('VAL-CROSS-009', 'MCP claim → lapse → CLI reclaim → resolution merged once; stale work had no effect; generation recorded; one workspace', Boolean(merged) && tip === aRes.sha && finalTask?.generation === gen2 && finalTask?.resolutionSha === aRes.sha && wsCount === 1 && twice.isError && twice.data?.code === 'TASK_COMPLETED' && (runs.json?.checks ?? runs.json?.runs ?? []).length <= 1);
+    check('VAL-CROSS-009', 'MCP claim → lapse → CLI reclaim → resolution merged once; stale work had no effect; generation recorded; one workspace and one CI check', Boolean(merged) && tip === aRes.sha && finalTask?.generation === gen2 && finalTask?.resolutionSha === aRes.sha && wsCount === 1 && currentCiRuns.length === 1 && twice.isError && twice.data?.code === 'TASK_COMPLETED');
   });
 
   await owner.close();

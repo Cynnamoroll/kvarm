@@ -10,13 +10,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 
 export { SnapshotBuilder } from './snapshotBuilder';
-
-export class CiPipeline extends WorkflowEntrypoint<Env, { repoId: string; ref: string; sha: string }> {
-  async run(_event: WorkflowEvent<{ repoId: string; ref: string; sha: string }>, _step: WorkflowStep) {
-    // Implemented in M5.
-    return { status: 'stub' };
-  }
-}
+export { CiPipeline } from './ciPipeline';
 
 export class MergeWorkflow extends WorkflowEntrypoint<Env, { repoId: string; changeSetId: string }> {
   async run(_event: WorkflowEvent<{ repoId: string; changeSetId: string }>, _step: WorkflowStep) {

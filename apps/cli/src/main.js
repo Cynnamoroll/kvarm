@@ -4,11 +4,13 @@ import { findCommand } from '@forge/ops';
 import { CliError, checkout } from './checkout.js';
 import { commandHelp, commandUsage, groupCommands, operationsOverview, runOperation } from './ops.js';
 import { STATUS_HELP, runStatus } from './status.js';
+import { runRunner } from './runner.js';
 
 const USAGE = `usage: forge <command> [args]
 
 commands:
   checkout <owner/repo> <ref> <dir>   materialize <ref> into <dir> from a snapshot, or git clone
+  runner --repo <owner/repo> [--once] claim and run CI jobs on this machine
   status <owner/repo> [--json]        read-only status: active workspaces with their pins, the train, open tasks
   help [command]                      show help (for API commands: help <group> <verb>)
 
@@ -48,6 +50,14 @@ first, for example:
 "git status" is clean right after the reset because the snapshot tree equals
 the commit tree.`;
 
+const RUNNER_HELP = `usage: forge runner --repo <owner/repo> [--once]
+
+Claims CI jobs for the repository, materializes each job's exact immutable
+commit through snapshot checkout (with clone fallback), runs the configured
+command in a shell, heartbeats the 120-second lease, and reports a bounded
+summary. The command runs only because the user explicitly started this
+runner. --once exits after one job, or immediately when none is queued.`;
+
 /**
  * @param {string[]} argv
  * @param {{ env: NodeJS.ProcessEnv, stdout: (line: string) => void, stderr: (line: string) => void, fetch?: import('./http.js').HttpFetch, apiFetch?: typeof fetch }} io
@@ -57,12 +67,13 @@ export async function main(argv, io) {
   const [command, ...rest] = argv;
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     const op = rest.length >= 2 ? findCommand(rest.slice(0, 2)) : undefined;
-    io.stdout(rest[0] === 'checkout' ? CHECKOUT_HELP : rest[0] === 'status' ? STATUS_HELP : op ? commandHelp(op) : usage());
+    io.stdout(rest[0] === 'checkout' ? CHECKOUT_HELP : rest[0] === 'runner' ? RUNNER_HELP : rest[0] === 'status' ? STATUS_HELP : op ? commandHelp(op) : usage());
     return command ? 0 : 2;
   }
   let label = command;
   try {
     if (command === 'checkout') return await runCheckout(rest, io);
+    if (command === 'runner') return await runCiRunner(rest, io);
     if (command === 'status') return await runStatus(rest, { env: io.env, stdout: io.stdout, stderr: io.stderr, apiFetch: io.apiFetch });
     const verbs = groupCommands(command);
     if (verbs.length === 0) {
@@ -118,5 +129,47 @@ async function runCheckout(args, io) {
   if (!baseUrl) throw new CliError('FORGE_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
   if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`FORGE_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
   await checkout({ baseUrl, pat: io.env.FORGE_PAT || undefined, repo, ref, dir, env: io.env, stdout: io.stdout, stderr: io.stderr, fetch: io.fetch });
+  return 0;
+}
+
+/**
+ * @param {string[]} args
+ * @param {Parameters<typeof main>[1]} io
+ */
+async function runCiRunner(args, io) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      allowPositionals: false,
+      strict: true,
+      options: {
+        repo: { type: 'string' },
+        once: { type: 'boolean', default: false },
+        help: { type: 'boolean', short: 'h' },
+      },
+    });
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err), 2);
+  }
+  if (parsed.values.help) {
+    io.stdout(RUNNER_HELP);
+    return 0;
+  }
+  const repo = parsed.values.repo;
+  if (!repo || !/^[^/\s]+\/[^/\s]+$/.test(repo)) throw new CliError('expected --repo <owner/repo>', 2);
+  const baseUrl = io.env.FORGE_BASE_URL;
+  const pat = io.env.FORGE_PAT;
+  if (!baseUrl) throw new CliError('FORGE_BASE_URL is not set', 2);
+  if (!pat) throw new CliError('FORGE_PAT is not set (the runner requires ci scope)', 2);
+  await runRunner({
+    baseUrl,
+    pat,
+    repo,
+    once: parsed.values.once,
+    stdout: io.stdout,
+    stderr: io.stderr,
+    apiFetch: io.apiFetch,
+  });
   return 0;
 }

@@ -17,7 +17,7 @@ npx forge checkout cynthia/demo main ./demo
 | variable | meaning |
 | --- | --- |
 | `FORGE_BASE_URL` | Platform origin (required). |
-| `FORGE_PAT` | Token for private repositories, writes and snapshot demands. A PAT needs the `api` scope for the REST API (API commands and the snapshot API); git access needs `read`. |
+| `FORGE_PAT` | Token for private repositories, writes and snapshot demands. A PAT needs the `api` scope for the REST API (API commands and the snapshot API), `ci` for the runner, and `read` for git access. |
 
 The token goes to the REST API as `Authorization: Bearer` and to git as a
 basic-auth header scoped to `FORGE_BASE_URL`. It is passed through
@@ -115,6 +115,16 @@ git switch -q -c <new-branch>
 the commit tree. `scripts/cli-checkout-e2e.mjs` checks this recipe live,
 including the final push. When an agent needs history from the start, a clone
 is the better choice.
+
+## `forge runner --repo <owner/repo> [--once]`
+
+Starts a user-owned CI runner. It claims a queued `.forge/ci.json` job with a
+120-second generation-fenced lease, materializes the job's exact immutable
+commit through snapshot checkout (clone fallback), runs the configured command
+in a shell with its timeout, heartbeats while it runs, and reports a bounded
+summary. `--once` exits after one job, or immediately when the queue is empty.
+The PAT must have `ci` scope. Repository commands run only because the user
+explicitly starts this process.
 
 ## Performance
 

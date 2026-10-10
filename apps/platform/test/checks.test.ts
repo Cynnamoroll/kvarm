@@ -22,7 +22,10 @@ const MAIN = 'refs/heads/main';
 const FEATURE = 'refs/heads/feature';
 
 class FakeWorkflow {
+  created: Array<{ id?: string; params?: unknown }> = [];
+
   async create(opts: { id?: string }) {
+    this.created.push(opts);
     return { id: opts.id ?? crypto.randomUUID() };
   }
   async get(id: string) {
@@ -34,6 +37,7 @@ const env = {
   ...baseEnv,
   ARTIFACTS: fakeArtifacts,
   SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
+  CI_PIPELINE: new FakeWorkflow() as unknown as Env['CI_PIPELINE'],
 } as Env;
 
 const tok = { owner: '', ci: '', ciOnly: '', noCi: '', reader: '' };
@@ -227,7 +231,7 @@ describe('guard findings', () => {
     const gaming = await seedRepo('gaming');
     await fixture(gaming, { ...BASE, '.forge/ci.json': ci('npm test') }, { '.forge/ci.json': ci('npm test || true') });
     await create('gaming');
-    const g = (await checksOf('gaming')).json.checks[0];
+    const g = (await checksOf('gaming')).json.checks.find((r: any) => r.name === 'forge/guard');
     expect(g.status).toBe('failure');
     expect(g.summary.findings).toEqual([expect.objectContaining({ path: '.forge/ci.json', rule: 'ci-gaming/or-true', line: 5 })]);
 
@@ -341,5 +345,163 @@ describe('reported check runs', () => {
     expect(six.json.mergeability.checks.required).toHaveLength(6);
     expect(one.cost.d1).toBe(six.cost.d1);
     expect(six.cost.d1).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('CI pipeline runner', () => {
+  const ci = (jobs: Array<{ name: string; run: string; required?: boolean }>) => `${JSON.stringify({ jobs })}\n`;
+
+  it('queues ci.json jobs, fences lease takeover and reports exact-head results within budget (VAL-CI-001/005/006/007, VAL-COST-012)', async () => {
+    const repo = await seedRepo('ci-runner');
+    const config = ci([
+      { name: 'build', run: 'cat ci-marker.txt', required: true },
+      { name: 'optional', run: 'exit 1', required: false },
+    ]);
+    const { feature } = await fixture(
+      repo,
+      { ...BASE, '.forge/ci.json': config },
+      { '.forge/ci.json': config, 'ci-marker.txt': 'marker-at-head\n' },
+    );
+    const snapshotWorkflow = env.SNAPSHOT_BUILDER as unknown as FakeWorkflow;
+    const snapshotCalls = snapshotWorkflow.created.length;
+    const created = await create('ci-runner', { mergePolicy: 'review' });
+    expect(created.status).toBe(201);
+    expect(snapshotWorkflow.created).toHaveLength(snapshotCalls);
+    const queued = await checksOf('ci-runner');
+    expect(queued.json.checks.map((r: any) => [r.name, r.status, r.required, r.attempt, r.headSha, r.treeSha])).toEqual([
+      ['optional', 'queued', false, 1, feature.sha, feature.tree],
+      ['build', 'queued', true, 1, feature.sha, feature.tree],
+      ['forge/guard', 'success', true, 1, feature.sha, feature.tree],
+    ]);
+
+    const claimPath = `${R('ci-runner')}/ci/jobs/claim`;
+    const denied = await call('POST', claimPath, tok.noCi, { runnerId: 'wrong-scope' });
+    expect(denied.status).toBe(403);
+    expect(denied.json.code).toBe('INSUFFICIENT_SCOPE');
+
+    const first = await call('POST', claimPath, tok.ci, { runnerId: 'runner-a' });
+    expect(first.status).toBe(200);
+    expect(first.json.job).toMatchObject({
+      name: 'build',
+      command: 'cat ci-marker.txt',
+      sha: feature.sha,
+      treeSha: feature.tree,
+      generation: 1,
+      runnerId: 'runner-a',
+      leaseSeconds: 120,
+    });
+    expect(first.cost.d1).toBeLessThanOrEqual(2);
+    expect(first.cost.do).toBe(0);
+    expect(first.cost.q).toBe(0);
+    expect(snapshotWorkflow.created).toHaveLength(snapshotCalls + 1);
+    expect((await checksOf('ci-runner')).json.checks.find((r: any) => r.name === 'build')).toMatchObject({
+      status: 'running',
+      startedAt: expect.any(String),
+    });
+
+    const guardId = queued.json.checks.find((r: any) => r.name === 'forge/guard').id;
+    const buildId = queued.json.checks.find((r: any) => r.name === 'build').id;
+    expect((await call('PATCH', `${R('ci-runner')}/check-runs/${guardId}`, tok.ci, { conclusion: 'failure' })).json.code).toBe('RESERVED_CHECK_RUN');
+    expect((await call('PATCH', `${R('ci-runner')}/check-runs/${buildId}`, tok.ci, { conclusion: 'failure' })).json.code).toBe('RESERVED_CHECK_RUN');
+
+    await env.DB.prepare('UPDATE ci_jobs SET lease_until = ? WHERE id = ?').bind(Date.now() - 1, first.json.job.id).run();
+    const expiredHeartbeat = await call('POST', `${R('ci-runner')}/ci/jobs/${first.json.job.id}/heartbeat`, tok.ci, {
+      runnerId: 'runner-a',
+      generation: 1,
+    });
+    expect(expiredHeartbeat.status).toBe(409);
+    const expiredReport = await call('POST', `${R('ci-runner')}/ci/jobs/${first.json.job.id}/report`, tok.ci, {
+      runnerId: 'runner-a',
+      generation: 1,
+      conclusion: 'failure',
+    });
+    expect(expiredReport.status).toBe(409);
+    const second = await call('POST', claimPath, tok.ci, { runnerId: 'runner-b' });
+    expect(second.status).toBe(200);
+    expect(second.json.job).toMatchObject({ id: first.json.job.id, generation: 2, runnerId: 'runner-b', sha: feature.sha });
+
+    const stale = await call('POST', `${R('ci-runner')}/ci/jobs/${first.json.job.id}/report`, tok.ci, {
+      runnerId: 'runner-a',
+      generation: 1,
+      conclusion: 'failure',
+      summary: { output: 'late' },
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.json.code).toBe('STALE_GENERATION');
+
+    const heartbeat = await call('POST', `${R('ci-runner')}/ci/jobs/${first.json.job.id}/heartbeat`, tok.ci, {
+      runnerId: 'runner-b',
+      generation: 2,
+    });
+    expect(heartbeat.status).toBe(200);
+    expect(Date.parse(heartbeat.json.job.leaseUntil)).toBeGreaterThan(Date.now() + 110_000);
+
+    const report = await call('POST', `${R('ci-runner')}/ci/jobs/${first.json.job.id}/report`, tok.ci, {
+      runnerId: 'runner-b',
+      generation: 2,
+      conclusion: 'success',
+      summary: { output: 'marker-at-head' },
+    });
+    expect(report.status).toBe(200);
+    expect(report.json.run).toMatchObject({ name: 'build', status: 'success', conclusion: 'success', summary: { output: 'marker-at-head' } });
+    expect(report.cost.d1).toBeLessThanOrEqual(2);
+    expect(report.cost.do).toBe(0);
+    expect(report.cost.q).toBe(0);
+
+    const status = await call('GET', `${R('ci-runner')}/commits/${feature.sha}/status`, tok.owner);
+    expect(status.json).toMatchObject({ state: 'success' });
+    expect(status.json.checks.find((r: any) => r.name === 'build')).toMatchObject({ status: 'success', summary: { output: 'marker-at-head' } });
+  });
+
+  it('queues a fresh job set after the change head moves (VAL-CI-002)', async () => {
+    const repo = await seedRepo('ci-refresh');
+    const config = ci([{ name: 'test', run: 'echo ok', required: true }]);
+    const { feature } = await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'one.txt': 'one\n' });
+    await create('ci-refresh');
+    const next = await commit(repo, { ...BASE, '.forge/ci.json': config, 'two.txt': 'two\n' }, [feature.sha]);
+    repo.refs.set(FEATURE, next.sha);
+    await deliver(pushBody('ci-refresh', FEATURE, feature.sha, next.sha, Date.now() + 1_000));
+    const checks = await checksOf('ci-refresh');
+    expect(checks.json.checks.filter((r: any) => r.name === 'test').map((r: any) => [r.headSha, r.status])).toEqual([
+      [next.sha, 'queued'],
+      [feature.sha, 'queued'],
+    ]);
+  });
+
+  it('queues and requires CI on the exact merge tree when the base advanced (VAL-MERGE-003/007)', async () => {
+    const repo = await seedRepo('ci-merge-tree');
+    const config = ci([{ name: 'merge-test', run: 'test -f base-moved.txt', required: true }]);
+    const { main, feature } = await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'feature.txt': 'feature\n' });
+    await create('ci-merge-tree');
+    const headClaim = await call('POST', `${R('ci-merge-tree')}/ci/jobs/claim`, tok.ci, { runnerId: 'head' });
+    await call('POST', `${R('ci-merge-tree')}/ci/jobs/${headClaim.json.job.id}/report`, tok.ci, {
+      runnerId: 'head',
+      generation: headClaim.json.job.generation,
+      conclusion: 'success',
+    });
+    const movedBase = await commit(repo, { ...BASE, '.forge/ci.json': config, 'base-moved.txt': 'base\n' }, [main.sha]);
+    repo.refs.set(MAIN, movedBase.sha);
+
+    const pending = await call('POST', `${R('ci-merge-tree')}/changes/1/merge`, tok.owner);
+    expect([pending.status, pending.json.code]).toEqual([409, 'REQUIRED_CHECKS_PENDING']);
+    const exact = await call('POST', `${R('ci-merge-tree')}/ci/jobs/claim`, tok.ci, { runnerId: 'merge-tree' });
+    expect(exact.json.job.sha).not.toBe(feature.sha);
+    expect(exact.json.job.name).toBe('merge-test');
+    await call('POST', `${R('ci-merge-tree')}/ci/jobs/${exact.json.job.id}/report`, tok.ci, {
+      runnerId: 'merge-tree',
+      generation: exact.json.job.generation,
+      conclusion: 'success',
+    });
+    const merged = await call('POST', `${R('ci-merge-tree')}/changes/1/merge`, tok.owner);
+    expect(merged.status).toBe(200);
+    expect(merged.json).toMatchObject({ state: 'merged', mergeCommit: exact.json.job.sha });
+  });
+
+  it('rejects an invalid CI config before persisting a change', async () => {
+    const repo = await seedRepo('ci-invalid-create');
+    await fixture(repo, { ...BASE, '.forge/ci.json': '{bad' }, { 'feature.txt': 'feature\n' });
+    const refused = await create('ci-invalid-create');
+    expect([refused.status, refused.json.code]).toEqual([422, 'INVALID_CI_CONFIG']);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_sets WHERE repo_id = ?').bind(repoIds['ci-invalid-create']).first('n')).toBe(0);
   });
 });

@@ -339,7 +339,15 @@ await scenario('cand', async (repo) => {
   console.log(`POST changes/${cs.A}/merge (A, chosen by the caller) -> ${m.status} state=${m.json?.state} mergeCommit=${m.json?.mergeCommit}`);
   const gotB = await http(`${api}/changes/${cs.B}`);
   const gotC = await http(`${api}/changes/${cs.C}`);
-  check('VAL-CAND-006', 'winner A merged; B and C change sets still open', m.status === 200 && m.json?.state === 'merged' && gotB.json?.state === 'open' && gotC.json?.state === 'open', `B=${gotB.json?.state} C=${gotC.json?.state}`);
+  check(
+    'VAL-CAND-006',
+    'winner A merged; overlapping losers remain live (open or reconciled conflicted)',
+    m.status === 200 &&
+      m.json?.state === 'merged' &&
+      ['open', 'conflicted'].includes(gotB.json?.state) &&
+      ['open', 'conflicted'].includes(gotC.json?.state),
+    `B=${gotB.json?.state} C=${gotC.json?.state}`,
+  );
   const abandonB = await http(`${api}/workspaces/${B.id}/abandon`, { method: 'POST' });
   const wsB = await http(`${api}/workspaces/${B.id}`);
   const wsC = await http(`${api}/workspaces/${C.id}`);

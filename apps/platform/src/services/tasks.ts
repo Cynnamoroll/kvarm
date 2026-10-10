@@ -45,11 +45,13 @@ import {
   changeView,
   guarded,
   mergePlanFor,
+  readChange,
   recordGuard,
   resolveCtx,
   type ChangeRow,
   type ChangeView,
 } from './changes';
+import { queueChangeCi } from './ci';
 import { conflictViews, type ConflictView } from './conflicts';
 import { claimFenced, releaseFenced, renewFenced } from './fencing';
 import { artifactsPusher, type GitPusher } from './gitwrite';
@@ -773,7 +775,26 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
       } catch (err) {
         console.warn(JSON.stringify({ taskGuard: { repo: cx.repo.id, task: id, error: String(err).slice(0, 200) } }));
       }
-      change = (await autoMerge({ env: cx.env, repo: cx.repo, actor: cx.actor, branchRules: cx.branchRules ?? [], waitUntil: cx.waitUntil }, change)) ?? change;
+      const ci = await queueChangeCi(cx.env, cx.repo, change.id, resolution);
+      if (ci.ok && ci.value.jobs > 0) {
+        // Required CI makes this auto-policy resolution a train candidate.
+        // The runner's terminal report kicks the queued entry; no human step
+        // is introduced between conflict completion and publication.
+        const { enqueueChange } = await import('./queue');
+        const enqueued = await enqueueChange(
+          { env: cx.env, repo: cx.repo, actor: cx.actor, branchRules: cx.branchRules ?? [], waitUntil: cx.waitUntil },
+          String(change.number),
+          { headSha: resolution, mergePolicy: 'auto', attribution: claimantAttribution },
+        );
+        if (!enqueued.ok) {
+          console.warn(JSON.stringify({ taskCiEnqueue: { repo: cx.repo.id, task: id, code: enqueued.code } }));
+        }
+        change = (await readChange(cx.env, cx.repo.id, change.number)) ?? change;
+      } else if (ci.ok) {
+        change = (await autoMerge({ env: cx.env, repo: cx.repo, actor: cx.actor, branchRules: cx.branchRules ?? [], waitUntil: cx.waitUntil }, change)) ?? change;
+      } else {
+        console.warn(JSON.stringify({ taskCiConfig: { repo: cx.repo.id, task: id, code: ci.code } }));
+      }
     }
     return { ok: true, value: { task: taskView(after, now), change: changeView(change), headBranch } };
   });

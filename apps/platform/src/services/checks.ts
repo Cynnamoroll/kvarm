@@ -285,13 +285,15 @@ interface Pending {
 
 function answer(rows: readonly GateRow[], treeSha: string, headSha: string | null): Array<Omit<RequiredCheck, 'producer'>> {
   const newest = new Map<string, GateRow>();
+  const expected = new Set<string>([GUARD_CHECK]);
   // Rows arrive newest first: the first row per name is its current run.
   for (const r of rows) {
+    if (headSha !== null && r.head_sha === headSha) expected.add(r.name);
     const applies = r.tree_sha === treeSha || (r.name === GUARD_CHECK && headSha !== null && r.head_sha === headSha);
     if (applies && !newest.has(r.name)) newest.set(r.name, r);
   }
   const out: Array<Omit<RequiredCheck, 'producer'>> = [...newest.values()].map((r) => ({ name: r.name, state: stateOf(r.status), runId: r.id }));
-  if (!newest.has(GUARD_CHECK)) out.push({ name: GUARD_CHECK, state: 'pending' });
+  for (const name of expected) if (!newest.has(name)) out.push({ name, state: 'pending' });
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
@@ -318,7 +320,7 @@ export function checkRunsProducer(env: Pick<Env, 'DB'>): ChecksProducer {
           : env.DB.prepare(
               `SELECT ${GATE_COLUMNS} FROM check_runs k INDEXED BY idx_checks_sha_name_newest
                 WHERE k.repo_id = ?1 AND k.head_sha = ?2 AND k.name = '${GUARD_CHECK}' AND k.required = 1 AND k.quarantined = 0
-                ORDER BY k.created_at DESC, k.id DESC LIMIT 1`,
+                ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHECK_LIMITS.gateRowsPerTree}`,
             ).bind(repoId, k.head),
       );
       const results = await env.DB.batch<GateRow>(statements);
@@ -489,6 +491,72 @@ export async function reportCheckRun(ctx: ResolveContext, input: unknown): Promi
   return {
     ok: true,
     value: { run: checkRunView(row), change: c ? { number: c.number, policy: c.merge_policy, baseRef: c.base_ref, queued: c.queued === 1 } : null },
+  };
+}
+
+/** PATCH check-runs/:id — terminal/status updates for an externally created run. */
+export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input: unknown): Promise<ServiceResult<ReportedRun>> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return { ok: false, status: 400, error: 'body must be a JSON object', code: 'INVALID_BODY' };
+  }
+  const b = input as Record<string, unknown>;
+  const conclusion = b.conclusion;
+  const status = conclusion === undefined ? b.status : CONCLUSIONS[String(conclusion)];
+  if (conclusion !== undefined && (typeof conclusion !== 'string' || !(conclusion in CONCLUSIONS))) {
+    return { ok: false, status: 422, error: `conclusion must be one of ${Object.keys(CONCLUSIONS).join(', ')}`, code: 'INVALID_CONCLUSION' };
+  }
+  if (typeof status !== 'string' || !(STATUSES as readonly string[]).includes(status)) {
+    return { ok: false, status: 422, error: `status must be one of ${STATUSES.join(', ')}`, code: 'INVALID_STATUS' };
+  }
+  let summary: string | null | undefined;
+  if ('summary' in b) {
+    summary = b.summary === null ? null : JSON.stringify(b.summary);
+    if (summary !== null && new TextEncoder().encode(summary).length > CHECK_LIMITS.summaryMaxBytes) {
+      return { ok: false, status: 422, error: `summary must be at most ${CHECK_LIMITS.summaryMaxBytes} bytes`, code: 'SUMMARY_TOO_LARGE' };
+    }
+  }
+  const now = Date.now();
+  const terminal = status === 'success' || status === 'failure' || status === 'skipped';
+  const [updated, changeRead, ownershipRead] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE check_runs SET status = ?3, conclusion = ?4,
+          summary = CASE WHEN ?5 IS NULL THEN summary ELSE ?5 END,
+          started_at = CASE WHEN ?3 = 'queued' THEN started_at ELSE COALESCE(started_at, ?6) END,
+          finished_at = CASE WHEN ?7 = 1 THEN ?6 ELSE NULL END
+       WHERE id = ?1 AND repo_id = ?2 AND name NOT LIKE 'forge/%'
+         AND NOT EXISTS (SELECT 1 FROM ci_jobs j WHERE j.check_run_id = check_runs.id)
+       RETURNING ${CHECK_RUN_COLUMNS.replaceAll('k.', '')}`,
+    ).bind(id, repo.id, status, conclusion ?? (terminal ? status : null), summary === undefined ? null : summary, now, terminal ? 1 : 0),
+    env.DB.prepare(
+      `SELECT c.number, c.merge_policy, c.base_ref,
+              EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queued
+         FROM change_sets c WHERE c.id = (SELECT change_set_id FROM check_runs WHERE id = ?1 AND repo_id = ?2)`,
+    ).bind(id, repo.id),
+    env.DB.prepare(
+      `SELECT name, EXISTS (SELECT 1 FROM ci_jobs j WHERE j.check_run_id = k.id) AS runner_owned
+         FROM check_runs k WHERE k.id = ?1 AND k.repo_id = ?2`,
+    ).bind(id, repo.id),
+  ]);
+  const row = (updated?.results as CheckRunRow[] | undefined)?.[0];
+  if (!row) {
+    const owned = (ownershipRead?.results as Array<{ name: string; runner_owned: number }> | undefined)?.[0];
+    if (owned) {
+      return {
+        ok: false,
+        status: 403,
+        error: owned.name.startsWith('forge/') ? 'platform check runs cannot be updated' : 'runner-owned check runs must be updated through CI reporting',
+        code: 'RESERVED_CHECK_RUN',
+      };
+    }
+    return { ok: false, status: 404, error: 'check run not found', code: 'CHECK_RUN_NOT_FOUND' };
+  }
+  const c = (changeRead?.results as Array<{ number: number; merge_policy: string; base_ref: string; queued: number }> | undefined)?.[0];
+  return {
+    ok: true,
+    value: {
+      run: checkRunView(row),
+      change: c ? { number: c.number, policy: c.merge_policy, baseRef: c.base_ref, queued: c.queued === 1 } : null,
+    },
   };
 }
 
