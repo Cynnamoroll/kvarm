@@ -6,14 +6,16 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { createExecutionContext, createMessageBatch, getQueueResult, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { decode } from '@forge/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { COST_HEADER, CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
+import { INTENT_PREFIX, mergeLockAlarm, type MergeLock, type SettleIntent } from '../src/do/mergeLock';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
-import { DEPENDENCY_LIMITS, SETTLE_LIMITS } from '../src/services/dependencyGate';
+import { DEPENDENCY_LIMITS, SETTLE_INTENT, SETTLE_LIMITS, WAKE_KIND } from '../src/services/dependencyGate';
+import { defaultDependencyDeps } from '../src/services/dependencies';
 import { TRAIN_LIMITS, defaultTrainDeps, fairOrder, runTrain, type TrainDeps, type TrainEvent } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -33,8 +35,11 @@ class FakeWorkflow {
 }
 
 const sent: Array<{ body: any; delaySeconds?: number }> = [];
+/** Sends whose body matches reject, as a failing queue would. */
+const failSends: { match: ((body: any) => boolean) | null } = { match: null };
 const fakeEvents = {
   async send(body: unknown, opts?: { delaySeconds?: number }) {
+    if (failSends.match?.(body)) throw new Error('queue send rejected (test)');
     sent.push({ body, ...(opts?.delaySeconds !== undefined ? { delaySeconds: opts.delaySeconds } : {}) });
   },
   async sendBatch(msgs: Array<{ body: unknown }>) {
@@ -135,13 +140,46 @@ function pushEvent(repo: string, ref: string, before: string, after: string, at:
   };
 }
 
-async function deliver(body: unknown) {
+async function deliverRaw(body: unknown) {
   const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
   const ctx = createExecutionContext();
   await worker.queue!(batch, env, ctx);
   const result = await getQueueResult(batch, ctx);
   await waitOnExecutionContext(ctx);
-  expect(result.explicitAcks).toHaveLength(1);
+  return result;
+}
+
+async function deliver(body: unknown) {
+  expect((await deliverRaw(body)).explicitAcks).toHaveLength(1);
+}
+
+// The landing's durable settlement owner: the MergeLock of the landing's repo + target ref.
+const lockOf = (name: string, ref = MAIN) => env.MERGE_LOCK.get(env.MERGE_LOCK.idFromName(`${repoIds[name]}:${ref}`));
+
+async function intentsOf(name: string): Promise<SettleIntent[]> {
+  return runInDurableObject(lockOf(name), async (_obj, state) => [...(await state.storage.list<SettleIntent>({ prefix: INTENT_PREFIX })).values()]);
+}
+
+async function alarmOf(name: string): Promise<number | null> {
+  return runInDurableObject(lockOf(name), async (_obj, state) => state.storage.getAlarm());
+}
+
+/** One owner wakeup: makes the pending intents due and runs the alarm; false when no intent was pending. */
+async function fireOwner(name: string): Promise<boolean> {
+  return runInDurableObject(lockOf(name), async (obj: MergeLock, state) => {
+    const all = await state.storage.list<SettleIntent>({ prefix: INTENT_PREFIX });
+    if (all.size === 0) return false;
+    for (const [key, intent] of all) await state.storage.put(key, { ...intent, deadline: Date.now() - 1 });
+    await obj.alarm();
+    return true;
+  });
+}
+
+async function wakeMarks(name: string): Promise<number> {
+  const prefix = `${repoIds[name]}/`;
+  return (await env.DB.prepare('SELECT COUNT(*) AS n FROM fenced_claims WHERE kind = ?1 AND subject >= ?2 AND subject < ?3')
+    .bind(WAKE_KIND, prefix, `${prefix.slice(0, -1)}0`)
+    .first<{ n: number }>())!.n;
 }
 
 let clock = Date.now();
@@ -247,16 +285,28 @@ async function rows(name: string): Promise<Array<{ change_number: number; state:
   );
 }
 
+const savedIntent = { ...SETTLE_INTENT };
+const savedAlarmEnv = mergeLockAlarm.env;
+
 beforeAll(async () => {
   installFakeGitRemote();
+  // Owner wakeups are driven explicitly (fireOwner); no settlement alarm comes due on its own during the run.
+  SETTLE_INTENT.delayMs = 3_600_000;
+  SETTLE_INTENT.stepMs = 3_600_000;
+  mergeLockAlarm.env = () => env;
   tok.owner = (await mintPAT(env, await seedUser(OWNER), 'owner', FULL)).token;
   tok.writer = (await mintPAT(env, await seedUser('dep-writer'), 'writer', FULL)).token;
 });
 
-afterAll(() => restoreFetch());
+afterAll(() => {
+  restoreFetch();
+  Object.assign(SETTLE_INTENT, savedIntent);
+  mergeLockAlarm.env = savedAlarmEnv;
+});
 
 afterEach(() => {
   sent.length = 0;
+  failSends.match = null;
 });
 
 // ---------------------------------------------------------------------------
@@ -719,9 +769,15 @@ describe('lifecycle', () => {
       expect((await enqueue('settle-many', q.change!)).status).toBe(201);
       DEPENDENCY_LIMITS.readMax = 2;
       sent.length = 0;
-      expect((await merge('settle-many', a.change!)).status).toBe(200);
+      const landed = await merge('settle-many', a.change!);
+      expect(landed.status).toBe(200);
+      // Within one invocation's budget: no settlement intent, no continuation.
+      expect(landed.cost.do).toBe(0);
+      expect(await intentsOf('settle-many')).toEqual([]);
       for (const d of pinned) expect((await listDeps('settle-many', d.id)).json.dependencies, d.id).toEqual([expect.objectContaining({ state: 'satisfied' })]);
       expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-landed' }));
+      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+      expect(await wakeMarks('settle-many')).toBe(0);
       expect(repo.refs.get(a.ref)).toBe(r2);
     } finally {
       DEPENDENCY_LIMITS.readMax = saved;
@@ -771,10 +827,15 @@ describe('lifecycle', () => {
       expect(landed.status, JSON.stringify(landed.json)).toBe(200);
       const mergeCommit = landed.json.merge.mergeCommit as string;
       expect(await satisfied()).toEqual([true, true, true, true, false, false, false, false, false]);
+      // Two independent owners of the rest: the queue continuation (fast path) and the MergeLock intent (one DO call).
       expect(continuations()).toEqual([
-        { type: 'forge.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit },
+        { type: 'forge.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN },
       ]);
       const first = continuations()[0];
+      expect(landed.cost.do).toBe(1);
+      const [intent] = await intentsOf(name);
+      expect(intent).toMatchObject({ repoId: repoIds[name], changeSetId: first.changeSetId, mergedAt: first.mergedAt, mergeCommit, ref: MAIN });
+      expect(await alarmOf(name)).toBe(intent!.deadline);
       expect((await getChange(name, autoN)).json.state).toBe('open');
       const pushesBefore = await pushRows();
 
@@ -804,8 +865,14 @@ describe('lifecycle', () => {
 
       // A replayed continuation finds nothing unsettled: no writes, no wake-ups, no further continuation.
       sent.length = 0;
+      expect(await wakeMarks(name)).toBe(0);
       const before = (await env.DB.prepare('SELECT MAX(updated_at) AS t FROM workspace_dependencies WHERE repo_id = ?').bind(repoIds[name]).first<{ t: number }>())!.t;
       await deliver(first);
+      expect(sent).toEqual([]);
+      // The second owner's wakeup finds nothing fenced to this landing either: it clears its intent and disarms.
+      expect(await fireOwner(name)).toBe(true);
+      expect(await intentsOf(name)).toEqual([]);
+      expect(await alarmOf(name)).toBeNull();
       expect(sent).toEqual([]);
       expect((await env.DB.prepare('SELECT MAX(updated_at) AS t FROM workspace_dependencies WHERE repo_id = ?').bind(repoIds[name]).first<{ t: number }>())!.t).toBe(before);
       // Internal messages never enter the push-event log.
@@ -842,17 +909,273 @@ describe('lifecycle', () => {
       DEPENDENCY_LIMITS.readMax = 1;
       SETTLE_LIMITS.maxPages = 1;
       sent.length = 0;
-      const run = await runTrain(env, repoIds[name]!, MAIN, trainDeps());
+      const deps = trainDeps();
+      const meter = new CostMeter();
+      const run = await runWithMeter(meter, () => runTrain(meter.wrapEnv(env), repoIds[name]!, MAIN, deps));
       expect(run.published).toEqual([a.change]);
       const continuation = sent.map((m) => m.body).filter((b) => b?.type === 'forge.dependency-settle');
-      expect(continuation).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit: (await getChange(name, a.change!)).json.mergeCommit })]);
+      const mergeCommit = (await getChange(name, a.change!)).json.mergeCommit as string;
+      expect(continuation).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit, ref: MAIN })]);
+      // The intent is written after the recorded publication cost: that stays acquire + release.
+      const recorded = deps.events.find((e): e is Extract<TrainEvent, { type: 'publish' }> => e.type === 'publish' && e.status === 'recorded');
+      expect(recorded?.cost?.do).toBe(2);
+      const entry = await env.DB.prepare('SELECT cost FROM merge_queue WHERE repo_id = ? AND change_number = ?').bind(repoIds[name], a.change).first<{ cost: string }>();
+      expect((JSON.parse(entry!.cost) as CostCounters).do).toBe(2);
+      expect(meter.snapshot().do).toBe(3);
+      expect(await intentsOf(name)).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit, ref: MAIN })]);
       for (let i = 0; i < 4 && sent.some((m) => m.body?.type === 'forge.dependency-settle'); i++) {
         const next = sent.find((m) => m.body?.type === 'forge.dependency-settle')!.body;
         sent.length = 0;
         await deliver(next);
       }
       for (const d of dependents) expect((await listDeps(name, d.id)).json.dependencies[0].state).toBe('satisfied');
+      expect(await fireOwner(name)).toBe(true);
+      expect(await intentsOf(name)).toEqual([]);
     } finally {
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  /** A source with `n` dependents pinned on its first head, sorted in settlement (edge id) order, after it moved on keeping that head. */
+  async function pinnedSource(name: string, n: number) {
+    const a = await workspace(name, 'a.txt', { change: 'review' });
+    const edgeOf = new Map<string, string>();
+    const dependents: Ws[] = [];
+    for (let i = 0; i < n; i++) {
+      const d = await workspace(name, `d${i}.txt`);
+      const edge = await pin(name, d.id, a.id, a.head);
+      expect(edge.status).toBe(201);
+      edgeOf.set(d.id, edge.json.id as string);
+      dependents.push(d);
+    }
+    dependents.sort((x, y) => (edgeOf.get(x.id)! < edgeOf.get(y.id)! ? -1 : 1));
+    const changeFor = async (d: Ws, mergePolicy: 'review' | 'auto') =>
+      (await call('POST', api(name, `/workspaces/${d.id}/change-set`), tok.owner, { title: `dependent ${d.id}`, mergePolicy })).json.number as number;
+    return { a, dependents, changeFor };
+  }
+
+  const states = async (name: string, ds: Ws[]) => {
+    const out: string[] = [];
+    for (const d of ds) out.push((await listDeps(name, d.id)).json.dependencies[0].state as string);
+    return out;
+  };
+
+  const settleLines = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls
+      .map((c) => {
+        try {
+          return JSON.parse(String(c[0])) as Record<string, any>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((l): l is Record<string, any> => l?.mergeLock === 'dependency-settle');
+
+  it('VAL-DEP-010: a rejected landing continuation send does not strand the pins: the MergeLock intent settles them in bounded wakeups', async () => {
+    const name = 'settle-owner';
+    const { repo } = await seedRepo(name);
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    const logs = vi.spyOn(console, 'log');
+    try {
+      const { a, dependents, changeFor } = await pinnedSource(name, 9);
+      const queuedN = await changeFor(dependents[7]!, 'review');
+      expect((await enqueue(name, queuedN)).status).toBe(201);
+      const autoN = await changeFor(dependents[8]!, 'auto');
+      await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+      DEPENDENCY_LIMITS.readMax = 2;
+      SETTLE_LIMITS.maxPages = 2;
+
+      // Injected failure: every continuation send rejects, at the landing and after it.
+      failSends.match = (b) => b?.type === 'forge.dependency-settle';
+      sent.length = 0;
+      const landed = await merge(name, a.change!);
+      expect(landed.status, JSON.stringify(landed.json)).toBe(200);
+      const mergeCommit = landed.json.merge.mergeCommit as string;
+      expect(landed.cost.do).toBe(1);
+      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+      expect(await states(name, dependents)).toEqual([...Array(4).fill('satisfied'), ...Array(5).fill('stale')]);
+
+      // The durable owner exists: the intent names the exact landing and the alarm is armed for it.
+      const [intent] = await intentsOf(name);
+      expect(intent).toMatchObject({ repoId: repoIds[name], mergedAt: expect.any(Number), mergeCommit, ref: MAIN, attempts: 0 });
+      expect(await alarmOf(name)).toBe(intent!.deadline);
+
+      // Ordinary dependency reads stay read-only: they settle nothing.
+      const read = await listDeps(name, dependents[8]!.id);
+      expect(read.cost).toMatchObject({ rw: 0, q: 0, do: 0 });
+      expect(read.json.dependencies[0].state).toBe('stale');
+
+      // The owner's wakeups settle the rest, bounded pages per wakeup (2 pages of 2 pins here).
+      sent.length = 0;
+      logs.mockClear();
+      let wakeups = 0;
+      while (wakeups < 6 && (await fireOwner(name))) wakeups++;
+      expect(wakeups).toBe(2);
+      expect(await intentsOf(name)).toEqual([]);
+      expect(await alarmOf(name)).toBeNull();
+      for (const d of dependents) {
+        expect((await listDeps(name, d.id)).json.dependencies[0]).toMatchObject({ state: 'satisfied', satisfiedBy: mergeCommit });
+      }
+      // The queued dependent's partition is kicked once and the open auto dependent resumed and merged.
+      expect(sent.map((m) => m.body)).toEqual([{ type: 'forge.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
+      expect((await getChange(name, autoN)).json.state).toBe('merged');
+      expect(isAncestorOf(repo, dependents[8]!.head, repo.refs.get(MAIN)!)).toBe(true);
+      expect(await wakeMarks(name)).toBe(0);
+
+      // One {cost} line per wakeup: the first (4 pins, 2 pages) within d1 ≤ 2 + maxPages, the last done.
+      const lines = settleLines(logs);
+      expect(lines.map((l) => l.outcome)).toEqual(['continue', 'done']);
+      expect(lines[0]!.cost).toMatchObject({ d1: 2 + SETTLE_LIMITS.maxPages, q: 1, do: 0 });
+      expect(lines[0]!.settle).toMatchObject({ settled: 4, kicked: 1, remaining: true });
+      expect(lines[1]!.settle).toMatchObject({ settled: 1, resumed: 1, remaining: false });
+
+      // An intent for another identity of this landing (a superseded or replayed one) settles and writes nothing.
+      const stale = await lockOf(name).fetch('https://merge-lock/settle-intent', {
+        method: 'POST',
+        body: JSON.stringify({ ...intent, mergeCommit: 'f'.repeat(40) }),
+      });
+      expect(stale.status).toBe(200);
+      const before = (await env.DB.prepare('SELECT MAX(updated_at) AS t FROM workspace_dependencies WHERE repo_id = ?').bind(repoIds[name]).first<{ t: number }>())!.t;
+      sent.length = 0;
+      logs.mockClear();
+      expect(await fireOwner(name)).toBe(true);
+      expect(await fireOwner(name)).toBe(false);
+      expect(sent).toEqual([]);
+      expect(settleLines(logs)).toEqual([expect.objectContaining({ outcome: 'done', cost: expect.objectContaining({ d1: 1, rw: 0, q: 0 }) })]);
+      expect((await env.DB.prepare('SELECT MAX(updated_at) AS t FROM workspace_dependencies WHERE repo_id = ?').bind(repoIds[name]).first<{ t: number }>())!.t).toBe(before);
+
+      // The woken partition publishes the queued dependent.
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      expect((await runTrain(env, repoIds[name]!, MAIN, trainDeps())).published).toContain(queuedN);
+    } finally {
+      logs.mockRestore();
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  it('VAL-DEP-011: a continuation retry after its edge writes committed re-derives the wake/resume work from D1, without duplicates', async () => {
+    const name = 'settle-retry';
+    const { repo } = await seedRepo(name);
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    const resume = defaultDependencyDeps.resume;
+    try {
+      const { a, dependents, changeFor } = await pinnedSource(name, 4);
+      const queuedN = await changeFor(dependents[2]!, 'review');
+      expect((await enqueue(name, queuedN)).status).toBe(201);
+      const autoN = await changeFor(dependents[3]!, 'auto');
+      await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+      DEPENDENCY_LIMITS.readMax = 2;
+      SETTLE_LIMITS.maxPages = 1;
+      sent.length = 0;
+      expect((await merge(name, a.change!)).status).toBe(200);
+      expect(await states(name, dependents)).toEqual(['satisfied', 'satisfied', 'stale', 'stale']);
+      const first = sent.find((m) => m.body?.type === 'forge.dependency-settle')!.body;
+
+      // Injected failure after the segment's edge writes commit: the kick send and the resume both reject.
+      failSends.match = (b) => b?.type === 'forge.train';
+      let resumes = 0;
+      defaultDependencyDeps.resume = async () => {
+        resumes++;
+        throw new Error('resume failed (test)');
+      };
+      sent.length = 0;
+      const failed = await deliverRaw(first);
+      expect(failed.explicitAcks).toEqual([]);
+      expect(failed.retryMessages).toHaveLength(1);
+      expect(await states(name, dependents)).toEqual(Array(4).fill('satisfied'));
+      expect(resumes).toBe(1);
+      expect(sent).toEqual([]);
+      // The obligations are durable: one wake-pending mark per affected dependent survives the failure.
+      expect(await wakeMarks(name)).toBe(2);
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+
+      // The retry finds no unsettled pin, but re-derives the wake work from the marks and finishes it.
+      failSends.match = null;
+      defaultDependencyDeps.resume = resume;
+      sent.length = 0;
+      await deliver(first);
+      const kicks = sent.filter((m) => m.body?.type === 'forge.train' && m.body.reason === 'dependency-settled');
+      expect(kicks.map((m) => m.body)).toEqual([{ type: 'forge.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
+      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+      expect((await getChange(name, autoN)).json.state).toBe('merged');
+      expect(isAncestorOf(repo, dependents[3]!.head, repo.refs.get(MAIN)!)).toBe(true);
+      expect(await wakeMarks(name)).toBe(0);
+
+      // Another redelivery has nothing pending: no kick, merge or continuation.
+      sent.length = 0;
+      await deliver(first);
+      expect(sent).toEqual([]);
+      expect(await fireOwner(name)).toBe(true);
+      expect(sent).toEqual([]);
+
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      expect((await runTrain(env, repoIds[name]!, MAIN, trainDeps())).published).toEqual([queuedN]);
+    } finally {
+      defaultDependencyDeps.resume = resume;
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  it('a landing whose own wake effects fail hands them to the owners, which finish them once', async () => {
+    const name = 'settle-landing-wake';
+    await seedRepo(name);
+    const { a, dependents, changeFor } = await pinnedSource(name, 1);
+    const queuedN = await changeFor(dependents[0]!, 'review');
+    expect((await enqueue(name, queuedN)).status).toBe(201);
+    // The pin is on the landed head: the merged-record batch satisfies it and records its wake mark.
+    failSends.match = (b) => b?.type === 'forge.train';
+    sent.length = 0;
+    const landed = await merge(name, a.change!);
+    expect(landed.status).toBe(200);
+    expect(await states(name, dependents)).toEqual(['satisfied']);
+    expect(await wakeMarks(name)).toBe(1);
+    const handed = sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+    expect(handed).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit: landed.json.merge.mergeCommit, ref: MAIN })]);
+    expect(await intentsOf(name)).toHaveLength(1);
+
+    failSends.match = null;
+    sent.length = 0;
+    await deliver(handed[0]);
+    expect(sent.map((m) => m.body)).toEqual([{ type: 'forge.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
+    expect(await wakeMarks(name)).toBe(0);
+    sent.length = 0;
+    expect(await fireOwner(name)).toBe(true);
+    expect(sent).toEqual([]);
+    expect(await intentsOf(name)).toEqual([]);
+  });
+
+  it('a failed settlement intent write falls back to the queue continuation after bounded retries', async () => {
+    const name = 'settle-fallback';
+    await seedRepo(name);
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    const real = env.MERGE_LOCK;
+    let writes = 0;
+    try {
+      const { a } = await pinnedSource(name, 3);
+      await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+      DEPENDENCY_LIMITS.readMax = 1;
+      SETTLE_LIMITS.maxPages = 1;
+      (env as { MERGE_LOCK: unknown }).MERGE_LOCK = {
+        idFromName: (n: string) => real.idFromName(n),
+        get: () => ({
+          fetch: async () => {
+            writes++;
+            throw new Error('MergeLock unavailable (test)');
+          },
+        }),
+      };
+      sent.length = 0;
+      const landed = await merge(name, a.change!);
+      expect(landed.status).toBe(200);
+      expect(writes).toBe(SETTLE_INTENT.writeAttempts);
+      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body)).toEqual([
+        expect.objectContaining({ repoId: repoIds[name], mergeCommit: landed.json.merge.mergeCommit, ref: MAIN }),
+      ]);
+    } finally {
+      (env as { MERGE_LOCK: unknown }).MERGE_LOCK = real;
       DEPENDENCY_LIMITS.readMax = saved.readMax;
       SETTLE_LIMITS.maxPages = saved.maxPages;
     }

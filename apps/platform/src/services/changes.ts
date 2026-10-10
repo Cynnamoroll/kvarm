@@ -30,10 +30,11 @@ import {
   blockFromRows,
   changeDependenciesStatement,
   changeNumberDependenciesStatement,
+  handOffSettlement,
   landedDependentsStatement,
+  landedWakeMarksStatement,
   preservationRefusal,
   satisfyLandedStatement,
-  sendSettleContinuation,
   settleLanded,
   type DependencyRow,
   type DependencyView,
@@ -961,9 +962,11 @@ export function mergedRecordStatements(
       .bind(repoId, row.id, mergedAt, pub.headSha, pub.mergeCommit),
     changeSignalCleanup(db, repoId, row.id),
     retireConflictTaskStatement(db, repoId, row.number, mergedAt),
-    // Pins of the landed head are satisfied with the merge; the last statement finds the rest and the waiting dependents.
+    // Pins of the landed head are satisfied with the merge (each with its dependent's wake mark, written first under the
+    // same predicate); the last statement finds the rest and the marks.
+    landedWakeMarksStatement(db, repoId, row.id, pub, mergedAt),
     satisfyLandedStatement(db, repoId, row.id, pub, mergedAt),
-    landedDependentsStatement(db, repoId, row.id, mergedAt),
+    landedDependentsStatement(db, repoId, row.id, mergedAt, pub.mergeCommit),
   ];
 }
 
@@ -1089,9 +1092,13 @@ async function performMerge(
         pv.mergeCommit,
         {
           source: { changeSetId: row.id, mergedAt },
+          ref: targetRef,
           kick: (ref, reason) => kickTrain(cx.env, cx.repo.id, ref, reason),
-          resume: async (numbers) => cx.waitUntil(resumeAutoChanges(cx.env, cx.repo.id, numbers, cx.waitUntil)),
-          continueLater: (msg) => sendSettleContinuation(cx.env, msg),
+          resume: async (numbers) => {
+            await resumeAutoChanges(cx.env, cx.repo.id, numbers, cx.waitUntil);
+          },
+          handOff: (msg) => handOffSettlement(cx.env, msg),
+          defer: cx.waitUntil,
         },
       );
       if (pv.kind === 'merge') {

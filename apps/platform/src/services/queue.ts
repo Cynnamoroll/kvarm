@@ -75,10 +75,10 @@ import {
   dependencyRowsStatement,
   dependencyView,
   ejectedSourceStatement,
+  handOffSettlement,
   noBlockedPinCondition,
   pinsVerified,
   preservationRefusal,
-  sendSettleContinuation,
   settleLanded,
   type DependencyBlock,
   type DependencyRow,
@@ -1523,11 +1523,16 @@ async function publishCandidate(
     console.warn(JSON.stringify({ trainLateResult: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, generation: claimedGen } }));
     return { kind: 'lost' };
   }
+  // After the recorded publication cost above: a settlement intent (exceptional path only) is not publication work.
   await settleLanded(db, artifactsMergeSources(ctx), repo.id, recorded[record.length]?.results as LandedRow[] | undefined, pv.mergeCommit, {
     source: { changeSetId: e.change_set_id, mergedAt },
+    ref,
     kick: (r, reason) => deps.kick(env, repo.id, r, reason),
-    resume: async (numbers) => ctx.waitUntil(resumeAutoChanges(env, repo.id, numbers, ctx.waitUntil)),
-    continueLater: (msg) => sendSettleContinuation(env, msg),
+    resume: async (numbers) => {
+      await resumeAutoChanges(env, repo.id, numbers, ctx.waitUntil);
+    },
+    handOff: (msg) => handOffSettlement(env, msg),
+    defer: ctx.waitUntil,
   });
   if (!changeWrite?.meta.changes) {
     console.warn(JSON.stringify({ trainRecord: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, entry: entryWrite?.meta.changes, change: changeWrite?.meta.changes } }));

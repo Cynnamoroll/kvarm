@@ -25,9 +25,11 @@ import {
   DEPENDENCY_LIMITS,
   dependencyRowsStatement,
   dependencyView,
-  sendSettleContinuation,
+  emptySettleResult,
+  handOffSettlement,
   settleContinuation,
   settleEdgesStatement,
+  wakeStatement,
   type DependencyRow,
   type DependencyView,
   type LandedRow,
@@ -65,36 +67,51 @@ export const defaultDependencyDeps: DependencyDeps = {
 // ---------------------------------------------------------------------------
 
 /**
- * Handles one `forge.dependency-settle` message: one batch reads the repo
- * and the landing's first unsettled page (both empty for a replay, another
- * landing's identity or a deleted repo), then `settleContinuation` settles
- * at most SETTLE_LIMITS.maxPages pages, schedules the next message when more
- * remain and wakes the waiters of the pins it settled. Background merges of
- * resumed `auto` dependents finish before the message is acked.
+ * Runs one settlement continuation of a landing for one of its two owners:
+ * a `forge.dependency-settle` message (`queue`) or the MergeLock alarm
+ * (`alarm`). One batch reads the repo, the landing's first unsettled page and
+ * its wake-pending marks (all empty for a replay, another landing's identity
+ * or a deleted repo: nothing else happens), then `settleContinuation`
+ * settles at most SETTLE_LIMITS.maxPages pages and does the wake work of
+ * every pending mark. The queue owner hands what is left to both owners and
+ * throws when a wake effect failed, so the message is retried and re-derives
+ * the work from D1; the alarm owner returns `remaining` and re-arms itself.
+ * Background merges of resumed `auto` dependents finish before returning.
  */
-export async function continueDependencySettlement(env: Env, msg: SettleMessage, deps: DependencyDeps = defaultDependencyDeps): Promise<SettleContinuationResult> {
-  const [repoRead, pageRead] = await env.DB.batch([
+export async function continueDependencySettlement(
+  env: Env,
+  msg: SettleMessage,
+  deps: DependencyDeps = defaultDependencyDeps,
+  owner: 'queue' | 'alarm' = 'queue',
+): Promise<SettleContinuationResult> {
+  const [repoRead, pageRead, wakeRead] = await env.DB.batch([
     env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(msg.repoId),
     settleEdgesStatement(env.DB, msg),
+    wakeStatement(env.DB, msg),
   ]);
   const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
-  const page = (pageRead?.results as LandedRow[] | undefined) ?? [];
-  if (!repo || page.length === 0) return { settled: 0, continued: false, kicked: 0, resumed: 0 };
+  const first = [...((pageRead?.results as LandedRow[] | undefined) ?? []), ...((wakeRead?.results as LandedRow[] | undefined) ?? [])];
+  if (!repo || first.length === 0) return emptySettleResult();
   const pending: Promise<unknown>[] = [];
   const waitUntil = (p: Promise<unknown>) => void pending.push(p);
+  let result: SettleContinuationResult;
   try {
-    return await withLazyRepo(env, repo.artifacts_name, (artifacts) =>
-      settleContinuation(env.DB, artifactsMergeSources(resolveCtx({ env, repo, waitUntil }, artifacts)), msg, page, {
+    result = await withLazyRepo(env, repo.artifacts_name, (artifacts) =>
+      settleContinuation(env.DB, artifactsMergeSources(resolveCtx({ env, repo, waitUntil }, artifacts)), msg, first, {
         kick: (ref, reason) => deps.kick(env, repo.id, ref, reason),
         resume: async (numbers) => {
           await deps.resume(env, repo.id, numbers, waitUntil);
         },
-        continueLater: (next) => sendSettleContinuation(env, next),
+        ...(owner === 'queue' ? { continueLater: (next: SettleMessage) => handOffSettlement(env, next) } : {}),
       }),
     );
   } finally {
     await Promise.allSettled(pending);
   }
+  if (owner === 'queue' && result.failed) {
+    throw new Error(`dependency wake effects of ${msg.mergeCommit} failed after settlement (kicked ${result.kicked}, resumed ${result.resumed}); retrying`);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -8,11 +8,19 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
-import type { Lease } from '../src/do/mergeLock';
+import { afterEach, describe, expect, it } from 'vitest';
+import { INTENT_PREFIX, mergeLockAlarm, type Lease, type MergeLock, type SettleIntent } from '../src/do/mergeLock';
+import { SETTLE_INTENT } from '../src/services/dependencyGate';
 import { advanceFenced, claimFenced, readFenced, releaseFenced, reportFenced } from '../src/services/fencing';
 
 const env = cfEnv as unknown as Env;
+const savedIntent = { ...SETTLE_INTENT };
+const savedAlarmEnv = mergeLockAlarm.env;
+
+afterEach(() => {
+  Object.assign(SETTLE_INTENT, savedIntent);
+  mergeLockAlarm.env = savedAlarmEnv;
+});
 
 function lock(name: string) {
   const stub = env.MERGE_LOCK.get(env.MERGE_LOCK.idFromName(name));
@@ -25,7 +33,31 @@ function lock(name: string) {
     acquire: (owner: string, ttlMs?: number) => post('/acquire', { owner, ...(ttlMs !== undefined ? { ttlMs } : {}) }),
     release: (owner: string, generation: number) => post('/release', { owner, generation }),
     status: async () => (await (await stub.fetch('https://merge-lock/status')).json()) as { lease: Lease | null; generation: number },
+    intend: (landing: Partial<SettleIntent> = {}) =>
+      post('/settle-intent', {
+        repoId: `repo-${name}`,
+        changeSetId: 'change-1',
+        mergedAt: 1_000,
+        mergeCommit: 'a'.repeat(40),
+        ref: 'refs/heads/main',
+        ...landing,
+      }),
+    alarmAt: () => runInDurableObject(stub, async (_obj, state) => state.storage.getAlarm()),
+    intents: () => runInDurableObject(stub, async (_obj, state) => [...(await state.storage.list<SettleIntent>({ prefix: INTENT_PREFIX })).values()]),
+    /** Makes every pending intent due and runs the alarm handler once. */
+    fireDue: () =>
+      runInDurableObject(stub, async (obj: MergeLock, state) => {
+        for (const [key, intent] of await state.storage.list<SettleIntent>({ prefix: INTENT_PREFIX })) {
+          await state.storage.put(key, { ...intent, deadline: Date.now() - 1 });
+        }
+        await obj.alarm();
+      }),
   };
+}
+
+/** An env whose queue sends reject or record, for the alarm's own effects. */
+function alarmEnv(over: { send?: (body: unknown) => Promise<void>; db?: D1Database } = {}): (e: Env) => Env {
+  return (e) => ({ ...e, ...(over.db ? { DB: over.db } : {}), EVENTS: { send: over.send ?? (async () => {}), sendBatch: async () => {} } as unknown as Env['EVENTS'] });
 }
 
 describe('MergeLock publication lease', () => {
@@ -91,6 +123,134 @@ describe('MergeLock publication lease', () => {
   it('rejects an acquire without an owner', async () => {
     const r = await lock('no-owner').acquire('');
     expect(r.status).toBe(400);
+  });
+
+  it('an expired lease is cleared only after its train kick succeeds', async () => {
+    const l = lock('expiry-kick');
+    const kicks: unknown[] = [];
+    let fail = true;
+    mergeLockAlarm.env = alarmEnv({
+      send: async (body) => {
+        if (fail) throw new Error('queue send rejected (test)');
+        kicks.push(body);
+      },
+    });
+    await runInDurableObject(l.stub, async (obj: MergeLock, state) => {
+      await state.storage.put('lease', { owner: 'dead', generation: 1, expiresAt: Date.now() - 1, repoId: 'r', ref: 'refs/heads/main' } satisfies Lease);
+      await obj.alarm();
+      // The kick failed: the lease stays (expired, so not held) and the alarm retries it.
+      const kept = await state.storage.get<Lease>('lease');
+      expect(kept).toMatchObject({ owner: 'dead', generation: 1, kickAttempts: 1 });
+      expect(await state.storage.getAlarm()).toBe(kept!.retryAt);
+      fail = false;
+      await state.storage.put('lease', { ...kept!, retryAt: Date.now() - 1 });
+      await obj.alarm();
+      expect(await state.storage.get('lease')).toBeUndefined();
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+    expect(kicks).toEqual([{ type: 'forge.train', repoId: 'r', ref: 'refs/heads/main', reason: 'lease-expired' }]);
+  });
+});
+
+describe('MergeLock settlement intents (one alarm slot shared with the lease)', () => {
+  it('an intent write arms the alarm in the same transaction; release keeps it and a fresh acquire never clobbers it', async () => {
+    SETTLE_INTENT.delayMs = 50_000;
+    const l = lock('intent-coexist');
+    const written = await l.intend();
+    expect(written).toMatchObject({ status: 200, json: { armed: true } });
+    const [intent] = await l.intents();
+    expect(intent).toMatchObject({ repoId: 'repo-intent-coexist', changeSetId: 'change-1', mergedAt: 1_000, mergeCommit: 'a'.repeat(40), ref: 'refs/heads/main', attempts: 0 });
+    expect(await l.alarmAt()).toBe(intent!.deadline);
+
+    // A shorter lease takes the slot; its release hands it back to the intent instead of deleting it.
+    const short = await l.acquire('short', 20_000);
+    expect(await l.alarmAt()).toBe(short.json.expiresAt);
+    expect((await l.release('short', short.json.generation)).status).toBe(200);
+    expect(await l.alarmAt()).toBe(intent!.deadline);
+
+    // A longer lease leaves the earlier intent deadline armed.
+    const long = await l.acquire('long', 120_000);
+    expect(long.json).toMatchObject({ acquired: true, generation: 2 });
+    expect(await l.alarmAt()).toBe(intent!.deadline);
+    expect((await l.release('long', 2)).status).toBe(200);
+    expect(await l.alarmAt()).toBe(intent!.deadline);
+    expect(await l.status()).toEqual({ lease: null, generation: 2 });
+
+    // An early fire for the lease keeps both and re-arms the earliest.
+    const live = await l.acquire('live', 10_000);
+    expect(await runDurableObjectAlarm(l.stub)).toBe(true);
+    expect((await l.status()).lease).toMatchObject({ owner: 'live', generation: 3 });
+    expect(await l.alarmAt()).toBe(live.json.expiresAt);
+    expect(await l.intents()).toHaveLength(1);
+    expect((await l.release('live', 3)).status).toBe(200);
+
+    // A landing nothing in D1 knows: the due intent settles nothing, is cleared, and with no lease the alarm is deleted.
+    await l.fireDue();
+    expect(await l.intents()).toEqual([]);
+    expect(await l.alarmAt()).toBeNull();
+  });
+
+  it('release without lease or intent deletes the alarm; an invalid intent is refused', async () => {
+    const l = lock('intent-none');
+    const a = await l.acquire('a', 20_000);
+    expect(await l.alarmAt()).toBe(a.json.expiresAt);
+    await l.release('a', 1);
+    expect(await l.alarmAt()).toBeNull();
+    expect((await l.intend({ mergeCommit: 'nope' })).status).toBe(400);
+    expect(await l.intents()).toEqual([]);
+  });
+
+  it('a failing settlement re-arms with backoff and stops after a bounded number of wakeups', async () => {
+    SETTLE_INTENT.delayMs = 3_600_000;
+    SETTLE_INTENT.maxFailures = 3;
+    const l = lock('intent-bounded');
+    let reads = 0;
+    const failingDb = {
+      prepare: () => ({ bind: () => ({}) }),
+      batch: async () => {
+        reads++;
+        throw new Error('D1 unavailable (test)');
+      },
+    } as unknown as D1Database;
+    mergeLockAlarm.env = alarmEnv({ db: failingDb });
+    await l.intend();
+    await l.fireDue();
+    const [once] = await l.intents();
+    expect(once).toMatchObject({ attempts: 1 });
+    expect(once!.deadline).toBeGreaterThan(Date.now());
+    expect(await l.alarmAt()).toBe(once!.deadline);
+    await l.fireDue();
+    expect((await l.intents())[0]).toMatchObject({ attempts: 2 });
+    await l.fireDue();
+    // The failure bound is reached: the intent is dropped (logged) instead of re-arming forever.
+    expect(await l.intents()).toEqual([]);
+    expect(await l.alarmAt()).toBeNull();
+    expect(reads).toBe(3);
+  });
+
+  it('an intent rewritten while its settlement ran keeps the new hand-off', async () => {
+    SETTLE_INTENT.delayMs = 3_600_000;
+    const l = lock('intent-rewrite');
+    await l.intend();
+    await runInDurableObject(l.stub, async (obj: MergeLock, state) => {
+      const [key, intent] = [...(await state.storage.list<SettleIntent>({ prefix: INTENT_PREFIX }))][0]!;
+      await state.storage.put(key!, { ...intent!, deadline: Date.now() - 1 });
+      // While the alarm's settlement awaits D1, a fresh hand-off rewrites the intent: the alarm must not drop it.
+      mergeLockAlarm.env = alarmEnv({
+        db: {
+          prepare: () => ({ bind: () => ({}) }),
+          batch: async () => {
+            await state.storage.put(key!, { ...intent!, version: 'rewritten', attempts: 0, deadline: Date.now() + SETTLE_INTENT.delayMs });
+            return [{ results: [] }, { results: [] }, { results: [] }];
+          },
+        } as unknown as D1Database,
+      });
+      await obj.alarm();
+    });
+    const [kept] = await l.intents();
+    expect(kept).toMatchObject({ attempts: 0 });
+    expect(kept!.deadline).toBeGreaterThan(Date.now() + 3_000_000);
+    expect(await l.alarmAt()).toBe(kept!.deadline);
   });
 });
 
