@@ -181,6 +181,24 @@ async function recorded(env, id, sha) {
   return false;
 }
 
+/**
+ * Polls GET workspaces (whose heads come from push events, unlike the live
+ * GET workspaces/:id) until every workspace lists its pushed head. A pin's
+ * source read joins that push-event ref row, so a measurement taken before it
+ * arrives reads one row fewer than the same request a few seconds later.
+ */
+async function pushEventsSettled(env, list, ms = 60_000) {
+  const t0 = Date.now();
+  const want = new Map(list.map((w) => [w.id, w.head]));
+  while (Date.now() - t0 < ms) {
+    const r = await http(`${env.api}/workspaces?status=active&limit=100`);
+    const seen = new Map((r.json?.workspaces ?? []).map((w) => [w.id, w.headSha]));
+    if ([...want].every(([id, head]) => seen.get(id) === head)) return Date.now() - t0;
+    await sleep(1500);
+  }
+  return null;
+}
+
 /** A workspace with one commit adding `file`, optionally with a review change set. */
 async function workspace(env, name, { change = false, files } = {}) {
   const made = await http(`${env.api}/workspaces`, { method: 'POST', json: { task: `deps e2e ${name}`, agent: `agent-${name}` } });
@@ -321,6 +339,8 @@ await scenario(
     // VAL-DEP-002: chain d1 ← d2 ← d3 ← d4 (depth 4), d5 refused; detach an inner edge and re-create.
     const d = [];
     for (const n of ['d1', 'd2', 'd3', 'd4', 'd5']) d.push(await workspace(env, n));
+    const dSettled = await pushEventsSettled(env, d);
+    console.log(`push events recorded for d1..d5: ${dSettled === null ? 'not within 60 s' : `after ${dSettled} ms`}`);
     const chain = [];
     for (let i = 1; i < 4; i++) chain.push(await pin(env, d[i].id, d[i - 1].id, d[i - 1].head));
     const list4 = await deps(env, d[3].id);
@@ -349,6 +369,8 @@ await scenario(
     for (let i = 1; i < noise.length; i += 2) await pin(many, noise[i].json.id, noise[i - 1].json.id, noise[i - 1].json.headSha);
     const m = [];
     for (const n of ['m1', 'm2', 'm3', 'm4', 'm5']) m.push(await workspace(many, n));
+    const mSettled = await pushEventsSettled(many, m);
+    console.log(`push events recorded for m1..m5: ${mSettled === null ? 'not within 60 s' : `after ${mSettled} ms`}`);
     const mChain = [];
     for (let i = 1; i < 4; i++) mChain.push(await pin(many, m[i].id, m[i - 1].id, m[i - 1].head));
     const mDeep = await pin(many, m[4].id, m[3].id, m[3].head);
