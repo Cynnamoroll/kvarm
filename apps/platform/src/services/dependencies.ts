@@ -27,9 +27,11 @@ import {
   dependencyView,
   emptySettleResult,
   handOffSettlement,
+  releaseWakeClaims,
   settleContinuation,
   settleEdgesStatement,
-  wakeStatement,
+  wakeClaimStatements,
+  wakeSetOf,
   type DependencyRow,
   type DependencyView,
   type LandedRow,
@@ -37,7 +39,7 @@ import {
   type SettleMessage,
 } from './dependencyGate';
 import { RefStoreUnavailable } from './refs';
-import { resolveCtx, resumeAutoChanges } from './changes';
+import { resolveCtx, resumeAutoDependents } from './changes';
 import { artifactsMergeSources } from './merge';
 import { kickTrain } from './trainKick';
 import { WORKSPACE_ID_RE, agentOwnershipDenial, liveRefs, newId, type WorkspaceContext } from './workspaces';
@@ -54,12 +56,13 @@ function fail(status: number, error: string, code: string, extra: Record<string,
 
 export interface DependencyDeps {
   kick(env: Env, repoId: string, ref: string, reason: string): Promise<void>;
-  resume(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<unknown>;
+  /** Rejects when a resumed change failed operationally (see resumeAutoDependents). */
+  resume(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<void>;
 }
 
 export const defaultDependencyDeps: DependencyDeps = {
   kick: (env, repoId, ref, reason) => kickTrain(env, repoId, ref, reason),
-  resume: (env, repoId, numbers, waitUntil) => resumeAutoChanges(env, repoId, numbers, waitUntil),
+  resume: (env, repoId, numbers, waitUntil) => resumeAutoDependents(env, repoId, numbers, waitUntil),
 };
 
 // ---------------------------------------------------------------------------
@@ -69,14 +72,17 @@ export const defaultDependencyDeps: DependencyDeps = {
 /**
  * Runs one settlement continuation of a landing for one of its two owners:
  * a `forge.dependency-settle` message (`queue`) or the MergeLock alarm
- * (`alarm`). One batch reads the repo, the landing's first unsettled page and
- * its wake-pending marks (all empty for a replay, another landing's identity
- * or a deleted repo: nothing else happens), then `settleContinuation`
- * settles at most SETTLE_LIMITS.maxPages pages and does the wake work of
- * every pending mark. The queue owner hands what is left to both owners and
- * throws when a wake effect failed, so the message is retried and re-derives
- * the work from D1; the alarm owner returns `remaining` and re-arms itself.
- * Background merges of resumed `auto` dependents finish before returning.
+ * (`alarm`), under a fresh claim token. One batch reads the repo and the
+ * landing's first unsettled page and claims its wake-pending marks (all
+ * empty for a replay, another landing's identity or a deleted repo: nothing
+ * else happens), then `settleContinuation` settles at most
+ * SETTLE_LIMITS.maxPages pages and does the wake work of the marks it won.
+ * The queue owner hands what is left to both owners and throws when a wake
+ * effect failed or marks it could not claim remain, so the message is
+ * retried and re-derives the work from D1; the alarm owner returns
+ * `remaining` (and `heldUntil`) and re-arms itself. A failure gives the
+ * owner's claims back before it propagates. Background merges of resumed
+ * `auto` dependents finish before returning.
  */
 export async function continueDependencySettlement(
   env: Env,
@@ -84,32 +90,37 @@ export async function continueDependencySettlement(
   deps: DependencyDeps = defaultDependencyDeps,
   owner: 'queue' | 'alarm' = 'queue',
 ): Promise<SettleContinuationResult> {
-  const [repoRead, pageRead, wakeRead] = await env.DB.batch([
+  const token = `${owner}:${crypto.randomUUID()}`;
+  const [repoRead, pageRead, claimRead, restRead] = await env.DB.batch([
     env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(msg.repoId),
     settleEdgesStatement(env.DB, msg),
-    wakeStatement(env.DB, msg),
+    ...wakeClaimStatements(env.DB, msg, token, Date.now()),
   ]);
   const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
-  const first = [...((pageRead?.results as LandedRow[] | undefined) ?? []), ...((wakeRead?.results as LandedRow[] | undefined) ?? [])];
-  if (!repo || first.length === 0) return emptySettleResult();
+  if (!repo) return emptySettleResult();
+  const first = { edges: (pageRead?.results as LandedRow[] | undefined) ?? [], wake: wakeSetOf(claimRead, restRead) };
   const pending: Promise<unknown>[] = [];
   const waitUntil = (p: Promise<unknown>) => void pending.push(p);
   let result: SettleContinuationResult;
   try {
     result = await withLazyRepo(env, repo.artifacts_name, (artifacts) =>
-      settleContinuation(env.DB, artifactsMergeSources(resolveCtx({ env, repo, waitUntil }, artifacts)), msg, first, {
+      settleContinuation(env.DB, artifactsMergeSources(resolveCtx({ env, repo, waitUntil }, artifacts)), msg, first, token, {
         kick: (ref, reason) => deps.kick(env, repo.id, ref, reason),
-        resume: async (numbers) => {
-          await deps.resume(env, repo.id, numbers, waitUntil);
-        },
+        resume: (numbers) => deps.resume(env, repo.id, numbers, waitUntil),
         ...(owner === 'queue' ? { continueLater: (next: SettleMessage) => handOffSettlement(env, next) } : {}),
       }),
     );
+  } catch (err) {
+    await releaseWakeClaims(env.DB, msg, token);
+    throw err;
   } finally {
     await Promise.allSettled(pending);
   }
   if (owner === 'queue' && result.failed) {
     throw new Error(`dependency wake effects of ${msg.mergeCommit} failed after settlement (kicked ${result.kicked}, resumed ${result.resumed}); retrying`);
+  }
+  if (owner === 'queue' && result.held > 0 && !result.continued) {
+    throw new Error(`${result.held} wake marks of ${msg.mergeCommit} are held by another owner until ${result.heldUntil}; retrying`);
   }
   return result;
 }

@@ -1094,9 +1094,7 @@ async function performMerge(
           source: { changeSetId: row.id, mergedAt },
           ref: targetRef,
           kick: (ref, reason) => kickTrain(cx.env, cx.repo.id, ref, reason),
-          resume: async (numbers) => {
-            await resumeAutoChanges(cx.env, cx.repo.id, numbers, cx.waitUntil);
-          },
+          resume: (numbers) => resumeAutoDependents(cx.env, cx.repo.id, numbers, cx.waitUntil),
           handOff: (msg) => handOffSettlement(cx.env, msg),
           defer: cx.waitUntil,
         },
@@ -1200,23 +1198,40 @@ export function mergeChange(
  * base); a refusal is logged, never an error for the caller.
  */
 export async function autoMerge(cx: ChangeContext, row: ChangeRow, deps: MergeDeps = defaultMergeDeps): Promise<ChangeRow | null> {
-  if (row.merge_policy !== 'auto' || row.state !== 'open') return null;
+  return (await attemptAutoMerge(cx, row, deps)).row;
+}
+
+/**
+ * An auto-merge attempt. `failed` marks an operational failure: the attempt
+ * threw, or the merge refused with a status of 500 or above (storage
+ * unavailable, head update failed, merge read failed). Such a change may
+ * merge on a plain retry, so a settlement owner that resumed it keeps its
+ * wake mark. A 4xx refusal (checks pending or failed, review, dependency
+ * gates, head moved, conflicts) is not ready, not failed: the checks-gate
+ * and push hooks resume it when its state changes.
+ */
+interface AutoMergeAttempt {
+  row: ChangeRow | null;
+  failed: boolean;
+}
+
+async function attemptAutoMerge(cx: ChangeContext, row: ChangeRow, deps: MergeDeps): Promise<AutoMergeAttempt> {
+  if (row.merge_policy !== 'auto' || row.state !== 'open') return { row: null, failed: false };
   // A queued change publishes through the integration train (services/queue.ts) only.
-  if (row.queue_state !== null) return null;
+  if (row.queue_state !== null) return { row: null, failed: false };
   if (agentMergeDenial(cx.actor, row.base_ref, 'merge')) {
     console.log(JSON.stringify({ autoMerge: { repo: cx.repo.id, number: row.number, ok: false, code: 'AGENT_REF_FORBIDDEN' } }));
-    return null;
+    return { row: null, failed: false };
   }
-  let r: ServiceResult<MergeOutcome>;
   try {
-    r = await guarded(() => performMerge(cx, row, undefined, deps, 'auto'));
+    const r = await guarded(() => performMerge(cx, row, undefined, deps, 'auto'));
+    console.log(JSON.stringify({ autoMerge: { repo: cx.repo.id, number: row.number, ok: r.ok, ...(r.ok ? {} : { code: r.code }) } }));
+    if (!r.ok) return { row: null, failed: r.status >= 500 };
+    return { row: (await readChange(cx.env, cx.repo.id, row.number)) ?? null, failed: false };
   } catch (err) {
     console.warn(JSON.stringify({ autoMerge: { repo: cx.repo.id, number: row.number, error: String(err).slice(0, 200) } }));
-    return null;
+    return { row: null, failed: true };
   }
-  console.log(JSON.stringify({ autoMerge: { repo: cx.repo.id, number: row.number, ok: r.ok, ...(r.ok ? {} : { code: r.code }) } }));
-  if (!r.ok) return null;
-  return (await readChange(cx.env, cx.repo.id, row.number)) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1283,8 @@ export const AUTO_MERGE_PAGE = 20;
 
 export interface AutoMergePass {
   merged: number[];
+  /** Changes whose attempt failed operationally (see AutoMergeAttempt); a retry may merge them. */
+  failed: number[];
   /** Pass as `after` to continue with the changes numbered above it; null when none remain. */
   next: number | null;
 }
@@ -1286,7 +1303,7 @@ export async function mergeReadyAutoChanges(
   opts: { after?: number; deps?: MergeDeps } = {},
 ): Promise<AutoMergePass> {
   const ctxRows = await repoWithRules(env, repoId);
-  if (!ctxRows) return { merged: [], next: null };
+  if (!ctxRows) return { merged: [], failed: [], next: null };
   const after = opts.after ?? 0;
   const where = `c.repo_id = ?1 AND c.state = 'open' AND c.merge_policy = 'auto' AND c.number > ?2`;
   const page = `ORDER BY c.number LIMIT ${AUTO_MERGE_PAGE}`;
@@ -1295,12 +1312,14 @@ export async function mergeReadyAutoChanges(
     : env.DB.prepare(`${CHANGE_SELECT} WHERE ${where} ${page}`).bind(repoId, after);
   const rows = (await stmt.all<ChangeRow>()).results ?? [];
   const merged: number[] = [];
+  const failed: number[] = [];
   const cx: ChangeContext = { env, repo: ctxRows.repo, actor: null, branchRules: ctxRows.rules, waitUntil };
   for (const row of rows) {
-    const done = await autoMerge(cx, row, opts.deps);
-    if (done?.state === 'merged') merged.push(row.number);
+    const done = await attemptAutoMerge(cx, row, opts.deps ?? defaultMergeDeps);
+    if (done.row?.state === 'merged') merged.push(row.number);
+    else if (done.failed) failed.push(row.number);
   }
-  return { merged, next: rows.length === AUTO_MERGE_PAGE ? rows[rows.length - 1]!.number : null };
+  return { merged, failed, next: rows.length === AUTO_MERGE_PAGE ? rows[rows.length - 1]!.number : null };
 }
 
 /**
@@ -1308,14 +1327,31 @@ export async function mergeReadyAutoChanges(
  * bounded page of AUTO_MERGE_PAGE at a time. Every gate is re-checked by
  * the merge itself; changes that are not open `auto` are skipped.
  */
-export async function resumeAutoChanges(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<number[]> {
+export async function resumeAutoChanges(
+  env: Env,
+  repoId: string,
+  numbers: number[],
+  waitUntil: (p: Promise<unknown>) => void,
+): Promise<{ merged: number[]; failed: number[] }> {
   const merged: number[] = [];
+  const failed: number[] = [];
   for (let after: number | null = 0; numbers.length > 0 && after !== null; ) {
     const pass: AutoMergePass = await mergeReadyAutoChanges(env, repoId, numbers, waitUntil, { after });
     merged.push(...pass.merged);
+    failed.push(...pass.failed);
     after = pass.next;
   }
-  return merged;
+  return { merged, failed };
+}
+
+/**
+ * resumeAutoChanges for a landing's settlement owners: rejects when a
+ * resumed dependent failed operationally, so the owner keeps its wake mark
+ * and retries; a dependent that is merely not ready clears its mark.
+ */
+export async function resumeAutoDependents(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<void> {
+  const { failed } = await resumeAutoChanges(env, repoId, numbers, waitUntil);
+  if (failed.length > 0) throw new Error(`auto dependents ${failed.map((n) => `#${n}`).join(',')} failed to resume operationally`);
 }
 
 /** Which live changes a conflict re-evaluation covers. */
@@ -1380,7 +1416,7 @@ async function reevaluateConflicts(env: Env, repoId: string, scope: ConflictScop
  */
 export async function onBasePushed(env: Env, repoId: string, branch: string, waitUntil: (p: Promise<unknown>) => void): Promise<{ state: 'done'; detail: string }> {
   const reopened = await reevaluateConflicts(env, repoId, { conflictedAutoOnBase: branch }, waitUntil);
-  const merged = reopened.length > 0 ? await resumeAutoChanges(env, repoId, reopened, waitUntil) : [];
+  const { merged } = reopened.length > 0 ? await resumeAutoChanges(env, repoId, reopened, waitUntil) : { merged: [] };
   return { state: 'done', detail: `base: reopened ${reopened.length}, auto-merged ${merged.length}` };
 }
 
@@ -1408,7 +1444,7 @@ export async function onHeadPushed(
   const evaluate = moved.filter((c) => c.state === 'conflicted' || c.policy !== 'auto').map((c) => c.number);
   const reopened = evaluate.length > 0 ? new Set(await reevaluateConflicts(env, repoId, { numbers: evaluate }, waitUntil)) : new Set<number>();
   const auto = moved.filter((c) => c.policy === 'auto' && (c.state !== 'conflicted' || reopened.has(c.number))).map((c) => c.number);
-  const merged = await resumeAutoChanges(env, repoId, auto, waitUntil);
+  const { merged } = await resumeAutoChanges(env, repoId, auto, waitUntil);
   const parts = [`heads ${moved.map((c) => `#${c.number}`).join(',')}`];
   if (auto.length > 0) parts.push(`auto-merged ${merged.length ? merged.map((n) => `#${n}`).join(',') : 'none'}`);
   return { state: 'done', detail: parts.join('; ') };

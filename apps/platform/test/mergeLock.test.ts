@@ -9,16 +9,18 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
-import { INTENT_PREFIX, mergeLockAlarm, type Lease, type MergeLock, type SettleIntent } from '../src/do/mergeLock';
+import { INTENT_PREFIX, LEASE_KICK, mergeLockAlarm, type Lease, type MergeLock, type SettleIntent } from '../src/do/mergeLock';
 import { SETTLE_INTENT } from '../src/services/dependencyGate';
 import { advanceFenced, claimFenced, readFenced, releaseFenced, reportFenced } from '../src/services/fencing';
 
 const env = cfEnv as unknown as Env;
 const savedIntent = { ...SETTLE_INTENT };
+const savedKick = { ...LEASE_KICK };
 const savedAlarmEnv = mergeLockAlarm.env;
 
 afterEach(() => {
   Object.assign(SETTLE_INTENT, savedIntent);
+  Object.assign(LEASE_KICK, savedKick);
   mergeLockAlarm.env = savedAlarmEnv;
 });
 
@@ -150,6 +152,69 @@ describe('MergeLock publication lease', () => {
     });
     expect(kicks).toEqual([{ type: 'forge.train', repoId: 'r', ref: 'refs/heads/main', reason: 'lease-expired' }]);
   });
+
+  it('an expired lease whose kick keeps failing is kept with capped backoff past any attempt count, and cleared once a kick succeeds', async () => {
+    LEASE_KICK.retryMs = 1_000;
+    LEASE_KICK.retryMaxMs = 4_000;
+    const l = lock('expiry-kick-persist');
+    const kicks: unknown[] = [];
+    let fail = true;
+    mergeLockAlarm.env = alarmEnv({
+      send: async (body) => {
+        if (fail) throw new Error('queue send rejected (test)');
+        kicks.push(body);
+      },
+    });
+    await runInDurableObject(l.stub, async (obj: MergeLock, state) => {
+      await state.storage.put('lease', { owner: 'dead', generation: 1, expiresAt: Date.now() - 1, repoId: 'r', ref: 'refs/heads/main' } satisfies Lease);
+      for (let i = 1; i <= 9; i++) {
+        const before = Date.now();
+        await obj.alarm();
+        const kept = await state.storage.get<Lease>('lease');
+        // Never dropped while its kick has not succeeded: the attempt count only grows the (capped) backoff.
+        expect(kept).toMatchObject({ owner: 'dead', generation: 1, kickAttempts: i });
+        const delay = kept!.retryAt! - before;
+        expect(delay).toBeGreaterThan(0);
+        expect(delay).toBeLessThanOrEqual(LEASE_KICK.retryMaxMs + 50);
+        if (i >= 4) expect(delay).toBeGreaterThanOrEqual(LEASE_KICK.retryMaxMs - 50);
+        expect(await state.storage.getAlarm()).toBe(kept!.retryAt);
+        await state.storage.put('lease', { ...kept!, retryAt: Date.now() - 1 });
+      }
+      fail = false;
+      await obj.alarm();
+      expect(await state.storage.get('lease')).toBeUndefined();
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+    expect(kicks).toEqual([{ type: 'forge.train', repoId: 'r', ref: 'refs/heads/main', reason: 'lease-expired' }]);
+  });
+
+  it('an acquire on an expired lease with a pending kick retry succeeds and supersedes the retry', async () => {
+    LEASE_KICK.retryMs = 60_000;
+    const l = lock('expiry-kick-acquire');
+    mergeLockAlarm.env = alarmEnv({
+      send: async () => {
+        throw new Error('queue send rejected (test)');
+      },
+    });
+    await runInDurableObject(l.stub, async (obj: MergeLock, state) => {
+      await state.storage.put('generation', 1);
+      await state.storage.put('lease', { owner: 'dead', generation: 1, expiresAt: Date.now() - 1, repoId: 'r', ref: 'refs/heads/main' } satisfies Lease);
+      for (let i = 0; i < 6; i++) {
+        const kept = await state.storage.get<Lease>('lease');
+        await state.storage.put('lease', { ...kept!, retryAt: Date.now() - 1 });
+        await obj.alarm();
+      }
+      expect(await state.storage.get<Lease>('lease')).toMatchObject({ owner: 'dead', kickAttempts: 6 });
+    });
+    // The expired lease is not held: a publisher acquires it at once; its own run replaces the dead holder's kick.
+    const next = await l.acquire('next', 30_000);
+    expect(next.json).toMatchObject({ acquired: true, generation: 2 });
+    const lease = await runInDurableObject(l.stub, async (_obj, state) => state.storage.get<Lease>('lease'));
+    expect(lease).toMatchObject({ owner: 'next', generation: 2 });
+    expect(lease!.kickAttempts).toBeUndefined();
+    expect(lease!.retryAt).toBeUndefined();
+    expect(await l.alarmAt()).toBe(next.json.expiresAt);
+  });
 });
 
 describe('MergeLock settlement intents (one alarm slot shared with the lease)', () => {
@@ -200,32 +265,43 @@ describe('MergeLock settlement intents (one alarm slot shared with the lease)', 
     expect(await l.intents()).toEqual([]);
   });
 
-  it('a failing settlement re-arms with backoff and stops after a bounded number of wakeups', async () => {
+  it('a failing settlement keeps its intent past any failure count with capped backoff, and is deleted only once a wakeup finds nothing fenced', async () => {
     SETTLE_INTENT.delayMs = 3_600_000;
-    SETTLE_INTENT.maxFailures = 3;
-    const l = lock('intent-bounded');
+    SETTLE_INTENT.retryBaseMs = 1_000;
+    SETTLE_INTENT.retryMaxMs = 4_000;
+    const l = lock('intent-persist');
     let reads = 0;
-    const failingDb = {
+    let down = true;
+    const outageDb = {
       prepare: () => ({ bind: () => ({}) }),
       batch: async () => {
         reads++;
-        throw new Error('D1 unavailable (test)');
+        if (down) throw new Error('D1 unavailable (test)');
+        // The outage ended: nothing fenced to this landing remains.
+        return [{ results: [] }, { results: [] }, { results: [] }, { results: [{ held: 0, held_until: null, more: 0 }] }];
       },
     } as unknown as D1Database;
-    mergeLockAlarm.env = alarmEnv({ db: failingDb });
+    mergeLockAlarm.env = alarmEnv({ db: outageDb });
     await l.intend();
+    const failures = 12;
+    for (let i = 1; i <= failures; i++) {
+      const before = Date.now();
+      await l.fireDue();
+      const [kept] = await l.intents();
+      // Never abandoned: the attempt count only grows the capped backoff.
+      expect(kept).toMatchObject({ attempts: i, fires: i });
+      const delay = kept!.deadline - before;
+      expect(delay).toBeGreaterThan(0);
+      expect(delay).toBeLessThanOrEqual(SETTLE_INTENT.retryMaxMs + 50);
+      if (i >= 3) expect(delay).toBeGreaterThanOrEqual(SETTLE_INTENT.retryMaxMs - 50);
+      expect(await l.alarmAt()).toBe(kept!.deadline);
+    }
+    expect(reads).toBe(failures);
+    down = false;
     await l.fireDue();
-    const [once] = await l.intents();
-    expect(once).toMatchObject({ attempts: 1 });
-    expect(once!.deadline).toBeGreaterThan(Date.now());
-    expect(await l.alarmAt()).toBe(once!.deadline);
-    await l.fireDue();
-    expect((await l.intents())[0]).toMatchObject({ attempts: 2 });
-    await l.fireDue();
-    // The failure bound is reached: the intent is dropped (logged) instead of re-arming forever.
     expect(await l.intents()).toEqual([]);
     expect(await l.alarmAt()).toBeNull();
-    expect(reads).toBe(3);
+    expect(reads).toBe(failures + 1);
   });
 
   it('an intent rewritten while its settlement ran keeps the new hand-off', async () => {

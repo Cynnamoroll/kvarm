@@ -1096,8 +1096,8 @@ describe('auto-merge selection', () => {
 
     const repoId = repoIds['auto-all']!;
     const first = await mergeReadyAutoChanges(env, repoId, null, () => {});
-    expect(first).toEqual({ merged: [], next: 20 });
-    expect(await mergeReadyAutoChanges(env, repoId, null, () => {}, { after: first.next! })).toEqual({ merged: [21], next: null });
+    expect(first).toEqual({ merged: [], failed: [], next: 20 });
+    expect(await mergeReadyAutoChanges(env, repoId, null, () => {}, { after: first.next! })).toEqual({ merged: [21], failed: [], next: null });
   });
 });
 

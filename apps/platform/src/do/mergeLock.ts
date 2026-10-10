@@ -37,7 +37,7 @@ export interface Lease {
   expiresAt: number;
   repoId?: string;
   ref?: string;
-  /** Failed expiry kicks so far; the expired lease stays until its kick succeeds (bounded by LEASE_KICK.maxAttempts). */
+  /** Failed expiry kicks so far (the backoff exponent); the expired lease stays until its kick succeeds or a new acquire replaces it. */
   kickAttempts?: number;
   /** When the alarm retries a failed expiry kick. */
   retryAt?: number;
@@ -51,7 +51,7 @@ export interface SettleIntent {
   ref: string;
   /** When the alarm runs this settlement next. */
   deadline: number;
-  /** Consecutive wakeups that failed or made no progress. */
+  /** Consecutive wakeups that failed or made no progress: the backoff exponent (logged), never a reason to drop the intent. */
   attempts: number;
   /** Wakeups that ran this settlement (logged). */
   fires: number;
@@ -60,7 +60,12 @@ export interface SettleIntent {
 }
 
 export const LEASE_TTL = { defaultMs: 30_000, minMs: 1, maxMs: 120_000 };
-export const LEASE_KICK = { maxAttempts: 5, retryMs: 5_000 };
+export const LEASE_KICK = { retryMs: 5_000, retryMaxMs: 300_000 };
+
+/** `base` × 2^(attempt − 1), capped at `max`. */
+export function cappedBackoff(base: number, max: number, attempt: number): number {
+  return Math.min(max, base * 2 ** Math.min(30, Math.max(0, attempt - 1)));
+}
 
 const LEASE = 'lease';
 const GENERATION = 'generation';
@@ -191,15 +196,30 @@ export class MergeLock implements DurableObject {
    * One wakeup: an expired lease's train kick (the lease is cleared only
    * after it), then at most one due settlement intent, then the alarm is
    * re-armed from what storage holds now (or deleted when nothing does).
-   * Storage is re-read after every external await; nothing here throws.
+   * Storage is re-read after every external await. Each step catches its
+   * own failures: recovery never depends on the platform's alarm retries.
    */
   async alarm(): Promise<void> {
-    await this.expireLease();
-    await this.settleDue();
+    try {
+      await this.expireLease();
+    } catch (err) {
+      console.warn(JSON.stringify({ mergeLockAlarmFailed: { step: 'lease', error: String(err).slice(0, 200) } }));
+    }
+    try {
+      await this.settleDue();
+    } catch (err) {
+      console.warn(JSON.stringify({ mergeLockAlarmFailed: { step: 'settle', error: String(err).slice(0, 200) } }));
+    }
     const { lease, intents } = await this.read();
     await this.arm(alarmTarget(lease, intents.values()));
   }
 
+  /**
+   * An expired lease is kept until its train kick succeeded: a failed kick
+   * re-arms with capped exponential backoff, however often it failed. A new
+   * acquire (the lease is not held once expired) replaces it, and the
+   * generation re-read below then leaves the successor alone.
+   */
   private async expireLease(): Promise<void> {
     const lease = await this.state.storage.get<Lease>(LEASE);
     const now = Date.now();
@@ -216,14 +236,14 @@ export class MergeLock implements DurableObject {
     }
     const current = await this.state.storage.get<Lease>(LEASE);
     if (!current || current.generation !== lease.generation || current.owner !== lease.owner) return;
-    const attempts = (current.kickAttempts ?? 0) + 1;
     const log = { owner: lease.owner, generation: lease.generation, repoId: lease.repoId, ref: lease.ref, kicked, ...(error ? { error } : {}) };
-    if (kicked || attempts >= LEASE_KICK.maxAttempts) {
+    if (kicked) {
       await this.state.storage.delete(LEASE);
       console.log(JSON.stringify({ mergeLockExpired: log }));
       return;
     }
-    await this.state.storage.put(LEASE, { ...current, kickAttempts: attempts, retryAt: Date.now() + LEASE_KICK.retryMs * 2 ** (attempts - 1) });
+    const attempts = (current.kickAttempts ?? 0) + 1;
+    await this.state.storage.put(LEASE, { ...current, kickAttempts: attempts, retryAt: Date.now() + cappedBackoff(LEASE_KICK.retryMs, LEASE_KICK.retryMaxMs, attempts) });
     console.warn(JSON.stringify({ mergeLockExpiryKickFailed: { ...log, attempts } }));
   }
 
@@ -254,26 +274,28 @@ export class MergeLock implements DurableObject {
 
     const current = await this.state.storage.get<SettleIntent>(key);
     const t = Date.now();
-    let outcome: 'done' | 'continue' | 'retry' | 'abandoned' | 'superseded';
+    // Marks another owner holds are neither work nor failure: revisit them when that claim expires, if not sooner.
+    const revisit = (deadline: number) => (result?.heldUntil ? Math.min(deadline, Math.max(t, result.heldUntil)) : deadline);
+    let outcome: 'done' | 'continue' | 'held' | 'retry' | 'superseded';
     if (!current || current.version !== intent.version) {
       // A hand-off rewrote (or a run cleared) the intent while this one ran: its own deadline stands.
       outcome = 'superseded';
     } else if (result && !result.remaining) {
+      // The only way an intent ends: nothing fenced to its landing remains (no unsettled pin, no mark, no failed effect).
       outcome = 'done';
       await this.state.storage.delete(key);
     } else if (result && !result.failed && (result.settled > 0 || result.cleared > 0)) {
       outcome = 'continue';
-      await this.state.storage.put(key, { ...current, deadline: t + SETTLE_INTENT.stepMs, attempts: 0, fires: current.fires + 1 });
+      await this.state.storage.put(key, { ...current, deadline: revisit(t + SETTLE_INTENT.stepMs), attempts: 0, fires: current.fires + 1 });
+    } else if (result && !result.failed && result.held > 0) {
+      outcome = 'held';
+      await this.state.storage.put(key, { ...current, deadline: revisit(t + SETTLE_INTENT.retryMaxMs), fires: current.fires + 1 });
     } else {
+      // A failure or a wakeup without progress: retried with capped backoff for as long as fenced work remains.
+      outcome = 'retry';
       const attempts = current.attempts + 1;
-      if (attempts >= SETTLE_INTENT.maxFailures) {
-        outcome = 'abandoned';
-        await this.state.storage.delete(key);
-      } else {
-        outcome = 'retry';
-        const backoff = Math.min(SETTLE_INTENT.retryMaxMs, SETTLE_INTENT.retryBaseMs * 2 ** (attempts - 1));
-        await this.state.storage.put(key, { ...current, deadline: t + backoff, attempts, fires: current.fires + 1 });
-      }
+      const backoff = cappedBackoff(SETTLE_INTENT.retryBaseMs, SETTLE_INTENT.retryMaxMs, attempts);
+      await this.state.storage.put(key, { ...current, deadline: revisit(t + backoff), attempts, fires: current.fires + 1 });
     }
     console.log(
       JSON.stringify({

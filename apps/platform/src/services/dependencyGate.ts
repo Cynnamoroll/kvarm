@@ -331,8 +331,12 @@ export function pinsVerified(rows: readonly DependencyRow[] | undefined, verifie
 //     first, a wake-pending mark (fenced_claims kind WAKE_KIND) for each edge
 //     it settles, under the same landing/revision fences;
 //   - the dependents' wake/resume work (kick a queued dependent's partition,
-//     resume an open unqueued `auto` one) is derived from those marks, and a
-//     mark is deleted only after its effect succeeded;
+//     resume an open unqueued `auto` one) is derived from those marks, under
+//     a claim-then-send-then-confirm lifecycle: an owner claims marks (open
+//     or with a lapsed claim) in one statement, acts only on the marks it
+//     won, deletes a mark only after its effect succeeded and gives back the
+//     marks whose effect failed; a mark another owner holds is left alone
+//     until that claim expires;
 //   - pins or marks left past the budget, or effects that failed, are handed
 //     to two independent owners (handOffSettlement): a `forge.dependency-settle`
 //     message on the forge-events queue and a settlement intent in the
@@ -366,6 +370,20 @@ export function satisfyLandedStatement(
 /** fenced_claims kind of a dependent's wake-pending mark (subject: wakePrefix(landing) + dependent workspace id; identity: merge commit). */
 export const WAKE_KIND = 'dep-wake';
 
+/**
+ * How long an owner's claim on wake marks lasts. It covers the owner's
+ * kicks, resumes and confirmation; a claim that lapses unconfirmed (the
+ * owner died, or its confirmation failed) lets the next owner act again.
+ */
+export const WAKE_CLAIM = { ttlMs: 300_000 };
+
+/**
+ * The claim owner of a landing's own invocation. A landing identity is
+ * recorded by exactly one invocation, so this is an invocation token;
+ * continuations and alarm wakeups use a fresh random one each.
+ */
+export const landingOwner = (id: Pick<LandingIdentity, 'changeSetId' | 'mergedAt'>) => `landing:${id.changeSetId}:${id.mergedAt}`;
+
 /** One exact landing: the source change, its recorded merge time and merge commit. */
 export interface LandingIdentity {
   repoId: string;
@@ -384,7 +402,8 @@ const wakeRange = (id: LandingIdentity): [string, string, number] => {
 /**
  * Part of the merged-record batch, before satisfyLandedStatement and under
  * the same predicate: a wake-pending mark for each dependent whose pin that
- * statement is about to satisfy.
+ * statement is about to satisfy, born claimed by the landing's own
+ * invocation (landingOwner), which is the one that acts on it next.
  */
 export function landedWakeMarksStatement(
   db: D1Database,
@@ -395,12 +414,21 @@ export function landedWakeMarksStatement(
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT OR IGNORE INTO fenced_claims (kind, subject, generation, identity, state, updated_at)
-       SELECT '${WAKE_KIND}', ?6 || d.workspace_id, 0, ?3, 'open', ?4 FROM workspace_dependencies d
+      `INSERT OR IGNORE INTO fenced_claims (kind, subject, generation, owner, identity, state, expires_at, updated_at)
+       SELECT '${WAKE_KIND}', ?6 || d.workspace_id, 1, ?7, ?3, 'claimed', ?4 + ?8, ?4 FROM workspace_dependencies d
         WHERE d.repo_id = ?1 AND d.revision = ?5 AND d.satisfied_commit IS NULL AND d.broken_code IS NULL
           AND d.on_workspace IN (SELECT w.id FROM workspaces w WHERE w.repo_id = ?1 AND w.change_set_id = ?2 AND w.status = 'merged' AND w.merged_at = ?4)`,
     )
-    .bind(repoId, changeSetId, pub.mergeCommit, mergedAt, pub.headSha, wakePrefix({ repoId, changeSetId, mergedAt }));
+    .bind(
+      repoId,
+      changeSetId,
+      pub.mergeCommit,
+      mergedAt,
+      pub.headSha,
+      wakePrefix({ repoId, changeSetId, mergedAt }),
+      landingOwner({ changeSetId, mergedAt }),
+      WAKE_CLAIM.ttlMs,
+    );
 }
 
 export interface LandedRow {
@@ -432,7 +460,8 @@ const wakeLimit = () => DEPENDENCY_LIMITS.readMax * SETTLE_LIMITS.maxPages;
  * change is open `auto` and not queued (neither: nothing to wake). Fenced by
  * the landing: the subject range names the change and merge time, the
  * identity the merge commit. Parameters ?1 repo, ?4 merge commit, ?5/?6 the
- * subject range, ?7 where the workspace id starts in the subject.
+ * subject range, ?7 where the workspace id starts in the subject. Read only
+ * in the merged-record batch, whose marks the landing's invocation holds.
  */
 const WAKE_ROWS = () => `SELECT 'wake' AS kind, f.subject AS id, NULL AS revision,
     (SELECT q.target_ref FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1 LIMIT 1) AS target_ref,
@@ -457,16 +486,97 @@ export function landedDependentsStatement(db: D1Database, repoId: string, change
     .bind(repoId, changeSetId, mergedAt, mergeCommit, ...wakeRange({ repoId, changeSetId, mergedAt, mergeCommit }));
 }
 
-/** The landing's wake marks with what wakes each dependent (see WAKE_ROWS). */
-export function wakeStatement(db: D1Database, id: LandingIdentity): D1PreparedStatement {
-  return db.prepare(`SELECT * FROM (${WAKE_ROWS()})`).bind(id.repoId, id.changeSetId, id.mergedAt, id.mergeCommit, ...wakeRange(id));
+/**
+ * The wake marks one owner acts on: the marks it holds, with what wakes
+ * each dependent now (as WAKE_ROWS), and what it does not hold.
+ */
+export interface WakeSet {
+  rows: LandedRow[];
+  /** Claimable marks beyond what one invocation acts on. */
+  more: boolean;
+  /** Marks under another owner's live claim: neither work nor failure for this owner. */
+  held: number;
+  /** When the earliest of those claims expires. */
+  heldUntil: number | null;
 }
 
-/** Deletes the given marks of the landing (after their effects succeeded). */
+/** The marks the merged-record batch recorded (and its invocation holds), as read by landedDependentsStatement. */
+function landedWakeSet(rows: readonly LandedRow[]): WakeSet {
+  const marks = rows.filter((r) => r.kind === 'wake' && r.id);
+  return { rows: marks.slice(0, wakeLimit()), more: marks.length > wakeLimit(), held: 0, heldUntil: null };
+}
+
+/**
+ * Claim-and-read: one statement takes up to wakeLimit of the landing's marks
+ * that are open, already this owner's, or held under a lapsed claim (new
+ * generation, owner and expiry) and returns them with what wakes each
+ * dependent now; the second reads what the owner did not get (claimable
+ * marks past the limit, marks under another owner's live claim). Both run
+ * in the caller's batch, in place of a plain read.
+ */
+export function wakeClaimStatements(db: D1Database, id: LandingIdentity, owner: string, now: number): [D1PreparedStatement, D1PreparedStatement] {
+  const [lo, hi, offset] = wakeRange(id);
+  const dependent = `dw.repo_id = ?1 AND dw.id = substr(fenced_claims.subject, ?5)`;
+  const claim = db
+    .prepare(
+      `UPDATE fenced_claims SET state = 'claimed', owner = ?6, generation = generation + 1, expires_at = ?7 + ?8, updated_at = ?7
+        WHERE kind = '${WAKE_KIND}' AND subject IN (
+          SELECT f.subject FROM fenced_claims f
+           WHERE f.kind = '${WAKE_KIND}' AND f.subject >= ?3 AND f.subject < ?4 AND f.identity = ?2
+             AND (f.state = 'open' OR (f.state = 'claimed' AND (f.expires_at <= ?7 OR f.owner = ?6)))
+           ORDER BY f.subject LIMIT ${wakeLimit()})
+        RETURNING 'wake' AS kind, subject AS id, NULL AS revision,
+          (SELECT q.target_ref FROM workspaces dw JOIN merge_queue q ON q.change_set_id = dw.change_set_id AND q.active = 1 WHERE ${dependent} LIMIT 1) AS target_ref,
+          (SELECT c.number FROM workspaces dw JOIN change_sets c ON c.id = dw.change_set_id
+            WHERE ${dependent} AND c.state = 'open' AND c.merge_policy = 'auto'
+              AND NOT EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)) AS number`,
+    )
+    .bind(id.repoId, id.mergeCommit, lo, hi, offset, owner, now, WAKE_CLAIM.ttlMs);
+  const foreign = `f.state = 'claimed' AND f.owner IS NOT ?4 AND f.expires_at > ?5`;
+  const rest = db
+    .prepare(
+      `SELECT COALESCE(SUM(CASE WHEN ${foreign} THEN 1 ELSE 0 END), 0) AS held,
+              MIN(CASE WHEN ${foreign} THEN f.expires_at END) AS held_until,
+              COALESCE(SUM(CASE WHEN f.state = 'open' OR (f.state = 'claimed' AND f.owner IS NOT ?4 AND f.expires_at <= ?5) THEN 1 ELSE 0 END), 0) AS more
+         FROM fenced_claims f WHERE f.kind = '${WAKE_KIND}' AND f.subject >= ?2 AND f.subject < ?3 AND f.identity = ?1`,
+    )
+    .bind(id.mergeCommit, lo, hi, owner, now);
+  return [claim, rest];
+}
+
+/** The WakeSet from the results of wakeClaimStatements. */
+export function wakeSetOf(claimed: D1Result | undefined, rest: D1Result | undefined): WakeSet {
+  const rows = [...((claimed?.results as LandedRow[] | undefined) ?? [])].sort((a, b) => (a.id! < b.id! ? -1 : a.id! > b.id! ? 1 : 0));
+  const r = (rest?.results as Array<{ held: number; held_until: number | null; more: number }> | undefined)?.[0];
+  return { rows, more: (r?.more ?? 0) > 0, held: r?.held ?? 0, heldUntil: r?.held_until ?? null };
+}
+
+/** Confirms the given marks of the landing: deletes them after their effects succeeded (idempotent). */
 function clearWakeStatement(db: D1Database, id: LandingIdentity, subjects: readonly string[]): D1PreparedStatement {
   return db
     .prepare(`DELETE FROM fenced_claims WHERE kind = '${WAKE_KIND}' AND identity = ?1 AND subject IN (SELECT value FROM json_each(?2))`)
     .bind(id.mergeCommit, JSON.stringify(subjects));
+}
+
+/** Gives back the owner's claims on the given marks (all of the landing's when null), so the next owner can act at once. */
+function releaseWakeStatement(db: D1Database, id: LandingIdentity, owner: string, subjects: readonly string[] | null, now: number): D1PreparedStatement {
+  const [lo, hi] = wakeRange(id);
+  return db
+    .prepare(
+      `UPDATE fenced_claims SET state = 'open', owner = NULL, expires_at = NULL, updated_at = ?3
+        WHERE kind = '${WAKE_KIND}' AND identity = ?1 AND owner = ?2 AND state = 'claimed' AND subject >= ?4 AND subject < ?5
+          AND (?6 IS NULL OR subject IN (SELECT value FROM json_each(?6)))`,
+    )
+    .bind(id.mergeCommit, owner, now, lo, hi, subjects ? JSON.stringify(subjects) : null);
+}
+
+/** Best effort after a failure: the owner's claims on the landing's marks go back (else they lapse after WAKE_CLAIM.ttlMs). */
+export async function releaseWakeClaims(db: D1Database, id: LandingIdentity, owner: string): Promise<void> {
+  try {
+    await releaseWakeStatement(db, id, owner, null, Date.now()).run();
+  } catch (err) {
+    console.warn(JSON.stringify({ dependencyWakeReleaseFailed: { repo: id.repoId, mergeCommit: id.mergeCommit, error: String(err).slice(0, 200) } }));
+  }
 }
 
 /** Edge pages (readMax edges each) one landing, one continuation message or one alarm wakeup settles. */
@@ -512,14 +622,14 @@ export async function sendSettleContinuation(env: Pick<Env, 'EVENTS'>, msg: Sett
  * The MergeLock settlement intent (do/mergeLock.ts). `delayMs` is how long
  * the queue fast path has before the alarm runs the settlement itself;
  * `stepMs` re-arms an alarm that made progress with work left; failures
- * back off from `retryBaseMs` and stop after `maxFailures`.
+ * and wakeups without progress back off from `retryBaseMs` up to
+ * `retryMaxMs` and keep retrying at that cap while fenced work remains.
  */
 export const SETTLE_INTENT = {
   delayMs: 120_000,
   stepMs: 1_000,
   retryBaseMs: 10_000,
   retryMaxMs: 3_600_000,
-  maxFailures: 8,
   /** Inline attempts of the intent write before only the queue send carries the hand-off. */
   writeAttempts: 3,
 };
@@ -604,25 +714,32 @@ interface SettledPages {
   settled: string[];
   /** The page budget ran out with unsettled pins still listed. */
   left: boolean;
-  /** The landing's wake marks as read after the last settling batch (or with the first page when nothing was settled). */
-  wake: LandedRow[];
+  /** The landing's wake marks this owner holds, claimed with the last settling batch (or `wake` when nothing was settled). */
+  wake: WakeSet;
 }
 
 /**
- * Settles `first`'s edges and the pages after them, at most
+ * Settles the `first` edges and the pages after them, at most
  * SETTLE_LIMITS.maxPages pages of readMax edges: satisfied only when the
  * pinned revision is an ancestor of the landed commit, broken NOT_PRESERVED
  * otherwise; an ancestry walk that runs out of budget is NOT_VERIFIED, never
  * satisfied. Every write is fenced by the landing's identity and the pin's
  * revision and unsettled state, so a concurrent or replayed settlement
  * changes nothing twice; each batch records the settled edges' wake marks
- * first, and the last one re-reads the landing's marks.
+ * first, and the last one claims the landing's marks for `owner`.
  */
-async function settlePages(db: D1Database, reader: CommitReader | null, id: LandingIdentity, first: readonly LandedRow[]): Promise<SettledPages> {
+async function settlePages(
+  db: D1Database,
+  reader: CommitReader | null,
+  id: LandingIdentity,
+  first: readonly LandedRow[],
+  firstWake: WakeSet,
+  owner: string,
+): Promise<SettledPages> {
   const verdicts = new Map<string, { ancestor: boolean; truncated: boolean }>();
   const seen = new Set<string>();
   const settled: string[] = [];
-  let wake = first.filter((r) => r.kind === 'wake' && r.id);
+  let wake = firstWake;
   let wakeCurrent = true;
   let edges = first.filter((r) => r.kind === 'edge' && r.id && r.revision);
   for (let page = 0; edges.length > 0 && page < SETTLE_LIMITS.maxPages; page++) {
@@ -665,13 +782,13 @@ async function settlePages(db: D1Database, reader: CommitReader | null, id: Land
     const batch = [pageWakeMarksStatement(db, id, edges, now), ...writes];
     // The next page rides on the settling batch: the settled edges no longer match, so it returns the ones after them.
     if (full) batch.push(settleEdgesStatement(db, id));
-    if (last) batch.push(wakeStatement(db, id));
+    if (last) batch.push(...wakeClaimStatements(db, id, owner, now));
     const out = await db.batch(batch);
     edges.forEach((r, i) => {
       if (out[i + 1]?.meta.changes) settled.push(r.id!);
     });
     wakeCurrent = last;
-    if (last) wake = (out[out.length - 1]?.results as LandedRow[] | undefined) ?? [];
+    if (last) wake = wakeSetOf(out[out.length - 2], out[out.length - 1]);
     if (!full) {
       edges = [];
       break;
@@ -679,13 +796,21 @@ async function settlePages(db: D1Database, reader: CommitReader | null, id: Land
     edges = ((out[1 + writes.length]?.results as LandedRow[] | undefined) ?? []).filter((r) => r.id && r.revision && !seen.has(r.id));
   }
   // Only when the last page was exactly full and nothing followed it.
-  if (!wakeCurrent) wake = ((await wakeStatement(db, id).all<LandedRow>()).results ?? []) as LandedRow[];
+  if (!wakeCurrent) {
+    const [claimed, rest] = await db.batch(wakeClaimStatements(db, id, owner, Date.now()));
+    wake = wakeSetOf(claimed, rest);
+  }
   return { settled, left: edges.length > 0, wake };
 }
 
 export interface WakeEffects {
   kick(ref: string, reason: string): Promise<void>;
-  /** Resumes open `auto` dependents whose pins may now all be satisfied (their own merge path re-checks every gate); resolves when done. */
+  /**
+   * Resumes open `auto` dependents whose pins may now all be satisfied (their
+   * own merge path re-checks every gate). Resolves when each was merged or
+   * refused as not ready (a 4xx refusal: its own recovery path retries it);
+   * rejects when one failed operationally, so its mark is kept.
+   */
   resume(numbers: number[]): Promise<void>;
 }
 
@@ -694,26 +819,25 @@ export interface WakeResult {
   resumed: number;
   /** Marks deleted after their effect succeeded (or with nothing left to wake). */
   cleared: number;
-  /** An effect or the mark deletion failed: those marks stay for the next owner. */
+  /** An effect or the confirmation failed: those marks stay for the next owner. */
   failed: boolean;
-  /** More marks remain than one invocation acts on. */
-  more: boolean;
 }
 
 /**
- * Acts on (at most wakeLimit) wake marks: one kick per partition of queued
- * dependents, resumes of open unqueued `auto` dependents in pages of
- * readMax, then one deletion of the marks whose effect succeeded (and of
- * those with nothing to wake). A failed effect keeps its marks.
+ * Acts on the wake marks this owner holds (at most wakeLimit): one kick per
+ * partition of queued dependents, resumes of open unqueued `auto`
+ * dependents in pages of readMax, then one batch that confirms (deletes)
+ * the marks whose effect succeeded (and those with nothing to wake) and
+ * gives back the claims of those whose effect failed.
  */
-async function wakeDependents(db: D1Database, id: LandingIdentity, rows: readonly LandedRow[], s: WakeEffects, reason: string): Promise<WakeResult> {
-  const r: WakeResult = { kicked: 0, resumed: 0, cleared: 0, failed: false, more: rows.length > wakeLimit() };
-  const marks = rows.slice(0, wakeLimit());
-  if (marks.length === 0) return r;
+async function wakeDependents(db: D1Database, id: LandingIdentity, set: WakeSet, s: WakeEffects, reason: string, owner: string): Promise<WakeResult> {
+  const r: WakeResult = { kicked: 0, resumed: 0, cleared: 0, failed: false };
+  if (set.rows.length === 0) return r;
   const done: string[] = [];
+  const failed: string[] = [];
   const byRef = new Map<string, string[]>();
   const autos: LandedRow[] = [];
-  for (const m of marks) {
+  for (const m of set.rows) {
     if (m.target_ref) byRef.set(m.target_ref, [...(byRef.get(m.target_ref) ?? []), m.id!]);
     else if (m.number !== null) autos.push(m);
     else done.push(m.id!);
@@ -724,7 +848,7 @@ async function wakeDependents(db: D1Database, id: LandingIdentity, rows: readonl
       r.kicked++;
       done.push(...subjects);
     } catch (err) {
-      r.failed = true;
+      failed.push(...subjects);
       console.warn(JSON.stringify({ trainKickFailed: String(err).slice(0, 200) }));
     }
   }
@@ -735,15 +859,20 @@ async function wakeDependents(db: D1Database, id: LandingIdentity, rows: readonl
       r.resumed += page.length;
       done.push(...page.map((m) => m.id!));
     } catch (err) {
-      r.failed = true;
+      failed.push(...page.map((m) => m.id!));
       console.warn(JSON.stringify({ dependencyResumeFailed: String(err).slice(0, 200) }));
     }
   }
-  if (done.length > 0) {
+  r.failed = failed.length > 0;
+  const confirm: D1PreparedStatement[] = [];
+  if (done.length > 0) confirm.push(clearWakeStatement(db, id, done));
+  if (failed.length > 0) confirm.push(releaseWakeStatement(db, id, owner, failed, Date.now()));
+  if (confirm.length > 0) {
     try {
-      await clearWakeStatement(db, id, done).run();
+      await db.batch(confirm);
       r.cleared = done.length;
     } catch (err) {
+      // The claims stay until they lapse; a kick sent here may then be sent once more (the documented residual).
       r.failed = true;
       console.warn(JSON.stringify({ dependencyWakeClearFailed: { repo: id.repoId, error: String(err).slice(0, 200) } }));
     }
@@ -767,8 +896,12 @@ export interface LandedSettlement extends WakeEffects {
  * remaining pins in bounded pages, hands the rest to both owners at once
  * when the budget leaves pins unsettled, then wakes the dependents from
  * their marks (deferred when `defer` is given) and hands off anything that
- * wake could not finish. Costs nothing when the batch found no pins or
- * marks. A failed hand-off is logged: the landing itself already happened.
+ * wake could not finish. Any failure while settling (a page batch, the
+ * post-page claim) hands off to both owners before it propagates: the
+ * merged record is already durable, so the hand-off is never for a landing
+ * that did not happen, and one with nothing left is cleaned up by its first
+ * wakeup. Costs nothing when the batch found no pins or marks. A failed
+ * hand-off is logged: the landing itself already happened.
  */
 export async function settleLanded(
   db: D1Database,
@@ -787,11 +920,21 @@ export async function settleLanded(
       console.warn(JSON.stringify({ dependencySettleHandOffFailed: { repo: repoId, mergeCommit, error: String(err).slice(0, 200) } }));
     });
   };
-  const pages = await settlePages(db, reader, id, rows);
+  const owner = landingOwner(id);
+  let pages: SettledPages;
+  try {
+    pages = await settlePages(db, reader, id, rows, landedWakeSet(rows), owner);
+  } catch (err) {
+    await handOff('settle-failed');
+    await releaseWakeClaims(db, id, owner);
+    throw err;
+  }
   if (pages.left) await handOff('pins');
   const wake = async () => {
-    const w = await wakeDependents(db, id, pages.wake, s, 'dependency-landed');
-    if (!pages.left && (w.failed || w.more)) await handOff(w.failed ? 'wake-failed' : 'wake-marks');
+    const w = await wakeDependents(db, id, pages.wake, s, 'dependency-landed', owner);
+    if (!pages.left && (w.failed || pages.wake.more || pages.wake.held > 0)) {
+      await handOff(w.failed ? 'wake-failed' : pages.wake.more ? 'wake-marks' : 'wake-held');
+    }
   };
   if (s.defer) s.defer(wake());
   else await wake();
@@ -803,9 +946,13 @@ export interface SettleContinuationResult {
   kicked: number;
   resumed: number;
   cleared: number;
-  /** Fenced work is left for another invocation (pins past the budget, marks past the limit, or failed effects). */
+  /** Fenced work is left for another invocation (pins past the budget, marks past the limit, marks another owner holds, or failed effects). */
   remaining: boolean;
   failed: boolean;
+  /** Marks under another owner's live claim (not this invocation's work or failure). */
+  held: number;
+  /** When the earliest of those claims expires: the alarm revisits then at the latest. */
+  heldUntil: number | null;
 }
 
 export const emptySettleResult = (): SettleContinuationResult => ({
@@ -816,33 +963,48 @@ export const emptySettleResult = (): SettleContinuationResult => ({
   cleared: 0,
   remaining: false,
   failed: false,
+  held: 0,
+  heldUntil: null,
 });
 
 /**
- * One continuation (queue message or MergeLock alarm): the same bounded
- * pages as the landing from `first` (the first unsettled page and the
- * landing's marks, both fenced by the landing identity), then the wake work
- * of every pending mark, then, only when that work all succeeded and made
- * progress with more left, `continueLater` (absent for the alarm, which
- * re-arms itself from `remaining`). A replay or another landing's identity
- * reads nothing and does nothing.
+ * One continuation (queue message or MergeLock alarm) for `owner` (a fresh
+ * token per invocation): the same bounded pages as the landing from the
+ * first unsettled page and the marks the owner claimed with it (both fenced
+ * by the landing identity), then the wake work of the marks it holds, then,
+ * only when that work all succeeded and made progress with more left,
+ * `continueLater` (absent for the alarm, which re-arms itself from
+ * `remaining`). Marks another owner holds are reported (`held`), not acted
+ * on. A replay or another landing's identity reads nothing and does nothing.
  */
 export async function settleContinuation(
   db: D1Database,
   reader: CommitReader | null,
   msg: SettleMessage,
-  first: readonly LandedRow[],
+  first: { edges: readonly LandedRow[]; wake: WakeSet },
+  owner: string,
   s: WakeEffects & { continueLater?(msg: SettleMessage): Promise<unknown> },
 ): Promise<SettleContinuationResult> {
   const id: LandingIdentity = { repoId: msg.repoId, changeSetId: msg.changeSetId, mergedAt: msg.mergedAt, mergeCommit: msg.mergeCommit };
   const result = emptySettleResult();
-  if (first.length === 0) return result;
-  const pages = await settlePages(db, reader, id, first);
-  const w = await wakeDependents(db, id, pages.wake, s, 'dependency-settled');
-  Object.assign(result, { settled: pages.settled.length, kicked: w.kicked, resumed: w.resumed, cleared: w.cleared, failed: w.failed });
-  result.remaining = pages.left || w.more || w.failed;
+  if (first.edges.length === 0 && first.wake.rows.length === 0) {
+    Object.assign(result, { held: first.wake.held, heldUntil: first.wake.heldUntil, remaining: first.wake.held > 0 || first.wake.more });
+    return result;
+  }
+  const pages = await settlePages(db, reader, id, first.edges, first.wake, owner);
+  const w = await wakeDependents(db, id, pages.wake, s, 'dependency-settled', owner);
+  Object.assign(result, {
+    settled: pages.settled.length,
+    kicked: w.kicked,
+    resumed: w.resumed,
+    cleared: w.cleared,
+    failed: w.failed,
+    held: pages.wake.held,
+    heldUntil: pages.wake.heldUntil,
+  });
+  result.remaining = pages.left || pages.wake.more || pages.wake.held > 0 || w.failed;
   const progressed = pages.settled.length > 0 || w.cleared > 0;
-  if ((pages.left || w.more) && !w.failed && progressed && s.continueLater) {
+  if ((pages.left || pages.wake.more) && !w.failed && progressed && s.continueLater) {
     console.log(JSON.stringify({ dependencySettleContinues: { repo: id.repoId, change: id.changeSetId, mergeCommit: id.mergeCommit, why: pages.left ? 'pins' : 'wake-marks' } }));
     await s.continueLater({ ...msg, type: SETTLE_MESSAGE });
     result.continued = true;

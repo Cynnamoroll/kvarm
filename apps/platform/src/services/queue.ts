@@ -57,7 +57,7 @@ import {
   mergedRecordStatements,
   parseNumber,
   resolveCtx,
-  resumeAutoChanges,
+  resumeAutoDependents,
   reviewRefusal,
   workspaceAdmissionRefusal,
   type ChangeContext,
@@ -1528,9 +1528,7 @@ async function publishCandidate(
     source: { changeSetId: e.change_set_id, mergedAt },
     ref,
     kick: (r, reason) => deps.kick(env, repo.id, r, reason),
-    resume: async (numbers) => {
-      await resumeAutoChanges(env, repo.id, numbers, ctx.waitUntil);
-    },
+    resume: (numbers) => resumeAutoDependents(env, repo.id, numbers, ctx.waitUntil),
     handOff: (msg) => handOffSettlement(env, msg),
     defer: ctx.waitUntil,
   });
