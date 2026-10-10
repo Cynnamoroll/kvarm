@@ -29,6 +29,8 @@ import { onBasePushed, onHeadPushed, type ChangeOnRef } from './changes';
 import { reconcileObserved } from './intents/forecast';
 import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
+import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
+import { continueDependencySettlement } from './dependencies';
 
 export interface PushEvent {
   namespace: string;
@@ -370,7 +372,7 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect,
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train';
+export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
 export function retryDelaySeconds(attempts: number): number {
@@ -383,12 +385,16 @@ interface MessageResult {
   effects?: Record<string, string>;
   error?: string;
   train?: TrainRunResult & { reason: string };
+  settle?: SettleContinuationResult;
 }
 
 async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
   if (isTrainMessage(msg.body)) {
     const run = await runTrain(env, msg.body.repoId, msg.body.ref);
     return { outcome: 'train', train: { reason: msg.body.reason, ...run } };
+  }
+  if (isSettleMessage(msg.body)) {
+    return { outcome: 'settle', settle: await continueDependencySettlement(env, msg.body) };
   }
   const event = parsePushEvent(msg.body);
   if (!event) return { outcome: 'ignored' };
@@ -482,6 +488,7 @@ export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): 
         ...(result.eventId ? { eventId: result.eventId } : {}),
         ...(result.effects ? { effects: result.effects } : {}),
         ...(result.train ? { train: result.train } : {}),
+        ...(result.settle ? { settle: result.settle } : {}),
         ...(result.error ? { error: result.error } : {}),
       }),
     );

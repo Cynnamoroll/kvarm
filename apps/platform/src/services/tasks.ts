@@ -32,7 +32,7 @@
 
 import { isAncestor } from '@forge/gitops';
 import { withLazyRepo } from '../artifacts/repo';
-import type { RepoRow } from '../db/repos';
+import { touchRepoPushedStatement, type RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { attributeCommit, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
@@ -62,7 +62,8 @@ import {
   liveRefs,
   newId,
   workspaceInsertStatement,
-  workspaceOwners,
+  workspaceOwnersFrom,
+  workspaceOwnersSelect,
   workspaceRef,
   workspaceView,
   type WorkspaceRow,
@@ -663,13 +664,21 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
 
     // The completion advances the head branch on the claimant's behalf: the claimant must be allowed to push it
     // (agent token grant and workspace ownership, as the git gate), and protection is read fresh.
-    if (cx.actor?.agent) {
-      const command = { ref: headRef, oldOid: oldHead, newOid: resolution };
-      let denied = credentialMayUpdateRef(cx.actor, headRef) ? null : 'ref outside agent token grant';
-      if (!denied && headRef.startsWith(WORKSPACE_REF_PREFIX)) denied = agentWorkspaceDenial(cx.actor, command, await workspaceOwners(cx.env, cx.repo.id, [command]));
+    const command = { ref: headRef, oldOid: oldHead, newOid: resolution };
+    if (cx.actor?.agent && !credentialMayUpdateRef(cx.actor, headRef)) {
+      return fail(403, `this token may not update the change's head branch ${headRef} (ref outside agent token grant)`, 'HEAD_REF_FORBIDDEN');
+    }
+    const owners = cx.actor?.agent ? workspaceOwnersSelect(db, cx.repo.id, [command]) : null;
+    const [rulesRead, fenceNow, taskNow, ownersRead] = await db.batch([
+      repoBranchRulesSelect(db, cx.repo.id),
+      fenceSelect(db, id),
+      detailSelect(db, cx.repo.id, id),
+      ...(owners ? [owners] : []),
+    ]);
+    if (cx.actor?.agent && headRef.startsWith(WORKSPACE_REF_PREFIX)) {
+      const denied = agentWorkspaceDenial(cx.actor, command, workspaceOwnersFrom(ownersRead?.results));
       if (denied) return fail(403, `this token may not update the change's head branch ${headRef} (${denied})`, 'HEAD_REF_FORBIDDEN');
     }
-    const [rulesRead, fenceNow, taskNow] = await db.batch([repoBranchRulesSelect(db, cx.repo.id), fenceSelect(db, id), detailSelect(db, cx.repo.id, id)]);
     const protectedBy = directPushDenial(((rulesRead?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow), headRef);
     if (protectedBy) {
       return fail(409, `the change's head branch ${headRef} is protected (${protectedBy}); completion cannot fast-forward it`, 'HEAD_REF_PROTECTED');
@@ -685,7 +694,8 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
     // The head branch moves first; the completion is recorded only once it points at the resolution, so a
     // failed update leaves the task claimed and the same completion retryable.
     if (headTip !== resolution) {
-      const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref: headRef, oldOid: oldHead, newOid: resolution });
+      // Its pushed_at write rides on the completion batch below, which always follows a head branch moved here.
+      const pushed = await deps.pusher(cx.env, cx.repo).updateRef(command, undefined, { deferPushedAt: true });
       if (pushed.status !== 'ok') {
         const live = (await liveRefs(cx, [headRef])).get(headRef) ?? null;
         if (live !== resolution) {
@@ -730,6 +740,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
         .bind(changeId, id, resolution, oldHead, now),
       detailSelect(db, cx.repo.id, id),
       changeSelect(db, cx.repo.id, row.change_number!),
+      ...(headTip !== resolution ? [touchRepoPushedStatement(db, cx.repo.id, now)] : []),
     ]);
     const after = first<TaskDetailRow>(results[3]);
     let change = first<ChangeRow>(results[4]);

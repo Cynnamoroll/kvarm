@@ -13,7 +13,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
-import { DEPENDENCY_LIMITS } from '../src/services/dependencyGate';
+import { DEPENDENCY_LIMITS, SETTLE_LIMITS } from '../src/services/dependencyGate';
 import { TRAIN_LIMITS, defaultTrainDeps, fairOrder, runTrain, type TrainDeps, type TrainEvent } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -726,6 +726,148 @@ describe('lifecycle', () => {
     } finally {
       DEPENDENCY_LIMITS.readMax = saved;
     }
+  });
+
+  it('settlement past the per-message page ceiling continues on the events queue until every preserved pin is settled and wakes its dependents', async () => {
+    const name = 'settle-continue';
+    const { repo } = await seedRepo(name);
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    try {
+      const a = await workspace(name, 'a.txt', { change: 'review' });
+      const edgeOf = new Map<string, string>();
+      const dependents: Ws[] = [];
+      for (let i = 0; i < 9; i++) {
+        const d = await workspace(name, `d${i}.txt`);
+        const edge = await pin(name, d.id, a.id, a.head);
+        expect(edge.status).toBe(201);
+        edgeOf.set(d.id, edge.json.id as string);
+        dependents.push(d);
+      }
+      // Settlement pages run in edge-id order: the last pins are the ones left to continuations.
+      dependents.sort((x, y) => (edgeOf.get(x.id)! < edgeOf.get(y.id)! ? -1 : 1));
+      const queued = dependents[7]!;
+      const last = dependents[8]!;
+      const qn = (await call('POST', api(name, `/workspaces/${queued.id}/change-set`), tok.owner, { title: 'queued dependent', mergePolicy: 'review' })).json.number as number;
+      expect((await enqueue(name, qn)).status).toBe(201);
+      const autoN = (await call('POST', api(name, `/workspaces/${last.id}/change-set`), tok.owner, { title: 'auto dependent', mergePolicy: 'auto' })).json.number as number;
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+      // The source moves on while keeping the pinned revision: every pin settles by ancestry, none by exact head.
+      const r2 = await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+
+      // Two pages of two edges per message.
+      DEPENDENCY_LIMITS.readMax = 2;
+      SETTLE_LIMITS.maxPages = 2;
+      const satisfied = async () => {
+        const out: boolean[] = [];
+        for (const d of dependents) out.push((await listDeps(name, d.id)).json.dependencies[0].state === 'satisfied');
+        return out;
+      };
+      const continuations = () => sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+      const pushRows = async () =>
+        (await env.DB.prepare('SELECT COUNT(*) AS n FROM push_events WHERE repo_id = ?').bind(repoIds[name]).first<{ n: number }>())!.n;
+
+      sent.length = 0;
+      const landed = await merge(name, a.change!);
+      expect(landed.status, JSON.stringify(landed.json)).toBe(200);
+      const mergeCommit = landed.json.merge.mergeCommit as string;
+      expect(await satisfied()).toEqual([true, true, true, true, false, false, false, false, false]);
+      expect(continuations()).toEqual([
+        { type: 'forge.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit },
+      ]);
+      const first = continuations()[0];
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+      const pushesBefore = await pushRows();
+
+      // A continuation for another landing identity, or a malformed one, settles and schedules nothing.
+      sent.length = 0;
+      await deliver({ ...first, mergeCommit: 'f'.repeat(40) });
+      await deliver({ ...first, mergedAt: first.mergedAt - 1 });
+      await deliver({ ...first, changeSetId: crypto.randomUUID() });
+      await deliver({ type: 'forge.dependency-settle', repoId: repoIds[name] });
+      expect(sent).toEqual([]);
+      expect((await satisfied()).filter(Boolean)).toHaveLength(4);
+
+      // The first continuation settles the next two pages, wakes the queued dependent's partition and schedules one more.
+      await deliver(first);
+      expect(await satisfied()).toEqual([true, true, true, true, true, true, true, true, false]);
+      expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-settled' }));
+      expect(continuations()).toEqual([first]);
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+
+      // The next one settles the last preserved pin and resumes the open auto dependent; nothing is left to schedule.
+      sent.length = 0;
+      await deliver(first);
+      expect(await satisfied()).toEqual(Array(9).fill(true));
+      expect(continuations()).toEqual([]);
+      expect((await getChange(name, autoN)).json).toMatchObject({ state: 'merged' });
+      expect(isAncestorOf(repo, last.head, repo.refs.get(MAIN)!)).toBe(true);
+
+      // A replayed continuation finds nothing unsettled: no writes, no wake-ups, no further continuation.
+      sent.length = 0;
+      const before = (await env.DB.prepare('SELECT MAX(updated_at) AS t FROM workspace_dependencies WHERE repo_id = ?').bind(repoIds[name]).first<{ t: number }>())!.t;
+      await deliver(first);
+      expect(sent).toEqual([]);
+      expect((await env.DB.prepare('SELECT MAX(updated_at) AS t FROM workspace_dependencies WHERE repo_id = ?').bind(repoIds[name]).first<{ t: number }>())!.t).toBe(before);
+      // Internal messages never enter the push-event log.
+      expect(await pushRows()).toBe(pushesBefore);
+      for (const d of dependents) {
+        expect((await listDeps(name, d.id)).json.dependencies[0]).toMatchObject({ state: 'satisfied', satisfiedBy: mergeCommit });
+      }
+
+      // The woken partition publishes the queued dependent.
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      const run = await runTrain(env, repoIds[name]!, MAIN, trainDeps());
+      expect(run.published).toContain(qn);
+      expect(repo.refs.get(a.ref)).toBe(r2);
+    } finally {
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  it('a source published by the train hands its unsettled pins to a continuation too', async () => {
+    const name = 'settle-train';
+    await seedRepo(name);
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    try {
+      const a = await workspace(name, 'a.txt', { change: 'review' });
+      const dependents: Ws[] = [];
+      for (let i = 0; i < 3; i++) {
+        const d = await workspace(name, `d${i}.txt`);
+        expect((await pin(name, d.id, a.id, a.head)).status).toBe(201);
+        dependents.push(d);
+      }
+      await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+      expect((await enqueue(name, a.change!)).status).toBe(201);
+      DEPENDENCY_LIMITS.readMax = 1;
+      SETTLE_LIMITS.maxPages = 1;
+      sent.length = 0;
+      const run = await runTrain(env, repoIds[name]!, MAIN, trainDeps());
+      expect(run.published).toEqual([a.change]);
+      const continuation = sent.map((m) => m.body).filter((b) => b?.type === 'forge.dependency-settle');
+      expect(continuation).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit: (await getChange(name, a.change!)).json.mergeCommit })]);
+      for (let i = 0; i < 4 && sent.some((m) => m.body?.type === 'forge.dependency-settle'); i++) {
+        const next = sent.find((m) => m.body?.type === 'forge.dependency-settle')!.body;
+        sent.length = 0;
+        await deliver(next);
+      }
+      for (const d of dependents) expect((await listDeps(name, d.id)).json.dependencies[0].state).toBe('satisfied');
+    } finally {
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  it('an Artifacts push event is still dispatched as a push while settlement continuations share the queue', async () => {
+    const name = 'settle-dispatch';
+    await seedRepo(name);
+    const pushesBefore = (await env.DB.prepare('SELECT COUNT(*) AS n FROM push_events WHERE repo_id = ?').bind(repoIds[name]).first<{ n: number }>())!.n;
+    // A push body is never read as a continuation, even when it carries continuation-like fields.
+    const body = { ...pushEvent(name, 'refs/heads/side', '0'.repeat(40), repos[name]!.refs.get(MAIN)!, (clock += 1000)), repoId: repoIds[name], mergeCommit: 'a'.repeat(40), mergedAt: 1, changeSetId: 'x' };
+    sent.length = 0;
+    await deliver(body);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM push_events WHERE repo_id = ?').bind(repoIds[name]).first<{ n: number }>())!.n).toBe(pushesBefore + 1);
+    expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
   });
 
   it('an auto dependent that is not queued resumes when its source lands or its pin is detached', async () => {

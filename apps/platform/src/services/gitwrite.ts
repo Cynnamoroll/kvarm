@@ -42,13 +42,22 @@ export interface GitPusher {
    * can revalidate between preparation and the request. Throws
    * RefStoreUnavailable when no write credential can be had.
    */
-  prepareUpdate(command: RefCommand, objects?: readonly PackInput[]): Promise<PreparedRefUpdate>;
+  prepareUpdate(command: RefCommand, objects?: readonly PackInput[], opts?: RefUpdateOptions): Promise<PreparedRefUpdate>;
   /**
    * Compare-and-swap one ref from `oldOid` to `newOid` (zero OIDs create or
    * delete). `objects` are the objects `newOid` needs that the store may not
    * have; omit them for a pure ref move.
    */
-  updateRef(command: RefCommand, objects?: readonly PackInput[]): Promise<RefUpdateResult>;
+  updateRef(command: RefCommand, objects?: readonly PackInput[], opts?: RefUpdateOptions): Promise<RefUpdateResult>;
+}
+
+export interface RefUpdateOptions {
+  /**
+   * The caller records the confirmed update's `pushed_at` write in its own
+   * next D1 batch (`touchRepoPushedStatement`); the colo ref generation still
+   * moves here.
+   */
+  deferPushedAt?: boolean;
 }
 
 export interface GitPusherOptions {
@@ -73,7 +82,7 @@ export function artifactsPusher(env: Env, repo: PushTarget, opts: GitPusherOptio
     };
   };
 
-  const prepareUpdate = async (command: RefCommand, objects?: readonly PackInput[]): Promise<PreparedRefUpdate> => {
+  const prepareUpdate = async (command: RefCommand, objects?: readonly PackInput[], opts: RefUpdateOptions = {}): Promise<PreparedRefUpdate> => {
     const target = await remote();
     const pack = objects && objects.length > 0 ? await writePack(objects) : undefined;
     return {
@@ -81,7 +90,7 @@ export function artifactsPusher(env: Env, repo: PushTarget, opts: GitPusherOptio
         const result = await pushOneRef(target, command, pack);
         if (result.status === 'ok') {
           // The ref already moved; a failed freshness write must not turn it into a failure.
-          await recordConfirmedPush(env, repo.id).catch((err: unknown) => {
+          await recordConfirmedPush(env, repo.id, { deferPushedAt: opts.deferPushedAt === true }).catch((err: unknown) => {
             console.warn(JSON.stringify({ gitWriteFreshnessFailed: String(err).slice(0, 200) }));
           });
         }
@@ -105,8 +114,8 @@ export function artifactsPusher(env: Env, repo: PushTarget, opts: GitPusherOptio
 
     prepareUpdate,
 
-    async updateRef(command, objects) {
-      return (await prepareUpdate(command, objects)).send();
+    async updateRef(command, objects, opts) {
+      return (await prepareUpdate(command, objects, opts)).send();
     },
   };
 }

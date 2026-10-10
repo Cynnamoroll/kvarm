@@ -27,9 +27,13 @@ export async function repoViewGeneration(repo: Pick<RepoRow, 'id' | 'pushed_at'>
   return `${repo.pushed_at ?? 0}.${await refGeneration(repo.id)}`;
 }
 
-/** Moves the view generation after a confirmed push. */
-export async function recordConfirmedPush(env: Env, repoId: string): Promise<void> {
-  await Promise.all([bumpRefGeneration(repoId), touchRepoPushed(env.DB, repoId)]);
+/**
+ * Moves the view generation after a confirmed push. `deferPushedAt` leaves the
+ * `pushed_at` write to the caller, which records it in its own next D1 batch
+ * (`touchRepoPushedStatement`).
+ */
+export async function recordConfirmedPush(env: Env, repoId: string, opts: { deferPushedAt?: boolean } = {}): Promise<void> {
+  await Promise.all([bumpRefGeneration(repoId), opts.deferPushedAt ? null : touchRepoPushed(env.DB, repoId)]);
 }
 
 export interface RelayOptions {

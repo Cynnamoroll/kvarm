@@ -78,6 +78,7 @@ import {
   noBlockedPinCondition,
   pinsVerified,
   preservationRefusal,
+  sendSettleContinuation,
   settleLanded,
   type DependencyBlock,
   type DependencyRow,
@@ -1526,6 +1527,7 @@ async function publishCandidate(
     source: { changeSetId: e.change_set_id, mergedAt },
     kick: (r, reason) => deps.kick(env, repo.id, r, reason),
     resume: async (numbers) => ctx.waitUntil(resumeAutoChanges(env, repo.id, numbers, ctx.waitUntil)),
+    continueLater: (msg) => sendSettleContinuation(env, msg),
   });
   if (!changeWrite?.meta.changes) {
     console.warn(JSON.stringify({ trainRecord: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, entry: entryWrite?.meta.changes, change: changeWrite?.meta.changes } }));

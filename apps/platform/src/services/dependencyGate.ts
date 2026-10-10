@@ -400,18 +400,170 @@ export interface LandedSettlement {
   kick(ref: string, reason: string): Promise<void>;
   /** Resumes open `auto` dependents whose pins may now all be satisfied (their own merge path re-checks every gate). */
   resume?(numbers: number[]): Promise<void>;
+  /** Durably schedules the settlement of the pins this invocation's page budget left (one `forge.dependency-settle` message). */
+  continueLater(msg: SettleMessage): Promise<void>;
 }
 
-/** Edge pages settled per landing before the rest is left to the next landing-time read (each page is readMax edges). */
-const SETTLE_MAX_PAGES = 16;
+/** Edge pages (readMax edges each) one landing or one continuation message settles. */
+export const SETTLE_LIMITS = {
+  maxPages: 16,
+};
 
 /**
- * After a source landed: settles its remaining pins by ancestry (satisfied
- * only when the pinned revision is an ancestor of the landed commit, broken
- * NOT_PRESERVED otherwise; an ancestry walk that runs out of budget is
- * NOT_VERIFIED, never satisfied) in pages of readMax edges, kicks the
- * partitions where dependents wait and resumes `auto` dependents that are
- * not queued. Costs nothing when the batch found no pins.
+ * Continuation of a landing's pin settlement, on the `forge-events` queue.
+ * It names the landing exactly (source change, recorded merge time and merge
+ * commit); every read and write it causes is fenced by that identity, so a
+ * replay finds nothing unsettled and a message for another landing matches
+ * nothing.
+ */
+export const SETTLE_MESSAGE = 'forge.dependency-settle';
+
+export interface SettleMessage {
+  type: typeof SETTLE_MESSAGE;
+  repoId: string;
+  changeSetId: string;
+  mergedAt: number;
+  mergeCommit: string;
+}
+
+export function isSettleMessage(body: unknown): body is SettleMessage {
+  if (typeof body !== 'object' || body === null) return false;
+  const b = body as Record<string, unknown>;
+  return (
+    b.type === SETTLE_MESSAGE &&
+    typeof b.repoId === 'string' &&
+    typeof b.changeSetId === 'string' &&
+    typeof b.mergedAt === 'number' &&
+    Number.isSafeInteger(b.mergedAt) &&
+    typeof b.mergeCommit === 'string' &&
+    /^[0-9a-f]{40}$/.test(b.mergeCommit)
+  );
+}
+
+export async function sendSettleContinuation(env: Pick<Env, 'EVENTS'>, msg: SettleMessage): Promise<void> {
+  await env.EVENTS.send(msg);
+}
+
+/** The landed source of one exact landing, parameters ?1 repo, ?2 change, ?3 mergedAt, ?4 merge commit. */
+const SETTLE_SOURCE = `SELECT w.id FROM workspaces w WHERE w.repo_id = ?1 AND w.change_set_id = ?2 AND w.status = 'merged' AND w.merged_at = ?3
+  AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?2 AND c.repo_id = ?1 AND c.state = 'merged' AND c.merge_commit = ?4 AND c.merged_at = ?3)`;
+
+const SETTLE_EDGES = `SELECT 'edge' AS kind, d.id, d.revision, NULL AS target_ref, NULL AS number FROM workspace_dependencies d
+  WHERE d.repo_id = ?1 AND d.on_workspace IN (${SETTLE_SOURCE}) AND d.satisfied_commit IS NULL AND d.broken_code IS NULL
+  ORDER BY d.id LIMIT __LIMIT__`;
+
+/** The next page of a landing's unsettled pins. */
+export function settleEdgesStatement(db: D1Database, msg: Omit<SettleMessage, 'type'>): D1PreparedStatement {
+  return db.prepare(limited(SETTLE_EDGES)).bind(msg.repoId, msg.changeSetId, msg.mergedAt, msg.mergeCommit);
+}
+
+/**
+ * Who waits on the given settled edges (?2, a JSON array of edge ids): the
+ * partitions of their queued dependents and their open `auto` dependents that
+ * are not queued. Bounded by the edge list, itself one message's pages.
+ */
+function settledWaitersStatement(db: D1Database, repoId: string, edgeIds: readonly string[]): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT * FROM (SELECT DISTINCT 'kick' AS kind, NULL AS id, NULL AS revision, q.target_ref, NULL AS number FROM workspace_dependencies d
+         JOIN workspaces dw ON dw.repo_id = d.repo_id AND dw.id = d.workspace_id
+         JOIN merge_queue q ON q.change_set_id = dw.change_set_id AND q.active = 1
+        WHERE d.repo_id = ?1 AND d.id IN (SELECT value FROM json_each(?2))
+        LIMIT ${DEPENDENCY_LIMITS.readMax})
+       UNION ALL
+       SELECT * FROM (SELECT DISTINCT 'auto' AS kind, NULL AS id, NULL AS revision, NULL AS target_ref, c.number FROM workspace_dependencies d
+         JOIN workspaces dw ON dw.repo_id = d.repo_id AND dw.id = d.workspace_id
+         JOIN change_sets c ON c.id = dw.change_set_id
+        WHERE d.repo_id = ?1 AND d.id IN (SELECT value FROM json_each(?2)) AND c.state = 'open' AND c.merge_policy = 'auto'
+          AND NOT EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)
+        ORDER BY c.number LIMIT ?3)`,
+    )
+    .bind(repoId, JSON.stringify(edgeIds), edgeIds.length);
+}
+
+interface SettledPages {
+  /** Edges this invocation settled (its guarded writes changed them). */
+  settled: string[];
+  /** The page budget ran out with unsettled pins still listed. */
+  left: boolean;
+}
+
+/**
+ * Settles `edges` and the pages after them, at most SETTLE_LIMITS.maxPages
+ * pages of readMax edges: satisfied only when the pinned revision is an
+ * ancestor of the landed commit, broken NOT_PRESERVED otherwise; an ancestry
+ * walk that runs out of budget is NOT_VERIFIED, never satisfied. Every write
+ * is fenced by the landing's identity and the pin's revision and unsettled
+ * state, so a concurrent or replayed settlement changes nothing twice.
+ */
+async function settlePages(db: D1Database, reader: CommitReader | null, id: Omit<SettleMessage, 'type'>, first: readonly LandedRow[]): Promise<SettledPages> {
+  const verdicts = new Map<string, { ancestor: boolean; truncated: boolean }>();
+  const seen = new Set<string>();
+  const settled: string[] = [];
+  let edges = first.filter((r) => r.kind === 'edge' && r.id && r.revision);
+  for (let page = 0; edges.length > 0 && page < SETTLE_LIMITS.maxPages; page++) {
+    const now = Date.now();
+    const writes: D1PreparedStatement[] = [];
+    for (const r of edges) {
+      seen.add(r.id!);
+      let verdict = verdicts.get(r.revision!);
+      if (!verdict) {
+        verdict = { ancestor: false, truncated: true };
+        if (reader) {
+          try {
+            verdict = await isAncestor(reader, r.revision!, id.mergeCommit, { maxCommitReads: DEPENDENCY_LIMITS.maxCommitReads, concurrency: 4 });
+          } catch (err) {
+            console.warn(JSON.stringify({ dependencySettle: { repo: id.repoId, edge: r.id, error: String(err).slice(0, 200) } }));
+          }
+        }
+        verdicts.set(r.revision!, verdict);
+      }
+      const fence = `repo_id = ?1 AND id = ?2 AND satisfied_commit IS NULL AND broken_code IS NULL AND revision = ?5 AND on_workspace IN (${SETTLE_SOURCE.replaceAll('?2', '?6').replaceAll('?3', '?7').replaceAll('?4', '?8')})`;
+      if (verdict.ancestor) {
+        writes.push(
+          db
+            .prepare(`UPDATE workspace_dependencies SET satisfied_commit = ?3, satisfied_at = ?4, updated_at = ?4 WHERE ${fence}`)
+            .bind(id.repoId, r.id, id.mergeCommit, now, r.revision, id.changeSetId, id.mergedAt, id.mergeCommit),
+        );
+      } else {
+        const [code, message] = verdict.truncated
+          ? ['NOT_VERIFIED', `could not verify that the landed commit ${id.mergeCommit} contains the pinned ${r.revision}`]
+          : ['NOT_PRESERVED', `the source landed as ${id.mergeCommit}, which does not contain the pinned ${r.revision}`];
+        writes.push(
+          db
+            .prepare(`UPDATE workspace_dependencies SET broken_code = ?3, broken_reason = ?4, updated_at = ?9 WHERE ${fence}`)
+            .bind(id.repoId, r.id, code, message, r.revision, id.changeSetId, id.mergedAt, id.mergeCommit, now),
+        );
+      }
+    }
+    const full = edges.length >= DEPENDENCY_LIMITS.readMax;
+    // The next page rides on the settling batch: the settled edges no longer match, so it returns the ones after them.
+    if (full) writes.push(settleEdgesStatement(db, id));
+    const out = await db.batch(writes);
+    edges.forEach((r, i) => {
+      if (out[i]?.meta.changes) settled.push(r.id!);
+    });
+    if (!full) {
+      edges = [];
+      break;
+    }
+    edges = ((out[out.length - 1]?.results as LandedRow[] | undefined) ?? []).filter((r) => r.id && r.revision && !seen.has(r.id));
+  }
+  return { settled, left: edges.length > 0 };
+}
+
+async function scheduleRest(id: Omit<SettleMessage, 'type'>, s: Pick<LandedSettlement, 'continueLater'>): Promise<void> {
+  console.log(JSON.stringify({ dependencySettleContinues: { repo: id.repoId, change: id.changeSetId, mergeCommit: id.mergeCommit, pages: SETTLE_LIMITS.maxPages } }));
+  await s.continueLater({ type: SETTLE_MESSAGE, ...id });
+}
+
+/**
+ * After a source landed: settles its remaining pins by ancestry in bounded
+ * pages (`settlePages`), schedules one continuation message when the page
+ * budget leaves pins unsettled, kicks the partitions where dependents wait
+ * and resumes `auto` dependents that are not queued. Costs nothing when the
+ * batch found no pins. A failed continuation send is logged: the landing
+ * itself already happened.
  */
 export async function settleLanded(
   db: D1Database,
@@ -422,57 +574,13 @@ export async function settleLanded(
   s: LandedSettlement,
 ): Promise<void> {
   if (!rows || rows.length === 0) return;
-  const verdicts = new Map<string, { ancestor: boolean; truncated: boolean }>();
-  const seen = new Set<string>();
-  let edges = rows.filter((r) => r.kind === 'edge' && r.id && r.revision);
-  for (let page = 0; edges.length > 0 && page < SETTLE_MAX_PAGES; page++) {
-    const now = Date.now();
-    const writes: D1PreparedStatement[] = [];
-    for (const r of edges) {
-      seen.add(r.id!);
-      let verdict = verdicts.get(r.revision!);
-      if (!verdict) {
-        verdict = { ancestor: false, truncated: true };
-        if (reader) {
-          try {
-            verdict = await isAncestor(reader, r.revision!, mergeCommit, { maxCommitReads: DEPENDENCY_LIMITS.maxCommitReads, concurrency: 4 });
-          } catch (err) {
-            console.warn(JSON.stringify({ dependencySettle: { repo: repoId, edge: r.id, error: String(err).slice(0, 200) } }));
-          }
-        }
-        verdicts.set(r.revision!, verdict);
-      }
-      if (verdict.ancestor) {
-        writes.push(
-          db
-            .prepare(
-              `UPDATE workspace_dependencies SET satisfied_commit = ?3, satisfied_at = ?4, updated_at = ?4
-                WHERE repo_id = ?1 AND id = ?2 AND satisfied_commit IS NULL AND broken_code IS NULL AND revision = ?5`,
-            )
-            .bind(repoId, r.id, mergeCommit, now, r.revision),
-        );
-      } else {
-        const [code, message] = verdict.truncated
-          ? ['NOT_VERIFIED', `could not verify that the landed commit ${mergeCommit} contains the pinned ${r.revision}`]
-          : ['NOT_PRESERVED', `the source landed as ${mergeCommit}, which does not contain the pinned ${r.revision}`];
-        writes.push(
-          db
-            .prepare(
-              `UPDATE workspace_dependencies SET broken_code = ?3, broken_reason = ?4, updated_at = ?5
-                WHERE repo_id = ?1 AND id = ?2 AND satisfied_commit IS NULL AND broken_code IS NULL AND revision = ?6`,
-            )
-            .bind(repoId, r.id, code, message, now, r.revision),
-        );
-      }
-    }
-    const full = edges.length >= DEPENDENCY_LIMITS.readMax;
-    // The next page rides on the settling batch: the settled edges no longer match, so it returns the ones after them.
-    if (full) writes.push(db.prepare(limited(LANDED_EDGES)).bind(repoId, s.source.changeSetId, s.source.mergedAt));
-    const out = await db.batch(writes);
-    if (!full) break;
-    edges = ((out[out.length - 1]?.results as LandedRow[] | undefined) ?? []).filter((r) => r.id && r.revision && !seen.has(r.id));
+  const id = { repoId, changeSetId: s.source.changeSetId, mergedAt: s.source.mergedAt, mergeCommit };
+  const pages = await settlePages(db, reader, id, rows);
+  if (pages.left) {
+    await scheduleRest(id, s).catch((err: unknown) => {
+      console.warn(JSON.stringify({ dependencySettleContinueFailed: { repo: repoId, mergeCommit, error: String(err).slice(0, 200) } }));
+    });
   }
-  if (edges.length > 0) console.warn(JSON.stringify({ dependencySettleLeft: { repo: repoId, mergeCommit, pages: SETTLE_MAX_PAGES } }));
 
   const refs = [...new Set(rows.filter((r) => r.kind === 'kick' && r.target_ref).map((r) => r.target_ref!))];
   for (const ref of refs) {
@@ -490,6 +598,57 @@ export async function settleLanded(
     const next = await db.prepare(limited(LANDED_AUTOS)).bind(repoId, s.source.changeSetId, s.source.mergedAt, autos[autos.length - 1]).all<LandedRow>();
     autos = (next.results ?? []).map((r) => r.number!).filter((n) => n !== null);
   }
+}
+
+export interface SettleContinuationResult {
+  settled: number;
+  continued: boolean;
+  kicked: number;
+  resumed: number;
+}
+
+/**
+ * One continuation message: the same bounded pages as the landing, fenced
+ * by the message's landing identity, then the waiters of exactly the pins it
+ * settled are woken. Another continuation is scheduled only when this one
+ * settled pins and its budget left more; a replay or a message for another
+ * landing reads nothing and does nothing. Errors propagate so the queue
+ * retries the message (whatever it already settled no longer matches).
+ */
+export async function settleContinuation(
+  db: D1Database,
+  reader: CommitReader | null,
+  msg: SettleMessage,
+  firstPage: readonly LandedRow[],
+  s: Omit<LandedSettlement, 'source'>,
+): Promise<SettleContinuationResult> {
+  const id = { repoId: msg.repoId, changeSetId: msg.changeSetId, mergedAt: msg.mergedAt, mergeCommit: msg.mergeCommit };
+  const result: SettleContinuationResult = { settled: 0, continued: false, kicked: 0, resumed: 0 };
+  if (firstPage.length === 0) return result;
+  const pages = await settlePages(db, reader, id, firstPage);
+  result.settled = pages.settled.length;
+  if (pages.settled.length === 0) return result;
+  if (pages.left) {
+    await scheduleRest(id, s);
+    result.continued = true;
+  }
+  const waiters = ((await settledWaitersStatement(db, msg.repoId, pages.settled).all<LandedRow>()).results ?? []) as LandedRow[];
+  for (const ref of new Set(waiters.filter((r) => r.kind === 'kick' && r.target_ref).map((r) => r.target_ref!))) {
+    await s.kick(ref, 'dependency-settled').catch((err: unknown) => {
+      console.warn(JSON.stringify({ trainKickFailed: String(err).slice(0, 200) }));
+    });
+    result.kicked++;
+  }
+  const autos = waiters.filter((r) => r.kind === 'auto' && r.number !== null).map((r) => r.number!);
+  if (s.resume) {
+    for (let i = 0; i < autos.length; i += DEPENDENCY_LIMITS.readMax) {
+      await s.resume(autos.slice(i, i + DEPENDENCY_LIMITS.readMax)).catch((err: unknown) => {
+        console.warn(JSON.stringify({ dependencyResumeFailed: String(err).slice(0, 200) }));
+      });
+    }
+    result.resumed = autos.length;
+  }
+  return result;
 }
 
 /**

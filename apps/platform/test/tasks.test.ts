@@ -431,6 +431,41 @@ describe('complete', () => {
     expect((await getChange('complete-draft')).json).toMatchObject({ state: 'open', mergePolicy: 'draft' });
   });
 
+  it('a successful draft/review completion stays within d1 <= 6, do = 0, sub <= 5 and still notes the resolution (VAL-COST-027)', async () => {
+    for (const [name, policy, agent] of [
+      ['cost-draft', 'draft', false],
+      ['cost-review-agent', 'review', true],
+    ] as const) {
+      const { repo, main, feature, task } = await dispatched(name, policy);
+      const token = agent ? (await agentToken(name, `td-${name}`, ['refs/heads/agents/*', FEATURE])).token : tok.owner;
+      const c = await claim(name, task.id, agent ? {} : { agent: 'claude-code-1' }, token);
+      expect(c.status, JSON.stringify(c.json)).toBe(200);
+      const res = await resolution(repo, feature.sha, main.sha);
+      repo.refs.set(c.json.workspace.ref, res.sha);
+      const pushedAt = async () => (await env.DB.prepare('SELECT pushed_at AS p FROM repos WHERE id = ?').bind(repoIds[name]).first<{ p: number | null }>())!.p ?? 0;
+      // A pushed_at ahead of the clock makes each freshness write exactly +1.
+      const before = Date.now() + 1e9;
+      await env.DB.prepare('UPDATE repos SET pushed_at = ? WHERE id = ?').bind(before, repoIds[name]).run();
+      const done = await complete(name, task.id, agent ? { generation: 1 } : { agent: 'claude-code-1', generation: 1 }, token);
+      expect(done.status, JSON.stringify(done.json)).toBe(200);
+      expect(done.json.change).toMatchObject({ state: 'open', mergePolicy: policy, headSha: res.sha });
+      expect(repo.refs.get(FEATURE)).toBe(res.sha);
+      expect(done.cost, name).toMatchObject({ do: 0 });
+      expect(done.cost.d1, name).toBeLessThanOrEqual(6);
+      expect(done.cost.sub, name).toBeLessThanOrEqual(5);
+      // Both the head-branch and the notes updates still advance the view generation.
+      expect(await pushedAt(), name).toBe(before + 2);
+      // The attribution note and its ledger event are both still written.
+      const attr = await call('GET', repoPath(name, `/commits/${res.sha}/attribution`), tok.owner);
+      expect(attr.status, name).toBe(200);
+      const ledger = await env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE type = 'attribution.set' AND json_extract(payload, '$.commit') = ?`)
+        .bind(res.sha)
+        .first<{ n: number }>();
+      expect(ledger!.n, name).toBe(1);
+      expect((await getTask(name, task.id)).json).toMatchObject({ status: 'completed', resolutionSha: res.sha });
+    }
+  });
+
   it('a task whose change moved on is not completed against the old head', async () => {
     const { repo, main, feature, task } = await dispatched('complete-moved', 'review');
     const c = await claim('complete-moved', task.id, { agent: 'claude-code-1' });

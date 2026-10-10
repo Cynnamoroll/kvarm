@@ -33,6 +33,7 @@ import {
   landedDependentsStatement,
   preservationRefusal,
   satisfyLandedStatement,
+  sendSettleContinuation,
   settleLanded,
   type DependencyRow,
   type DependencyView,
@@ -1090,6 +1091,7 @@ async function performMerge(
           source: { changeSetId: row.id, mergedAt },
           kick: (ref, reason) => kickTrain(cx.env, cx.repo.id, ref, reason),
           resume: async (numbers) => cx.waitUntil(resumeAutoChanges(cx.env, cx.repo.id, numbers, cx.waitUntil)),
+          continueLater: (msg) => sendSettleContinuation(cx.env, msg),
         },
       );
       if (pv.kind === 'merge') {

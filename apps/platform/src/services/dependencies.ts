@@ -18,10 +18,25 @@
  * independent of how many other workspaces the repository has.
  */
 
+import { withLazyRepo } from '../artifacts/repo';
+import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
-import { DEPENDENCY_LIMITS, dependencyRowsStatement, dependencyView, type DependencyRow, type DependencyView } from './dependencyGate';
+import {
+  DEPENDENCY_LIMITS,
+  dependencyRowsStatement,
+  dependencyView,
+  sendSettleContinuation,
+  settleContinuation,
+  settleEdgesStatement,
+  type DependencyRow,
+  type DependencyView,
+  type LandedRow,
+  type SettleContinuationResult,
+  type SettleMessage,
+} from './dependencyGate';
 import { RefStoreUnavailable } from './refs';
-import { resumeAutoChanges } from './changes';
+import { resolveCtx, resumeAutoChanges } from './changes';
+import { artifactsMergeSources } from './merge';
 import { kickTrain } from './trainKick';
 import { WORKSPACE_ID_RE, agentOwnershipDenial, liveRefs, newId, type WorkspaceContext } from './workspaces';
 
@@ -44,6 +59,43 @@ export const defaultDependencyDeps: DependencyDeps = {
   kick: (env, repoId, ref, reason) => kickTrain(env, repoId, ref, reason),
   resume: (env, repoId, numbers, waitUntil) => resumeAutoChanges(env, repoId, numbers, waitUntil),
 };
+
+// ---------------------------------------------------------------------------
+// Landing settlement continuation (forge-events consumer)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handles one `forge.dependency-settle` message: one batch reads the repo
+ * and the landing's first unsettled page (both empty for a replay, another
+ * landing's identity or a deleted repo), then `settleContinuation` settles
+ * at most SETTLE_LIMITS.maxPages pages, schedules the next message when more
+ * remain and wakes the waiters of the pins it settled. Background merges of
+ * resumed `auto` dependents finish before the message is acked.
+ */
+export async function continueDependencySettlement(env: Env, msg: SettleMessage, deps: DependencyDeps = defaultDependencyDeps): Promise<SettleContinuationResult> {
+  const [repoRead, pageRead] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(msg.repoId),
+    settleEdgesStatement(env.DB, msg),
+  ]);
+  const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
+  const page = (pageRead?.results as LandedRow[] | undefined) ?? [];
+  if (!repo || page.length === 0) return { settled: 0, continued: false, kicked: 0, resumed: 0 };
+  const pending: Promise<unknown>[] = [];
+  const waitUntil = (p: Promise<unknown>) => void pending.push(p);
+  try {
+    return await withLazyRepo(env, repo.artifacts_name, (artifacts) =>
+      settleContinuation(env.DB, artifactsMergeSources(resolveCtx({ env, repo, waitUntil }, artifacts)), msg, page, {
+        kick: (ref, reason) => deps.kick(env, repo.id, ref, reason),
+        resume: async (numbers) => {
+          await deps.resume(env, repo.id, numbers, waitUntil);
+        },
+        continueLater: (next) => sendSettleContinuation(env, next),
+      }),
+    );
+  } finally {
+    await Promise.allSettled(pending);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Reads

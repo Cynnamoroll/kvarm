@@ -113,10 +113,12 @@ export async function listReposForOwner(
  * the same millisecond still yield distinct values (it keys cached views).
  */
 export async function touchRepoPushed(db: D1Database, id: string, at = Date.now()): Promise<void> {
-  await db
-    .prepare('UPDATE repos SET pushed_at = MAX(COALESCE(pushed_at, 0) + 1, ?) WHERE id = ?')
-    .bind(at, id)
-    .run();
+  await touchRepoPushedStatement(db, id, at).run();
+}
+
+/** The `touchRepoPushed` write, for a caller's batch. */
+export function touchRepoPushedStatement(db: D1Database, id: string, at = Date.now()): D1PreparedStatement {
+  return db.prepare('UPDATE repos SET pushed_at = MAX(COALESCE(pushed_at, 0) + 1, ?) WHERE id = ?').bind(at, id);
 }
 
 /** The repo-row DELETE, for a batch with the repo's dependent cleanup. */

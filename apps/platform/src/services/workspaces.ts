@@ -618,14 +618,22 @@ export interface WorkspaceOwner {
 
 /** One query for every workspace a push names; nothing when no command is in the namespace. */
 export async function workspaceOwners(env: Env, repoId: string, commands: readonly RefCommand[]): Promise<Map<string, WorkspaceOwner>> {
+  const stmt = workspaceOwnersSelect(env.DB, repoId, commands);
+  if (!stmt) return new Map();
+  return workspaceOwnersFrom((await stmt.all()).results);
+}
+
+/** The `workspaceOwners` query, for a caller's batch; null when no command is in the namespace. */
+export function workspaceOwnersSelect(db: D1Database, repoId: string, commands: readonly RefCommand[]): D1PreparedStatement | null {
   const ids = [...new Set(commands.map((c) => workspaceIdOf(c.ref)).filter((x): x is string => x !== null))];
-  if (ids.length === 0) return new Map();
-  const { results } = await env.DB.prepare(
-    `SELECT id, ref, status, agent_id FROM workspaces WHERE repo_id = ? AND id IN (SELECT value FROM json_each(?))`,
-  )
-    .bind(repoId, JSON.stringify(ids))
-    .all<WorkspaceOwner & { id: string }>();
-  return new Map((results ?? []).map((r) => [r.id, r]));
+  if (ids.length === 0) return null;
+  return db
+    .prepare(`SELECT id, ref, status, agent_id FROM workspaces WHERE repo_id = ? AND id IN (SELECT value FROM json_each(?))`)
+    .bind(repoId, JSON.stringify(ids));
+}
+
+export function workspaceOwnersFrom(results: unknown[] | undefined): Map<string, WorkspaceOwner> {
+  return new Map(((results ?? []) as (WorkspaceOwner & { id: string })[]).map((r) => [r.id, r]));
 }
 
 /** The `ng` reason for an agent token's command on a workspace-namespace ref, or null when allowed. */
