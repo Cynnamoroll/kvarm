@@ -14,7 +14,7 @@ import { COST_HEADER, CostMeter, parseCostHeader, runWithMeter, type CostCounter
 import { INTENT_PREFIX, mergeLockAlarm, type MergeLock, type SettleIntent } from '../src/do/mergeLock';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
-import { DEPENDENCY_LIMITS, SETTLE_INTENT, SETTLE_LIMITS, WAKE_KIND } from '../src/services/dependencyGate';
+import { DEPENDENCY_LIMITS, SETTLE_INTENT, SETTLE_LIMITS, WAKE_KIND, wakeClaimStatements, wakeSetOf } from '../src/services/dependencyGate';
 import { TRAIN_LIMITS, defaultTrainDeps, fairOrder, runTrain, type TrainDeps, type TrainEvent } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -1369,6 +1369,209 @@ describe('lifecycle', () => {
       expect(await alarmOf(name)).toBeNull();
     } finally {
       mergeLockAlarm.env = () => env;
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  /**
+   * A source with `older` dependents pinned on its first head (settled by pages, in edge id order) whose workspace ids
+   * sort before that of `auto`'s workspace, an open unqueued auto dependent pinned on the head that lands: its wake
+   * mark is born claimed by the landing and sorts after every page-born mark.
+   */
+  async function displacedAuto(name: string, older: number) {
+    const { repo } = await seedRepo(name);
+    const a = await workspace(name, 'a.txt', { change: 'review' });
+    const ws: Ws[] = [];
+    for (let i = 0; i <= older; i++) ws.push(await workspace(name, `d${i}.txt`));
+    ws.sort((x, y) => (x.id < y.id ? -1 : 1));
+    const auto = ws.pop()!;
+    const edgeOf = new Map<string, string>();
+    for (const d of ws) {
+      const edge = await pin(name, d.id, a.id, a.head);
+      expect(edge.status).toBe(201);
+      edgeOf.set(d.id, edge.json.id as string);
+    }
+    ws.sort((x, y) => (edgeOf.get(x.id)! < edgeOf.get(y.id)! ? -1 : 1));
+    const head = await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+    expect((await pin(name, auto.id, a.id, head)).status).toBe(201);
+    const autoN = (await call('POST', api(name, `/workspaces/${auto.id}/change-set`), tok.owner, { title: 'auto dependent', mergePolicy: 'auto' })).json
+      .number as number;
+    expect((await getChange(name, autoN)).json.state).toBe('open');
+    return { repo, a, older: ws, auto, autoN };
+  }
+
+  const settleSends = () => sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+
+  it('the wake accounting reports every mark of the landing that the bounded claim did not return', async () => {
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    const id = { repoId: crypto.randomUUID(), changeSetId: crypto.randomUUID(), mergedAt: 1, mergeCommit: 'c'.repeat(40) };
+    const prefix = `${id.repoId}/${id.changeSetId}/${id.mergedAt}/`;
+    const now = Date.now();
+    type Mark = [subject: string, state: 'open' | 'claimed', owner: string | null, expiresAt: number | null];
+    const account = async (marks: Mark[]) => {
+      await env.DB.prepare('DELETE FROM fenced_claims WHERE kind = ?1 AND identity = ?2').bind(WAKE_KIND, id.mergeCommit).run();
+      for (const [subject, state, owner, expiresAt] of marks) {
+        await env.DB.prepare('INSERT INTO fenced_claims (kind, subject, generation, owner, identity, state, expires_at, updated_at) VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7)')
+          .bind(WAKE_KIND, prefix + subject, owner, id.mergeCommit, state, expiresAt, now)
+          .run();
+      }
+      const [claimed, rest] = await env.DB.batch(wakeClaimStatements(env.DB, id, 'me', now));
+      const set = wakeSetOf(claimed, rest);
+      return { rows: set.rows.map((r) => r.id!.slice(prefix.length)), more: set.more, held: set.held };
+    };
+    try {
+      DEPENDENCY_LIMITS.readMax = 1;
+      SETTLE_LIMITS.maxPages = 1;
+      const live = now + 60_000;
+      // The claim's one slot takes the earliest claimable mark; what it leaves out is remaining work or held.
+      expect(await account([['a', 'open', null, null], ['b', 'claimed', 'me', live]])).toEqual({ rows: ['a'], more: true, held: 0 });
+      expect(await account([['a', 'open', null, null], ['b', 'claimed', 'me', now - 1]])).toEqual({ rows: ['a'], more: true, held: 0 });
+      expect(await account([['a', 'open', null, null], ['b', 'claimed', 'other', now - 1]])).toEqual({ rows: ['a'], more: true, held: 0 });
+      expect(await account([['a', 'open', null, null], ['b', 'open', null, null]])).toEqual({ rows: ['a'], more: true, held: 0 });
+      expect(await account([['a', 'open', null, null], ['b', 'claimed', 'other', live]])).toEqual({ rows: ['a'], more: false, held: 1 });
+      // Everything the owner holds was returned: nothing else remains.
+      expect(await account([['a', 'claimed', 'me', live]])).toEqual({ rows: ['a'], more: false, held: 0 });
+      expect(await account([['a', 'claimed', 'me', now - 1], ['b', 'claimed', 'other', live]])).toEqual({ rows: ['a'], more: false, held: 1 });
+    } finally {
+      await env.DB.prepare('DELETE FROM fenced_claims WHERE kind = ?1 AND identity = ?2').bind(WAKE_KIND, id.mergeCommit).run();
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  it('VAL-DEP-011: a landing whose bounded wake claim displaces a mark it already owns hands it to the owners; the auto dependent resumes at claim expiry', async () => {
+    const name = 'settle-displaced';
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    try {
+      const { repo, a, older, auto, autoN } = await displacedAuto(name, 1);
+      // Wake limit one: the page-born mark of the older dependent takes the final claim's only slot.
+      DEPENDENCY_LIMITS.readMax = 1;
+      SETTLE_LIMITS.maxPages = 1;
+      sent.length = 0;
+      const landed = await merge(name, a.change!);
+      expect(landed.status, JSON.stringify(landed.json)).toBe(200);
+      const mergeCommit = landed.json.merge.mergeCommit as string;
+      expect(await states(name, [...older, auto])).toEqual(['satisfied', 'satisfied']);
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+      expect(await wakeMarks(name)).toBe(1);
+      // The displaced mark is still the landing's work: both owners exist.
+      const handed = settleSends();
+      expect(handed).toEqual([{ type: 'forge.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN }]);
+      expect(await intentsOf(name)).toEqual([expect.objectContaining({ mergeCommit, ref: MAIN })]);
+
+      // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried, not acknowledged.
+      sent.length = 0;
+      const early = await deliverRaw(handed[0]);
+      expect(early.explicitAcks).toEqual([]);
+      expect(early.retryMessages).toHaveLength(1);
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+      expect(sent).toEqual([]);
+
+      // At the claim's expiry the retry resumes the auto dependent once.
+      await expireClaims(name);
+      await deliver(handed[0]);
+      expect((await getChange(name, autoN)).json.state).toBe('merged');
+      expect(isAncestorOf(repo, auto.head, repo.refs.get(MAIN)!)).toBe(true);
+      expect(await wakeMarks(name)).toBe(0);
+      expect(await fireOwner(name)).toBe(true);
+      expect(await intentsOf(name)).toEqual([]);
+      expect(await alarmOf(name)).toBeNull();
+    } finally {
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  /** displacedAuto with two older dependents, landed at wake limit one: one older pin is left, and the landing's claim on the auto dependent's mark has lapsed. */
+  async function displacedContinuation(name: string) {
+    const d = await displacedAuto(name, 2);
+    DEPENDENCY_LIMITS.readMax = 1;
+    SETTLE_LIMITS.maxPages = 1;
+    sent.length = 0;
+    const landed = await merge(name, d.a.change!);
+    expect(landed.status, JSON.stringify(landed.json)).toBe(200);
+    expect(await states(name, [...d.older, d.auto])).toEqual(['satisfied', 'stale', 'satisfied']);
+    expect((await getChange(name, d.autoN)).json.state).toBe('open');
+    const handed = settleSends();
+    expect(handed).toHaveLength(1);
+    expect(await intentsOf(name)).toHaveLength(1);
+    // The next owner claims the auto dependent's mark first, then the last page's earlier-sorting mark displaces it.
+    await expireClaims(name);
+    sent.length = 0;
+    return { ...d, msg: handed[0] };
+  }
+
+  it('a continuation whose bounded wake claim displaces a mark it claimed reports remaining work; a retry under a fresh owner resumes the dependent', async () => {
+    const name = 'settle-displaced-queue';
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    try {
+      const { repo, older, auto, autoN, msg } = await displacedContinuation(name);
+      const first = await deliverRaw(msg);
+      expect(await states(name, [...older, auto])).toEqual(Array(3).fill('satisfied'));
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+      expect(await wakeMarks(name)).toBe(1);
+      // Not done: the delivery hands the displaced mark on (successor continuation and the kept intent) before it is acknowledged.
+      expect(first.explicitAcks).toHaveLength(1);
+      expect(settleSends()).toEqual([msg]);
+      expect(await intentsOf(name)).toHaveLength(1);
+
+      // The successor runs under a fresh owner token: the live claim is held, so its delivery is retried, not acknowledged.
+      sent.length = 0;
+      const held = await deliverRaw(msg);
+      expect(held.explicitAcks).toEqual([]);
+      expect(held.retryMessages).toHaveLength(1);
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+
+      // At the claim's expiry the retry resumes it.
+      await expireClaims(name);
+      await deliver(msg);
+      expect((await getChange(name, autoN)).json.state).toBe('merged');
+      expect(isAncestorOf(repo, auto.head, repo.refs.get(MAIN)!)).toBe(true);
+      expect(await wakeMarks(name)).toBe(0);
+      expect(settleSends()).toEqual([]);
+      expect(await fireOwner(name)).toBe(true);
+      expect(await intentsOf(name)).toEqual([]);
+    } finally {
+      DEPENDENCY_LIMITS.readMax = saved.readMax;
+      SETTLE_LIMITS.maxPages = saved.maxPages;
+    }
+  });
+
+  it('an alarm wakeup whose bounded wake claim displaces a mark it claimed keeps the intent, re-arms by the claim expiry and resumes the dependent', async () => {
+    const name = 'settle-displaced-alarm';
+    const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
+    const logs = vi.spyOn(console, 'log');
+    try {
+      const { repo, older, auto, autoN } = await displacedContinuation(name);
+      logs.mockClear();
+      expect(await fireOwner(name)).toBe(true);
+      expect(await states(name, [...older, auto])).toEqual(Array(3).fill('satisfied'));
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+      expect(await wakeMarks(name)).toBe(1);
+      expect(settleLines(logs)).toEqual([expect.objectContaining({ outcome: 'continue', settle: expect.objectContaining({ settled: 1, remaining: true }) })]);
+      expect(await intentsOf(name)).toHaveLength(1);
+
+      // The next wakeup (a fresh token) finds the mark under that wakeup's live claim: held, revisited by its expiry.
+      logs.mockClear();
+      expect(await fireOwner(name)).toBe(true);
+      expect(settleLines(logs)).toEqual([expect.objectContaining({ outcome: 'held', settle: expect.objectContaining({ held: 1, remaining: true }) })]);
+      const [intent] = await intentsOf(name);
+      expect(intent!.deadline).toBeLessThanOrEqual((await claimExpiry(name))!);
+      expect(await alarmOf(name)).toBe(intent!.deadline);
+      expect((await getChange(name, autoN)).json.state).toBe('open');
+
+      await expireClaims(name);
+      logs.mockClear();
+      expect(await fireOwner(name)).toBe(true);
+      expect((await getChange(name, autoN)).json.state).toBe('merged');
+      expect(isAncestorOf(repo, auto.head, repo.refs.get(MAIN)!)).toBe(true);
+      expect(settleLines(logs)).toEqual([expect.objectContaining({ outcome: 'done', settle: expect.objectContaining({ resumed: 1, remaining: false }) })]);
+      expect(await wakeMarks(name)).toBe(0);
+      expect(await intentsOf(name)).toEqual([]);
+      expect(await alarmOf(name)).toBeNull();
+    } finally {
+      logs.mockRestore();
       DEPENDENCY_LIMITS.readMax = saved.readMax;
       SETTLE_LIMITS.maxPages = saved.maxPages;
     }

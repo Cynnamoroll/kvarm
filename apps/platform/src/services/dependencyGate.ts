@@ -492,7 +492,7 @@ export function landedDependentsStatement(db: D1Database, repoId: string, change
  */
 export interface WakeSet {
   rows: LandedRow[];
-  /** Claimable marks beyond what one invocation acts on. */
+  /** Claimable marks beyond what one invocation acts on, or marks this owner holds that its bounded claim did not return. */
   more: boolean;
   /** Marks under another owner's live claim: neither work nor failure for this owner. */
   held: number;
@@ -511,8 +511,10 @@ function landedWakeSet(rows: readonly LandedRow[]): WakeSet {
  * that are open, already this owner's, or held under a lapsed claim (new
  * generation, owner and expiry) and returns them with what wakes each
  * dependent now; the second reads what the owner did not get (claimable
- * marks past the limit, marks under another owner's live claim). Both run
- * in the caller's batch, in place of a plain read.
+ * marks past the limit, marks under another owner's live claim) and how
+ * many live claims the owner has, so a mark it already held that the
+ * limit left out still counts as remaining. Both run in the caller's
+ * batch, in place of a plain read.
  */
 export function wakeClaimStatements(db: D1Database, id: LandingIdentity, owner: string, now: number): [D1PreparedStatement, D1PreparedStatement] {
   const [lo, hi, offset] = wakeRange(id);
@@ -537,7 +539,8 @@ export function wakeClaimStatements(db: D1Database, id: LandingIdentity, owner: 
     .prepare(
       `SELECT COALESCE(SUM(CASE WHEN ${foreign} THEN 1 ELSE 0 END), 0) AS held,
               MIN(CASE WHEN ${foreign} THEN f.expires_at END) AS held_until,
-              COALESCE(SUM(CASE WHEN f.state = 'open' OR (f.state = 'claimed' AND f.owner IS NOT ?4 AND f.expires_at <= ?5) THEN 1 ELSE 0 END), 0) AS more
+              COALESCE(SUM(CASE WHEN f.state = 'open' OR (f.state = 'claimed' AND f.expires_at <= ?5) THEN 1 ELSE 0 END), 0) AS more,
+              COALESCE(SUM(CASE WHEN f.state = 'claimed' AND f.owner = ?4 AND f.expires_at > ?5 THEN 1 ELSE 0 END), 0) AS own_live
          FROM fenced_claims f WHERE f.kind = '${WAKE_KIND}' AND f.subject >= ?2 AND f.subject < ?3 AND f.identity = ?1`,
     )
     .bind(id.mergeCommit, lo, hi, owner, now);
@@ -547,8 +550,11 @@ export function wakeClaimStatements(db: D1Database, id: LandingIdentity, owner: 
 /** The WakeSet from the results of wakeClaimStatements. */
 export function wakeSetOf(claimed: D1Result | undefined, rest: D1Result | undefined): WakeSet {
   const rows = [...((claimed?.results as LandedRow[] | undefined) ?? [])].sort((a, b) => (a.id! < b.id! ? -1 : a.id! > b.id! ? 1 : 0));
-  const r = (rest?.results as Array<{ held: number; held_until: number | null; more: number }> | undefined)?.[0];
-  return { rows, more: (r?.more ?? 0) > 0, held: r?.held ?? 0, heldUntil: r?.held_until ?? null };
+  const r = (rest?.results as Array<{ held: number; held_until: number | null; more: number; own_live?: number }> | undefined)?.[0];
+  // Marks this owner already held (born claimed, or claimed by its first read) can sort past the bounded claim once
+  // earlier marks are recorded: they are neither held nor claimable for it, so they count as remaining here.
+  const displaced = (r?.own_live ?? 0) > rows.length;
+  return { rows, more: (r?.more ?? 0) > 0 || displaced, held: r?.held ?? 0, heldUntil: r?.held_until ?? null };
 }
 
 /** Confirms the given marks of the landing: deletes them after their effects succeeded (idempotent). */
