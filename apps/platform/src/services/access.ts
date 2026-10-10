@@ -138,7 +138,9 @@ const RATE_LIMITED: AccessDenied = { ok: false, status: 429, error: 'rate limite
 function actorFor(transport: Transport, pat: PATInfo | null | undefined): Actor | null {
   if (!pat) return null;
   if (pat.agent && transport === 'page') return null;
-  if (transport !== 'git' && !scopesAllow(pat.scopes, 'api')) return null;
+  // A ci-transport PAT without the `ci` scope stays the actor so the scope
+  // ceiling answers 403 INSUFFICIENT_SCOPE rather than treating it as anonymous.
+  if (transport !== 'git' && transport !== 'ci' && !scopesAllow(pat.scopes, 'api')) return null;
   return patActor(pat);
 }
 

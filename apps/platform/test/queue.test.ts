@@ -13,6 +13,7 @@ import { decode } from '@forge/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
+import { recordGuard } from '../src/services/changes';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
 import {
   TRAIN_LIMITS,
@@ -459,6 +460,39 @@ describe('integration train', () => {
     ]);
   });
 
+  it('with the real gate, a change whose forge/guard failed is ejected and the clean ones behind it publish (VAL-QUEUE-005)', async () => {
+    const repo = await seedRepo('guard-eject');
+    const main = await commit(repo, { 'README.md': 'readme\n' });
+    repo.refs.set(MAIN, main.sha);
+    const heads: Files[] = [
+      { 'README.md': 'readme\n', 'secrets.txt': `aws_key=${'AKIA' + 'IOSFODNN7EXAMPLE'}\n` },
+      { 'README.md': 'readme\n', 'x.txt': 'x\n' },
+      { 'README.md': 'readme\n', 'y.txt': 'y\n' },
+    ];
+    const numbers: number[] = [];
+    for (const [i, files] of heads.entries()) {
+      const b = await commit(repo, files, [main.sha]);
+      repo.refs.set(`refs/heads/g${i}`, b.sha);
+      numbers.push((await createChange('guard-eject', `g${i}`)).json.number as number);
+    }
+    const [bad, x, y] = numbers as [number, number, number];
+    await enqueue('guard-eject', bad);
+    await enqueue('guard-eject', x);
+    const deps = trainDeps();
+    const run = await runTrain(env, repoIds['guard-eject']!, MAIN, deps);
+    expect(run.ejected).toEqual([{ number: bad, code: 'CHECKS_FAILED' }]);
+    expect(run.published).toEqual([x]);
+    expect((await getChange('guard-eject', bad)).json).toMatchObject({ state: 'open', queueState: null });
+    expect((await queueOf('guard-eject')).json.entries).toEqual([]);
+
+    await enqueue('guard-eject', y);
+    const later = await runTrain(env, repoIds['guard-eject']!, MAIN, deps);
+    expect(later.published).toEqual([y]);
+    expect(firstParents(repo, main.sha)).toHaveLength(2);
+    expect(commitOf(repo, repo.refs.get(MAIN)!).tree).toBe(await writeTree(repo, { 'README.md': 'readme\n', 'x.txt': 'x\n', 'y.txt': 'y\n' }));
+    expect((await leaseStatus('guard-eject')).lease).toBeNull();
+  });
+
   it('checks the exact composition: a failing combined tree ejects only the candidate that formed it', async () => {
     const { repo, main, numbers } = await setup('compose', 3);
     const [one, two, three] = numbers as [number, number, number];
@@ -705,8 +739,10 @@ describe('integration train', () => {
     await env.DB.prepare(`UPDATE merge_queue SET merge_policy = 'auto' WHERE repo_id = ? AND change_number = ?`).bind(repoIds['auto-follow'], n).run();
     const next = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1 v2\n' }, [repo.refs.get('refs/heads/b1')!]);
     repo.refs.set('refs/heads/b1', next.sha);
-    // The ingest batch moved the change's head; the hook that moves the queue entry has not run.
+    // The ingest batch moved the change's head and the guard hook judged it; the hook that moves the queue entry has not run.
     await env.DB.prepare('UPDATE change_sets SET head_sha = ? WHERE repo_id = ? AND number = ?').bind(next.sha, repoIds['auto-follow'], n).run();
+    const changeId = (await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = ?').bind(repoIds['auto-follow'], n).first<{ id: string }>())!.id;
+    expect(await recordGuard(env, repoIds['auto-follow']!, changeId, next.sha)).toBe('recorded');
     const run = await runTrain(env, repoIds['auto-follow']!, MAIN, trainDeps());
     expect(run.published).toEqual([n]);
     expect(repo.refs.get(MAIN)).toBe(next.sha);

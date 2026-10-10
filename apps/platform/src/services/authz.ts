@@ -17,7 +17,8 @@ import type { AgentGrant } from '../auth/agentTokens';
 import { refMatchesAny } from '@forge/gitops';
 
 export type RepoRole = 'none' | 'read' | 'write' | 'admin';
-export type Transport = 'git' | 'api' | 'page';
+/** `ci`: REST routes for CI reporters (check runs), which need the `ci` scope instead of `api`. */
+export type Transport = 'git' | 'api' | 'page' | 'ci';
 export type RepoNeed = Exclude<RepoRole, 'none'>;
 export type OrgRole = 'owner' | 'maintainer' | 'member';
 
@@ -126,6 +127,7 @@ export function scopeCeiling(scopes: Scope[] | null, transport: Transport): Repo
     if (scopes.includes('read')) return 'read';
     return 'none';
   }
+  if (transport === 'ci') return scopes.includes('ci') ? 'write' : 'none';
   return scopes.includes('api') ? 'admin' : 'none';
 }
 

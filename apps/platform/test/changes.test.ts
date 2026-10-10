@@ -13,7 +13,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import { getRepoById } from '../src/db/repos';
-import { defaultMergeDeps, mergeChange, mergeReadyAutoChanges, type MergeDeps } from '../src/services/changes';
+import { defaultMergeDeps, mergeChange, mergeReadyAutoChanges, recordGuard, type MergeDeps } from '../src/services/changes';
 import {
   FakeRepo,
   commit,
@@ -468,9 +468,10 @@ describe('detail: rating, mergeability, checks', () => {
       targetSha: main.sha,
       headSha: feature.sha,
       treeSha: feature.tree,
-      checks: { state: 'success', required: [] },
+      checks: { state: 'success', required: [{ name: 'forge/guard', state: 'success', producer: 'check-runs' }] },
     });
-    expect(d.json.checks).toEqual([]);
+    // Creation records the forge/guard run of the head, the only check on a repo without CI.
+    expect(d.json.checks).toMatchObject([{ name: 'forge/guard', headSha: feature.sha, treeSha: feature.tree, status: 'success', required: true }]);
 
     const c = await seedRepo('conflicted');
     await conflicting(c);
@@ -508,7 +509,8 @@ describe('detail: rating, mergeability, checks', () => {
     expect(after.json.checks).toHaveLength(100);
     expect(after.json.checks[0].name).toBe('check-119');
     expect(after.cost.d1).toBe(before.cost.d1);
-    expect(after.cost.d1).toBeLessThanOrEqual(2);
+    // Authority, the change + newest runs batch, and the checks-gate read.
+    expect(after.cost.d1).toBeLessThanOrEqual(3);
     const checks = await call('GET', path('cost', '/1/checks'), tok.owner);
     expect(checks.json.checks).toHaveLength(100);
     expect(checks.cost.d1).toBeLessThanOrEqual(2);
@@ -521,6 +523,8 @@ describe('detail: rating, mergeability, checks', () => {
     await create('cost-rows', { title: 'rows', base: 'main', head: 'feature' });
     const change = (await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ?').bind(repoIds['cost-rows']).first<{ id: string; head_sha: string }>())!;
     let n = 0;
+    // After the guard run recorded at creation, so the newest 100 are these.
+    const later = Date.now() + 60_000;
     const addRuns = async (count: number) => {
       for (let done = 0; done < count; done += 250) {
         await env.DB.batch(
@@ -529,7 +533,7 @@ describe('detail: rating, mergeability, checks', () => {
             return env.DB.prepare(
               `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, created_at)
                VALUES (?, ?, ?, ?, ?, 'success', 'success', ?)`,
-            ).bind(crypto.randomUUID(), repoIds['cost-rows'], change.id, change.head_sha, `check-${n}`, 1_790_000_000_000 + n);
+            ).bind(crypto.randomUUID(), repoIds['cost-rows'], change.id, change.head_sha, `check-${n}`, later + n);
           }),
         );
       }
@@ -1095,6 +1099,8 @@ describe('auto-merge selection', () => {
     await env.DB.prepare(`UPDATE change_sets SET head_sha = ?, state = 'open', conflicts = NULL WHERE repo_id = ? AND number = 21`).bind(r21.sha, repoIds['auto-all']).run();
 
     const repoId = repoIds['auto-all']!;
+    const id21 = (await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 21').bind(repoId).first<{ id: string }>())!.id;
+    expect(await recordGuard(env, repoId, id21, r21.sha)).toBe('recorded');
     const first = await mergeReadyAutoChanges(env, repoId, null, () => {});
     expect(first).toEqual({ merged: [], failed: [], next: 20 });
     expect(await mergeReadyAutoChanges(env, repoId, null, () => {}, { after: first.next! })).toEqual({ merged: [21], failed: [], next: null });

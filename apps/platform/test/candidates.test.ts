@@ -186,7 +186,8 @@ describe('candidates', () => {
       expect(summary.vsBase.files.map((f: any) => [f.path, f.status])).toEqual(cmp.json.files.map((f: any) => [f.path, f.status]));
       expect(summary.vsBase.totals).toEqual(cmp.json.totals);
       expect(summary.vsBase.rating).toEqual(cmp.json.rating);
-      expect(summary).toMatchObject({ ref: ws.ref, baseMatches: true, checks: { state: 'success', required: [] } });
+      // No change judged these heads, so the always-required forge/guard is pending.
+      expect(summary).toMatchObject({ ref: ws.ref, baseMatches: true, checks: { state: 'pending', required: [{ name: 'forge/guard', state: 'pending', producer: 'check-runs' }] } });
     }
 
     const ab = r.json.pairwise.find((p: any) => p.workspaces[0] === a.id && p.workspaces[1] === b.id);
@@ -215,7 +216,7 @@ describe('candidates', () => {
     const again = await cands('cmp', [a.id, b.id, c.id]);
     expect(again.text).toBe(r.text);
     expect(again.cost).toMatchObject({ art: 0, do: 0 });
-    expect(again.cost.d1).toBe(2);
+    expect(again.cost.d1).toBe(3);
     const again2 = await cands('cmp', [a.id, b.id, c.id]);
     expect(again2.cost.d1).toBe(again.cost.d1);
   });
@@ -309,8 +310,9 @@ describe('candidates', () => {
     const four = await cands('scale', ids.slice(0, 4));
     const eight = await cands('scale', ids);
     expect(eight.json.overlap.pairs).toHaveLength(28);
-    expect([four.cost.d1, four.cost.art, four.cost.do]).toEqual([2, 0, 0]);
-    expect([eight.cost.d1, eight.cost.art, eight.cost.do]).toEqual([2, 0, 0]);
+    // Authority, the workspace + overlap batch, and one coalesced checks-gate read for every candidate.
+    expect([four.cost.d1, four.cost.art, four.cost.do]).toEqual([3, 0, 0]);
+    expect([eight.cost.d1, eight.cost.art, eight.cost.do]).toEqual([3, 0, 0]);
     expect(eight.cost.rr).toBeLessThan(four.cost.rr * 4);
   });
 });
@@ -395,7 +397,7 @@ describe('arenas', () => {
     });
     const again = await call('GET', `${R('arena-rank')}/arenas/${arena.id}/candidates`, tok.owner);
     expect(canonical(again.json)).toBe(canonical(r.json));
-    expect(again.cost).toMatchObject({ art: 0, do: 0, d1: 3 });
+    expect(again.cost).toMatchObject({ art: 0, do: 0, d1: 4 });
 
     // Selection is a recorded choice: nothing merges, closes or abandons.
     const changeA = (await call('POST', `${R('arena-rank')}/workspaces/${a.id}/change-set`, tok.owner, { title: 'a' })).json;
@@ -456,7 +458,7 @@ describe('composition', () => {
       baseSha: main.sha,
       treeSha: expectedTree,
       conflict: null,
-      checks: { state: 'success', required: [] },
+      checks: { state: 'pending', required: [{ name: 'forge/guard', state: 'pending', producer: 'check-runs' }] },
       sources: [
         { workspace: a.id, mergeBase: main.sha, paths: null },
         { workspace: b.id, mergeBase: main.sha, paths: null },

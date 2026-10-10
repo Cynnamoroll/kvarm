@@ -374,7 +374,7 @@ async function compareSet(
     await runPool(members, CANDIDATE_LIMITS.bodyConcurrency, async (m, i) => {
       bodies[i] = (await treePairBody(ctx, baseCommit.tree, m.tree)).body;
     });
-    const checks = await Promise.all(members.map((m) => gate.requiredChecksFor({ id: cx.repo.id }, m.tree, null)));
+    const checks = await Promise.all(members.map((m) => gate.requiredChecksFor({ id: cx.repo.id }, m.tree, null, { headSha: m.sha })));
 
     const reasons: string[] = [];
     const candidates = members.map((m, i): CandidateSummary => {

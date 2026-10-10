@@ -126,7 +126,7 @@ function writeFiles(dir, files) {
 
 function commitAll(dir, msg) {
   mustGit(['add', '-A'], dir);
-  mustGit(['-c', 'user.name=review-e2e', '-c', 'user.email=review-e2e@forge.invalid', 'commit', '-q', '-m', msg], dir);
+  mustGit(['commit', '-q', '-m', msg], dir);
   return mustGit(['rev-parse', 'HEAD'], dir);
 }
 

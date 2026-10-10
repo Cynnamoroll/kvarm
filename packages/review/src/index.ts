@@ -1,6 +1,7 @@
 /** Review heuristics (risk classification, guard rules, flake detection). */
 
 export * from './risk';
+export * from './guard';
 export { countTestCases, dependencyNames, hasGeneratedMarker, isWhitespaceOnlyChange, GENERATED_MARKER_WINDOW } from './content';
 export {
   isCiConfigPath,

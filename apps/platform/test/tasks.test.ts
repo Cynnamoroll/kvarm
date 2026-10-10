@@ -13,6 +13,7 @@ import { decode } from '@forge/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
+import { recordGuard } from '../src/services/changes';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -397,7 +398,13 @@ describe('complete', () => {
     expect(attr.status).toBe(200);
     expect(attr.json).toMatchObject({ agent: 'claude-code-1', session: `forge:task/${task.id}`, actor: OWNER });
 
-    // Review: open until the explicit merge.
+    // Review: open until the explicit merge, which waits for the resolution's forge/guard run (recorded by the
+    // head branch's push event).
+    const unchecked = await call('POST', repoPath('complete', '/changes/1/merge'), tok.owner);
+    expect([unchecked.status, unchecked.json.code]).toEqual([409, 'REQUIRED_CHECKS_PENDING']);
+    expect(unchecked.json.error).toContain('forge/guard');
+    const changeId = (await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1').bind(repoIds['complete']).first<{ id: string }>())!.id;
+    expect(await recordGuard(env, repoIds['complete']!, changeId, res.sha)).toBe('recorded');
     const merged = await call('POST', repoPath('complete', '/changes/1/merge'), tok.owner);
     expect(merged.json.state).toBe('merged');
     expect(fileAt(repo, repo.refs.get(MAIN)!, 'src/app.ts')).toBe(RESOLVED);

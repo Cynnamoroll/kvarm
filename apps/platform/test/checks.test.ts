@@ -1,0 +1,345 @@
+/**
+ * Check runs (services/checks.ts): the forge/guard run recorded on change
+ * creation and head refresh, its findings and redaction, the commit status
+ * rollup, reported runs through the ci transport, and the check-runs
+ * producer as the checks gate of merges. Runs through the Worker's routes
+ * and push queue over the in-memory Artifacts fake.
+ */
+
+import { env as cfEnv } from 'cloudflare:workers';
+import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mintPAT, type Scope } from '../src/auth/pat';
+import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import worker from '../src/index';
+import { GUARD_BUDGETS } from '../src/services/checks';
+import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+
+const baseEnv = cfEnv as unknown as Env;
+const ORIGIN = 'https://forge.test';
+const OWNER = 'ck-owner';
+const MAIN = 'refs/heads/main';
+const FEATURE = 'refs/heads/feature';
+
+class FakeWorkflow {
+  async create(opts: { id?: string }) {
+    return { id: opts.id ?? crypto.randomUUID() };
+  }
+  async get(id: string) {
+    return { id };
+  }
+}
+
+const env = {
+  ...baseEnv,
+  ARTIFACTS: fakeArtifacts,
+  SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
+} as Env;
+
+const tok = { owner: '', ci: '', ciOnly: '', noCi: '', reader: '' };
+const repoIds: Record<string, string> = {};
+
+// Fake credentials, assembled so no literal token sits in the source.
+const AWS_KEY = 'AKIA' + 'IOSFODNN7EXAMPLE';
+const FORGE_PAT = 'forge_pat_' + 'fedcba9876543210'.repeat(4);
+
+async function seedUser(login: string): Promise<string> {
+  const id = crypto.randomUUID();
+  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
+    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, Date.now())
+    .run();
+  return id;
+}
+
+async function seedRepo(name: string): Promise<FakeRepo> {
+  const artifactsName = `${OWNER}--${name}`;
+  const repo = new FakeRepo();
+  fakeRepos.set(artifactsName, repo);
+  const id = crypto.randomUUID();
+  repoIds[name] = id;
+  await env.DB.prepare(
+    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
+     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
+  )
+    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
+    .run();
+  return repo;
+}
+
+interface Reply {
+  status: number;
+  text: string;
+  json: Record<string, any>;
+  cost: CostCounters;
+}
+
+async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
+  const ctx = createExecutionContext();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+  const text = await res.text();
+  await waitOnExecutionContext(ctx);
+  const cost = parseCostHeader(res.headers.get(COST_HEADER));
+  expect(cost).not.toBeNull();
+  let json: Record<string, any> = {};
+  try {
+    json = JSON.parse(text) as Record<string, any>;
+  } catch {
+    // non-JSON body
+  }
+  return { status: res.status, text, json, cost: cost! };
+}
+
+const R = (repo: string) => `/api/v1/repos/${OWNER}/${repo}`;
+const create = (repo: string, body: Record<string, unknown> = {}) =>
+  call('POST', `${R(repo)}/changes`, tok.owner, { title: 't', base: 'main', head: 'feature', ...body });
+const checksOf = (repo: string, n = 1) => call('GET', `${R(repo)}/changes/${n}/checks`, tok.owner);
+const report = (repo: string, body: unknown, token = tok.ci) => call('POST', `${R(repo)}/check-runs`, token, body);
+
+/** main = `base`; feature = main + `edit` (files mapped to null are deleted). */
+async function fixture(repo: FakeRepo, base: Files, edit: Record<string, string | null>) {
+  const main = await commit(repo, base);
+  const next: Files = { ...base };
+  for (const [p, v] of Object.entries(edit)) {
+    if (v === null) delete next[p];
+    else next[p] = v;
+  }
+  const feature = await commit(repo, next, [main.sha]);
+  repo.refs.set(MAIN, main.sha);
+  repo.refs.set(FEATURE, feature.sha);
+  return { main, feature };
+}
+
+function pushBody(repo: string, ref: string, before: string, after: string, at: number) {
+  return {
+    type: 'cf.artifacts.repo.pushed',
+    source: { type: 'artifacts', namespace: 'default', repoName: `${OWNER}--${repo}` },
+    payload: { ref, before, after, commits: [], totalCommitsCount: 0, commitsTruncated: false },
+    metadata: { accountId: 'acct', eventSubscriptionId: 'sub', eventSchemaVersion: 1, eventTimestamp: new Date(at).toISOString() },
+  };
+}
+
+async function deliver(body: unknown) {
+  const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
+  const ctx = createExecutionContext();
+  await worker.queue!(batch, env, ctx);
+  const result = await getQueueResult(batch, ctx);
+  await waitOnExecutionContext(ctx);
+  expect(result.explicitAcks).toHaveLength(1);
+}
+
+const BASE: Files = { 'README.md': '# App\n', 'src/app.js': 'module.exports = 1;\n' };
+
+beforeAll(async () => {
+  installFakeGitRemote();
+  const ownerId = await seedUser(OWNER);
+  const all: Scope[] = ['read', 'write', 'api', 'ci'];
+  tok.owner = (await mintPAT(env, ownerId, 'owner', all)).token;
+  tok.ci = tok.owner;
+  tok.ciOnly = (await mintPAT(env, ownerId, 'ci-only', ['ci'])).token;
+  tok.noCi = (await mintPAT(env, ownerId, 'no-ci', ['read', 'write', 'api'])).token;
+  const readerId = await seedUser('ck-reader');
+  tok.reader = (await mintPAT(env, readerId, 'reader', all)).token;
+});
+
+afterAll(() => restoreFetch());
+
+describe('forge/guard on creation and head refresh', () => {
+  it('records one guard run at creation and a new one when the head moves; the status shows only the guard (VAL-GUARD-001/006)', async () => {
+    const repo = await seedRepo('refresh');
+    const { feature } = await fixture(repo, BASE, { 'README.md': '# App\n\nMore words.\n' });
+    const created = await create('refresh');
+    expect(created.status).toBe(201);
+    expect(created.json.checks).toMatchObject([{ name: 'forge/guard', headSha: feature.sha, status: 'success', conclusion: 'success' }]);
+
+    const first = await checksOf('refresh');
+    expect(first.json.checks).toHaveLength(1);
+    expect(first.json.checks[0]).toMatchObject({
+      name: 'forge/guard',
+      headSha: feature.sha,
+      treeSha: feature.tree,
+      status: 'success',
+      conclusion: 'success',
+      required: true,
+      quarantined: false,
+      attempt: 1,
+      summary: { conclusion: 'success', findings: [], version: 'guard/v1' },
+    });
+
+    const next = await commit(repo, { ...BASE, 'README.md': '# App\n\nEven more words.\n' }, [feature.sha]);
+    repo.refs.set(FEATURE, next.sha);
+    const push = pushBody('refresh', FEATURE, feature.sha, next.sha, Date.now() + 1_000);
+    await deliver(push);
+    await deliver(push);
+    const second = await checksOf('refresh');
+    expect(second.json.checks.map((c: any) => [c.name, c.headSha, c.status])).toEqual([
+      ['forge/guard', next.sha, 'success'],
+      ['forge/guard', feature.sha, 'success'],
+    ]);
+
+    const status = await call('GET', `${R('refresh')}/commits/${next.sha}/status`, tok.owner);
+    expect(status.status).toBe(200);
+    expect(status.json).toMatchObject({ sha: next.sha, state: 'success', total: 1, checks: [{ name: 'forge/guard', headSha: next.sha }] });
+    expect(status.cost.d1).toBe(2);
+    const none = await call('GET', `${R('refresh')}/commits/${'0'.repeat(40)}/status`, tok.owner);
+    expect(none.json).toMatchObject({ state: 'none', total: 0, checks: [] });
+    expect((await call('GET', `${R('refresh')}/commits/nope/status`, tok.owner)).json.code).toBe('INVALID_SHA');
+    expect((await call('GET', `${R('refresh')}/commits/${next.sha}/status`)).status).toBe(404);
+  });
+});
+
+describe('guard findings', () => {
+  it('fails a planted secret with path, line and rule, redacted everywhere, and blocks the merge (VAL-GUARD-002/007)', async () => {
+    const repo = await seedRepo('secret');
+    const { main } = await fixture(repo, BASE, { 'secrets.txt': `aws_key=${AWS_KEY}\nforge_token=${FORGE_PAT}\n` });
+    const created = await create('secret');
+    expect(created.status).toBe(201);
+    const checks = await checksOf('secret');
+    const run = checks.json.checks[0];
+    expect(run).toMatchObject({ name: 'forge/guard', status: 'failure', conclusion: 'failure' });
+    expect(run.summary.findings).toEqual([
+      expect.objectContaining({ path: 'secrets.txt', line: 1, rule: 'secret/aws-access-key', message: expect.any(String) }),
+      expect.objectContaining({ path: 'secrets.txt', line: 2, rule: 'secret/forge-token', message: expect.any(String) }),
+    ]);
+
+    const detail = await call('GET', `${R('secret')}/changes/1`, tok.owner);
+    expect(detail.json.mergeability.checks).toMatchObject({ state: 'failure', required: [{ name: 'forge/guard', state: 'failure' }] });
+    const status = await call('GET', `${R('secret')}/commits/${run.headSha}/status`, tok.owner);
+    expect(status.json.state).toBe('failure');
+    for (const text of [created.text, checks.text, detail.text, status.text]) {
+      expect(text).not.toContain(AWS_KEY);
+      expect(text).not.toContain(FORGE_PAT);
+    }
+    const stored = await env.DB.prepare('SELECT summary FROM check_runs WHERE repo_id = ?').bind(repoIds.secret).all<{ summary: string }>();
+    for (const r of stored.results ?? []) expect(r.summary).not.toContain(AWS_KEY);
+
+    const merge = await call('POST', `${R('secret')}/changes/1/merge`, tok.owner);
+    expect([merge.status, merge.json.code]).toEqual([409, 'REQUIRED_CHECKS_FAILED']);
+    expect(merge.json.error).toContain('forge/guard');
+    expect(repo.refs.get(MAIN)).toBe(main.sha);
+    expect((await call('GET', `${R('secret')}/changes/1`, tok.owner)).json.state).toBe('open');
+  });
+
+  it('fails CI gaming, a deleted test and flags a typosquatted dependency (VAL-GUARD-003/004/005)', async () => {
+    const ci = (run: string) => JSON.stringify({ jobs: [{ name: 'test', run }] }, null, 2) + '\n';
+    const gaming = await seedRepo('gaming');
+    await fixture(gaming, { ...BASE, '.forge/ci.json': ci('npm test') }, { '.forge/ci.json': ci('npm test || true') });
+    await create('gaming');
+    const g = (await checksOf('gaming')).json.checks[0];
+    expect(g.status).toBe('failure');
+    expect(g.summary.findings).toEqual([expect.objectContaining({ path: '.forge/ci.json', rule: 'ci-gaming/or-true', line: 5 })]);
+
+    const deleted = await seedRepo('deleted');
+    await fixture(deleted, { ...BASE, 'tests/app.test.js': "test('x', () => {});\n" }, { 'tests/app.test.js': null });
+    await create('deleted');
+    const d = (await checksOf('deleted')).json.checks[0];
+    expect(d.status).toBe('failure');
+    expect(d.summary.findings).toEqual([expect.objectContaining({ path: 'tests/app.test.js', rule: 'ci-gaming/test-deleted' })]);
+
+    const deps = await seedRepo('deps');
+    const pkg = (extra: Record<string, string>) => JSON.stringify({ name: 'app', dependencies: { express: '^4.0.0', ...extra } }, null, 2) + '\n';
+    await fixture(deps, { ...BASE, 'package.json': pkg({}) }, { 'package.json': pkg({ lodahs: '^1.0.0' }) });
+    await create('deps');
+    const p = (await checksOf('deps')).json.checks[0];
+    expect(p.summary.findings).toEqual([expect.objectContaining({ path: 'package.json', rule: 'dependency/typosquat', message: expect.stringContaining('lodahs') })]);
+  });
+
+  it('reads at most the per-file budget of an oversized file and reports the rest as unscanned', async () => {
+    const repo = await seedRepo('big');
+    const big = 'x'.repeat(GUARD_BUDGETS.maxBytesPerFile + 10) + `\naws=${AWS_KEY}\n`;
+    await fixture(repo, BASE, { 'big.txt': big });
+    await create('big');
+    const run = (await checksOf('big')).json.checks[0];
+    expect(run).toMatchObject({ status: 'success', conclusion: 'neutral' });
+    expect(run.summary.findings).toEqual([expect.objectContaining({ rule: 'guard/incomplete', path: 'big.txt' })]);
+    expect(run.summary.scanned.bytes).toBeLessThanOrEqual(GUARD_BUDGETS.maxBytesPerFile);
+  });
+});
+
+describe('the guard as the checks gate', () => {
+  it('an auto change with a failing guard stays open; the clean head pushed over it merges on its own (VAL-MERGE-006)', async () => {
+    const repo = await seedRepo('auto');
+    const { feature } = await fixture(repo, BASE, { 'secrets.txt': `aws_key=${AWS_KEY}\n` });
+    const created = await create('auto', { mergePolicy: 'auto' });
+    expect(created.json).toMatchObject({ state: 'open', mergeCommit: null });
+    const clean = await commit(repo, { ...BASE, 'notes.txt': 'clean\n' }, [feature.sha]);
+    repo.refs.set(FEATURE, clean.sha);
+    await deliver(pushBody('auto', FEATURE, feature.sha, clean.sha, Date.now() + 1_000));
+    const after = await call('GET', `${R('auto')}/changes/1`, tok.owner);
+    expect(after.json).toMatchObject({ state: 'merged', mergeCommit: clean.sha });
+    expect(repo.refs.get(MAIN)).toBe(clean.sha);
+  });
+});
+
+describe('reported check runs', () => {
+  it('needs the ci scope, reserves forge/ names, and validates the body', async () => {
+    const repo = await seedRepo('report-auth');
+    const { feature } = await fixture(repo, BASE, { 'notes.txt': 'n\n' });
+    const body = { headSha: feature.sha, name: 'test', conclusion: 'success' };
+    expect((await report('report-auth', body, tok.noCi)).json.code).toBe('INSUFFICIENT_SCOPE');
+    expect((await report('report-auth', body, tok.reader)).status).toBe(404);
+    expect((await report('report-auth', body, '')).status).toBe(401);
+    expect((await report('report-auth', { ...body, name: 'forge/guard' })).json.code).toBe('RESERVED_CHECK_NAME');
+    expect((await report('report-auth', { ...body, headSha: 'abc' })).json.code).toBe('INVALID_SHA');
+    expect((await report('report-auth', { ...body, conclusion: 'meh' })).json.code).toBe('INVALID_CONCLUSION');
+    expect((await report('report-auth', { ...body, headSha: 'f'.repeat(40) })).json.code).toBe('COMMIT_NOT_FOUND');
+    const ok = await report('report-auth', body, tok.ciOnly);
+    expect(ok.status).toBe(201);
+    expect(ok.json.run).toMatchObject({ name: 'test', headSha: feature.sha, treeSha: feature.tree, status: 'success', conclusion: 'success', required: true });
+    expect(ok.json.change).toBeNull();
+  });
+
+  it('a running required check holds an auto change; its success merges it (resume after check)', async () => {
+    const repo = await seedRepo('report-auto');
+    const { feature } = await fixture(repo, BASE, { 'notes.txt': 'n\n' });
+    expect((await report('report-auto', { headSha: feature.sha, name: 'test', status: 'running' })).status).toBe(201);
+    const created = await create('report-auto', { mergePolicy: 'auto' });
+    expect(created.json).toMatchObject({ state: 'open' });
+    const held = await call('GET', `${R('report-auto')}/changes/1/mergeability`, tok.owner);
+    expect(held.json.mergeability.checks).toMatchObject({ state: 'pending' });
+    const done = await report('report-auto', { headSha: feature.sha, name: 'test', conclusion: 'success' });
+    expect(done.json.change).toEqual({ number: 1 });
+    expect((await call('GET', `${R('report-auto')}/changes/1`, tok.owner)).json).toMatchObject({ state: 'merged', mergeCommit: feature.sha });
+  });
+
+  it('a failing non-required run does not block, a failing required run does', async () => {
+    const repo = await seedRepo('report-required');
+    const { feature } = await fixture(repo, BASE, { 'notes.txt': 'n\n' });
+    await create('report-required');
+    await report('report-required', { headSha: feature.sha, name: 'optional', conclusion: 'failure', required: false });
+    const m1 = await call('GET', `${R('report-required')}/changes/1/mergeability`, tok.owner);
+    expect(m1.json.mergeability.checks.state).toBe('success');
+    await report('report-required', { headSha: feature.sha, name: 'test', conclusion: 'failure' });
+    const m2 = await call('GET', `${R('report-required')}/changes/1/mergeability`, tok.owner);
+    expect(m2.json.mergeability.checks).toMatchObject({ state: 'failure' });
+    const refused = await call('POST', `${R('report-required')}/changes/1/merge`, tok.owner);
+    expect([refused.status, refused.json.code]).toEqual([409, 'REQUIRED_CHECKS_FAILED']);
+    expect(refused.json.error).toContain('test');
+    const status = await call('GET', `${R('report-required')}/commits/${feature.sha}/status`, tok.owner);
+    expect(status.json).toMatchObject({ state: 'failure', total: 3 });
+  });
+
+  it('change detail D1 is the same with 1 and 6 check runs (VAL-COST-011)', async () => {
+    const repo = await seedRepo('detail-cost');
+    const main = await commit(repo, BASE);
+    const a = await commit(repo, { ...BASE, 'a.txt': 'a\n' }, [main.sha]);
+    const b = await commit(repo, { ...BASE, 'b.txt': 'b\n' }, [main.sha]);
+    repo.refs.set(MAIN, main.sha);
+    repo.refs.set('refs/heads/a', a.sha);
+    repo.refs.set('refs/heads/b', b.sha);
+    await create('detail-cost', { head: 'a' });
+    await create('detail-cost', { head: 'b' });
+    for (let i = 0; i < 5; i++) await report('detail-cost', { headSha: b.sha, name: `job-${i}`, conclusion: 'success' });
+    expect((await checksOf('detail-cost', 1)).json.checks).toHaveLength(1);
+    expect((await checksOf('detail-cost', 2)).json.checks).toHaveLength(6);
+    await call('GET', `${R('detail-cost')}/changes/1`, tok.owner);
+    await call('GET', `${R('detail-cost')}/changes/2`, tok.owner);
+    const one = await call('GET', `${R('detail-cost')}/changes/1`, tok.owner);
+    const six = await call('GET', `${R('detail-cost')}/changes/2`, tok.owner);
+    expect(six.json.mergeability.checks.required).toHaveLength(6);
+    expect(one.cost.d1).toBe(six.cost.d1);
+    expect(six.cost.d1).toBeLessThanOrEqual(3);
+  });
+});

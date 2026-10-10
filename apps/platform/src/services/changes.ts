@@ -24,8 +24,9 @@ import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import { effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
+import { CHECK_RUN_COLUMNS, checkRunView, evaluateGuard, guardRunExists, guardRunInsert, type CheckRunRow, type CheckRunView, type GuardSummary } from './checks';
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
-import { treePairRating } from './compare';
+import { treePairBody, treePairRating, type CompareBody } from './compare';
 import {
   blockFromRows,
   changeDependenciesStatement,
@@ -54,12 +55,13 @@ import { artifactsPusher, type GitPusher } from './gitwrite';
 import { changeSignalCleanup } from './intents/store';
 import {
   artifactsMergeSources,
-  computeMergeability,
+  computeMergePlan,
   overlaySources,
   prepareMerge,
   publishMerge,
   type Mergeability,
   type MergeErrorCode,
+  type MergePlanView,
   type MergeStatus,
   type MergeWork,
 } from './merge';
@@ -137,30 +139,6 @@ const CHANGE_SELECT = `SELECT c.id, c.repo_id, c.number, c.title, c.body, c.base
        (SELECT q.state FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queue_state,
        (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1) AS workspace_id
   FROM change_sets c LEFT JOIN users u ON u.id = c.author_id`;
-
-export interface CheckRunView {
-  id: string;
-  name: string;
-  headSha: string;
-  status: string;
-  conclusion: string | null;
-  detailsUrl: string | null;
-  startedAt: string | null;
-  finishedAt: string | null;
-  createdAt: string;
-}
-
-interface CheckRunRow {
-  id: string;
-  name: string;
-  head_sha: string;
-  status: string;
-  conclusion: string | null;
-  details_url: string | null;
-  started_at: number | null;
-  finished_at: number | null;
-  created_at: number;
-}
 
 export interface ChangeView {
   number: number;
@@ -264,20 +242,6 @@ function storedRating(row: ChangeRow): ChangeRating | null {
     // stored reasons are informational
   }
   return { score: row.risk_score, level: row.risk_level as ChangeRating['level'], reasons };
-}
-
-function checkRunView(r: CheckRunRow): CheckRunView {
-  return {
-    id: r.id,
-    name: r.name,
-    headSha: r.head_sha,
-    status: r.status,
-    conclusion: r.conclusion,
-    detailsUrl: r.details_url,
-    startedAt: iso(r.started_at),
-    finishedAt: iso(r.finished_at),
-    createdAt: iso(r.created_at)!,
-  };
 }
 
 function mergeabilityView(m: Mergeability): MergeabilityView {
@@ -397,7 +361,7 @@ async function readChangeWithChecks(env: Env, repoId: string, number: number): P
   const [change, checks] = await env.DB.batch([
     changeSelect(env.DB, repoId, number),
     env.DB.prepare(
-      `SELECT k.id, k.name, k.head_sha, k.status, k.conclusion, k.details_url, k.started_at, k.finished_at, k.created_at
+      `SELECT ${CHECK_RUN_COLUMNS}
          FROM check_runs k
         WHERE k.change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2)
         ORDER BY k.created_at DESC, k.id DESC
@@ -452,10 +416,10 @@ export async function listChanges(
 // Mergeability
 // ---------------------------------------------------------------------------
 
-type CachedPlan = Omit<Mergeability, 'checks' | 'mergeable'>;
+type CachedPlan = MergePlanView;
 
 /** Outcomes that depend only on the two commits (never transient read failures). */
-function cacheablePlan(m: Mergeability): boolean {
+function cacheablePlan(m: CachedPlan): boolean {
   return m.status !== 'unknown' || m.unknownReason === 'criss-cross' || (m.unknownReason?.startsWith('max') ?? false) || m.unknownReason === 'diffBudget';
 }
 
@@ -465,19 +429,96 @@ function cacheablePlan(m: Mergeability): boolean {
  * fresh from the checks-gate.
  */
 export async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, targetSha: string, headSha: string): Promise<Mergeability> {
+  const plan = await mergePlanFor(ctx, targetSha, headSha);
+  const checks = plan.treeSha ? await gate.requiredChecksFor({ id: ctx.repo.id }, plan.treeSha, null, { headSha }) : null;
+  const mergeable = (plan.status === 'fast-forward' || plan.status === 'clean') && checks?.state === 'success';
+  return { ...plan, checks, mergeable };
+}
+
+/** The cached merge plan of a commit pair, without asking the checks-gate (conflict evaluation, guard base). */
+export async function mergePlanFor(ctx: ResolveContext, targetSha: string, headSha: string): Promise<CachedPlan> {
   const key = internalKey('mergeplan/v2', ctx.repo.id, targetSha, headSha);
   const hit = await readCachedJson<CachedPlan>(key);
-  if (hit) {
-    const checks = hit.treeSha ? await gate.requiredChecksFor({ id: ctx.repo.id }, hit.treeSha, null) : null;
-    const mergeable = (hit.status === 'fast-forward' || hit.status === 'clean') && checks?.state === 'success';
-    return { ...hit, checks, mergeable };
+  if (hit) return hit;
+  const plan = await computeMergePlan(artifactsMergeSources(ctx), { targetSha, headSha });
+  if (cacheablePlan(plan)) ctx.waitUntil(writeCachedJson(key, plan, 31_536_000));
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
+// The guard (services/checks.ts) on creation and head refresh
+// ---------------------------------------------------------------------------
+
+/**
+ * The guard over the change's own edits: its merge base's tree against the
+ * head tree (the base tip's when there is no single merge base). `body` is
+ * the base tip -> head compare body when the caller already holds it.
+ */
+async function guardFor(
+  ctx: ResolveContext,
+  p: { baseSha: string; baseTree: string; headTree: string; mergeBase: string | null; body?: CompareBody },
+): Promise<GuardSummary> {
+  try {
+    if (p.mergeBase === null || p.mergeBase === p.baseSha) return await evaluateGuard(ctx, p.baseTree, p.headTree, p.body);
+    const mb = (await resolveCommitish(ctx, [p.mergeBase])).get(p.mergeBase);
+    if (!mb) throw new RefStoreUnavailable(`merge base ${p.mergeBase} could not be read`);
+    return await evaluateGuard(ctx, mb.tree, p.headTree);
+  } catch (err) {
+    if (err instanceof RefStoreUnavailable) throw err;
+    throw new RefStoreUnavailable(`guard read failed: ${String(err).slice(0, 200)}`);
   }
-  const m = await computeMergeability(artifactsMergeSources(ctx), gate, { repo: { id: ctx.repo.id }, targetSha, headSha });
-  if (cacheablePlan(m)) {
-    const { checks: _checks, mergeable: _mergeable, ...plan } = m;
-    ctx.waitUntil(writeCachedJson(key, plan, 31_536_000));
+}
+
+/**
+ * Records the guard run for a live change at `headSha` unless it has one:
+ * one read batch (repo, change, existing run), the guard's reads, one
+ * insert. Skips a change that moved on or left the live states.
+ */
+export async function recordGuard(env: Env, repoId: string, changeId: string, headSha: string): Promise<'recorded' | 'skipped'> {
+  const db = env.DB;
+  const [repoRes, changeRes, existing] = await db.batch([
+    db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
+    db.prepare('SELECT id, base_ref, head_sha, state FROM change_sets WHERE id = ? AND repo_id = ?').bind(changeId, repoId),
+    guardRunExists(db, repoId, changeId, headSha),
+  ]);
+  const repo = (repoRes?.results as RepoRow[] | undefined)?.[0];
+  const change = (changeRes?.results as Array<{ id: string; base_ref: string; head_sha: string | null; state: ChangeState }> | undefined)?.[0];
+  if (!repo || !change || change.head_sha !== headSha || !isLive({ state: change.state } as ChangeRow)) return 'skipped';
+  if ((existing?.results?.length ?? 0) > 0) return 'skipped';
+  const pending: Promise<unknown>[] = [];
+  try {
+    return await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+      const ctx = resolveCtx({ env, repo, waitUntil: (p) => pending.push(p) }, artifacts);
+      const baseRef = branchRef(change.base_ref);
+      const baseSha = (await lsRefs(ctx, [baseRef])).get(baseRef) ?? null;
+      if (!baseSha) return 'skipped' as const;
+      const commits = await resolveCommitish(ctx, [baseSha, headSha]);
+      const base = commits.get(baseSha);
+      const head = commits.get(headSha);
+      if (!base || !head) throw new RefStoreUnavailable(`commits of change ${changeId} could not be read`);
+      const started = Date.now();
+      const plan = await mergePlanFor(ctx, baseSha, headSha);
+      const summary = await guardFor(ctx, { baseSha, baseTree: base.tree, headTree: head.tree, mergeBase: plan.mergeBase });
+      await guardRunInsert(db, { repoId, changeId, headSha, treeSha: head.tree, summary, startedAt: started, now: Date.now() }).run();
+      return 'recorded' as const;
+    });
+  } finally {
+    await Promise.allSettled(pending);
   }
-  return m;
+}
+
+/**
+ * After a reported run on a live change's head: an `auto` change may now
+ * merge, and a queued one's train re-checks it.
+ */
+export async function resumeAfterCheck(
+  env: Env,
+  repoId: string,
+  change: { number: number; policy: string; baseRef: string; queued: boolean },
+  waitUntil: (p: Promise<unknown>) => void,
+): Promise<void> {
+  if (change.queued) await kickTrain(env, repoId, branchRef(change.baseRef), 'check-reported');
+  else if (change.policy === 'auto') await resumeAutoChanges(env, repoId, [change.number], waitUntil);
 }
 
 /** Live base tip and head trees, the compare rating and mergeability for an open change. */
@@ -635,14 +676,14 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       const head = commits.get(headSha);
       if (!base || !head) return fail(503, 'branch commits could not be read, retry shortly', 'STORAGE_UNAVAILABLE');
       // Conflict detection is eager: a change that conflicts is created `conflicted` with its resolve-conflict task.
-      const [rating, m] = await Promise.all([
-        treePairRating(ctx, base.tree, head.tree),
-        mergeabilityFor(ctx, defaultChecksGate(cx.env), baseSha, headSha),
-      ]);
-      return { ok: true as const, value: { baseSha, headSha, rating, m } };
+      const [pair, m] = await Promise.all([treePairBody(ctx, base.tree, head.tree), mergePlanFor(ctx, baseSha, headSha)]);
+      // The guard judges the change's own edits (merge base -> head) before the row exists, so its run lands in the same batch.
+      const guardStarted = Date.now();
+      const guard = await guardFor(ctx, { baseSha, baseTree: base.tree, headTree: head.tree, mergeBase: m.mergeBase, body: pair.body });
+      return { ok: true as const, value: { baseSha, headSha, headTree: head.tree, rating: pair.body.rating, m, guard, guardStarted } };
     });
     if (!resolved.ok) return resolved;
-    const { baseSha, headSha, rating, m } = resolved.value;
+    const { baseSha, headSha, headTree, rating, m, guard, guardStarted } = resolved.value;
 
     const now = Date.now();
     const id = crypto.randomUUID();
@@ -687,16 +728,25 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       ...(cx.branchRules && effectivePolicy(cx.branchRules, branchRef(p.base)).protected
         ? [recordMissingEscalation(cx.env.DB, id, 'protected-path', now)]
         : []),
+      guardRunInsert(cx.env.DB, { repoId: cx.repo.id, changeId: id, headSha, treeSha: headTree, summary: guard, startedAt: guardStarted, now }),
+      cx.env.DB.prepare(`SELECT ${CHECK_RUN_COLUMNS} FROM check_runs k WHERE k.change_set_id = ? ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHANGE_LIMITS.checksMax}`).bind(id),
       cx.env.DB.prepare(`${CHANGE_SELECT} WHERE c.id = ?`).bind(id),
     ]);
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(500, 'change could not be created', 'CREATE_FAILED');
+    let checks = ((results[results.length - 2]?.results as CheckRunRow[] | undefined) ?? []).map(checkRunView);
+    if (row.head_sha && row.head_sha !== headSha) {
+      // The insert adopted a push newer than the evaluated head; that push's hooks ran before the change existed.
+      await recordGuard(cx.env, cx.repo.id, row.id, row.head_sha);
+      const read = await listChangeChecks(cx.env, cx.repo, String(row.number));
+      if (read.ok) checks = read.value.checks;
+    }
     if (opts.admit) {
       const refused = await opts.admit({ id: row.id, number: row.number });
       if (refused) return refused;
     }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
-    return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks: [] } };
+    return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks } };
   });
 }
 
@@ -798,15 +848,15 @@ export interface MergeOutcome {
   merge: { kind: 'fast-forward' | 'merge'; mergeCommit: string; treeSha: string; previous: string; work: MergeWork };
 }
 
-/** The gate's answer per tree, asked once per merge attempt. */
+/** The gate's answer per tree (and subject head), asked once per merge attempt or train pass. */
 export function memoGate(inner: ChecksGate): ChecksGate {
   const seen = new Map<string, Promise<RequiredChecks>>();
   return {
-    requiredChecksFor(repo, treeSha, configId) {
-      const k = `${repo.id}:${treeSha}:${configId ?? ''}`;
+    requiredChecksFor(repo, treeSha, configId, subject) {
+      const k = `${repo.id}:${treeSha}:${configId ?? ''}:${subject?.headSha ?? ''}`;
       let p = seen.get(k);
       if (!p) {
-        p = inner.requiredChecksFor(repo, treeSha, configId);
+        p = inner.requiredChecksFor(repo, treeSha, configId, subject);
         seen.set(k, p);
       }
       return p;
@@ -1035,7 +1085,7 @@ async function performMerge(
         }
         return fail(prepared.status, prepared.error, prepared.code, prepared.conflicts ? { conflicts: conflictViews(prepared.conflicts).conflicts } : {});
       }
-      const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null);
+      const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null, { headSha: prepared.value.headSha });
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
       // The last change read runs after every asynchronous preparation step (checks, write token, pack).
@@ -1266,12 +1316,16 @@ export interface HeadMoved {
 }
 
 /**
- * Runs for every open change whose head moved to a pushed commit. Review
- * approvals and check producers register here to stale approvals and start
- * checks for the new head identity; none are registered yet.
+ * Runs for every open change whose head moved to a pushed commit, in order.
+ * The guard comes first, so hooks after it (the train kick of a queued
+ * change) and the auto merge that follows see the new head's guard run.
  */
 export type HeadMovedHook = (e: HeadMoved) => Promise<void>;
-export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [];
+export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
+  async (e) => {
+    await recordGuard(e.env, e.repoId, e.change.id, e.headSha);
+  },
+];
 
 async function repoWithRules(env: Env, repoId: string): Promise<{ repo: RepoRow; rules: BranchRule[] } | null> {
   const [repo, rules] = await env.DB.batch([
@@ -1396,13 +1450,12 @@ async function reevaluateConflicts(env: Env, repoId: string, scope: ConflictScop
     for (const r of rows) if (r.state === 'open') open.add(r.number);
     await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
-      const gate = defaultChecksGate(env);
       const bases = [...new Set(rows.map((r) => branchRef(r.base_ref)))];
       const tips = await lsRefs(ctx, bases);
       for (const row of rows) {
         const target = tips.get(branchRef(row.base_ref));
         if (!target || !row.head_sha) continue;
-        const m = await mergeabilityFor(ctx, gate, target, row.head_sha);
+        const m = await mergePlanFor(ctx, target, row.head_sha);
         const t = conflictTransition(row, m);
         if (!t) continue;
         writes.push(...transitionStatements(env.DB, repoId, { id: row.id, number: row.number, head_sha: row.head_sha }, t, now));

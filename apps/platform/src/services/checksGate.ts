@@ -3,10 +3,11 @@
  * queue and composition code learns which checks a tree must pass.
  *
  * Producers (guard, CI) register a factory in CHECKS_PRODUCERS and answer
- * for the exact tree and config identity being published. With none
- * registered the required set is empty and its state is `success`, so a
- * merge is gated by mergeability alone. Producers return only checks that
- * are required; non-required and quarantined runs never reach the gate.
+ * for the exact tree and config identity being published (and, for checks
+ * of a change's own edits, the head it publishes). With none registered the
+ * required set is empty and its state is `success`, so a merge is gated by
+ * mergeability alone. Producers return only checks that are required;
+ * non-required and quarantined runs never reach the gate.
  */
 
 export type CheckState = 'success' | 'pending' | 'failure';
@@ -32,19 +33,28 @@ export interface ChecksRepo {
   id: string;
 }
 
+/**
+ * The change head whose content the tree publishes (the merged or composed
+ * head). Producers that judge a change's own edits rather than the exact
+ * tree (the guard) answer for it; tree-exact producers ignore it.
+ */
+export interface ChecksSubject {
+  headSha: string;
+}
+
 export interface ChecksProducer {
   readonly name: string;
-  requiredChecksFor(repo: ChecksRepo, treeSha: string, configId: string | null): Promise<Array<Omit<RequiredCheck, 'producer'>>>;
+  requiredChecksFor(repo: ChecksRepo, treeSha: string, configId: string | null, subject?: ChecksSubject): Promise<Array<Omit<RequiredCheck, 'producer'>>>;
 }
 
 export interface ChecksGate {
-  requiredChecksFor(repo: ChecksRepo, treeSha: string, configId: string | null): Promise<RequiredChecks>;
+  requiredChecksFor(repo: ChecksRepo, treeSha: string, configId: string | null, subject?: ChecksSubject): Promise<RequiredChecks>;
 }
 
 export type ChecksProducerFactory = (env: Env) => ChecksProducer;
 
-/** Registered producers; empty until guard/CI land. */
-export const CHECKS_PRODUCERS: readonly ChecksProducerFactory[] = [];
+/** Registered producers (services/checks.ts registers the check-run producer behind forge/guard). */
+export const CHECKS_PRODUCERS: ChecksProducerFactory[] = [];
 
 export function rollupState(checks: readonly { state: CheckState }[]): CheckState {
   if (checks.some((c) => c.state === 'failure')) return 'failure';
@@ -54,9 +64,9 @@ export function rollupState(checks: readonly { state: CheckState }[]): CheckStat
 
 export function checksGate(producers: readonly ChecksProducer[]): ChecksGate {
   return {
-    async requiredChecksFor(repo, treeSha, configId) {
+    async requiredChecksFor(repo, treeSha, configId, subject) {
       const lists = await Promise.all(
-        producers.map(async (p) => (await p.requiredChecksFor(repo, treeSha, configId)).map((c) => ({ ...c, producer: p.name }))),
+        producers.map(async (p) => (await p.requiredChecksFor(repo, treeSha, configId, subject)).map((c) => ({ ...c, producer: p.name }))),
       );
       const required = lists.flat();
       return { treeSha, configId, required, state: rollupState(required) };

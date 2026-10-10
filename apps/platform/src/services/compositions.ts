@@ -375,7 +375,7 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     const commit = await buildCommit({ tree: treeSha, parents: [baseSha], author, committer, message: `${task}\n\n${lines.join('\n')}\n` });
 
     const gate = cx.gate ?? deps.gate(cx.env);
-    const checks = await gate.requiredChecksFor({ id: cx.repo.id }, treeSha, null);
+    const checks = await gate.requiredChecksFor({ id: cx.repo.id }, treeSha, null, { headSha: commit.hash });
     const conflict = semanticConflict(checks);
 
     const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref, oldOid: ZERO_SHA, newOid: commit.hash }, [commit, ...objects]);

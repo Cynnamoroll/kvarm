@@ -53,6 +53,7 @@ import {
   guarded,
   headWorkspaceSelect,
   liveHeadRefusal,
+  memoGate,
   mergeRefusal,
   mergedRecordStatements,
   parseNumber,
@@ -942,7 +943,8 @@ async function trainPass(
   // One ls-refs round trip reads the target tip and every window entry's live head branch.
   const tips = await lsRefs(ctx, [ref, ...new Set(rows.map((r) => branchRef(r.c_head_ref)))]);
   const target = tips.get(ref) ?? null;
-  const gate = deps.gate(env);
+  // Publication re-asks about the tree it prepared in this pass; the memo answers without another lookup.
+  const gate = memoGate(deps.gate(env));
   const policy = effectivePolicy(rules, ref);
   const overlay = new Map<string, GitObject>();
   const sources = overlaySources(artifactsMergeSources(ctx), overlay);
@@ -1101,7 +1103,7 @@ async function trainPass(
       continue;
     }
     plan.verifiedPins = kept.verified;
-    const checks = await gate.requiredChecksFor({ id: repo.id }, p.value.treeSha, null);
+    const checks = await gate.requiredChecksFor({ id: repo.id }, p.value.treeSha, null, { headSha: p.value.headSha });
     deps.observe?.({ type: 'checks', number: e.change_number, treeSha: p.value.treeSha, baseSha: p.value.targetSha, state: checks.state, leaseHeld: false, phase: 'prepare' });
     const ruleBlock = branchPolicyBlock(policy, checks);
     if (checks.state === 'failure' || ruleBlock?.code === 'REQUIRED_CHECKS_FAILED') {
@@ -1185,7 +1187,7 @@ async function trainPass(
       if (plan.next === 'checking' || plan.next === 'preparing') out.waiting = true;
       break;
     }
-    const r = await publishCandidate(env, ctx, repo, rules, ref, plan, owner, deps);
+    const r = await publishCandidate(env, ctx, repo, rules, ref, plan, owner, deps, gate);
     if (r.kind === 'published') {
       out.published.push(plan.e.change_number);
       out.progress = true;
@@ -1304,6 +1306,7 @@ async function publishCandidate(
   plan: Plan,
   owner: string,
   deps: TrainDeps,
+  gate: ChecksGate,
 ): Promise<PublishResult> {
   const db = env.DB;
   const e = plan.e;
@@ -1332,7 +1335,7 @@ async function publishCandidate(
       .run();
   };
 
-  const checks = await deps.gate(env).requiredChecksFor({ id: repo.id }, pv.treeSha, null);
+  const checks = await gate.requiredChecksFor({ id: repo.id }, pv.treeSha, null, { headSha: pv.headSha });
   deps.observe?.({ type: 'checks', number: e.change_number, treeSha: pv.treeSha, baseSha: pv.targetSha, state: checks.state, leaseHeld: false, phase: 'publish' });
   const checksVerdict = async (policy: BranchPolicy): Promise<PublishResult | null> => {
     const block = branchPolicyBlock(policy, checks);

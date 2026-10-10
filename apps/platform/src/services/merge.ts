@@ -309,9 +309,12 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
   return { status: 'clean', mergeBase: base, treeSha: m.treeHash, conflicts: [], resolved: m.resolved, objects: m.objects, work: mergeWork };
 }
 
-export async function computeMergeability(sources: MergeSources, gate: ChecksGate, input: MergeabilityInput): Promise<Mergeability> {
+/** Mergeability without the checks: the merge plan of a commit pair only. */
+export type MergePlanView = Omit<Mergeability, 'checks' | 'mergeable'>;
+
+/** The merge plan alone, for callers that need the merge outcome but not the required checks. */
+export async function computeMergePlan(sources: MergeSources, input: Omit<MergeabilityInput, 'repo' | 'configId'>): Promise<MergePlanView> {
   const p = await plan(sources, input.targetSha, input.headSha, input.budgets);
-  const checks = p.treeSha ? await gate.requiredChecksFor(input.repo, p.treeSha, input.configId ?? null) : null;
   return {
     targetSha: input.targetSha,
     headSha: input.headSha,
@@ -322,10 +325,14 @@ export async function computeMergeability(sources: MergeSources, gate: ChecksGat
     conflicts: p.conflicts,
     resolved: p.resolved,
     ...(p.unknownReason !== undefined ? { unknownReason: p.unknownReason } : {}),
-    checks,
-    mergeable: (p.status === 'fast-forward' || p.status === 'clean') && checks?.state === 'success',
     work: p.work,
   };
+}
+
+export async function computeMergeability(sources: MergeSources, gate: ChecksGate, input: MergeabilityInput): Promise<Mergeability> {
+  const p = await computeMergePlan(sources, input);
+  const checks = p.treeSha ? await gate.requiredChecksFor(input.repo, p.treeSha, input.configId ?? null, { headSha: input.headSha }) : null;
+  return { ...p, checks, mergeable: (p.status === 'fast-forward' || p.status === 'clean') && checks?.state === 'success' };
 }
 
 function planFailure(p: MergePlan): MergeResult<never> {
@@ -361,13 +368,20 @@ export async function prepareMerge(sources: MergeSources, input: PrepareInput): 
   return { ok: true, value: { kind: 'merge', ...common, mergeCommit: commit.hash, objects: [commit, ...p.objects] } };
 }
 
+function checkNames(checks: RequiredChecks, state: 'failure' | 'pending'): string {
+  return checks.required
+    .filter((c) => c.state === state)
+    .map((c) => c.name)
+    .join(', ');
+}
+
 export async function publishMerge(deps: PublishDeps, target: MergeTarget, prepared: PreparedMerge): Promise<MergeResult<MergePublished>> {
-  const checks = await deps.gate.requiredChecksFor(target.repo, prepared.treeSha, target.configId ?? null);
+  const checks = await deps.gate.requiredChecksFor(target.repo, prepared.treeSha, target.configId ?? null, { headSha: prepared.headSha });
   if (checks.state === 'failure') {
-    return { ok: false, status: 409, error: 'a required check failed', code: 'REQUIRED_CHECKS_FAILED', checks };
+    return { ok: false, status: 409, error: `required check ${checkNames(checks, 'failure')} failed`, code: 'REQUIRED_CHECKS_FAILED', checks };
   }
   if (checks.state === 'pending') {
-    return { ok: false, status: 409, error: 'required checks have not finished', code: 'REQUIRED_CHECKS_PENDING', checks };
+    return { ok: false, status: 409, error: `required check ${checkNames(checks, 'pending')} has not finished`, code: 'REQUIRED_CHECKS_PENDING', checks };
   }
 
   let update;

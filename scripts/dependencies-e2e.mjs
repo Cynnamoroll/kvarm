@@ -142,7 +142,7 @@ function commitOn(dir, from, files, msg) {
   mustGit(['checkout', '-q', '--detach', from], dir);
   writeFiles(dir, files);
   mustGit(['add', '-A'], dir);
-  mustGit(['-c', 'user.name=deps-e2e', '-c', 'user.email=deps-e2e@forge.invalid', 'commit', '-q', '-m', msg], dir);
+  mustGit(['commit', '-q', '-m', msg], dir);
   return mustGit(['rev-parse', 'HEAD'], dir);
 }
 
@@ -165,7 +165,7 @@ async function seed(repo) {
   mustGit(['init', '-q', '-b', 'main'], dir);
   writeFiles(dir, { 'README.md': `# ${repo}\n` });
   mustGit(['add', '-A'], dir);
-  mustGit(['-c', 'user.name=deps-e2e', '-c', 'user.email=deps-e2e@forge.invalid', 'commit', '-q', '-m', 'base'], dir);
+  mustGit(['commit', '-q', '-m', 'base'], dir);
   const main = mustGit(['rev-parse', 'HEAD'], dir);
   await pushRetry(dir, gitUrl(repo), ['main:refs/heads/main']);
   return { repo, dir, main, api: repoPath(repo), full: `${OWNER}/${repo}` };
@@ -465,15 +465,18 @@ await scenario(
     // A's head is force-moved to a commit that does not contain R, then A lands.
     const rewritten = await pushTo(other, a2, { 'a.txt': 'a rewritten\n' }, 'a rewritten', true, other.main);
     // Merge immediately after the push. Until the push event records the rewrite, the merge confirms the live
-    // head branch and refuses 409 HEAD_MOVED naming it; the client re-reads the change and merges again.
+    // head branch and refuses 409 HEAD_MOVED naming it; the client re-reads the change and merges again. The
+    // same event records the new head's forge/guard run, so the first merges after it refuse REQUIRED_CHECKS_PENDING.
     let ma2 = await merge(other, a2.number);
     const movedReplies = [];
-    for (let i = 0; i < 40 && ma2.status === 409 && ma2.json?.code === 'HEAD_MOVED'; i++) {
-      movedReplies.push(ma2);
+    const pendingReplies = [];
+    for (let i = 0; i < 40 && ma2.status === 409 && ['HEAD_MOVED', 'REQUIRED_CHECKS_PENDING'].includes(ma2.json?.code); i++) {
+      (ma2.json?.code === 'HEAD_MOVED' ? movedReplies : pendingReplies).push(ma2);
       await sleep(1500);
       await change(other, a2.number);
       ma2 = await merge(other, a2.number);
     }
+    if (pendingReplies.length) console.log(`merge a while forge/guard judged the rewritten head -> 409 REQUIRED_CHECKS_PENDING ×${pendingReplies.length}: ${pendingReplies[0].json?.error}`);
     if (movedReplies.length) console.log(`merge a right after the force-push -> 409 HEAD_MOVED ×${movedReplies.length}: ${movedReplies[0].text} (x-forge-cost ${cost('head moved', movedReplies[0])})`);
     else console.log('merge a right after the force-push -> no HEAD_MOVED (the push event had already recorded the rewrite)');
     check('VAL-DEP-007', '(b) an immediate merge after the force-push never publishes the previous head: HEAD_MOVED names the live rewrite', movedReplies.every((r) => r.json?.headSha === rewritten && r.json?.recordedHead === a2.head));

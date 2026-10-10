@@ -278,6 +278,16 @@ await scenario('policy', async (repo) => {
     autoState = (await http(`${api}/changes/${auto.json?.number}`)).json;
   }
   const clone = cloneMain(repo);
+  // Green checks: forge/guard (the checks-gate producer since m5-guard-check) passed on both heads.
+  const guardOf = async (n) => (await http(`${api}/changes/${n}/checks`)).json?.checks?.map((c) => `${c.name}:${c.status}`);
+  const draftChecks = await guardOf(draft.json?.number);
+  const autoChecks = await guardOf(auto.json?.number);
+  console.log(`checks: draft ${JSON.stringify(draftChecks)} (gate ${dm.json?.mergeability?.checks?.state}); auto ${JSON.stringify(autoChecks)}`);
+  check(
+    'VAL-CONFLICT-005',
+    'both changes have green required checks (forge/guard success; draft gate state success)',
+    JSON.stringify(draftChecks) === '["forge/guard:success"]' && JSON.stringify(autoChecks) === '["forge/guard:success"]' && dm.json?.mergeability?.checks?.state === 'success',
+  );
   check(
     'VAL-CONFLICT-005',
     'draft: resolvable (clean, mergeable) yet stays open over a 30 s poll and main is untouched by it',

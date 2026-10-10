@@ -81,13 +81,13 @@ export function actorJson(c: Context<App>, data: unknown, status = 200): Respons
 export async function authorizeRoute(
   c: Context<App>,
   need: RepoNeed,
-  opts: { requireActor?: boolean; allowAgent?: boolean; branchRules?: boolean } = {},
+  opts: { requireActor?: boolean; allowAgent?: boolean; branchRules?: boolean; transport?: 'api' | 'ci' } = {},
 ): Promise<RepoAccess> {
   return resolveRepoAccess(c.env, {
     owner: c.req.param('owner') ?? '',
     name: c.req.param('repo') ?? '',
     need,
-    transport: 'api',
+    transport: opts.transport ?? 'api',
     credential: await requestCredential(c),
     clientIp: clientIp(c),
     requireActor: opts.requireActor,

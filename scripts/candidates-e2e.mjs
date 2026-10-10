@@ -3,7 +3,7 @@
  * Live driver for candidate comparison, arenas and composition
  * (m6a-candidates-overlap): VAL-CAND-001..004/006, VAL-COST-015,
  * VAL-WORKFLOW-004, VAL-CROSS-010, VAL-ARENA-001..004, the candidates half of
- * VAL-COST-025 and VAL-COMPOSE-001..002.
+ * VAL-COST-025, VAL-COMPOSE-001..002 and (m5-guard-check) VAL-CAND-005.
  *
  * Every section runs in a fresh public repo owned by FORGE_USER (cynthia),
  * named `m6a-candidates-overlap-<section>-<timestamp>`, seeded and changed
@@ -25,10 +25,14 @@
  *            path selection from conflicting attempts, incompatible and
  *            partially compatible pairs refused with no ref or record
  *            (VAL-COMPOSE-001..002)
+ *   gate     two candidates with change sets, so forge/guard (the real
+ *            checks-gate producer) judges both heads; a required `test` run
+ *            reported failing on B and passing on A (POST check-runs, ci
+ *            scope) ranks A above B with B's failing check shown (VAL-CAND-005)
  *
  * Tokens come from env by NAME and are never printed:
  *   set -a; . apps/platform/.dev.vars.validation; set +a
- *   node scripts/candidates-e2e.mjs [--keep] [--only cand,bounds,arena,compose]
+ *   node scripts/candidates-e2e.mjs [--keep] [--only cand,bounds,arena,compose,gate]
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper; commits use the configured git identity.
  * Exit 0 only when every check held.
@@ -313,7 +317,8 @@ await scenario('cand', async (repo) => {
     JSON.stringify(rankOf),
   );
   check('VAL-CAND-004', 'two identical calls return byte-identical ranking arrays (and bodies)', eq(r1.json?.ranking, r2.json?.ranking) && r1.text === r2.text);
-  check('VAL-COST-015', 'second identical candidates call: art=0, do=0, d1 <= 2', r2.c.art === 0 && r2.c.do === 0 && r2.c.d1 <= 2, `#1 ${r1.cost} | #2 ${r2.cost}`);
+  // d1 = 3 since forge/guard made the checks gate read D1 (library/cost.md, warm candidates row).
+  check('VAL-COST-015', 'second identical candidates call: art=0, do=0, d1 <= 3', r2.c.art === 0 && r2.c.do === 0 && r2.c.d1 <= 3, `#1 ${r1.cost} | #2 ${r2.cost}`);
   const o1 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
   const o2 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
   console.log(`GET workspaces/overlap #1 (x-forge-cost ${o1.cost}) #2 (x-forge-cost ${o2.cost}) -> ${o2.text}`);
@@ -590,7 +595,7 @@ await scenario('compose', async (repo) => {
       k.workspace?.ref?.startsWith(`refs/heads/agents/${k.workspace.id}/`) &&
       Number.isInteger(k.changeSet) &&
       k.conflict === null &&
-      k.checks?.state === 'success',
+      k.checks?.required?.some((c) => c.name === 'forge/guard' && c.producer === 'check-runs'),
   );
   const rb = await http(`${api}/compositions/${k.id}`, { label: 'GET compositions/:id' });
   check('VAL-COMPOSE-001', 'GET compositions/:id reads back the same record', rb.status === 200 && rb.text === mk.text, rb.cost);
@@ -657,6 +662,57 @@ await scenario('compose', async (repo) => {
   const newRefs = Object.keys(after.refs).filter((r) => !(r in before.refs));
   console.log(`after refused compositions: compositions ${before.list} -> ${after.list}; new refs ${JSON.stringify(newRefs)}`);
   check('VAL-COMPOSE-002', 'no composition record and no ref created by the refused requests', after.list === before.list && newRefs.length === 0 && eq(after.refs, before.refs));
+});
+
+await scenario('gate', async (repo) => {
+  const env = await seeded(repo);
+  const { api } = env;
+  const A = await createWs(api, { task: 'gate A', agent: 'gate-a' });
+  const B = await createWs(api, { task: 'gate B', agent: 'gate-b' });
+  // Structurally alike edits, so nothing but the reported checks separates them.
+  const shaA = await pushWork(env, A, { 'src/a.ts': 'export const a = 1;\n' }, 'A');
+  const shaB = await pushWork(env, B, { 'src/b.ts': 'export const b = 1;\n' }, 'B');
+  for (const [name, ws] of [['A', A], ['B', B]]) {
+    const r = await http(`${api}/workspaces/${ws.id}/change-set`, { method: 'POST', json: { title: `gate ${name}` } });
+    console.log(`POST workspaces/${ws.id}/change-set -> ${r.status} #${r.json?.number} checks=${JSON.stringify(r.json?.checks?.map((c) => [c.name, c.headSha?.slice(0, 8), c.status]))}`);
+    if (r.status !== 201) throw new Error(`change set ${name} -> ${r.status} ${r.text}`);
+  }
+  const q = `${api}/candidates?base=main&workspaces=${A.id},${B.id}`;
+  const view = (r) =>
+    Object.fromEntries((r.json?.candidates ?? []).map((c) => [c.workspace === A.id ? 'A' : 'B', { state: c.checks?.state, required: c.checks?.required?.map((k) => `${k.name}:${k.state}:${k.producer}`) }]));
+  const order = (r) => (r.json?.ranking ?? []).map((e) => (e.workspace === A.id ? 'A' : 'B'));
+  const before = await http(q, { label: 'GET candidates (gate)' });
+  console.log(`before reports: ${before.status} checks=${JSON.stringify(view(before))} ranking=${JSON.stringify(order(before))} (x-forge-cost ${before.cost})`);
+  check(
+    'VAL-CAND-005',
+    'forge/guard is the real producer: both candidates carry forge/guard:success from check-runs before any report',
+    before.status === 200 && ['A', 'B'].every((k) => view(before)[k]?.state === 'success' && eq(view(before)[k].required, ['forge/guard:success:check-runs'])),
+    JSON.stringify(view(before)),
+  );
+
+  const failB = await http(`${api}/check-runs`, { method: 'POST', json: { headSha: shaB, name: 'test', conclusion: 'failure' }, label: 'POST check-runs' });
+  const passA = await http(`${api}/check-runs`, { method: 'POST', json: { headSha: shaA, name: 'test', conclusion: 'success' }, label: 'POST check-runs' });
+  console.log(`POST check-runs test=failure on B ${shaB.slice(0, 8)} -> ${failB.status} ${JSON.stringify(failB.json?.run && { name: failB.json.run.name, status: failB.json.run.status, required: failB.json.run.required })} (x-forge-cost ${failB.cost})`);
+  console.log(`POST check-runs test=success on A ${shaA.slice(0, 8)} -> ${passA.status} (x-forge-cost ${passA.cost})`);
+  check('VAL-CAND-005', 'required test runs recorded on both heads with the ci-scope PAT (201)', failB.status === 201 && passA.status === 201 && failB.json?.run?.required === true);
+  const after = await http(q, { label: 'GET candidates (gate)' });
+  const ranking = after.json?.ranking ?? [];
+  const entryB = ranking.find((e) => e.workspace === B.id);
+  console.log(`after reports: checks=${JSON.stringify(view(after))}\nranking=${JSON.stringify(ranking.map((e) => ({ ws: e.workspace === A.id ? 'A' : 'B', rank: e.rank, checks: e.factors.checks, failingChecks: e.factors.failingChecks })))}`);
+  check(
+    'VAL-CAND-005',
+    "A (guard + test passing) ranks strictly above B (test failing); B's entry shows the failing check",
+    after.status === 200 && eq(order(after), ['A', 'B']) && entryB?.factors?.checks === 'failure' && eq(entryB?.factors?.failingChecks, ['test']),
+  );
+  check(
+    'VAL-CAND-005',
+    "B's checks list forge/guard success from check-runs alongside test failure",
+    eq(view(after).B?.required, ['forge/guard:success:check-runs', 'test:failure:check-runs']) && view(after).A?.state === 'success',
+    JSON.stringify(view(after)),
+  );
+  const status = await http(`${api}/commits/${shaB}/status`, { label: 'GET commits/:sha/status' });
+  console.log(`GET commits/${shaB.slice(0, 8)}/status -> ${status.status} state=${status.json?.state} checks=${JSON.stringify(status.json?.checks?.map((c) => [c.name, c.status]))} (x-forge-cost ${status.cost})`);
+  check('VAL-CAND-005', "B's commit status rolls up to failure over forge/guard and test", status.status === 200 && status.json?.state === 'failure' && status.json?.total === 2);
 });
 
 rmSync(work, { recursive: true, force: true });

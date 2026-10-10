@@ -26,7 +26,8 @@
  * the fence and moves the change to the resolution and back to `open`; only
  * then is the change's head branch fast-forwarded to it and the resolution
  * attributed to the claimant. The change then follows its mergePolicy: `auto`
- * merges at once when mergeable (otherwise when its checks complete), `review`
+ * records the resolution's forge/guard run and merges at once when mergeable
+ * and checked (otherwise when its checks complete), `review`
  * waits for an explicit merge, `draft` never merges.
  */
 
@@ -43,12 +44,12 @@ import {
   changeSelect,
   changeView,
   guarded,
-  mergeabilityFor,
+  mergePlanFor,
+  recordGuard,
   resolveCtx,
   type ChangeRow,
   type ChangeView,
 } from './changes';
-import { defaultChecksGate } from './checksGate';
 import { conflictViews, type ConflictView } from './conflicts';
 import { claimFenced, releaseFenced, renewFenced } from './fencing';
 import { artifactsPusher, type GitPusher } from './gitwrite';
@@ -648,7 +649,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
       if (!anc.ancestor) {
         return fail(409, `the resolution ${resolution} does not contain the change's head ${oldHead}; merge the base into the head instead of rewriting it`, 'RESOLUTION_NOT_DESCENDANT');
       }
-      const m = await mergeabilityFor(ctx, defaultChecksGate(cx.env), baseTip, resolution);
+      const m = await mergePlanFor(ctx, baseTip, resolution);
       if (m.status === 'conflicts') {
         return fail(409, `the resolution still conflicts with ${row.change_base_ref} in ${m.conflicts.length} path(s)`, 'RESOLUTION_CONFLICTS', {
           conflicts: conflictViews(m.conflicts).conflicts,
@@ -766,6 +767,12 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
     await attributeCommit(cx, deps.pusher(cx.env, cx.repo), resolution, claimantAttribution, { replace: attribution !== null });
 
     if (change.merge_policy === 'auto') {
+      // The head branch's push event also records the guard; an auto change judged here merges now instead of then.
+      try {
+        await recordGuard(cx.env, cx.repo.id, change.id, resolution);
+      } catch (err) {
+        console.warn(JSON.stringify({ taskGuard: { repo: cx.repo.id, task: id, error: String(err).slice(0, 200) } }));
+      }
       change = (await autoMerge({ env: cx.env, repo: cx.repo, actor: cx.actor, branchRules: cx.branchRules ?? [], waitUntil: cx.waitUntil }, change)) ?? change;
     }
     return { ok: true, value: { task: taskView(after, now), change: changeView(change), headBranch } };
