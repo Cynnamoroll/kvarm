@@ -1363,6 +1363,7 @@ async function publishCandidate(
 
   let status: string;
   let who: { actor: Actor | null; denied: string | null } = { actor: null, denied: null };
+  let linked = true;
   try {
     let update: Awaited<ReturnType<GitPusher['prepareUpdate']>> | null = null;
     try {
@@ -1418,11 +1419,16 @@ async function publishCandidate(
     fence = { generation: claimedGen, state: 'publishing' };
 
     const row = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
-    const refused = mergeRefusal(row, 'explicit', plan.headSha) ?? workspaceAdmissionRefusal(row!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null);
+    const headWs = (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null;
+    const refused = mergeRefusal(row, 'explicit', plan.headSha) ?? workspaceAdmissionRefusal(row!, headWs);
     if (refused) {
       await release();
       return exit(refused.code ?? 'REFUSED', refused.error);
     }
+    // Pins sit on workspaces, and a workspace is only ever linked to a change opened from its own ref (neither a
+    // workspace's ref nor a change's head ref ever changes). No workspace at the head ref: none is or can become linked,
+    // so the landing has no pins to settle. A linked change keeps every pin statement: a pin can be written until the record.
+    linked = headWs !== null;
     who = enqueuerActor(repo, ref, (facts?.results as FactsRow[] | undefined)?.[0], (agentRes?.results as AgentRow[] | undefined)?.[0], e, deps.now());
     if (who.denied) {
       await release();
@@ -1506,6 +1512,7 @@ async function publishCandidate(
     { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha: plan.headSha },
     mergedAt,
     { queueId: e.id, generation: claimedGen },
+    { dependents: linked },
   );
   const recorded = await db.batch([
     db
@@ -1524,7 +1531,8 @@ async function publishCandidate(
     return { kind: 'lost' };
   }
   // After the recorded publication cost above: a settlement intent (exceptional path only) is not publication work.
-  await settleLanded(db, artifactsMergeSources(ctx), repo.id, recorded[record.length]?.results as LandedRow[] | undefined, pv.mergeCommit, {
+  const landed = linked ? (recorded[record.length]?.results as LandedRow[] | undefined) : undefined;
+  await settleLanded(db, artifactsMergeSources(ctx), repo.id, landed, pv.mergeCommit, {
     source: { changeSetId: e.change_set_id, mergedAt },
     ref,
     kick: (r, reason) => deps.kick(env, repo.id, r, reason),

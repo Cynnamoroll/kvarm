@@ -1901,6 +1901,154 @@ describe('integration train', () => {
     }
   });
 
+  /** The train publication's merged-record batch: the one whose first statement records the entry published. */
+  interface RecordedStatement {
+    sql: string;
+    result: D1Result;
+  }
+  function batchRecorder(real: D1Database): { db: D1Database; batches: RecordedStatement[][] } {
+    const sqlOf = new WeakMap<object, string>();
+    const batches: RecordedStatement[][] = [];
+    const tracked = (s: D1PreparedStatement, sql: string): D1PreparedStatement => {
+      const p = new Proxy(s, {
+        get(t, k) {
+          if (k === 'bind') return (...args: unknown[]) => tracked(t.bind(...args), sql);
+          const v = Reflect.get(t, k);
+          return typeof v === 'function' ? v.bind(t) : v;
+        },
+      });
+      sqlOf.set(p, sql);
+      return p;
+    };
+    const db = new Proxy(real, {
+      get(t, k) {
+        if (k === 'prepare') return (sql: string) => tracked(t.prepare(sql), sql);
+        if (k === 'batch') {
+          return async (stmts: D1PreparedStatement[]) => {
+            const out = await t.batch(stmts);
+            batches.push(stmts.map((s, i) => ({ sql: sqlOf.get(s) ?? '', result: out[i]! })));
+            return out;
+          };
+        }
+        const v = Reflect.get(t, k);
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    return { db, batches };
+  }
+  const isRecordBatch = (b: RecordedStatement[]) => b[0]?.sql.includes("SET state = 'published'") ?? false;
+  const DEPENDENCY_STATEMENTS = {
+    wakeMarks: (sql: string) => sql.includes('INSERT OR IGNORE INTO fenced_claims'),
+    satisfy: (sql: string) => sql.includes('UPDATE workspace_dependencies SET satisfied_commit'),
+    dependents: (sql: string) => sql.includes("'edge' AS kind"),
+  };
+  const dependencyStatementsOf = (b: RecordedStatement[]) =>
+    b.filter((s) => Object.values(DEPENDENCY_STATEMENTS).some((is) => is(s.sql)));
+
+  it('a train landing of a change no workspace is linked to composes no dependency statements in its merged-record batch', async () => {
+    const name = 'record-branch';
+    const { repo, main } = await seedRepo(name);
+    const head = await commit(repo, { 'README.md': 'readme\n', 'f.txt': 'f\n' }, [main]);
+    repo.refs.set('refs/heads/feature', head.sha);
+    const created = await call('POST', api(name, '/changes'), tok.owner, { title: 'branch change', base: 'main', head: 'feature', mergePolicy: 'review' });
+    expect(created.status, JSON.stringify(created.json)).toBe(201);
+    const n = created.json.number as number;
+    expect((await enqueue(name, n)).status).toBe(201);
+    const rec = batchRecorder(env.DB);
+    const deps = trainDeps();
+    const meter = new CostMeter();
+    const run = await runWithMeter(meter, () => runTrain(meter.wrapEnv({ ...env, DB: rec.db }), repoIds[name]!, MAIN, deps));
+    expect(run.published).toEqual([n]);
+    const records = rec.batches.filter(isRecordBatch);
+    expect(records).toHaveLength(1);
+    const record = records[0]!;
+    expect(dependencyStatementsOf(record).map((s) => s.sql.slice(0, 60))).toEqual([]);
+    // The rest of the merged record is unchanged: the change, its (absent) workspace, signals and conflict task.
+    expect(record.some((s) => s.sql.includes("UPDATE change_sets SET state = 'merged'") && s.result.meta.changes === 1)).toBe(true);
+    expect(record.some((s) => s.sql.includes("UPDATE workspaces SET status = 'merged'"))).toBe(true);
+    const merged = (await getChange(name, n)).json;
+    expect(merged).toMatchObject({ state: 'merged', mergeCommit: repo.refs.get(MAIN) });
+    expect(await wakeMarks(name)).toBe(0);
+    expect(sent.filter((m) => m.body?.reason === 'dependency-landed' || m.body?.type === 'forge.dependency-settle')).toEqual([]);
+    const recorded = deps.events.find((e): e is Extract<TrainEvent, { type: 'publish' }> => e.type === 'publish' && e.status === 'recorded');
+    expect(recorded?.cost).toMatchObject({ do: 2, sub: 2 });
+    expect(recorded!.cost!.d1).toBeLessThanOrEqual(3);
+    expect(recorded!.cost!.rr).toBeLessThanOrEqual(12);
+    expect(recorded!.cost!.rw).toBeLessThanOrEqual(8);
+  });
+
+  it('a train landing with pins on its head runs the wake-mark, satisfaction and landed-dependents statements in its merged-record batch', async () => {
+    const name = 'record-edges';
+    await seedRepo(name);
+    const a = await workspace(name, 'a.txt', { change: 'review' });
+    // c pins a's first head (settled by ancestry after the batch), b pins the head that lands (satisfied in the batch).
+    const c = await workspace(name, 'c.txt');
+    const older = (await pin(name, c.id, a.id, a.head)).json;
+    const landed = await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+    const b = await workspace(name, 'b.txt', { change: 'review' });
+    const edge = (await pin(name, b.id, a.id, landed)).json;
+    expect((await enqueue(name, b.change!)).status).toBe(201);
+    expect((await enqueue(name, a.change!)).status).toBe(201);
+    sent.length = 0;
+    const rec = batchRecorder(env.DB);
+    const first = await runTrain({ ...env, DB: rec.db }, repoIds[name]!, MAIN, trainDeps());
+    expect(first.published).toContain(a.change);
+    const records = rec.batches.filter(isRecordBatch);
+    const record = records[0]!;
+    const deps = dependencyStatementsOf(record);
+    expect(deps.map((s) => Object.entries(DEPENDENCY_STATEMENTS).find(([, is]) => is(s.sql))![0])).toEqual(['wakeMarks', 'satisfy', 'dependents']);
+    // They close the batch, in that order.
+    expect(record.slice(-3)).toEqual(deps);
+    const mergeCommit = (await getChange(name, a.change!)).json.mergeCommit as string;
+    expect(deps[0]!.result.meta.changes).toBe(1);
+    expect(deps[1]!.result.meta.changes).toBe(1);
+    const landedRows = deps[2]!.result.results as Array<{ kind: string; id: string; target_ref: string | null }>;
+    expect(landedRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'edge', id: older.id }),
+        expect.objectContaining({ kind: 'wake', id: expect.stringContaining(b.id), target_ref: MAIN }),
+      ]),
+    );
+    expect((await listDeps(name, b.id)).json.dependencies).toEqual([expect.objectContaining({ id: edge.id, state: 'satisfied', satisfiedBy: mergeCommit })]);
+    expect((await listDeps(name, c.id)).json.dependencies).toEqual([expect.objectContaining({ id: older.id, state: 'satisfied', satisfiedBy: mergeCommit })]);
+    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-landed' }));
+    expect(await wakeMarks(name)).toBe(0);
+    if (!first.published.includes(b.change!)) expect((await runTrain(env, repoIds[name]!, MAIN, trainDeps())).published).toEqual([b.change]);
+  });
+
+  it('a pin written on the source while it publishes is still satisfied by the landing', async () => {
+    const name = 'record-late-pin';
+    await seedRepo(name);
+    const a = await workspace(name, 'a.txt', { change: 'review' });
+    const b = await workspace(name, 'b.txt');
+    expect((await enqueue(name, a.change!)).status).toBe(201);
+    let late: Record<string, any> | null = null;
+    // After the publication's claim batch (which sees no pin on the source) and before the record batch.
+    const pusher: TrainDeps['pusher'] = (e, r) => {
+      const real = defaultTrainDeps.pusher(e, r);
+      return {
+        ...real,
+        async prepareUpdate(...args: Parameters<typeof real.prepareUpdate>) {
+          const update = await real.prepareUpdate(...args);
+          return {
+            ...update,
+            async send() {
+              const res = await pin(name, b.id, a.id, a.head);
+              expect(res.status, JSON.stringify(res.json)).toBe(201);
+              late = res.json;
+              return update.send();
+            },
+          };
+        },
+      };
+    };
+    const run = await runTrain(env, repoIds[name]!, MAIN, trainDeps({ pusher }));
+    expect(run.published).toEqual([a.change]);
+    expect(late).not.toBeNull();
+    const mergeCommit = (await getChange(name, a.change!)).json.mergeCommit as string;
+    expect((await listDeps(name, b.id)).json.dependencies).toEqual([expect.objectContaining({ id: late!.id, state: 'satisfied', satisfiedBy: mergeCommit })]);
+  });
+
   it('independent target partitions continue separately while a dependent waits', async () => {
     const { repo, main } = await seedRepo('partitions');
     repo.refs.set('refs/heads/dev', main);

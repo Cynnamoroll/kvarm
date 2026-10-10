@@ -934,6 +934,9 @@ export function workspaceAdmissionRefusal(row: ChangeRow, ws: HeadWorkspace | nu
  * it is still open at the published head and not a draft; its workspace and
  * index rows follow only when that guarded write landed. The first
  * statement's `meta.changes` tells whether the change was recorded.
+ * `dependents: false` leaves out the three pin statements that end the
+ * batch; only for a change that no workspace is, or can still become,
+ * linked to (they would find nothing).
  */
 export function mergedRecordStatements(
   db: D1Database,
@@ -942,6 +945,7 @@ export function mergedRecordStatements(
   pub: { mergeCommit: string; targetSha: string; headSha: string },
   mergedAt: number,
   queue?: { queueId: string; generation: number },
+  opts: { dependents?: boolean } = {},
 ): D1PreparedStatement[] {
   // A train publication records only while its queue entry was just written published at the publisher's generation.
   const fenced = queue ? `AND EXISTS (SELECT 1 FROM merge_queue q WHERE q.id = ?7 AND q.generation = ?8 AND q.state = 'published' AND q.merge_commit = ?3)` : '';
@@ -964,9 +968,13 @@ export function mergedRecordStatements(
     retireConflictTaskStatement(db, repoId, row.number, mergedAt),
     // Pins of the landed head are satisfied with the merge (each with its dependent's wake mark, written first under the
     // same predicate); the last statement finds the rest and the marks.
-    landedWakeMarksStatement(db, repoId, row.id, pub, mergedAt),
-    satisfyLandedStatement(db, repoId, row.id, pub, mergedAt),
-    landedDependentsStatement(db, repoId, row.id, mergedAt, pub.mergeCommit),
+    ...(opts.dependents === false
+      ? []
+      : [
+          landedWakeMarksStatement(db, repoId, row.id, pub, mergedAt),
+          satisfyLandedStatement(db, repoId, row.id, pub, mergedAt),
+          landedDependentsStatement(db, repoId, row.id, mergedAt, pub.mergeCommit),
+        ]),
   ];
 }
 
