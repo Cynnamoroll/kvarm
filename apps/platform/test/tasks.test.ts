@@ -444,3 +444,131 @@ describe('complete', () => {
     expect((await getTask('complete-moved', task.id)).json.status).toBe('claimed');
   });
 });
+
+describe('completion authority over the head branch', () => {
+  it('an agent token outside the head branch grant cannot advance it through completion', async () => {
+    const { repo, main, feature, task } = await dispatched('complete-scope', 'auto');
+    const agent = await agentToken('complete-scope', 'td-scoped');
+    const c = await claim('complete-scope', task.id, {}, agent.token);
+    expect(c.status, JSON.stringify(c.json)).toBe(200);
+    const res = await resolution(repo, feature.sha, main.sha);
+    repo.refs.set(c.json.workspace.ref, res.sha);
+    const denied = await complete('complete-scope', task.id, { generation: 1 }, agent.token);
+    expect([denied.status, denied.json.code]).toEqual([403, 'HEAD_REF_FORBIDDEN']);
+    expect(repo.refs.get(FEATURE)).toBe(feature.sha);
+    expect(repo.refs.get(MAIN)).toBe(main.sha);
+    expect((await getTask('complete-scope', task.id)).json).toMatchObject({ status: 'claimed', generation: 1 });
+    expect((await getChange('complete-scope')).json).toMatchObject({ state: 'conflicted', headSha: feature.sha });
+  });
+
+  it('a protected head branch is not fast-forwarded by completion', async () => {
+    const { repo, main, feature, task } = await dispatched('complete-protected', 'review');
+    const c = await claim('complete-protected', task.id, { agent: 'claude-code-1' });
+    const res = await resolution(repo, feature.sha, main.sha);
+    repo.refs.set(c.json.workspace.ref, res.sha);
+    expect((await call('POST', repoPath('complete-protected', '/branch-rules'), tok.owner, { pattern: 'feature' })).status).toBe(201);
+    const denied = await complete('complete-protected', task.id, { agent: 'claude-code-1', generation: 1 });
+    expect([denied.status, denied.json.code]).toEqual([409, 'HEAD_REF_PROTECTED']);
+    expect(repo.refs.get(FEATURE)).toBe(feature.sha);
+    expect((await getTask('complete-protected', task.id)).json.status).toBe('claimed');
+  });
+});
+
+describe('completion confirms the head branch', () => {
+  it('a failed head-branch update leaves the task claimed and retryable; the retry lands and an auto change merges', async () => {
+    const { repo, main, feature, task } = await dispatched('complete-retry', 'auto');
+    const c = await claim('complete-retry', task.id, { agent: 'claude-code-1' });
+    const res = await resolution(repo, feature.sha, main.sha);
+    repo.refs.set(c.json.workspace.ref, res.sha);
+    repo.hook = async (call) => {
+      if (call.startsWith(`receivePack:${FEATURE}:`)) repo.receivePackStatus = 503;
+    };
+    const failed = await complete('complete-retry', task.id, { agent: 'claude-code-1', generation: 1 });
+    repo.hook = null;
+    repo.receivePackStatus = null;
+    expect([failed.status, failed.json.code]).toEqual([502, 'HEAD_UPDATE_FAILED']);
+    expect(repo.refs.get(FEATURE)).toBe(feature.sha);
+    expect((await getTask('complete-retry', task.id)).json).toMatchObject({ status: 'claimed', generation: 1 });
+    expect((await getChange('complete-retry')).json).toMatchObject({ state: 'conflicted', headSha: feature.sha });
+
+    const done = await complete('complete-retry', task.id, { agent: 'claude-code-1', generation: 1 });
+    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    expect(done.json.headBranch).toMatchObject({ ref: FEATURE, updated: true });
+    expect(done.json.change).toMatchObject({ state: 'merged' });
+    expect(fileAt(repo, repo.refs.get(MAIN)!, 'src/app.ts')).toBe(RESOLVED);
+  });
+
+  it('a retry after the head branch already moved to the resolution finalizes instead of answering HEAD_MOVED', async () => {
+    const { repo, main, feature, task } = await dispatched('complete-landed', 'review');
+    const c = await claim('complete-landed', task.id, { agent: 'claude-code-1' });
+    const res = await resolution(repo, feature.sha, main.sha);
+    repo.refs.set(c.json.workspace.ref, res.sha);
+    // A previous attempt advanced the branch but did not record the completion.
+    repo.refs.set(FEATURE, res.sha);
+    const done = await complete('complete-landed', task.id, { agent: 'claude-code-1', generation: 1 });
+    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    expect(done.json.change).toMatchObject({ state: 'open', headSha: res.sha });
+    expect((await getTask('complete-landed', task.id)).json.status).toBe('completed');
+  });
+});
+
+describe('claims are fenced across the workspace ref creation', () => {
+  /** Pauses the n-th workspace ref creation until released. */
+  function pauseCreations(repo: FakeRepo, count: number) {
+    const gates = Array.from({ length: count }, () => {
+      let release!: () => void;
+      let reached!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const at = new Promise<void>((r) => (reached = r));
+      return { gate, at, release, reached };
+    });
+    let n = 0;
+    repo.hook = async (call) => {
+      if (!call.startsWith('receivePack:refs/heads/agents/')) return;
+      const g = gates[n++];
+      if (!g) return;
+      g.reached();
+      await g.gate;
+    };
+    return gates;
+  }
+
+  const agentRefs = (repo: FakeRepo) => [...repo.refs.keys()].filter((r) => r.startsWith('refs/heads/agents/'));
+
+  it('a holder whose lease was taken over during its ref creation persists nothing', async () => {
+    const { repo, task } = await dispatched('claim-takeover', 'review');
+    const [slow] = pauseCreations(repo, 1);
+    const first = claim('claim-takeover', task.id, { agent: 'claude-code-1', ttlSeconds: 1 });
+    await slow!.at;
+    await new Promise((r) => setTimeout(r, 1100));
+    const second = await claim('claim-takeover', task.id, { agent: 'claude-code-2', ttlSeconds: 120 });
+    expect(second.status, JSON.stringify(second.json)).toBe(200);
+    slow!.release();
+    const lost = await first;
+    repo.hook = null;
+    expect(lost.status).toBe(409);
+    expect((await getTask('claim-takeover', task.id)).json).toMatchObject({ status: 'claimed', claimedBy: 'claude-code-2', generation: 2, workspace: second.json.workspace.id });
+    expect(await workspaceCount('claim-takeover')).toBe(1);
+    expect(agentRefs(repo)).toEqual([second.json.workspace.ref]);
+  });
+
+  it('a superseded holder finishing first cannot record its claim over the current generation', async () => {
+    const { repo, task } = await dispatched('claim-order', 'review');
+    const [a, b] = pauseCreations(repo, 2);
+    const first = claim('claim-order', task.id, { agent: 'claude-code-1', ttlSeconds: 1 });
+    await a!.at;
+    await new Promise((r) => setTimeout(r, 1100));
+    const second = claim('claim-order', task.id, { agent: 'claude-code-2', ttlSeconds: 120 });
+    await b!.at;
+    a!.release();
+    const lost = await first;
+    expect(lost.status).toBe(409);
+    expect((await getTask('claim-order', task.id)).json.claimedBy).not.toBe('claude-code-1');
+    b!.release();
+    const won = await second;
+    repo.hook = null;
+    expect(won.status, JSON.stringify(won.json)).toBe(200);
+    expect((await getTask('claim-order', task.id)).json).toMatchObject({ status: 'claimed', claimedBy: 'claude-code-2', generation: 2 });
+    expect(await workspaceCount('claim-order')).toBe(1);
+  });
+});

@@ -23,7 +23,7 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
-import { effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
+import { effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
 import { treePairRating } from './compare';
 import {
@@ -31,6 +31,7 @@ import {
   changeDependenciesStatement,
   changeNumberDependenciesStatement,
   landedDependentsStatement,
+  preservationRefusal,
   satisfyLandedStatement,
   settleLanded,
   type DependencyRow,
@@ -52,6 +53,7 @@ import { changeSignalCleanup } from './intents/store';
 import {
   artifactsMergeSources,
   computeMergeability,
+  overlaySources,
   prepareMerge,
   publishMerge,
   type Mergeability,
@@ -497,9 +499,12 @@ function isLive(row: ChangeRow): boolean {
 }
 
 /** The row after the conflict transition (services/conflicts.ts) this evaluation of its head calls for. */
-async function reconciled(env: Env, repoId: string, row: ChangeRow, m: Mergeability): Promise<ChangeRow> {
-  const after = await reconcileConflicts(env, repoId, row, m);
-  return after ? { ...row, ...after } : row;
+async function reconciled(cx: ChangeContext, row: ChangeRow, m: Mergeability): Promise<ChangeRow> {
+  const after = await reconcileConflicts(cx.env, cx.repo.id, row, m);
+  if (!after) return row;
+  // A base that moved past the conflict reopens an auto change here when a read sees it first; it then merges on its own.
+  if (after.state === 'open' && row.merge_policy === 'auto') cx.waitUntil(resumeAutoChanges(cx.env, cx.repo.id, [row.number], (p) => cx.waitUntil(p)));
+  return { ...row, ...after };
 }
 
 /** GET changes/:number — the change, its rating and mergeability (open changes) and check runs. */
@@ -513,7 +518,7 @@ export function getChange(cx: ChangeContext, rawNumber: string): Promise<Service
     if (!isLive(row)) return { ok: true, value: { ...changeView(row), rating: storedRating(row), mergeability: null, checks } };
     return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const live = await liveState(resolveCtx(cx, artifacts), defaultChecksGate(cx.env), row);
-      const current = live.mergeability ? await reconciled(cx.env, cx.repo.id, row, live.mergeability) : row;
+      const current = live.mergeability ? await reconciled(cx, row, live.mergeability) : row;
       const view = changeView(current);
       return {
         ok: true,
@@ -549,7 +554,7 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
       const base = resolved.get(baseName);
       if (!base) return fail(409, `base branch ${row.base_ref} no longer exists`, 'BASE_NOT_FOUND');
       const m = await mergeabilityFor(ctx, defaultChecksGate(cx.env), base.sha, row.head_sha!);
-      const current = await reconciled(cx.env, cx.repo.id, row, m);
+      const current = await reconciled(cx, row, m);
       return { ok: true, value: { number: row.number, state: current.state, mergeability: mergeabilityView(m) } };
     });
   });
@@ -934,14 +939,17 @@ export function mergedRecordStatements(
   row: Pick<ChangeRow, 'id' | 'number'>,
   pub: { mergeCommit: string; targetSha: string; headSha: string },
   mergedAt: number,
+  queue?: { queueId: string; generation: number },
 ): D1PreparedStatement[] {
+  // A train publication records only while its queue entry was just written published at the publisher's generation.
+  const fenced = queue ? `AND EXISTS (SELECT 1 FROM merge_queue q WHERE q.id = ?7 AND q.generation = ?8 AND q.state = 'published' AND q.merge_commit = ?3)` : '';
   return [
     db
       .prepare(
         `UPDATE change_sets SET state = 'merged', merge_commit = ?3, merged_at = ?4, updated_at = ?4, base_sha = ?5, conflicts = NULL
-          WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft'`,
+          WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted') AND head_sha = ?6 AND merge_policy != 'draft' ${fenced}`,
       )
-      .bind(repoId, row.number, pub.mergeCommit, mergedAt, pub.targetSha, pub.headSha),
+      .bind(repoId, row.number, pub.mergeCommit, mergedAt, pub.targetSha, pub.headSha, ...(queue ? [queue.queueId, queue.generation] : [])),
     // The workspace the change was opened from (services/workspaces.ts) follows it, only when the guarded write above landed.
     db
       .prepare(
@@ -1019,28 +1027,40 @@ async function performMerge(
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
       // The last change read runs after every asynchronous preparation step (checks, write token, pack).
-      const verdict: { refusal: Fail | null; facts: ReviewFacts | null } = { refusal: null, facts: null };
+      const verdict: { refusal: Fail | null; facts: ReviewFacts | null; policy: BranchPolicy } = { refusal: null, facts: null, policy };
       const beforeSend = async () => {
-        const [change, ws, reviews, pins] = await cx.env.DB.batch([
+        const [change, ws, reviews, pins, rulesRes] = await cx.env.DB.batch([
           changeSelect(cx.env.DB, cx.repo.id, row.number),
           headWorkspaceSelect(cx.env.DB, cx.repo.id, row.number),
           // Approvals are revalidated against the exact head immediately before publication.
           reviewFactsSelect(cx.env.DB, cx.repo.id, row.number),
           changeDependenciesStatement(cx.env.DB, cx.repo.id, row.id),
+          // Rules raised or added since the authorization apply to this publication.
+          repoBranchRulesSelect(cx.env.DB, cx.repo.id),
         ]);
         const current = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
         verdict.facts = parseReviewFacts((reviews?.results as ReviewFactsRow[] | undefined)?.[0]);
+        verdict.policy = effectivePolicy(((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow), targetRef);
+        const pinsNow = pins?.results as DependencyRow[] | undefined;
         verdict.refusal =
           mergeRefusal(current, mode, headSha) ??
           workspaceAdmissionRefusal(current!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null) ??
-          reviewGate(verdict.facts, policy).block ??
-          dependencyRefusal(pins?.results as DependencyRow[] | undefined);
+          reviewGate(verdict.facts, verdict.policy).block ??
+          branchPolicyBlock(verdict.policy, checks) ??
+          dependencyRefusal(pinsNow);
+        if (!verdict.refusal && pinsNow?.some((p) => p.satisfied_commit)) {
+          // A satisfied pin must be contained in this very publication, not only in some earlier landing.
+          const objects = new Map(prepared.value.objects.map((o) => [o.hash, o]));
+          const kept = await preservationRefusal(overlaySources(sources, objects), pinsNow, prepared.value.mergeCommit).catch(() => null);
+          const r = kept?.refusal;
+          verdict.refusal = kept ? (r ? fail(r.status, r.error, r.code, { dependencies: r.dependencies }) : null) : fail(503, 'could not read the pinned revisions to verify they are preserved', 'MERGE_READ_FAILED');
+        }
         return verdict.refusal === null;
       };
       const published = await publishMerge({ pusher, gate, beforeSend }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);
       if (verdict.refusal) {
         // A review refusal records the escalations it found missing.
-        if (verdict.refusal.review && verdict.facts) return (await reviewRefusal(cx.env, row.id, verdict.facts, policy)) ?? verdict.refusal;
+        if (verdict.refusal.review && verdict.facts) return (await reviewRefusal(cx.env, row.id, verdict.facts, verdict.policy)) ?? verdict.refusal;
         return verdict.refusal;
       }
       let ok = published.ok;
@@ -1066,7 +1086,11 @@ async function performMerge(
         cx.repo.id,
         recorded[record.length - 1]?.results as LandedRow[] | undefined,
         pv.mergeCommit,
-        (ref, reason) => kickTrain(cx.env, cx.repo.id, ref, reason),
+        {
+          source: { changeSetId: row.id, mergedAt },
+          kick: (ref, reason) => kickTrain(cx.env, cx.repo.id, ref, reason),
+          resume: async (numbers) => cx.waitUntil(resumeAutoChanges(cx.env, cx.repo.id, numbers, cx.waitUntil)),
+        },
       );
       if (pv.kind === 'merge') {
         // The merge commit is Forge's own, so it carries the merging principal; a fast-forward publishes the author's commit untouched.
@@ -1271,43 +1295,84 @@ export async function mergeReadyAutoChanges(
 }
 
 /**
- * Re-evaluates the conflict state (services/conflicts.ts) of the given live
- * changes at their current heads against their base tips: two D1 reads, the
+ * Attempts the merge of the given open `auto` changes (a finite set), one
+ * bounded page of AUTO_MERGE_PAGE at a time. Every gate is re-checked by
+ * the merge itself; changes that are not open `auto` are skipped.
+ */
+export async function resumeAutoChanges(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<number[]> {
+  const merged: number[] = [];
+  for (let after: number | null = 0; numbers.length > 0 && after !== null; ) {
+    const pass: AutoMergePass = await mergeReadyAutoChanges(env, repoId, numbers, waitUntil, { after });
+    merged.push(...pass.merged);
+    after = pass.next;
+  }
+  return merged;
+}
+
+/** Which live changes a conflict re-evaluation covers. */
+type ConflictScope = { numbers: number[] } | { conflictedAutoOnBase: string };
+
+/**
+ * Re-evaluates the conflict state (services/conflicts.ts) of the scoped live
+ * changes at their current heads against their base tips, in pages of
+ * AUTO_MERGE_PAGE by number until none remain: per page two D1 reads, the
  * cached merge plans, and one batch with the transitions (none when nothing
  * changed). Returns the numbers now open.
  */
-async function reevaluateConflicts(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<number[]> {
-  const [repoRead, changeRead] = await env.DB.batch([
-    env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
-    env.DB.prepare(
-      `${CHANGE_SELECT} WHERE c.repo_id = ?1 AND c.state IN ('open', 'conflicted') AND c.number IN (SELECT value FROM json_each(?2))
-        ORDER BY c.number LIMIT ${AUTO_MERGE_PAGE}`,
-    ).bind(repoId, JSON.stringify(numbers)),
-  ]);
-  const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
-  const rows = (changeRead?.results as ChangeRow[] | undefined) ?? [];
-  if (!repo || rows.length === 0) return [];
-  const now = Date.now();
-  const writes: D1PreparedStatement[] = [];
-  const open = new Set(rows.filter((r) => r.state === 'open').map((r) => r.number));
-  await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
-    const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
-    const gate = defaultChecksGate(env);
-    const bases = [...new Set(rows.map((r) => branchRef(r.base_ref)))];
-    const tips = await lsRefs(ctx, bases);
-    for (const row of rows) {
-      const target = tips.get(branchRef(row.base_ref));
-      if (!target || !row.head_sha) continue;
-      const m = await mergeabilityFor(ctx, gate, target, row.head_sha);
-      const t = conflictTransition(row, m);
-      if (!t) continue;
-      writes.push(...transitionStatements(env.DB, repoId, { id: row.id, number: row.number, head_sha: row.head_sha }, t, now));
-      if (t.kind === 'clear') open.add(row.number);
-      else open.delete(row.number);
-    }
-  });
-  if (writes.length > 0) await env.DB.batch(writes);
+async function reevaluateConflicts(env: Env, repoId: string, scope: ConflictScope, waitUntil: (p: Promise<unknown>) => void): Promise<number[]> {
+  const where =
+    'numbers' in scope
+      ? `c.state IN ('open', 'conflicted') AND c.number IN (SELECT value FROM json_each(?2))`
+      : `c.state = 'conflicted' AND c.merge_policy = 'auto' AND c.base_ref = ?2`;
+  const param = 'numbers' in scope ? JSON.stringify(scope.numbers) : scope.conflictedAutoOnBase;
+  const open = new Set<number>();
+  for (let after = 0; ; ) {
+    const [repoRead, changeRead] = await env.DB.batch([
+      env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
+      env.DB.prepare(`${CHANGE_SELECT} WHERE c.repo_id = ?1 AND ${where} AND c.number > ?3 ORDER BY c.number LIMIT ${AUTO_MERGE_PAGE}`).bind(
+        repoId,
+        param,
+        after,
+      ),
+    ]);
+    const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
+    const rows = (changeRead?.results as ChangeRow[] | undefined) ?? [];
+    if (!repo || rows.length === 0) break;
+    const now = Date.now();
+    const writes: D1PreparedStatement[] = [];
+    for (const r of rows) if (r.state === 'open') open.add(r.number);
+    await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+      const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
+      const gate = defaultChecksGate(env);
+      const bases = [...new Set(rows.map((r) => branchRef(r.base_ref)))];
+      const tips = await lsRefs(ctx, bases);
+      for (const row of rows) {
+        const target = tips.get(branchRef(row.base_ref));
+        if (!target || !row.head_sha) continue;
+        const m = await mergeabilityFor(ctx, gate, target, row.head_sha);
+        const t = conflictTransition(row, m);
+        if (!t) continue;
+        writes.push(...transitionStatements(env.DB, repoId, { id: row.id, number: row.number, head_sha: row.head_sha }, t, now));
+        if (t.kind === 'clear') open.add(row.number);
+        else open.delete(row.number);
+      }
+    });
+    if (writes.length > 0) await env.DB.batch(writes);
+    if (rows.length < AUTO_MERGE_PAGE) break;
+    after = rows[rows.length - 1]!.number;
+  }
   return [...open];
+}
+
+/**
+ * Push-event effect body for a branch that is the base of conflicted `auto`
+ * changes: re-evaluates them against the new tip and merges those the move
+ * cleared (every gate is re-checked by the merge).
+ */
+export async function onBasePushed(env: Env, repoId: string, branch: string, waitUntil: (p: Promise<unknown>) => void): Promise<{ state: 'done'; detail: string }> {
+  const reopened = await reevaluateConflicts(env, repoId, { conflictedAutoOnBase: branch }, waitUntil);
+  const merged = reopened.length > 0 ? await resumeAutoChanges(env, repoId, reopened, waitUntil) : [];
+  return { state: 'done', detail: `base: reopened ${reopened.length}, auto-merged ${merged.length}` };
 }
 
 /**
@@ -1332,15 +1397,9 @@ export async function onHeadPushed(
     for (const hook of HEAD_MOVED_HOOKS) await hook({ env, repoId, change, headSha: after });
   }
   const evaluate = moved.filter((c) => c.state === 'conflicted' || c.policy !== 'auto').map((c) => c.number);
-  const reopened = evaluate.length > 0 ? new Set(await reevaluateConflicts(env, repoId, evaluate, waitUntil)) : new Set<number>();
+  const reopened = evaluate.length > 0 ? new Set(await reevaluateConflicts(env, repoId, { numbers: evaluate }, waitUntil)) : new Set<number>();
   const auto = moved.filter((c) => c.policy === 'auto' && (c.state !== 'conflicted' || reopened.has(c.number))).map((c) => c.number);
-  const merged: number[] = [];
-  // The moved changes are a finite set from the ingest batch; each pass is one bounded page of them.
-  for (let after: number | null = 0; auto.length > 0 && after !== null; ) {
-    const pass: AutoMergePass = await mergeReadyAutoChanges(env, repoId, auto, waitUntil, { after });
-    merged.push(...pass.merged);
-    after = pass.next;
-  }
+  const merged = await resumeAutoChanges(env, repoId, auto, waitUntil);
   const parts = [`heads ${moved.map((c) => `#${c.number}`).join(',')}`];
   if (auto.length > 0) parts.push(`auto-merged ${merged.length ? merged.map((n) => `#${n}`).join(',') : 'none'}`);
   return { state: 'done', detail: parts.join('; ') };

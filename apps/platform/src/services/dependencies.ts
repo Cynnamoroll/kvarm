@@ -21,6 +21,7 @@
 import type { ServiceResult } from '../repos/service';
 import { DEPENDENCY_LIMITS, dependencyRowsStatement, dependencyView, type DependencyRow, type DependencyView } from './dependencyGate';
 import { RefStoreUnavailable } from './refs';
+import { resumeAutoChanges } from './changes';
 import { kickTrain } from './trainKick';
 import { WORKSPACE_ID_RE, agentOwnershipDenial, liveRefs, newId, type WorkspaceContext } from './workspaces';
 
@@ -36,9 +37,13 @@ function fail(status: number, error: string, code: string, extra: Record<string,
 
 export interface DependencyDeps {
   kick(env: Env, repoId: string, ref: string, reason: string): Promise<void>;
+  resume(env: Env, repoId: string, numbers: number[], waitUntil: (p: Promise<unknown>) => void): Promise<unknown>;
 }
 
-export const defaultDependencyDeps: DependencyDeps = { kick: (env, repoId, ref, reason) => kickTrain(env, repoId, ref, reason) };
+export const defaultDependencyDeps: DependencyDeps = {
+  kick: (env, repoId, ref, reason) => kickTrain(env, repoId, ref, reason),
+  resume: (env, repoId, numbers, waitUntil) => resumeAutoChanges(env, repoId, numbers, waitUntil),
+};
 
 // ---------------------------------------------------------------------------
 // Reads
@@ -105,7 +110,7 @@ function downWalk(db: D1Database, repoId: string, start: string): D1PreparedStat
          LEFT JOIN workspace_dependencies y2 ON y2.repo_id = y1.repo_id AND y2.workspace_id = y1.on_workspace
          LEFT JOIN workspace_dependencies y3 ON y3.repo_id = y1.repo_id AND y3.workspace_id = y2.on_workspace
         WHERE y1.repo_id = ?1 AND y1.workspace_id = ?2
-        LIMIT ${DEPENDENCY_LIMITS.walkMax}`,
+        LIMIT ${DEPENDENCY_LIMITS.walkMax + 1}`,
     )
     .bind(repoId, start);
 }
@@ -119,7 +124,7 @@ function upWalk(db: D1Database, repoId: string, start: string): D1PreparedStatem
          LEFT JOIN workspace_dependencies y2 ON y2.repo_id = y1.repo_id AND y2.on_workspace = y1.workspace_id
          LEFT JOIN workspace_dependencies y3 ON y3.repo_id = y1.repo_id AND y3.on_workspace = y2.workspace_id
         WHERE y1.repo_id = ?1 AND y1.on_workspace = ?2
-        LIMIT ${DEPENDENCY_LIMITS.walkMax}`,
+        LIMIT ${DEPENDENCY_LIMITS.walkMax + 1}`,
     )
     .bind(repoId, start);
 }
@@ -131,14 +136,62 @@ const NO_PATH_BACK = `NOT EXISTS (
     LEFT JOIN workspace_dependencies y3 ON y3.repo_id = y1.repo_id AND y3.workspace_id = y2.on_workspace
    WHERE y1.repo_id = ?1 AND y1.workspace_id = ?4 AND ?3 IN (y1.on_workspace, y2.on_workspace, y3.on_workspace))`;
 
-/** The queue partition of the dependent's change while it is queued (to kick when its pins change). */
+// The hop conditions use CROSS JOIN because SQLite then keeps the written
+// join order, starting from the bound workspace instead of scanning the repo's edges.
+
+/** SQL condition: a chain of `hops` pins leads up to workspace `ws` (its dependents' dependents...). */
+function upHops(hops: number, ws: string): string {
+  const joins = Array.from({ length: hops - 1 }, (_, i) => `CROSS JOIN workspace_dependencies u${i + 2} ON u${i + 2}.repo_id = u${i + 1}.repo_id AND u${i + 2}.on_workspace = u${i + 1}.workspace_id`);
+  return `EXISTS (SELECT 1 FROM workspace_dependencies u1 ${joins.join(' ')} WHERE u1.repo_id = ?1 AND u1.on_workspace = ${ws})`;
+}
+
+/** SQL condition: a chain of `hops` pins leads down from workspace `ws` (its sources' sources...). */
+function downHops(hops: number, ws: string): string {
+  const joins = Array.from({ length: hops - 1 }, (_, i) => `CROSS JOIN workspace_dependencies v${i + 2} ON v${i + 2}.repo_id = v${i + 1}.repo_id AND v${i + 2}.workspace_id = v${i + 1}.on_workspace`);
+  return `EXISTS (SELECT 1 FROM workspace_dependencies v1 ${joins.join(' ')} WHERE v1.repo_id = ?1 AND v1.workspace_id = ${ws})`;
+}
+
+/**
+ * SQL condition, checked atomically with the write of an edge dependent ?3
+ * → source ?4: the chain through the edge stays within maxDepth workspaces
+ * (hops above the dependent plus hops below the source at most maxDepth - 2).
+ * Graphs written by concurrent requests are judged as they are at the write.
+ */
+const WITHIN_DEPTH = (() => {
+  const room = DEPENDENCY_LIMITS.maxDepth - 2;
+  const terms: string[] = [];
+  for (let up = 0; up <= room + 1; up++) {
+    const down = room + 1 - up;
+    const parts = [...(up > 0 ? [upHops(up, '?3')] : []), ...(down > 0 ? [downHops(down, '?4')] : [])];
+    terms.push(`(${parts.join(' AND ')})`);
+  }
+  return `NOT (${terms.join(' OR ')})`;
+})();
+
+/** SQL condition: dependent ?3 has fewer than maxDirect pins (for a new edge, at the write). */
+const WITHIN_DIRECT = `(SELECT COUNT(*) FROM workspace_dependencies x WHERE x.repo_id = ?1 AND x.workspace_id = ?3) < ${DEPENDENCY_LIMITS.maxDirect}`;
+
+/**
+ * What to wake when the dependent's pins change: the queue partition of its
+ * change while it is queued, or the change's number while it is an open
+ * `auto` change outside the queue.
+ */
 function queuedPartition(db: D1Database, repoId: string, workspaceId: string): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT q.target_ref FROM workspaces w JOIN merge_queue q ON q.change_set_id = w.change_set_id AND q.active = 1
-        WHERE w.repo_id = ?1 AND w.id = ?2`,
+      `SELECT q.target_ref, NULL AS number FROM workspaces w JOIN merge_queue q ON q.change_set_id = w.change_set_id AND q.active = 1
+        WHERE w.repo_id = ?1 AND w.id = ?2
+       UNION ALL
+       SELECT NULL AS target_ref, c.number FROM workspaces w JOIN change_sets c ON c.id = w.change_set_id
+        WHERE w.repo_id = ?1 AND w.id = ?2 AND c.state = 'open' AND c.merge_policy = 'auto'
+          AND NOT EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)`,
     )
     .bind(repoId, workspaceId);
+}
+
+interface WakeRow {
+  target_ref: string | null;
+  number: number | null;
 }
 
 function ownEdges(db: D1Database, repoId: string, workspaceId: string): D1PreparedStatement {
@@ -152,6 +205,29 @@ function sourceHead(row: SourceRow): string | null {
 }
 
 const results = <T>(r: D1Result | undefined): T[] => (r?.results as T[] | undefined) ?? [];
+
+/**
+ * A walk that returned more paths than its budget is incomplete: the depth
+ * and cycle checks would judge a prefix of the graph, so the pin is refused
+ * (the write guard would refuse an actually too deep edge anyway, but only
+ * with a generic conflict).
+ */
+function walkOverflow(rows: PathRow[], around: string, dependent: string, source: string): Fail | null {
+  if (rows.length <= DEPENDENCY_LIMITS.walkMax) return null;
+  return fail(
+    422,
+    `the dependency chains around workspace ${around} have more than ${DEPENDENCY_LIMITS.walkMax} paths, too many to validate the edge ${dependent} -> ${source}; detach dependencies of the workspaces around ${around}, or pin another source`,
+    'DEPENDENCY_GRAPH_TOO_WIDE',
+    { walkMax: DEPENDENCY_LIMITS.walkMax, workspaceId: around, edge: { workspaceId: dependent, onWorkspace: source } },
+  );
+}
+
+const graphChanged = (what: string) =>
+  fail(
+    409,
+    `${what}, or the dependency graph changed meanwhile so that the edge would exceed the depth or direct-dependency limits or close a cycle; retry to see the exact reason`,
+    'DEPENDENCY_CONFLICT',
+  );
 
 /** Walk rows as workspace paths starting at `start`; a lone `[start]` when it has no pins. */
 function paths(start: string, rows: PathRow[]): string[][] {
@@ -270,10 +346,18 @@ function isUnique(err: unknown): boolean {
   return /UNIQUE constraint failed/i.test(String(err));
 }
 
-async function kickPartition(cx: WorkspaceContext, deps: DependencyDeps, rows: Array<{ target_ref: string }>): Promise<void> {
+async function kickPartition(cx: WorkspaceContext, deps: DependencyDeps, rows: WakeRow[]): Promise<void> {
   for (const r of rows) {
-    await deps.kick(cx.env, cx.repo.id, r.target_ref, 'dependency-changed').catch((err: unknown) => {
-      console.warn(JSON.stringify({ trainKickFailed: String(err).slice(0, 200) }));
+    if (r.target_ref) {
+      await deps.kick(cx.env, cx.repo.id, r.target_ref, 'dependency-changed').catch((err: unknown) => {
+        console.warn(JSON.stringify({ trainKickFailed: String(err).slice(0, 200) }));
+      });
+    }
+  }
+  const autos = rows.filter((r) => r.number !== null).map((r) => r.number!);
+  if (autos.length > 0) {
+    await deps.resume(cx.env, cx.repo.id, autos, (p) => cx.waitUntil(p)).catch((err: unknown) => {
+      console.warn(JSON.stringify({ dependencyResumeFailed: String(err).slice(0, 200) }));
     });
   }
 }
@@ -340,7 +424,11 @@ export async function createDependency(cx: WorkspaceContext, workspaceId: string
       maxDirect: DEPENDENCY_LIMITS.maxDirect,
     });
   }
-  const chain = chainRefusal(workspaceId, source, paths(source, results<PathRow>(downRes)), paths(workspaceId, results<PathRow>(upRes)));
+  const downRows = results<PathRow>(downRes);
+  const upRows = results<PathRow>(upRes);
+  const wide = walkOverflow(downRows, source, workspaceId, source) ?? walkOverflow(upRows, workspaceId, workspaceId, source);
+  if (wide) return wide;
+  const chain = chainRefusal(workspaceId, source, paths(source, downRows), paths(workspaceId, upRows));
   if ('ok' in chain) return chain;
   const stale = await revisionRefusal(cx, src!, revision);
   if (stale) return stale;
@@ -349,14 +437,16 @@ export async function createDependency(cx: WorkspaceContext, workspaceId: string
   const now = Date.now();
   let written: D1Result;
   try {
-    // Re-checked atomically with the write: both workspaces still active and no path back from the source.
+    // Re-checked atomically with the write: both workspaces still active, no path back from the source, and the depth and direct limits.
     written = await db
       .prepare(
         `INSERT INTO workspace_dependencies (repo_id, id, workspace_id, on_workspace, revision, created_by, created_login, agent_id, created_at, updated_at)
          SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9
           WHERE EXISTS (SELECT 1 FROM workspaces WHERE repo_id = ?1 AND id = ?3 AND status = 'active')
             AND EXISTS (SELECT 1 FROM workspaces WHERE repo_id = ?1 AND id = ?4 AND status = 'active')
+            AND ${WITHIN_DIRECT}
             AND ${NO_PATH_BACK}
+            AND ${WITHIN_DEPTH}
          RETURNING id`,
       )
       .bind(cx.repo.id, id, workspaceId, source, revision, cx.actor?.user.id ?? null, cx.actor?.user.login ?? null, cx.actor?.agent?.agentId ?? null, now)
@@ -365,9 +455,7 @@ export async function createDependency(cx: WorkspaceContext, workspaceId: string
     if (isUnique(err)) return exists(workspaceId, source);
     throw err;
   }
-  if (!written.results?.length) {
-    return fail(409, 'a workspace left active or the dependency graph changed meanwhile; retry', 'DEPENDENCY_CONFLICT');
-  }
+  if (!written.results?.length) return graphChanged('a workspace left active');
   return {
     ok: true,
     value: newEdgeView({
@@ -435,7 +523,7 @@ export async function repinDependency(
                FROM workspace_dependencies y1
                LEFT JOIN workspace_dependencies y2 ON y2.repo_id = y1.repo_id AND y2.workspace_id = y1.on_workspace
               WHERE y1.repo_id = ?1 AND y1.workspace_id = ${edgeSource.replace('?3', '?2')}
-              LIMIT ${DEPENDENCY_LIMITS.walkMax}`,
+              LIMIT ${DEPENDENCY_LIMITS.walkMax + 1}`,
           )
           .bind(cx.repo.id, depId),
     named ? upWalk(db, cx.repo.id, workspaceId) : db.prepare('SELECT NULL AS a1 WHERE 0'),
@@ -451,12 +539,18 @@ export async function repinDependency(
   const src = results<SourceRow>(srcRes)[0];
   const bad = sourceRefusal(source, src);
   if (bad) return bad;
-  const down = paths(source, results<PathRow>(downRes));
+  const downRows = results<PathRow>(downRes);
+  const tooWide = walkOverflow(downRows, source, workspaceId, source);
+  if (tooWide) return tooWide;
+  const down = paths(source, downRows);
   let edgeDepth = Math.max(...down.map((p) => p.length)) + 1;
   if (source !== edge.on_workspace) {
     if (workspaceId === source) return selfPin(workspaceId);
     if (dependent!.dup) return exists(workspaceId, source);
-    const chain = chainRefusal(workspaceId, source, down, paths(workspaceId, results<PathRow>(upRes)));
+    const upRows = results<PathRow>(upRes);
+    const wide = walkOverflow(upRows, workspaceId, workspaceId, source);
+    if (wide) return wide;
+    const chain = chainRefusal(workspaceId, source, down, paths(workspaceId, upRows));
     if ('ok' in chain) return chain;
     edgeDepth = chain.edgeDepth;
   }
@@ -474,6 +568,7 @@ export async function repinDependency(
           WHERE repo_id = ?1 AND id = ?2 AND workspace_id = ?3
             AND EXISTS (SELECT 1 FROM workspaces WHERE repo_id = ?1 AND id = ?4 AND status = 'active')
             AND ${NO_PATH_BACK}
+            AND ${WITHIN_DEPTH}
          RETURNING id`,
       )
       .bind(cx.repo.id, depId, workspaceId, source, parsed.value.revision, now)
@@ -482,10 +577,8 @@ export async function repinDependency(
     if (isUnique(err)) return exists(workspaceId, source);
     throw err;
   }
-  if (!written.results?.length) {
-    return fail(409, 'the source left active or the dependency graph changed meanwhile; retry', 'DEPENDENCY_CONFLICT');
-  }
-  await kickPartition(cx, deps, results<{ target_ref: string }>(queuedRes));
+  if (!written.results?.length) return graphChanged('the source left active');
+  await kickPartition(cx, deps, results<WakeRow>(queuedRes));
   return {
     ok: true,
     value: {
@@ -530,6 +623,6 @@ export async function detachDependency(
     .bind(cx.repo.id, depId, workspaceId)
     .all();
   if (!removed.results?.length) return notFound();
-  await kickPartition(cx, deps, results<{ target_ref: string }>(queuedRes));
+  await kickPartition(cx, deps, results<WakeRow>(queuedRes));
   return { ok: true, value: { detached: true, dependency: dependencyView(row) } };
 }

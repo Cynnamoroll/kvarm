@@ -257,6 +257,61 @@ export function blockFromRows(rows: readonly DependencyRow[] | undefined, mode: 
   return dependencyBlock(rows.map(dependencyView), mode);
 }
 
+export interface PreservationRefusal {
+  status: 409;
+  code: 'DEPENDENCY_NOT_PRESERVED';
+  error: string;
+  dependencies: DependencyView[];
+}
+
+const pinKey = (r: Pick<DependencyRow, 'id' | 'revision'>) => `${r.id}@${r.revision}`;
+
+/**
+ * A satisfied pin records that its source landed somewhere; the dependent's
+ * own publication must still contain the pinned revision (another target
+ * branch, or a base rewound after the landing, would not). Checks every
+ * satisfied pin against the exact commit about to be published; a walk that
+ * runs out of budget refuses too. `verified` names the pins (id and
+ * revision) that were checked.
+ */
+export async function preservationRefusal(
+  reader: CommitReader,
+  rows: readonly DependencyRow[] | undefined,
+  result: string,
+): Promise<{ refusal: PreservationRefusal | null; verified: Set<string> }> {
+  const verified = new Set<string>();
+  for (const r of rows ?? []) {
+    if (!r.satisfied_commit) continue;
+    let ok = r.revision === result;
+    let truncated = false;
+    if (!ok) {
+      const v = await isAncestor(reader, r.revision, result, { maxCommitReads: DEPENDENCY_LIMITS.maxCommitReads, concurrency: 4 });
+      ok = v.ancestor;
+      truncated = !v.ancestor && v.truncated;
+    }
+    if (!ok) {
+      const route = `workspaces/${r.workspace_id}/dependencies/${r.id}`;
+      const why = truncated ? 'could not be verified to contain' : 'does not contain';
+      return {
+        refusal: {
+          status: 409,
+          code: 'DEPENDENCY_NOT_PRESERVED',
+          error: `workspace ${r.workspace_id} depends on workspace ${r.on_workspace} at ${r.revision}, which landed as ${r.satisfied_commit}, but this publication (${result}) ${why} it; update the change's base to include the landed source, or repin (POST ${route}/repin) or detach (DELETE ${route}) the dependency`,
+          dependencies: [dependencyView(r)],
+        },
+        verified,
+      };
+    }
+    verified.add(pinKey(r));
+  }
+  return { refusal: null, verified };
+}
+
+/** True when every satisfied pin in `rows` is one `verified` names (same edge, same revision). */
+export function pinsVerified(rows: readonly DependencyRow[] | undefined, verified: ReadonlySet<string>): boolean {
+  return (rows ?? []).every((r) => !r.satisfied_commit || verified.has(pinKey(r)));
+}
+
 // ---------------------------------------------------------------------------
 // Landing a source
 // ---------------------------------------------------------------------------
@@ -283,40 +338,72 @@ export function satisfyLandedStatement(
 }
 
 export interface LandedRow {
-  kind: 'edge' | 'kick';
+  kind: 'edge' | 'kick' | 'auto';
   id: string | null;
   revision: string | null;
   target_ref: string | null;
+  number: number | null;
 }
+
+/** The landed source workspace (merged by the change at `mergedAt`), parameters ?1 repo, ?2 change, ?3 mergedAt. */
+const LANDED_SOURCE = `SELECT w.id FROM workspaces w WHERE w.repo_id = ?1 AND w.change_set_id = ?2 AND w.status = 'merged' AND w.merged_at = ?3`;
+
+const LANDED_EDGES = `SELECT 'edge' AS kind, d.id, d.revision, NULL AS target_ref, NULL AS number FROM workspace_dependencies d
+  WHERE d.repo_id = ?1 AND d.on_workspace IN (${LANDED_SOURCE}) AND d.satisfied_commit IS NULL AND d.broken_code IS NULL
+  ORDER BY d.id LIMIT __LIMIT__`;
+
+/** Open `auto` dependents without an active queue entry, numbered above ?4: they resume when their gate clears. */
+const LANDED_AUTOS = `SELECT DISTINCT 'auto' AS kind, NULL AS id, NULL AS revision, NULL AS target_ref, c.number FROM workspace_dependencies d
+  JOIN workspaces dw ON dw.repo_id = d.repo_id AND dw.id = d.workspace_id
+  JOIN change_sets c ON c.id = dw.change_set_id
+  WHERE d.repo_id = ?1 AND d.on_workspace IN (${LANDED_SOURCE}) AND c.state = 'open' AND c.merge_policy = 'auto' AND c.number > ?4
+    AND NOT EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)
+  ORDER BY c.number LIMIT __LIMIT__`;
+
+const limited = (sql: string) => sql.replace('__LIMIT__', String(DEPENDENCY_LIMITS.readMax));
 
 /**
  * Last statement of the merged-record batch: the landed source's pins still
  * unsettled (their revision is not the landed head: an ancestry check
- * decides) and the queue partitions of its queued dependents (to kick).
- * Indexed by source; returns nothing in a repo without pins.
+ * decides), the queue partitions of its queued dependents (to kick) and its
+ * open `auto` dependents that are not queued (to resume), each part with its
+ * own bound so none crowds out another. Indexed by source; returns nothing in
+ * a repo without pins.
  */
 export function landedDependentsStatement(db: D1Database, repoId: string, changeSetId: string, mergedAt: number): D1PreparedStatement {
-  const source = `SELECT w.id FROM workspaces w WHERE w.repo_id = ?1 AND w.change_set_id = ?2 AND w.status = 'merged' AND w.merged_at = ?3`;
   return db
     .prepare(
-      `SELECT 'edge' AS kind, d.id, d.revision, NULL AS target_ref FROM workspace_dependencies d
-        WHERE d.repo_id = ?1 AND d.on_workspace IN (${source}) AND d.satisfied_commit IS NULL AND d.broken_code IS NULL
+      `SELECT * FROM (${limited(LANDED_EDGES)})
        UNION ALL
-       SELECT DISTINCT 'kick' AS kind, NULL, NULL, q.target_ref FROM workspace_dependencies d
+       SELECT * FROM (SELECT DISTINCT 'kick' AS kind, NULL AS id, NULL AS revision, q.target_ref, NULL AS number FROM workspace_dependencies d
          JOIN workspaces dw ON dw.repo_id = d.repo_id AND dw.id = d.workspace_id
          JOIN merge_queue q ON q.change_set_id = dw.change_set_id AND q.active = 1
-        WHERE d.repo_id = ?1 AND d.on_workspace IN (${source})
-       LIMIT ${DEPENDENCY_LIMITS.readMax}`,
+        WHERE d.repo_id = ?1 AND d.on_workspace IN (${LANDED_SOURCE})
+        LIMIT ${DEPENDENCY_LIMITS.readMax})
+       UNION ALL
+       SELECT * FROM (${limited(LANDED_AUTOS)})`,
     )
-    .bind(repoId, changeSetId, mergedAt);
+    .bind(repoId, changeSetId, mergedAt, 0);
 }
+
+export interface LandedSettlement {
+  /** The landed change and the time it was recorded merged (identifies the source workspace for continuation pages). */
+  source: { changeSetId: string; mergedAt: number };
+  kick(ref: string, reason: string): Promise<void>;
+  /** Resumes open `auto` dependents whose pins may now all be satisfied (their own merge path re-checks every gate). */
+  resume?(numbers: number[]): Promise<void>;
+}
+
+/** Edge pages settled per landing before the rest is left to the next landing-time read (each page is readMax edges). */
+const SETTLE_MAX_PAGES = 16;
 
 /**
  * After a source landed: settles its remaining pins by ancestry (satisfied
  * only when the pinned revision is an ancestor of the landed commit, broken
  * NOT_PRESERVED otherwise; an ancestry walk that runs out of budget is
- * NOT_VERIFIED, never satisfied) and kicks the partitions where dependents
- * wait. Costs nothing when the batch found no pins.
+ * NOT_VERIFIED, never satisfied) in pages of readMax edges, kicks the
+ * partitions where dependents wait and resumes `auto` dependents that are
+ * not queued. Costs nothing when the batch found no pins.
  */
 export async function settleLanded(
   db: D1Database,
@@ -324,49 +411,109 @@ export async function settleLanded(
   repoId: string,
   rows: readonly LandedRow[] | undefined,
   mergeCommit: string,
-  kick: (ref: string, reason: string) => Promise<void>,
+  s: LandedSettlement,
 ): Promise<void> {
   if (!rows || rows.length === 0) return;
-  const now = Date.now();
-  const writes: D1PreparedStatement[] = [];
-  for (const r of rows) {
-    if (r.kind !== 'edge' || !r.id || !r.revision) continue;
-    let verdict: { ancestor: boolean; truncated: boolean } = { ancestor: false, truncated: true };
-    if (reader) {
-      try {
-        verdict = await isAncestor(reader, r.revision, mergeCommit, { maxCommitReads: DEPENDENCY_LIMITS.maxCommitReads, concurrency: 4 });
-      } catch (err) {
-        console.warn(JSON.stringify({ dependencySettle: { repo: repoId, edge: r.id, error: String(err).slice(0, 200) } }));
+  const verdicts = new Map<string, { ancestor: boolean; truncated: boolean }>();
+  const seen = new Set<string>();
+  let edges = rows.filter((r) => r.kind === 'edge' && r.id && r.revision);
+  for (let page = 0; edges.length > 0 && page < SETTLE_MAX_PAGES; page++) {
+    const now = Date.now();
+    const writes: D1PreparedStatement[] = [];
+    for (const r of edges) {
+      seen.add(r.id!);
+      let verdict = verdicts.get(r.revision!);
+      if (!verdict) {
+        verdict = { ancestor: false, truncated: true };
+        if (reader) {
+          try {
+            verdict = await isAncestor(reader, r.revision!, mergeCommit, { maxCommitReads: DEPENDENCY_LIMITS.maxCommitReads, concurrency: 4 });
+          } catch (err) {
+            console.warn(JSON.stringify({ dependencySettle: { repo: repoId, edge: r.id, error: String(err).slice(0, 200) } }));
+          }
+        }
+        verdicts.set(r.revision!, verdict);
+      }
+      if (verdict.ancestor) {
+        writes.push(
+          db
+            .prepare(
+              `UPDATE workspace_dependencies SET satisfied_commit = ?3, satisfied_at = ?4, updated_at = ?4
+                WHERE repo_id = ?1 AND id = ?2 AND satisfied_commit IS NULL AND broken_code IS NULL AND revision = ?5`,
+            )
+            .bind(repoId, r.id, mergeCommit, now, r.revision),
+        );
+      } else {
+        const [code, message] = verdict.truncated
+          ? ['NOT_VERIFIED', `could not verify that the landed commit ${mergeCommit} contains the pinned ${r.revision}`]
+          : ['NOT_PRESERVED', `the source landed as ${mergeCommit}, which does not contain the pinned ${r.revision}`];
+        writes.push(
+          db
+            .prepare(
+              `UPDATE workspace_dependencies SET broken_code = ?3, broken_reason = ?4, updated_at = ?5
+                WHERE repo_id = ?1 AND id = ?2 AND satisfied_commit IS NULL AND broken_code IS NULL AND revision = ?6`,
+            )
+            .bind(repoId, r.id, code, message, now, r.revision),
+        );
       }
     }
-    if (verdict.ancestor) {
-      writes.push(
-        db
-          .prepare(
-            `UPDATE workspace_dependencies SET satisfied_commit = ?3, satisfied_at = ?4, updated_at = ?4
-              WHERE repo_id = ?1 AND id = ?2 AND satisfied_commit IS NULL AND broken_code IS NULL AND revision = ?5`,
-          )
-          .bind(repoId, r.id, mergeCommit, now, r.revision),
-      );
-    } else {
-      const [code, message] = verdict.truncated
-        ? ['NOT_VERIFIED', `could not verify that the landed commit ${mergeCommit} contains the pinned ${r.revision}`]
-        : ['NOT_PRESERVED', `the source landed as ${mergeCommit}, which does not contain the pinned ${r.revision}`];
-      writes.push(
-        db
-          .prepare(
-            `UPDATE workspace_dependencies SET broken_code = ?3, broken_reason = ?4, updated_at = ?5
-              WHERE repo_id = ?1 AND id = ?2 AND satisfied_commit IS NULL AND broken_code IS NULL AND revision = ?6`,
-          )
-          .bind(repoId, r.id, code, message, now, r.revision),
-      );
-    }
+    const full = edges.length >= DEPENDENCY_LIMITS.readMax;
+    // The next page rides on the settling batch: the settled edges no longer match, so it returns the ones after them.
+    if (full) writes.push(db.prepare(limited(LANDED_EDGES)).bind(repoId, s.source.changeSetId, s.source.mergedAt));
+    const out = await db.batch(writes);
+    if (!full) break;
+    edges = ((out[out.length - 1]?.results as LandedRow[] | undefined) ?? []).filter((r) => r.id && r.revision && !seen.has(r.id));
   }
-  if (writes.length > 0) await db.batch(writes);
+  if (edges.length > 0) console.warn(JSON.stringify({ dependencySettleLeft: { repo: repoId, mergeCommit, pages: SETTLE_MAX_PAGES } }));
+
   const refs = [...new Set(rows.filter((r) => r.kind === 'kick' && r.target_ref).map((r) => r.target_ref!))];
   for (const ref of refs) {
-    await kick(ref, 'dependency-landed').catch((err: unknown) => {
+    await s.kick(ref, 'dependency-landed').catch((err: unknown) => {
       console.warn(JSON.stringify({ trainKickFailed: String(err).slice(0, 200) }));
     });
   }
+  if (!s.resume) return;
+  let autos = rows.filter((r) => r.kind === 'auto' && r.number !== null).map((r) => r.number!);
+  while (autos.length > 0) {
+    await s.resume(autos).catch((err: unknown) => {
+      console.warn(JSON.stringify({ dependencyResumeFailed: String(err).slice(0, 200) }));
+    });
+    if (autos.length < DEPENDENCY_LIMITS.readMax) break;
+    const next = await db.prepare(limited(LANDED_AUTOS)).bind(repoId, s.source.changeSetId, s.source.mergedAt, autos[autos.length - 1]).all<LandedRow>();
+    autos = (next.results ?? []).map((r) => r.number!).filter((n) => n !== null);
+  }
+}
+
+/**
+ * Train ejection of a source for a reason that sticks to its head (a merge
+ * conflict with the base or a failed required check): the pins on exactly
+ * that head of its workspace break with SOURCE_EJECTED, which repin (to the
+ * same or a new revision) or detach recovers. Other pins are untouched.
+ */
+export function ejectedSourceStatement(
+  db: D1Database,
+  repoId: string,
+  changeSetId: string,
+  headSha: string,
+  cause: string,
+  now: number,
+  ejected: { queueId: string; generation: number },
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE workspace_dependencies SET broken_code = 'SOURCE_EJECTED', broken_reason = ?4, updated_at = ?5
+        WHERE repo_id = ?1 AND revision = ?3 AND satisfied_commit IS NULL AND broken_code IS NULL
+          AND on_workspace IN (SELECT w.id FROM workspaces w WHERE w.repo_id = ?1 AND w.change_set_id = ?2 AND w.status = 'active')
+          AND EXISTS (SELECT 1 FROM merge_queue q WHERE q.id = ?6 AND q.generation = ?7 AND q.state = 'ejected' AND q.reason_code = ?8)`,
+    )
+    .bind(
+      repoId,
+      changeSetId,
+      headSha,
+      `the source's change was ejected from the merge train at ${headSha} (${cause}); repin once it is fixed, or detach`,
+      now,
+      ejected.queueId,
+      ejected.generation,
+      cause,
+    );
 }

@@ -280,6 +280,24 @@ describe('enqueue, dequeue and the queue read', () => {
     expect((await enqueue('stale-expect', n, { headSha: head, mergePolicy: 'review' })).status).toBe(201);
   });
 
+  it('re-enqueueing a queued change checks its current state and the expected head and policy before the idempotent answer', async () => {
+    const { numbers } = await setup('requeue', 1);
+    const [n] = numbers as [number];
+    expect((await enqueue('requeue', n)).status).toBe(201);
+    const head = (await getChange('requeue', n)).json.headSha as string;
+    const stale = await enqueue('requeue', n, { headSha: 'f'.repeat(40) });
+    expect([stale.status, stale.json.code]).toEqual([409, 'HEAD_MOVED']);
+    const policy = await enqueue('requeue', n, { mergePolicy: 'auto' });
+    expect([policy.status, policy.json.code]).toEqual([409, 'POLICY_CHANGED']);
+    const same = await enqueue('requeue', n, { headSha: head, mergePolicy: 'review' });
+    expect(same.status, JSON.stringify(same.json)).toBe(200);
+    expect(same.json).toMatchObject({ created: false, entry: { number: n, state: 'queued' } });
+    expect((await call('PATCH', api('requeue', `/changes/${n}`), tok.owner, { mergePolicy: 'draft' })).status).toBe(200);
+    const draft = await enqueue('requeue', n);
+    expect([draft.status, draft.json.code]).toEqual([409, 'DRAFT']);
+    expect(await entries('requeue')).toHaveLength(1);
+  });
+
   it('answers 429 with Retry-After at admission capacity, without a hidden retry or a duplicate entry', async () => {
     const { numbers } = await setup('capacity', 3);
     const saved = TRAIN_LIMITS.admissionCapacity;
@@ -706,6 +724,133 @@ describe('integration train', () => {
     const run = await runTrain(env, repoIds.revoked!, MAIN, trainDeps());
     expect(run.ejected).toEqual([{ number: numbers[0], code: 'AUTHORIZATION_REVOKED' }]);
     expect(repo.refs.get(MAIN)).toBe(main);
+  });
+
+  /** Train deps whose pusher runs `fn` once, after the real pusher minted its credential and built the pack, before anything is sent. */
+  function preparing(fn: () => Promise<void>, over: Partial<TrainDeps> = {}): TrainDeps & { events: TrainEvent[] } {
+    let pending: (() => Promise<void>) | null = fn;
+    return trainDeps({
+      pusher(e, r) {
+        const real = defaultTrainDeps.pusher(e, r);
+        return {
+          listRefs: () => real.listRefs(),
+          updateRef: (command, objects) => real.updateRef(command, objects),
+          async prepareUpdate(command, objects) {
+            const prepared = await real.prepareUpdate(command, objects);
+            const run = pending;
+            pending = null;
+            await run?.();
+            return prepared;
+          },
+        };
+      },
+      ...over,
+    });
+  }
+
+  it('revalidates the change, enqueuer, rules and reviews after the pack is prepared, right before sending', async () => {
+    const cases: Array<[string, (n: number, repo: FakeRepo) => Promise<void>, string]> = [
+      [
+        'prep-draft',
+        async (n) => {
+          expect((await call('PATCH', api('prep-draft', `/changes/${n}`), tok.owner, { mergePolicy: 'draft' })).status).toBe(200);
+        },
+        'DRAFT',
+      ],
+      [
+        'prep-rules',
+        async () => {
+          await env.DB.prepare(
+            `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals, created_by, created_at, updated_by, updated_at)
+             VALUES (?, ?, 'refs/heads/main', '[]', 1, ?, ?, ?, ?)`,
+          )
+            .bind(crypto.randomUUID(), repoIds['prep-rules'], userIds[OWNER], Date.now(), userIds[OWNER], Date.now())
+            .run();
+        },
+        'ANY',
+      ],
+      [
+        'prep-revoked',
+        async () => {
+          await env.DB.prepare('DELETE FROM repo_grants WHERE repo_id = ? AND user_id = ?').bind(repoIds['prep-revoked'], userIds['mq-writer']).run();
+        },
+        'AUTHORIZATION_REVOKED',
+      ],
+    ];
+    for (const [name, mutate, code] of cases) {
+      const { repo, main, numbers } = await setup(name, 1);
+      const [n] = numbers as [number];
+      let token = tok.owner;
+      if (name === 'prep-revoked') {
+        await env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .bind(repoIds[name], userIds['mq-writer'], 'write', userIds[OWNER], Date.now(), Date.now())
+          .run();
+        token = tok.writer;
+      }
+      expect((await enqueue(name, n, undefined, token)).status).toBe(201);
+      const run = await runTrain(env, repoIds[name]!, MAIN, preparing(() => mutate(n, repo)));
+      expect(run.published, name).toEqual([]);
+      expect(run.ejected, name).toHaveLength(1);
+      if (code !== 'ANY') expect(run.ejected[0]!.code, name).toBe(code);
+      expect(repo.count('receivePack:'), name).toBe(0);
+      expect(repo.refs.get(MAIN), name).toBe(main);
+      expect((await getChange(name, n)).json, name).toMatchObject({ state: 'open', mergeCommit: null });
+      expect((await leaseStatus(name)).lease, name).toBeNull();
+    }
+  });
+
+  it('a force-push of the head while the pack is prepared stops publication of the composed head', async () => {
+    const { repo, main, numbers } = await setup('prep-head', 1);
+    const [n] = numbers as [number];
+    await enqueue('prep-head', n);
+    const rewritten = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'rewritten\n' }, [main]);
+    const run = await runTrain(
+      env,
+      repoIds['prep-head']!,
+      MAIN,
+      preparing(async () => {
+        repo.refs.set('refs/heads/b1', rewritten.sha);
+      }),
+    );
+    expect(run.published).toEqual([]);
+    expect(run.ejected).toEqual([{ number: n, code: 'HEAD_MOVED' }]);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get(MAIN)).toBe(main);
+    expect((await getChange('prep-head', n)).json).toMatchObject({ state: 'open', mergeCommit: null });
+  });
+
+  it('a publisher whose entry was recovered while it sent records nothing and reports no publication', async () => {
+    const { repo, numbers } = await setup('late-result', 1);
+    const [n] = numbers as [number];
+    await enqueue('late-result', n);
+    const deps = trainDeps({
+      pusher(e, r) {
+        const real = defaultTrainDeps.pusher(e, r);
+        return {
+          listRefs: () => real.listRefs(),
+          updateRef: (command, objects) => real.updateRef(command, objects),
+          async prepareUpdate(command, objects) {
+            const prepared = await real.prepareUpdate(command, objects);
+            return {
+              async send() {
+                // Recovery took the entry over (as a later pass does for a publisher presumed dead).
+                await env.DB.prepare(`UPDATE merge_queue SET state = 'queued', generation = generation + 1 WHERE repo_id = ? AND active = 1`)
+                  .bind(repoIds['late-result'])
+                  .run();
+                return prepared.send();
+              },
+            };
+          },
+        };
+      },
+    });
+    const run = await runTrain(env, repoIds['late-result']!, MAIN, deps);
+    expect(run.published).not.toContain(n);
+    expect(deps.events.filter((e) => e.type === 'publish' && (e as { status: string }).status === 'recorded')).toEqual([]);
+    const change = (await getChange('late-result', n)).json;
+    expect(change).toMatchObject({ state: 'open', mergeCommit: null });
+    expect(repo.refs.get(MAIN)).toBe(repo.refs.get('refs/heads/b1'));
+    expect((await entries('late-result')).map((e) => e.state)).not.toContain('published');
   });
 
   it('the queue consumer runs the train for a kick message', async () => {

@@ -36,7 +36,7 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { attributeCommit, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
-import type { BranchRule } from './branchRules';
+import { directPushDenial, repoBranchRulesSelect, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   autoMerge,
   branchRef,
@@ -55,11 +55,14 @@ import { artifactsPusher, type GitPusher } from './gitwrite';
 import { MERGE_BUDGETS, artifactsMergeSources } from './merge';
 import { lsRefs } from './refs';
 import {
+  WORKSPACE_REF_PREFIX,
   WORKSPACE_SELECT,
   agentOwnershipDenial,
+  agentWorkspaceDenial,
   liveRefs,
   newId,
   workspaceInsertStatement,
+  workspaceOwners,
   workspaceRef,
   workspaceView,
   type WorkspaceRow,
@@ -469,15 +472,25 @@ export function claimTask(cx: TaskContext, id: string, input: unknown, deps: Tas
       }
     }
 
+    // The claim is recorded only while this generation and owner still hold the fence and the task still
+    // names the change head the workspace was made at: a takeover during the ref I/O leaves no trace.
+    const landed = `EXISTS (SELECT 1 FROM agent_tasks t WHERE t.id = ?17 AND t.status = 'claimed' AND t.generation = ?18 AND t.claim_workspace_id = ?19)`;
     const results = await db.batch([
       db
         .prepare(
           `UPDATE agent_tasks SET status = 'claimed', claimed_by = ?3, generation = ?4, lease_expires_at = ?5, claim_workspace_id = ?6, updated_at = ?7
-            WHERE repo_id = ?1 AND id = ?2 AND status IN ('open', 'claimed') AND generation < ?4`,
+            WHERE repo_id = ?1 AND id = ?2 AND status IN ('open', 'claimed') AND generation < ?4 AND head_sha = ?9
+              AND EXISTS (SELECT 1 FROM fenced_claims f WHERE f.kind = '${FENCE_KIND}' AND f.subject = ?2 AND f.generation = ?4 AND f.owner = ?8 AND f.state = 'claimed')
+              AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = agent_tasks.change_set_id AND c.state = 'conflicted' AND c.head_sha = ?9)`,
         )
-        .bind(cx.repo.id, id, who.value.agent, generation, until, wsId, now),
+        .bind(cx.repo.id, id, who.value.agent, generation, until, wsId, now, who.value.owner, row.head_sha),
       reuse
-        ? db.prepare('UPDATE workspaces SET agent = ?3, updated_at = ?4 WHERE repo_id = ?1 AND id = ?2 AND agent_id IS NULL').bind(cx.repo.id, wsId, who.value.agent, now)
+        ? db
+            .prepare(
+              `UPDATE workspaces SET agent = ?3, updated_at = ?4 WHERE repo_id = ?1 AND id = ?2 AND agent_id IS NULL
+                 AND ${landed.replace('?17', '?5').replace('?18', '?6').replace('?19', '?2')}`,
+            )
+            .bind(cx.repo.id, wsId, who.value.agent, now, id, generation)
         : workspaceInsertStatement(
             cx,
             {
@@ -490,6 +503,9 @@ export function claimTask(cx: TaskContext, id: string, input: unknown, deps: Tas
               headSha: row.head_sha,
             },
             now,
+            null,
+            null,
+            { where: landed, params: [id, generation, wsId] },
           ),
       detailSelect(db, cx.repo.id, id),
       db.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, wsId),
@@ -497,9 +513,21 @@ export function claimTask(cx: TaskContext, id: string, input: unknown, deps: Tas
     const after = first<TaskDetailRow>(results[2]);
     const ws = first<WorkspaceRow>(results[3]);
     if (!results[0]?.meta.changes || !after || !ws) {
-      // The task completed or was retired between the read and the claim.
+      // The claim was taken over, or the task completed, was retired or followed a new head meanwhile.
       await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.value.owner });
-      return (after && lifecycleRefusal(after)) ?? fail(409, `task ${id} changed while it was claimed; retry`, 'CLAIM_LOST');
+      if (!reuse) {
+        const removed = await deps
+          .pusher(cx.env, cx.repo)
+          .updateRef({ ref, oldOid: row.head_sha, newOid: ZERO_SHA })
+          .catch((err: unknown) => ({ status: 'unknown' as const, reason: String(err).slice(0, 200) }));
+        if (removed.status !== 'ok') console.warn(JSON.stringify({ taskClaimRefLeft: { repo: cx.repo.id, task: id, ref, status: removed.status } }));
+      }
+      return (
+        (after && lifecycleRefusal(after)) ??
+        fail(409, `task ${id} was claimed again or changed while this claim was being set up; claim it again`, 'CLAIM_LOST', {
+          currentGeneration: after?.generation ?? null,
+        })
+      );
     }
     const task = taskView(after, now);
     return { ok: true, value: { task, workspace: workspaceView(ws, cx.repo, cx.origin, reuse ? undefined : row.head_sha), lease: task.lease! } };
@@ -589,7 +617,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
     const baseRef = branchRef(row.change_base_ref);
     const wsRef = ws.ref;
 
-    const verified = await withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts): Promise<ServiceResult<string>> => {
+    const verified = await withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts): Promise<ServiceResult<{ resolution: string; headTip: string }>> => {
       const ctx = resolveCtx(cx, artifacts);
       const tips = await lsRefs(ctx, [wsRef, headRef, baseRef]);
       const resolution = tips.get(wsRef) ?? null;
@@ -605,7 +633,8 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
           'RESOLUTION_NOT_PUSHED',
         );
       }
-      if (tips.get(headRef) !== oldHead) {
+      // A head branch already at the resolution is a previous attempt whose completion was not recorded.
+      if (tips.get(headRef) !== oldHead && tips.get(headRef) !== resolution) {
         return fail(409, `the change's head branch ${headRef} moved; the task follows the new head shortly, retry then`, 'HEAD_MOVED');
       }
       const baseTip = tips.get(baseRef) ?? null;
@@ -627,21 +656,64 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
       if (m.status !== 'clean' && m.status !== 'fast-forward' && m.status !== 'up-to-date') {
         return fail(422, `the resolution cannot be merged into ${row.change_base_ref} (${m.unknownReason ?? m.status})`, 'RESOLUTION_UNVERIFIABLE');
       }
-      return { ok: true, value: resolution };
+      return { ok: true, value: { resolution, headTip: tips.get(headRef)! } };
     });
     if (!verified.ok) return verified;
-    const resolution = verified.value;
+    const { resolution, headTip } = verified.value;
+
+    // The completion advances the head branch on the claimant's behalf: the claimant must be allowed to push it
+    // (agent token grant and workspace ownership, as the git gate), and protection is read fresh.
+    if (cx.actor?.agent) {
+      const command = { ref: headRef, oldOid: oldHead, newOid: resolution };
+      let denied = credentialMayUpdateRef(cx.actor, headRef) ? null : 'ref outside agent token grant';
+      if (!denied && headRef.startsWith(WORKSPACE_REF_PREFIX)) denied = agentWorkspaceDenial(cx.actor, command, await workspaceOwners(cx.env, cx.repo.id, [command]));
+      if (denied) return fail(403, `this token may not update the change's head branch ${headRef} (${denied})`, 'HEAD_REF_FORBIDDEN');
+    }
+    const [rulesRead, fenceNow, taskNow] = await db.batch([repoBranchRulesSelect(db, cx.repo.id), fenceSelect(db, id), detailSelect(db, cx.repo.id, id)]);
+    const protectedBy = directPushDenial(((rulesRead?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow), headRef);
+    if (protectedBy) {
+      return fail(409, `the change's head branch ${headRef} is protected (${protectedBy}); completion cannot fast-forward it`, 'HEAD_REF_PROTECTED');
+    }
+    const current = first<TaskDetailRow>(taskNow);
+    if (!current) return fail(404, 'task not found', 'TASK_NOT_FOUND');
+    const lost = lifecycleRefusal(current) ?? fenceRefusal(current, first<FenceRow>(fenceNow), generation.value, who.value);
+    if (lost) return lost;
+    if (current.change_id !== changeId || (current.change_head_sha !== oldHead && current.change_head_sha !== resolution)) {
+      return fail(409, `the change moved while the task was completed; retry`, 'HEAD_MOVED');
+    }
+
+    // The head branch moves first; the completion is recorded only once it points at the resolution, so a
+    // failed update leaves the task claimed and the same completion retryable.
+    if (headTip !== resolution) {
+      const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref: headRef, oldOid: oldHead, newOid: resolution });
+      if (pushed.status !== 'ok') {
+        const live = (await liveRefs(cx, [headRef])).get(headRef) ?? null;
+        if (live !== resolution) {
+          console.warn(JSON.stringify({ taskHeadBranch: { repo: cx.repo.id, task: id, ref: headRef, status: pushed.status, reason: pushed.reason } }));
+          if (live !== oldHead) return fail(409, `the change's head branch ${headRef} moved; the task follows the new head shortly, retry then`, 'HEAD_MOVED');
+          return fail(
+            502,
+            `the change's head branch ${headRef} could not be fast-forwarded to the resolution (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''}); the task is still claimed by you, retry the completion`,
+            'HEAD_UPDATE_FAILED',
+          );
+        }
+      }
+    }
 
     // The fence and the change's head are checked again inside the batch: the first statement lands only if both still hold.
+    // The head branch's push event may already have reopened the change at the resolution (retiring the task).
     const now = Date.now();
     const landed = `EXISTS (SELECT 1 FROM agent_tasks t WHERE t.id = ?2 AND t.status = 'completed' AND t.completed_at = ?5 AND t.resolution_sha = ?3)`;
     const results = await db.batch([
       db
         .prepare(
           `UPDATE agent_tasks SET status = 'completed', resolution_sha = ?3, completed_by = ?4, completed_at = ?5, updated_at = ?5, lease_expires_at = NULL
-            WHERE repo_id = ?1 AND id = ?2 AND status = 'claimed' AND generation = ?6
+            WHERE repo_id = ?1 AND id = ?2 AND generation = ?6
               AND EXISTS (SELECT 1 FROM fenced_claims f WHERE f.kind = '${FENCE_KIND}' AND f.subject = ?2 AND f.generation = ?6 AND f.owner = ?7 AND f.state = 'claimed')
-              AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?8 AND c.state = 'conflicted' AND c.head_sha = ?9)`,
+              AND (
+                (status = 'claimed' AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?8 AND c.state = 'conflicted' AND c.head_sha IN (?9, ?3)))
+                OR (status IN ('claimed', 'obsolete') AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?8 AND c.state = 'open' AND c.head_sha = ?3))
+              )`,
         )
         .bind(cx.repo.id, id, resolution, who.value.agent, now, generation.value, who.value.owner, changeId, oldHead),
       db
@@ -653,7 +725,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
       db
         .prepare(
           `UPDATE change_sets SET head_sha = ?3, state = 'open', conflicts = NULL, updated_at = ?5
-            WHERE id = ?1 AND state = 'conflicted' AND head_sha = ?4 AND ${landed}`,
+            WHERE id = ?1 AND state IN ('conflicted', 'open') AND head_sha IN (?4, ?3) AND ${landed}`,
         )
         .bind(changeId, id, resolution, oldHead, now),
       detailSelect(db, cx.repo.id, id),
@@ -672,12 +744,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
       return fail(409, `the change moved while the task was completed; retry`, 'HEAD_MOVED');
     }
 
-    // The change already points at the resolution; its head branch follows (fast-forward, expected old value).
-    const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref: headRef, oldOid: oldHead, newOid: resolution });
-    let updated = pushed.status === 'ok';
-    if (pushed.status === 'unknown') updated = (await liveRefs(cx, [headRef])).get(headRef) === resolution;
-    const headBranch = { ref: headRef, updated, ...(updated ? {} : { reason: `${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''}` }) };
-    if (!updated) console.warn(JSON.stringify({ taskHeadBranch: { repo: cx.repo.id, task: id, ref: headRef, status: pushed.status, reason: pushed.reason } }));
+    const headBranch = { ref: headRef, updated: true };
 
     const claimantAttribution: AttributionInput = {
       agent: attribution?.agent ?? who.value.agent,
@@ -687,7 +754,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
     };
     await attributeCommit(cx, deps.pusher(cx.env, cx.repo), resolution, claimantAttribution, { replace: attribution !== null });
 
-    if (updated && change.merge_policy === 'auto') {
+    if (change.merge_policy === 'auto') {
       change = (await autoMerge({ env: cx.env, repo: cx.repo, actor: cx.actor, branchRules: cx.branchRules ?? [], waitUntil: cx.waitUntil }, change)) ?? change;
     }
     return { ok: true, value: { task: taskView(after, now), change: changeView(change), headBranch } };

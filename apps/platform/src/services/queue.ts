@@ -31,7 +31,7 @@
  * polling the lease.
  */
 
-import { decode, parseTree, type CommitInfo, type GitObject } from '@forge/gitops';
+import type { GitObject } from '@forge/gitops';
 import type { AgentGrant } from '../auth/agentTokens';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { currentMeter, type CostCounters } from '../cost/meter';
@@ -57,6 +57,7 @@ import {
   mergedRecordStatements,
   parseNumber,
   resolveCtx,
+  resumeAutoChanges,
   reviewRefusal,
   workspaceAdmissionRefusal,
   type ChangeContext,
@@ -73,7 +74,10 @@ import {
   changeNumberDependenciesStatement,
   dependencyRowsStatement,
   dependencyView,
+  ejectedSourceStatement,
   noBlockedPinCondition,
+  pinsVerified,
+  preservationRefusal,
   settleLanded,
   type DependencyBlock,
   type DependencyRow,
@@ -82,7 +86,7 @@ import {
 } from './dependencyGate';
 import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
-import { artifactsMergeSources, prepareMerge, type MergeSources, type PreparedMerge } from './merge';
+import { artifactsMergeSources, overlaySources, prepareMerge, type PreparedMerge } from './merge';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
 import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewFactsSelectById, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
@@ -501,13 +505,14 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
     ]);
     const row = (readRes?.results as (EnqueueReadRow & Partial<EntryRow> & ReviewFactsRow)[] | undefined)?.[0];
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+    // An already queued change answers with its entry only while it could be enqueued now as the caller expects.
+    const refused = refusal(row, input);
+    if (refused) return refused;
     if (row.id) {
       const denied = agentMergeDenial(cx.actor, row.c_base, 'merge');
       if (denied) return denied;
       return { ok: true, value: { created: false, entry: entryView(row as EntryRow) } };
     }
-    const refused = refusal(row, input);
-    if (refused) return refused;
     // A stale or broken pin keeps the change out of the queue; a pending one is admitted and waits in the train.
     const pinned = dependencyRefusal(pinsRes?.results as DependencyRow[] | undefined, 'enqueue');
     if (pinned) return pinned;
@@ -747,37 +752,6 @@ export async function trainStatus(env: Env, repo: RepoRow, q: { limit?: string; 
 }
 
 // ---------------------------------------------------------------------------
-// Speculative composition
-// ---------------------------------------------------------------------------
-
-function parseCommitObject(o: GitObject): CommitInfo {
-  const text = decode(o.raw.subarray(o.raw.indexOf(0) + 1));
-  const head = text.split('\n\n')[0] ?? '';
-  return {
-    treeHash: /^tree ([0-9a-f]{40})$/m.exec(head)?.[1] ?? '',
-    parents: [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!),
-  };
-}
-
-/** Merge inputs that also see prepared, not yet published candidates (their commits, trees and blobs). */
-function overlaySources(inner: MergeSources, objects: Map<string, GitObject>): MergeSources {
-  return {
-    async readCommit(sha) {
-      const o = objects.get(sha);
-      return o?.type === 'commit' ? parseCommitObject(o) : inner.readCommit(sha);
-    },
-    async readTree(hash) {
-      const o = objects.get(hash);
-      return o?.type === 'tree' ? parseTree(o.raw) : inner.readTree(hash);
-    },
-    async readBlob(hash) {
-      const o = objects.get(hash);
-      return o?.type === 'blob' ? o.raw.slice(o.raw.indexOf(0) + 1) : inner.readBlob(hash);
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Train run
 // ---------------------------------------------------------------------------
 
@@ -847,6 +821,22 @@ async function finishRun(db: D1Database, repoId: string, ref: string, c: RunClai
   return 'lost';
 }
 
+/**
+ * The entries a pass reads: the first readAhead entries in arrival order with
+ * no unsatisfied pin, plus the first readAhead with one (they only record
+ * their wait, since a pin that is not yet satisfied cannot clear within the
+ * pass). Waiting dependents therefore never fill the window and hide a later
+ * prerequisite or unrelated work. Bound as ?1 repo, ?2 target, ?3 readAhead.
+ */
+const WINDOW_IDS = (() => {
+  const unsatisfied = `EXISTS (SELECT 1 FROM workspaces pw INDEXED BY idx_ws_change
+      JOIN workspace_dependencies pd ON pd.repo_id = pw.repo_id AND pd.workspace_id = pw.id
+     WHERE pw.change_set_id = q.change_set_id AND pw.repo_id = q.repo_id AND pd.satisfied_commit IS NULL)`;
+  const part = (cond: string) =>
+    `SELECT * FROM (SELECT q.id FROM merge_queue q WHERE q.repo_id = ?1 AND q.active = 1 AND q.target_ref = ?2 AND ${cond} ORDER BY q.seq LIMIT ?3)`;
+  return `${part(`NOT ${unsatisfied}`)} UNION ALL ${part(unsatisfied)}`;
+})();
+
 function windowStatements(db: D1Database, repoId: string, ref: string): D1PreparedStatement[] {
   return [
     db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
@@ -861,15 +851,15 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
         `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title, c.head_ref AS c_head_ref,
                 ${reviewFactsColumns('c')}
            FROM merge_queue q JOIN change_sets c ON c.id = q.change_set_id
-          WHERE q.repo_id = ?1 AND q.active = 1 AND q.target_ref = ?2
-          ORDER BY q.seq LIMIT ?3`,
+          WHERE q.id IN (${WINDOW_IDS})
+          ORDER BY q.seq`,
       )
       .bind(repoId, ref, TRAIN_LIMITS.readAhead),
     // The pins of the entries read above (their workspaces' dependency edges with their states).
     dependencyRowsStatement(
       db,
       repoId,
-      { where: 'w.change_set_id IN (SELECT q.change_set_id FROM merge_queue q WHERE q.repo_id = ?1 AND q.active = 1 AND q.target_ref = ?2 ORDER BY q.seq LIMIT ?3)', byChange: true },
+      { where: `w.change_set_id IN (SELECT q.change_set_id FROM merge_queue q WHERE q.id IN (${WINDOW_IDS}))`, byChange: true },
       ref,
       TRAIN_LIMITS.readAhead,
     ),
@@ -899,6 +889,8 @@ interface Plan {
   message?: string;
   /** The unresolved pin the entry waits on (it stays queued, skipped, never ejected). */
   wait?: DependencyBlock;
+  /** Satisfied pins (id@revision) whose revision the prepared merge commit was checked to contain. */
+  verifiedPins?: Set<string>;
   /** False when this pass's guarded write for the entry did not apply. */
   current: boolean;
 }
@@ -920,6 +912,9 @@ function enqueuerAuthor(e: EntryRow): { name: string; email: string } | undefine
   if (e.enqueuer_login) return { name: e.enqueuer_login, email: `${e.enqueuer_login}@users.forge.invalid` };
   return undefined;
 }
+
+/** Ejections that stick to the exact head (pins on it break; see ejectedSourceStatement). */
+const EJECTS_PINS: ReadonlySet<string> = new Set(['MERGE_CONFLICT', 'CHECKS_FAILED']);
 
 const EXIT_STATES: Partial<Record<string, 'ejected' | 'stale'>> = {
   ALREADY_MERGED: 'stale',
@@ -971,6 +966,9 @@ async function trainPass(
       plan.code = code;
       plan.message = message;
       push(null, exitStatement(db, { repoId: e.repo_id, id: e.id, generation: plan.generation }, to, code, message, now));
+      if (EJECTS_PINS.has(code)) {
+        push(null, ejectedSourceStatement(db, e.repo_id, e.change_set_id, plan.headSha, code, now, { queueId: e.id, generation: plan.generation + 1 }));
+      }
       out.ejected.push({ number: e.change_number, code });
       out.progress = true;
       deps.observe?.({ type: 'transition', number: e.change_number, to, code });
@@ -1091,6 +1089,17 @@ async function trainPass(
       plan.next = 'queued';
       continue;
     }
+    let kept: Awaited<ReturnType<typeof preservationRefusal>>;
+    try {
+      kept = await preservationRefusal(overlaySources(sources, new Map(p.value.objects.map((o) => [o.hash, o]))), pins.get(e.change_set_id), p.value.mergeCommit);
+    } catch (err) {
+      throw err instanceof RefStoreUnavailable ? err : new RefStoreUnavailable(`pin ancestry read failed: ${String(err).slice(0, 200)}`);
+    }
+    if (kept.refusal) {
+      exit(kept.refusal.code, kept.refusal.error);
+      continue;
+    }
+    plan.verifiedPins = kept.verified;
     const checks = await gate.requiredChecksFor({ id: repo.id }, p.value.treeSha, null);
     deps.observe?.({ type: 'checks', number: e.change_number, treeSha: p.value.treeSha, baseSha: p.value.targetSha, state: checks.state, leaseHeld: false, phase: 'prepare' });
     const ruleBlock = branchPolicyBlock(policy, checks);
@@ -1175,7 +1184,7 @@ async function trainPass(
       if (plan.next === 'checking' || plan.next === 'preparing') out.waiting = true;
       break;
     }
-    const r = await publishCandidate(env, ctx, repo, ref, plan, owner, deps);
+    const r = await publishCandidate(env, ctx, repo, rules, ref, plan, owner, deps);
     if (r.kind === 'published') {
       out.published.push(plan.e.change_number);
       out.progress = true;
@@ -1274,58 +1283,41 @@ function costDelta(a: CostCounters | null, b: CostCounters | null): Partial<Cost
 }
 
 /**
- * Publishes one ready candidate: revalidate and claim (one batch), ask the
- * gate about the exact tree, take the lease, push one ref with the expected
- * old value, release, then record. The head revalidated and recorded is the
- * one this pass composed, which its ls-refs confirmed as the live head branch. The lease covers only the write
- * credential, the pack and the receive-pack exchange.
+ * Publishes one ready candidate: ask the gate about the exact tree (no
+ * lease), take the lease, prepare the push (write credential and pack),
+ * then claim and revalidate in one batch: the change (state, policy, the
+ * composed head, workspace admission), the enqueuer's authority, the current
+ * branch rules against the gate's answer, reviews and pins. One ls-refs
+ * confirms the target tip and the head branch right before the one ref
+ * update with the expected old value; release, then record. Every result
+ * write is fenced by the claimed generation, so a publisher whose entry was
+ * recovered meanwhile records nothing. The lease covers only the write
+ * credential, the pack, the revalidation and the receive-pack exchange.
  */
-async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, ref: string, plan: Plan, owner: string, deps: TrainDeps): Promise<PublishResult> {
+async function publishCandidate(
+  env: Env,
+  ctx: ResolveContext,
+  repo: RepoRow,
+  rules: readonly BranchRule[],
+  ref: string,
+  plan: Plan,
+  owner: string,
+  deps: TrainDeps,
+): Promise<PublishResult> {
   const db = env.DB;
   const e = plan.e;
   const pv = plan.prepared!;
   const start = meterSnapshot();
-  const now = deps.now();
   const claimedGen = plan.generation + 1;
-  const agentMeta = parseJson<{ tokenId: string }>(e.agent_meta);
-  const [claim, change, ws, facts, agentRes, rulesRes, reviewRes, pinsRes] = await db.batch([
-    db
-      .prepare(
-        `UPDATE merge_queue SET state = 'publishing', generation = generation + 1, updated_at = ?3
-          WHERE repo_id = ?4 AND id = ?1 AND generation = ?2 AND state = 'ready' AND active = 1 RETURNING generation`,
-      )
-      .bind(e.id, plan.generation, now, repo.id),
-    db.prepare('SELECT id, number, state, merge_policy, head_sha, base_ref FROM change_sets WHERE id = ?').bind(e.change_set_id),
-    headWorkspaceSelect(db, repo.id, e.change_number),
-    db
-      .prepare(
-        `SELECT u.*,
-                (SELECT m.role FROM org_members m WHERE m.org_id = ?2 AND m.user_id = u.id) AS facts_org_role,
-                (SELECT g.role FROM repo_grants g WHERE g.repo_id = ?3 AND g.user_id = u.id) AS facts_grant
-           FROM users u WHERE u.id = ?1`,
-      )
-      .bind(e.enqueued_by, repo.owner_org_id ?? null, repo.id),
-    db
-      .prepare(
-        `SELECT t.id AS token_id, t.role, t.refs, t.expires_at, t.revoked_at, t.repo_id, a.id AS agent_id, a.name AS agent_name,
-                a.owner_login, a.owner_kind, a.revoked_at AS agent_revoked_at
-           FROM agent_tokens t JOIN agents a ON a.id = t.agent_id WHERE t.id = ?1`,
-      )
-      .bind(agentMeta?.tokenId ?? null),
-    db
-      .prepare(
-        `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
-           FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
-      )
-      .bind(repo.id),
-    reviewFactsSelectById(db, e.change_set_id),
-    changeDependenciesStatement(db, repo.id, e.change_set_id),
-  ]);
-  if ((claim?.results?.length ?? 0) === 0) return { kind: 'lost' };
-  const fenced = { repoId: repo.id, id: e.id, generation: claimedGen };
+  // Before the claim the entry is `ready` at the pass's generation; after it, `publishing` at the claimed one.
+  let fence = { generation: plan.generation, state: 'ready' as QueueState };
   const exit = async (code: string, message: string): Promise<PublishResult> => {
     const to = EXIT_STATES[code] ?? 'ejected';
-    await exitStatement(db, fenced, to, code, message, deps.now(), ['publishing']).run();
+    const out = exitStatement(db, { repoId: repo.id, id: e.id, generation: fence.generation }, to, code, message, deps.now(), [fence.state]);
+    if (EJECTS_PINS.has(code)) {
+      await db.batch([out, ejectedSourceStatement(db, repo.id, e.change_set_id, plan.headSha, code, deps.now(), { queueId: e.id, generation: fence.generation + 1 })]);
+    }
+    else await out.run();
     deps.observe?.({ type: 'transition', number: e.change_number, to, code });
     return { kind: 'exited', code };
   };
@@ -1333,35 +1325,25 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
     await db
       .prepare(
         `UPDATE merge_queue SET state = ?3, attempts = attempts + ?4, updated_at = ?5
-          WHERE repo_id = ?6 AND id = ?1 AND generation = ?2 AND state = 'publishing'`,
+          WHERE repo_id = ?6 AND id = ?1 AND generation = ?2 AND state = ?7`,
       )
-      .bind(e.id, claimedGen, state, attempts, deps.now(), repo.id)
+      .bind(e.id, fence.generation, state, attempts, deps.now(), repo.id, fence.state)
       .run();
   };
 
-  const row = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
-  const refused = mergeRefusal(row, 'explicit', plan.headSha) ?? workspaceAdmissionRefusal(row!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null);
-  if (refused) return exit(refused.code ?? 'REFUSED', refused.error);
-  const who = enqueuerActor(repo, ref, (facts?.results as FactsRow[] | undefined)?.[0], (agentRes?.results as AgentRow[] | undefined)?.[0], e, now);
-  if (who.denied) return exit('AUTHORIZATION_REVOKED', who.denied);
-  const rules = ((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow);
-  // Approvals, escalations and the human requirement are revalidated for the exact head right before publication.
-  const review = await reviewRefusal(env, e.change_set_id, parseReviewFacts((reviewRes?.results as ReviewFactsRow[] | undefined)?.[0]), effectivePolicy(rules, ref));
-  if (review) return exit(review.code ?? 'REVIEWS_REQUIRED', review.error);
-  const wait = blockFromRows(pinsRes?.results as DependencyRow[] | undefined, 'publish');
-  if (wait) {
-    // A pin turned unresolved since the pass: back to waiting in place (the next pass records why).
-    await back('queued');
-    return { kind: 'lost' };
-  }
   const checks = await deps.gate(env).requiredChecksFor({ id: repo.id }, pv.treeSha, null);
   deps.observe?.({ type: 'checks', number: e.change_number, treeSha: pv.treeSha, baseSha: pv.targetSha, state: checks.state, leaseHeld: false, phase: 'publish' });
-  const block = branchPolicyBlock(effectivePolicy(rules, ref), checks);
-  if (checks.state === 'failure' || block?.code === 'REQUIRED_CHECKS_FAILED') return exit('CHECKS_FAILED', block?.error ?? 'a required check failed on the composed tree');
-  if (checks.state === 'pending' || block) {
-    await back('checking');
-    return { kind: 'pending' };
-  }
+  const checksVerdict = async (policy: BranchPolicy): Promise<PublishResult | null> => {
+    const block = branchPolicyBlock(policy, checks);
+    if (checks.state === 'failure' || block?.code === 'REQUIRED_CHECKS_FAILED') return exit('CHECKS_FAILED', block?.error ?? 'a required check failed on the composed tree');
+    if (checks.state === 'pending' || block) {
+      await back('checking');
+      return { kind: 'pending' };
+    }
+    return null;
+  };
+  const early = await checksVerdict(effectivePolicy(rules, ref));
+  if (early) return early;
 
   const lease = deps.lease(env, repo.id, ref);
   const acq = await lease.acquire(owner, TRAIN_LIMITS.leaseTtlMs);
@@ -1370,25 +1352,136 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
     await back('ready', 1);
     return { kind: 'busy', retryAfterSeconds: Math.max(1, Math.ceil(acq.retryAfterMs / 1000)) };
   }
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    released = true;
+    const rel = await lease.release(owner, acq.generation).catch(() => ({ released: false }));
+    deps.observe?.({ type: 'lease', op: 'release', number: e.change_number, ok: rel.released, generation: acq.generation });
+  };
+
   let status: string;
+  let who: { actor: Actor | null; denied: string | null } = { actor: null, denied: null };
   try {
-    const update = await deps.pusher(env, repo).prepareUpdate({ ref, oldOid: pv.targetSha, newOid: pv.mergeCommit }, pv.objects);
-    const r = await update.send();
-    status = r.status;
-    if (r.status !== 'ok' && r.status !== 'stale' && r.status !== 'rejected') {
-      // The update may have landed: the ref decides.
-      const nowRef = (await lsRefs(ctx, [ref]).catch(() => new Map<string, string | null>())).get(ref);
-      status = nowRef === pv.mergeCommit ? 'ok' : 'unknown';
+    let update: Awaited<ReturnType<GitPusher['prepareUpdate']>> | null = null;
+    try {
+      update = await deps.pusher(env, repo).prepareUpdate({ ref, oldOid: pv.targetSha, newOid: pv.mergeCommit }, pv.objects);
+    } catch (err) {
+      if (!(err instanceof RefStoreUnavailable)) throw err;
+    }
+    if (!update) {
+      await release();
+      await back('queued', 1);
+      return { kind: 'retry' };
+    }
+
+    // Everything above may have taken a while: the claim and every publication fact are read now.
+    const agentMeta = parseJson<{ tokenId: string }>(e.agent_meta);
+    const [claim, change, ws, facts, agentRes, rulesRes, reviewRes, pinsRes] = await db.batch([
+      db
+        .prepare(
+          `UPDATE merge_queue SET state = 'publishing', generation = generation + 1, updated_at = ?3
+            WHERE repo_id = ?4 AND id = ?1 AND generation = ?2 AND state = 'ready' AND active = 1 RETURNING generation`,
+        )
+        .bind(e.id, plan.generation, deps.now(), repo.id),
+      db.prepare('SELECT id, number, state, merge_policy, head_sha, base_ref FROM change_sets WHERE id = ?').bind(e.change_set_id),
+      headWorkspaceSelect(db, repo.id, e.change_number),
+      db
+        .prepare(
+          `SELECT u.*,
+                  (SELECT m.role FROM org_members m WHERE m.org_id = ?2 AND m.user_id = u.id) AS facts_org_role,
+                  (SELECT g.role FROM repo_grants g WHERE g.repo_id = ?3 AND g.user_id = u.id) AS facts_grant
+             FROM users u WHERE u.id = ?1`,
+        )
+        .bind(e.enqueued_by, repo.owner_org_id ?? null, repo.id),
+      db
+        .prepare(
+          `SELECT t.id AS token_id, t.role, t.refs, t.expires_at, t.revoked_at, t.repo_id, a.id AS agent_id, a.name AS agent_name,
+                  a.owner_login, a.owner_kind, a.revoked_at AS agent_revoked_at
+             FROM agent_tokens t JOIN agents a ON a.id = t.agent_id WHERE t.id = ?1`,
+        )
+        .bind(agentMeta?.tokenId ?? null),
+      db
+        .prepare(
+          `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+             FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
+        )
+        .bind(repo.id),
+      reviewFactsSelectById(db, e.change_set_id),
+      changeDependenciesStatement(db, repo.id, e.change_set_id),
+    ]);
+    if ((claim?.results?.length ?? 0) === 0) {
+      await release();
+      return { kind: 'lost' };
+    }
+    fence = { generation: claimedGen, state: 'publishing' };
+
+    const row = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
+    const refused = mergeRefusal(row, 'explicit', plan.headSha) ?? workspaceAdmissionRefusal(row!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null);
+    if (refused) {
+      await release();
+      return exit(refused.code ?? 'REFUSED', refused.error);
+    }
+    who = enqueuerActor(repo, ref, (facts?.results as FactsRow[] | undefined)?.[0], (agentRes?.results as AgentRow[] | undefined)?.[0], e, deps.now());
+    if (who.denied) {
+      await release();
+      return exit('AUTHORIZATION_REVOKED', who.denied);
+    }
+    // Rules may have been raised or added since the pass: approvals and required checks are judged by the current ones.
+    const policy = effectivePolicy(((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow), ref);
+    const review = reviewGate(parseReviewFacts((reviewRes?.results as ReviewFactsRow[] | undefined)?.[0]), policy);
+    if (review.block) {
+      await release();
+      if (review.missing.length > 0) await db.batch(review.missing.map((reason) => recordMissingEscalation(db, e.change_set_id, reason, deps.now())));
+      return exit(review.block.code, review.block.error);
+    }
+    const pins = pinsRes?.results as DependencyRow[] | undefined;
+    if (blockFromRows(pins, 'publish') || !pinsVerified(pins, plan.verifiedPins ?? new Set())) {
+      // A pin turned unresolved (or was repinned) since the pass: back to waiting in place (the next pass records why).
+      await release();
+      await back('queued');
+      return { kind: 'lost' };
+    }
+    const late = await checksVerdict(policy);
+    if (late) {
+      await release();
+      return late;
+    }
+
+    const headRef = branchRef(e.c_head_ref);
+    let tips: Map<string, string | null> | null = null;
+    try {
+      tips = await lsRefs(ctx, [ref, headRef]);
+    } catch (err) {
+      if (!(err instanceof RefStoreUnavailable)) throw err;
+    }
+    const moved = tips ? liveHeadRefusal(headRef, plan.headSha, tips.get(headRef)) : null;
+    if (moved) {
+      await release();
+      if (row!.merge_policy !== 'auto') return exit('HEAD_MOVED', `${headRef} moved from the approved ${plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
+      // The auto change follows its new head once its push event records it (that event kicks the train).
+      await back('queued');
+      return { kind: 'pending' };
+    }
+    if (!tips) {
+      status = 'unavailable';
+    } else if (tips.get(ref) !== pv.targetSha) {
+      status = 'stale';
+    } else {
+      const r = await update.send();
+      status = r.status;
+      if (r.status !== 'ok' && r.status !== 'stale' && r.status !== 'rejected') {
+        // The update may have landed: the ref decides.
+        const nowRef = (await lsRefs(ctx, [ref]).catch(() => new Map<string, string | null>())).get(ref);
+        status = nowRef === pv.mergeCommit ? 'ok' : 'unknown';
+      }
     }
   } catch (err) {
-    if (!(err instanceof RefStoreUnavailable)) {
-      await lease.release(owner, acq.generation).catch(() => undefined);
-      throw err;
-    }
+    if (!(err instanceof RefStoreUnavailable)) throw err;
     status = 'unavailable';
+  } finally {
+    await release();
   }
-  const rel = await lease.release(owner, acq.generation).catch(() => ({ released: false }));
-  deps.observe?.({ type: 'lease', op: 'release', number: e.change_number, ok: rel.released, generation: acq.generation });
   deps.observe?.({ type: 'publish', number: e.change_number, status, mergeCommit: pv.mergeCommit, previous: pv.targetSha });
 
   if (status === 'stale') {
@@ -1411,6 +1504,7 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
     { id: e.change_set_id, number: e.change_number },
     { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha: plan.headSha },
     mergedAt,
+    { queueId: e.id, generation: claimedGen },
   );
   const recorded = await db.batch([
     db
@@ -1423,10 +1517,17 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
     ...record,
   ]);
   const [entryWrite, changeWrite] = recorded;
-  await settleLanded(db, artifactsMergeSources(ctx), repo.id, recorded[record.length]?.results as LandedRow[] | undefined, pv.mergeCommit, (r, reason) =>
-    deps.kick(env, repo.id, r, reason),
-  );
-  if (!entryWrite?.meta.changes || !changeWrite?.meta.changes) {
+  if (!entryWrite?.meta.changes) {
+    // The entry was recovered by another pass while this publisher waited: its fenced record wrote nothing, so it reports nothing.
+    console.warn(JSON.stringify({ trainLateResult: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, generation: claimedGen } }));
+    return { kind: 'lost' };
+  }
+  await settleLanded(db, artifactsMergeSources(ctx), repo.id, recorded[record.length]?.results as LandedRow[] | undefined, pv.mergeCommit, {
+    source: { changeSetId: e.change_set_id, mergedAt },
+    kick: (r, reason) => deps.kick(env, repo.id, r, reason),
+    resume: async (numbers) => ctx.waitUntil(resumeAutoChanges(env, repo.id, numbers, ctx.waitUntil)),
+  });
+  if (!changeWrite?.meta.changes) {
     console.warn(JSON.stringify({ trainRecord: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, entry: entryWrite?.meta.changes, change: changeWrite?.meta.changes } }));
   }
   deps.observe?.({ type: 'publish', number: e.change_number, status: 'recorded', mergeCommit: pv.mergeCommit, previous: pv.targetSha, ...(cost ? { cost: recordCost! } : {}) });

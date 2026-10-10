@@ -26,9 +26,11 @@ import {
   BlobTooLargeError,
   buildCommit,
   classifyConflicts,
+  decode,
   deterministicResolver,
   merge3,
   mergeBase,
+  parseTree,
   type ClassifiedConflict,
   type CommitInfo,
   type CommitReader,
@@ -72,6 +74,33 @@ const resolver = deterministicResolver(RESOLVE);
 export type MergeConflict = ClassifiedConflict;
 
 export interface MergeSources extends CommitReader, MergeReader {}
+
+function parseCommitObject(o: GitObject): CommitInfo {
+  const text = decode(o.raw.subarray(o.raw.indexOf(0) + 1));
+  const head = text.split('\n\n')[0] ?? '';
+  return {
+    treeHash: /^tree ([0-9a-f]{40})$/m.exec(head)?.[1] ?? '',
+    parents: [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!),
+  };
+}
+
+/** Merge inputs that also see prepared, not yet published objects (their commits, trees and blobs). */
+export function overlaySources(inner: MergeSources, objects: Map<string, GitObject>): MergeSources {
+  return {
+    async readCommit(sha) {
+      const o = objects.get(sha);
+      return o?.type === 'commit' ? parseCommitObject(o) : inner.readCommit(sha);
+    },
+    async readTree(hash) {
+      const o = objects.get(hash);
+      return o?.type === 'tree' ? parseTree(o.raw) : inner.readTree(hash);
+    },
+    async readBlob(hash) {
+      const o = objects.get(hash);
+      return o?.type === 'blob' ? o.raw.slice(o.raw.indexOf(0) + 1) : inner.readBlob(hash);
+    },
+  };
+}
 
 export type MergeStatus = 'fast-forward' | 'clean' | 'conflicts' | 'up-to-date' | 'unrelated' | 'unknown';
 

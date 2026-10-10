@@ -390,6 +390,39 @@ describe('unresolvable conflicts', () => {
     expect((await taskRows('base-moves')).map((t) => t.status)).toEqual(['obsolete']);
   });
 
+  it('a resolution push reopens every conflicted change on the branch, beyond one page', async () => {
+    const repo = await seedRepo('many-heads');
+    const { main, feature } = await fork(repo, ...FIXTURES.unresolvable);
+    const count = 22;
+    for (let i = 1; i <= count; i++) {
+      repo.refs.set(`refs/heads/base${i}`, main.sha);
+      const c = await call('POST', repoPath('many-heads', '/changes'), tok.owner, { title: `c${i}`, base: `base${i}`, head: 'feature', mergePolicy: 'review' });
+      expect(c.json.state, JSON.stringify(c.json)).toBe('conflicted');
+    }
+    const fixed = await commit(repo, { ...BASE, 'lines.txt': linesWith({ 9: 'line 9 main', 10: 'line 10 feature' }) }, [feature.sha, main.sha]);
+    repo.refs.set('refs/heads/feature', fixed.sha);
+    await deliver(pushBody('many-heads', 'refs/heads/feature', feature.sha, fixed.sha, Date.now()));
+    for (const n of [1, 20, 21, count]) expect((await stateRow('many-heads', n)).state, `#${n}`).toBe('open');
+    expect((await taskRows('many-heads')).filter((t) => t.status !== 'obsolete')).toEqual([]);
+  });
+
+  it('an auto change whose base moves past the conflict merges without a read', async () => {
+    for (const via of ['push', 'read'] as const) {
+      const name = `base-clears-${via}`;
+      const repo = await seedRepo(name);
+      const { main } = await fork(repo, ...FIXTURES.unresolvable);
+      await create(name, 'auto');
+      expect((await stateRow(name, 1)).state).toBe('conflicted');
+      const moved = await commit(repo, { ...BASE, ...FIXTURES.unresolvable[1] }, [main.sha]);
+      repo.refs.set(MAIN, moved.sha);
+      // A read may see the cleared conflict before the push event is processed.
+      if (via === 'read') expect((await get(name, 1)).status).toBe(200);
+      await deliver(pushBody(name, MAIN, main.sha, moved.sha, Date.now()));
+      expect((await stateRow(name, 1)).state, via).toBe('merged');
+      expect((await taskRows(name)).map((t) => t.status)).toEqual(['obsolete']);
+    }
+  });
+
   it('a push that makes an open review change conflict marks it right away; it cannot be enqueued', async () => {
     const repo = await seedRepo('push-conflicts');
     const { main, feature } = await fork(repo, { 'lines.txt': linesWith({ 9: 'line 9 main' }) }, { 'lines.txt': linesWith({ 12: 'line 12 feature' }) });

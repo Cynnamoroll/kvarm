@@ -572,6 +572,56 @@ describe('workspace admission comes before automatic publication', () => {
     expect(res.status === 201 || res.status === 409).toBe(true);
   });
 
+  /** A workspace whose pushed work conflicts with main (both edit README.md). */
+  async function workspaceWithConflict(name: string) {
+    const { repo, main, ws, head } = await workspaceWithWork(name);
+    const moved = await commit(repo, { 'README.md': 'readme on main\n' }, [main.sha]);
+    repo.refs.set('refs/heads/main', moved.sha);
+    const c = await commit(repo, { 'README.md': 'readme in the workspace\n', 'race.txt': 'r\n' }, [head]);
+    expect((await gitPush(name, tok.owner, [`${head} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
+    return { repo, ws };
+  }
+
+  const liveTasks = async (name: string) =>
+    (
+      await env.DB.prepare(`SELECT t.status, c.number FROM agent_tasks t JOIN change_sets c ON c.id = t.change_set_id WHERE t.repo_id = ? AND t.status IN ('open', 'claimed')`)
+        .bind(repoIds[name])
+        .all<{ status: string; number: number }>()
+    ).results ?? [];
+
+  it('a conflicted change set that loses the admission is closed and its task retired', async () => {
+    const { repo, ws } = await workspaceWithConflict('admit-conflicted');
+    let lsRefs = 0;
+    // The first request pauses before it writes its change; the second wins the link meanwhile.
+    const pause = pauseAt(repo, (c) => c === 'lsRefs' && ++lsRefs === 1);
+    const late = openChange('admit-conflicted', ws.id, { title: 'late' });
+    await pause.reached;
+    const won = await openChange('admit-conflicted', ws.id, { title: 'won' });
+    pause.release();
+    const lost = await late;
+    repo.hook = null;
+    expect([won.status, won.json.state]).toEqual([201, 'conflicted']);
+    expect([lost.status, lost.json.code]).toEqual([409, 'CHANGE_SET_EXISTS']);
+    const all = await call('GET', `/api/v1/repos/${OWNER}/admit-conflicted/changes?state=all`, tok.owner);
+    expect(all.json.changes.map((c: any) => [c.number, c.state]).sort()).toEqual(
+      [
+        [won.json.number, 'conflicted'],
+        [lost.json.closedChange, 'closed'],
+      ].sort(),
+    );
+    expect(await liveTasks('admit-conflicted')).toEqual([{ status: 'open', number: won.json.number }]);
+  });
+
+  it('abandoning a workspace retires the live conflict task of its closed change', async () => {
+    const { ws } = await workspaceWithConflict('abandon-conflicted');
+    const opened = await openChange('abandon-conflicted', ws.id, { title: 'conflicted' });
+    expect([opened.status, opened.json.state]).toEqual([201, 'conflicted']);
+    expect(await liveTasks('abandon-conflicted')).toHaveLength(1);
+    expect((await abandon('abandon-conflicted', ws.id)).status).toBe(200);
+    expect((await getChange('abandon-conflicted', opened.json.number)).json.state).toBe('closed');
+    expect(await liveTasks('abandon-conflicted')).toEqual([]);
+  });
+
   it('the send-time check refuses an auto change on a workspace branch linked to another change set', async () => {
     const { repo, main, ws } = await workspaceWithWork('admit-send');
     const linked = await openChange('admit-send', ws.id, { title: 'linked review' });

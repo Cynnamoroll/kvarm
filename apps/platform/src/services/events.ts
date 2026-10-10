@@ -25,7 +25,7 @@ import { sha256Hex, ZERO_OID } from '@forge/gitops';
 import { bumpRefGeneration } from '../cache/compare';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import type { ServiceResult } from '../repos/service';
-import { onHeadPushed, type ChangeOnRef } from './changes';
+import { onBasePushed, onHeadPushed, type ChangeOnRef } from './changes';
 import { reconcileObserved } from './intents/forecast';
 import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
@@ -115,6 +115,7 @@ interface IngestRow {
   done: string;
   changes: string | null;
   workspace: string | null;
+  base_conflicted: number | null;
 }
 
 /** The workspace whose ref was pushed (workspace-namespace refs only). */
@@ -136,6 +137,8 @@ export interface Ingested {
   /** Event time as first persisted (orders reconciliations of one ref). */
   eventAt: number;
   workspace: PushedWorkspace | null;
+  /** True when a conflicted `auto` change has the pushed branch as its base. */
+  baseConflicted: boolean;
 }
 
 const BRANCH_PREFIX = 'refs/heads/';
@@ -218,7 +221,8 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
                      'queuedHead', (SELECT q.head_sha FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)))
               FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state IN ('open', 'conflicted')) AS changes,
            (SELECT json_object('id', w.id, 'status', w.status, 'baseSha', w.base_sha)
-              FROM workspaces w WHERE w.repo_id = r.id AND w.ref = ?5) AS workspace
+              FROM workspaces w WHERE w.repo_id = r.id AND w.ref = ?5) AS workspace,
+           (SELECT 1 FROM change_sets b WHERE b.repo_id = r.id AND b.state = 'conflicted' AND b.merge_policy = 'auto' AND b.base_ref = ?4 LIMIT 1) AS base_conflicted
          FROM repos r
          JOIN push_events p ON p.id = ?2 AND p.repo_id = r.id
          LEFT JOIN repo_refs f ON f.repo_id = r.id AND f.ref = ?3
@@ -237,6 +241,7 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
     changes: parseChanges(row.changes),
     eventAt: row.event_at,
     workspace: row.workspace ? (JSON.parse(row.workspace) as PushedWorkspace) : null,
+    baseConflicted: row.base_conflicted === 1,
   };
 }
 
@@ -255,6 +260,7 @@ export interface EffectContext {
   changes: ChangeOnRef[];
   eventAt: number;
   workspace: PushedWorkspace | null;
+  baseConflicted: boolean;
   /** Counts SnapshotBuilder instance creations for the per-message log line. */
   counters: { wf: number };
 }
@@ -338,15 +344,20 @@ const intentIndexEffect: PushEffect = {
 /**
  * Change requests on the pushed branch (services/changes.ts): their head
  * already moved in the ingest batch; this runs the head-moved hooks and
- * merges ready `auto` changes. No D1 when no open change uses the branch.
+ * merges ready `auto` changes; as a base, it re-evaluates the conflicted
+ * `auto` changes onto it. No D1 when no live change uses the branch.
  */
 const changeHooksEffect: PushEffect = {
   name: 'change-hooks',
   async run(ctx) {
     if (!ctx.event.ref.startsWith(BRANCH_PREFIX)) return { state: 'skipped', detail: 'not a branch' };
     const pending: Promise<unknown>[] = [];
+    const waitUntil = (p: Promise<unknown>) => pending.push(p);
     try {
-      return await onHeadPushed(ctx.env, ctx.repoId, ctx.changes, ctx.event.after, (p) => pending.push(p));
+      const head = await onHeadPushed(ctx.env, ctx.repoId, ctx.changes, ctx.event.after, waitUntil);
+      if (!ctx.baseConflicted || ctx.event.after === ZERO_OID) return head;
+      const base = await onBasePushed(ctx.env, ctx.repoId, ctx.event.ref.slice(BRANCH_PREFIX.length), waitUntil);
+      return { state: 'done', detail: head.state === 'done' ? `${head.detail}; ${base.detail}` : base.detail };
     } finally {
       await Promise.allSettled(pending);
     }
@@ -401,6 +412,7 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
     changes: state.changes,
     eventAt: state.eventAt,
     workspace: state.workspace,
+    baseConflicted: state.baseConflicted,
     counters,
   };
   const settled = await Promise.allSettled(pending.map((e) => e.run(ctx)));

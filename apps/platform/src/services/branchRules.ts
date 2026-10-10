@@ -187,6 +187,16 @@ export function branchRulesSelect(db: D1Database, owner: string, name: string): 
     .bind(owner, name);
 }
 
+/** The repo's rules by id, for a publication's final revalidation batch. */
+export function repoBranchRulesSelect(db: D1Database, repoId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+         FROM branch_rules b WHERE b.repo_id = ? LIMIT ${BRANCH_RULES_MAX}`,
+    )
+    .bind(repoId);
+}
+
 export async function listRules(env: Env, repo: RepoRow): Promise<BranchRule[]> {
   const { results } = await env.DB.prepare(`${RULE_SELECT} WHERE b.repo_id = ? ORDER BY b.pattern LIMIT ?`)
     .bind(repo.id, BRANCH_RULES_MAX)

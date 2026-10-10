@@ -13,6 +13,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
+import { DEPENDENCY_LIMITS } from '../src/services/dependencyGate';
 import { TRAIN_LIMITS, defaultTrainDeps, fairOrder, runTrain, type TrainDeps, type TrainEvent } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -384,6 +385,99 @@ describe('explicit pins', () => {
     expect([...one.repo.refs.entries()]).toEqual(refsBefore);
   });
 
+  it('a concurrent pin cannot combine with another into a chain deeper than 4', async () => {
+    const { repo } = await seedRepo('race-depth');
+    const w: Ws[] = [];
+    for (let i = 1; i <= 5; i++) w.push(await workspace('race-depth', `w${i}.txt`));
+    const [w1, w2, w3, w4, w5] = w as [Ws, Ws, Ws, Ws, Ws];
+    expect((await pin('race-depth', w1.id, w2.id, w2.head)).status).toBe(201);
+    expect((await pin('race-depth', w2.id, w3.id, w3.head)).status).toBe(201);
+    // w3 -> w4 (a 4-chain) and w4 -> w5 are each valid alone; together they make w1..w5.
+    let other: Reply | null = null;
+    let armed = true;
+    repo.hook = async (call) => {
+      if (call !== 'lsRefs' || !armed) return;
+      armed = false;
+      other = await pin('race-depth', w4.id, w5.id, w5.head);
+    };
+    const first = await pin('race-depth', w3.id, w4.id, w4.head);
+    repo.hook = null;
+    expect(other!.status, JSON.stringify(other!.json)).toBe(201);
+    expect(first.status, JSON.stringify(first.json)).toBeGreaterThanOrEqual(409);
+    expect(['DEPENDENCY_CONFLICT', 'DEPENDENCY_DEPTH_EXCEEDED']).toContain(first.json.code);
+    expect((await listDeps('race-depth', w3.id)).json.dependencies).toEqual([]);
+    const retry = await pin('race-depth', w3.id, w4.id, w4.head);
+    expect([retry.status, retry.json.code]).toEqual([422, 'DEPENDENCY_DEPTH_EXCEEDED']);
+  });
+
+  it('a repin onto a deeper source is bounded by the depth cap at the write', async () => {
+    const { repo } = await seedRepo('race-repin');
+    const w: Ws[] = [];
+    for (let i = 1; i <= 5; i++) w.push(await workspace('race-repin', `w${i}.txt`));
+    const [w1, w2, w3, w4, w5] = w as [Ws, Ws, Ws, Ws, Ws];
+    expect((await pin('race-repin', w1.id, w2.id, w2.head)).status).toBe(201);
+    const edge = (await pin('race-repin', w2.id, w3.id, w3.head)).json;
+    expect((await pin('race-repin', w4.id, w5.id, w5.head)).status).toBe(201);
+    // Repin w2 -> w4 (w1 w2 w4 w5: 4) while w5 concurrently gains a source (w1 w2 w4 w5 w6: 5).
+    const w6 = await workspace('race-repin', 'w6.txt');
+    let armed = true;
+    let other: Reply | null = null;
+    repo.hook = async (call) => {
+      if (call !== 'lsRefs' || !armed) return;
+      armed = false;
+      other = await pin('race-repin', w5.id, w6.id, w6.head);
+    };
+    const moved = await repin('race-repin', w2.id, edge.id, { onWorkspace: w4.id, revision: w4.head });
+    repo.hook = null;
+    expect(other!.status, JSON.stringify(other!.json)).toBe(201);
+    expect(moved.status, JSON.stringify(moved.json)).toBeGreaterThanOrEqual(409);
+    expect((await listDeps('race-repin', w2.id)).json.dependencies).toEqual([expect.objectContaining({ onWorkspace: w3.id })]);
+  });
+
+  it('concurrent pins cannot exceed the direct-dependency limit', async () => {
+    const { repo } = await seedRepo('race-direct');
+    const dep = await workspace('race-direct', 'dep.txt');
+    const sources: Ws[] = [];
+    for (let i = 0; i < 9; i++) sources.push(await workspace('race-direct', `s${i}.txt`));
+    for (let i = 0; i < 7; i++) expect((await pin('race-direct', dep.id, sources[i]!.id, sources[i]!.head)).status).toBe(201);
+    let armed = true;
+    let other: Reply | null = null;
+    repo.hook = async (call) => {
+      if (call !== 'lsRefs' || !armed) return;
+      armed = false;
+      other = await pin('race-direct', dep.id, sources[8]!.id, sources[8]!.head);
+    };
+    const first = await pin('race-direct', dep.id, sources[7]!.id, sources[7]!.head);
+    repo.hook = null;
+    expect(other!.status).toBe(201);
+    expect(first.status).toBeGreaterThanOrEqual(409);
+    expect((await listDeps('race-direct', dep.id)).json.dependencies).toHaveLength(8);
+  });
+
+  it('a chain walk past its path budget fails closed instead of trusting a partial walk', async () => {
+    await seedRepo('wide');
+    const saved = DEPENDENCY_LIMITS.walkMax;
+    try {
+      const d = await workspace('wide', 'd.txt');
+      const x1 = await workspace('wide', 'x1.txt');
+      const x2 = await workspace('wide', 'x2.txt');
+      const z = await workspace('wide', 'z.txt');
+      const y = await workspace('wide', 'y.txt');
+      const s = await workspace('wide', 's.txt');
+      const t = await workspace('wide', 't.txt');
+      for (const [a, b] of [[x1, d], [x2, d], [z, d], [y, z], [s, t]] as const) expect((await pin('wide', a.id, b.id, b.head)).status).toBe(201);
+      DEPENDENCY_LIMITS.walkMax = 2;
+      // Above d: x1, x2 and y -> z -> d (three paths); d -> s -> t would make y z d s t, five long.
+      const r = await pin('wide', d.id, s.id, s.head);
+      expect(r.status, JSON.stringify(r.json)).toBe(422);
+      expect(['DEPENDENCY_GRAPH_TOO_WIDE', 'DEPENDENCY_DEPTH_EXCEEDED']).toContain(r.json.code);
+      expect(r.json.error).toContain(d.id);
+      expect((await listDeps('wide', d.id)).json.dependencies).toEqual([]);
+    } finally {
+      DEPENDENCY_LIMITS.walkMax = saved;
+    }
+  });
+
   it('validates and lists with work independent of unrelated workspaces', async () => {
     await seedRepo('cost-small');
     await seedRepo('cost-big');
@@ -584,6 +678,80 @@ describe('lifecycle', () => {
     const refused = await merge('unsatisfied', b2.change!);
     expect([refused.status, refused.json.code]).toEqual([409, 'DEPENDENCY_BROKEN']);
   });
+
+  it('a pin satisfied by a landing elsewhere does not let the dependent publish without the pinned revision', async () => {
+    const { repo, main } = await seedRepo('elsewhere');
+    repo.refs.set('refs/heads/dev', main);
+    const a = await workspace('elsewhere', 'a.txt', { change: 'review', base: 'dev' });
+    const b = await workspace('elsewhere', 'b.txt', { change: 'review' });
+    expect((await pin('elsewhere', b.id, a.id, a.head)).status).toBe(201);
+    expect((await merge('elsewhere', a.change!)).status).toBe(200);
+    expect((await listDeps('elsewhere', b.id)).json.dependencies).toEqual([expect.objectContaining({ state: 'satisfied' })]);
+
+    const m = await merge('elsewhere', b.change!);
+    expect([m.status, m.json.code]).toEqual([409, 'DEPENDENCY_NOT_PRESERVED']);
+    expect(m.json.error).toContain(a.head);
+    expect(repo.refs.get(MAIN)).toBe(main);
+
+    expect((await enqueue('elsewhere', b.change!)).status).toBe(201);
+    const run = await runTrain(env, repoIds.elsewhere!, MAIN, trainDeps());
+    expect(run.published).toEqual([]);
+    expect(run.ejected).toEqual([{ number: b.change, code: 'DEPENDENCY_NOT_PRESERVED' }]);
+    expect(repo.refs.get(MAIN)).toBe(main);
+    expect((await getChange('elsewhere', b.change!)).json).toMatchObject({ state: 'open', mergeCommit: null });
+  });
+
+  it('landing settles every pin of the source and still wakes waiting partitions, in bounded batches', async () => {
+    const { repo } = await seedRepo('settle-many');
+    const saved = DEPENDENCY_LIMITS.readMax;
+    try {
+      const a = await workspace('settle-many', 'a.txt', { change: 'review' });
+      const pinned: Ws[] = [];
+      for (let i = 0; i < 3; i++) {
+        const d = await workspace('settle-many', `d${i}.txt`);
+        expect((await pin('settle-many', d.id, a.id, a.head)).status).toBe(201);
+        pinned.push(d);
+      }
+      // The source moves on; its earlier pins are settled by ancestry when it lands.
+      const r2 = await push('settle-many', a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
+      const q = await workspace('settle-many', 'q.txt', { change: 'review' });
+      expect((await pin('settle-many', q.id, a.id, r2)).status).toBe(201);
+      expect((await enqueue('settle-many', q.change!)).status).toBe(201);
+      DEPENDENCY_LIMITS.readMax = 2;
+      sent.length = 0;
+      expect((await merge('settle-many', a.change!)).status).toBe(200);
+      for (const d of pinned) expect((await listDeps('settle-many', d.id)).json.dependencies, d.id).toEqual([expect.objectContaining({ state: 'satisfied' })]);
+      expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-landed' }));
+      expect(repo.refs.get(a.ref)).toBe(r2);
+    } finally {
+      DEPENDENCY_LIMITS.readMax = saved;
+    }
+  });
+
+  it('an auto dependent that is not queued resumes when its source lands or its pin is detached', async () => {
+    const { repo } = await seedRepo('auto-resume');
+    const autoChange = async (w: Ws) => {
+      const ch = await call('POST', api('auto-resume', `/workspaces/${w.id}/change-set`), tok.owner, { title: `Change ${w.id}`, mergePolicy: 'auto' });
+      expect(ch.status, JSON.stringify(ch.json)).toBe(201);
+      return ch.json.number as number;
+    };
+    const a = await workspace('auto-resume', 'a.txt', { change: 'review' });
+    const b = await workspace('auto-resume', 'b.txt');
+    expect((await pin('auto-resume', b.id, a.id, a.head)).status).toBe(201);
+    const bn = await autoChange(b);
+    expect((await getChange('auto-resume', bn)).json).toMatchObject({ state: 'open', queueState: null });
+    expect((await merge('auto-resume', a.change!)).status).toBe(200);
+    expect((await getChange('auto-resume', bn)).json).toMatchObject({ state: 'merged' });
+    expect(isAncestorOf(repo, b.head, repo.refs.get(MAIN)!)).toBe(true);
+
+    const c = await workspace('auto-resume', 'c.txt', { change: 'review' });
+    const d = await workspace('auto-resume', 'd.txt');
+    const edge = (await pin('auto-resume', d.id, c.id, c.head)).json;
+    const dn = await autoChange(d);
+    expect((await getChange('auto-resume', dn)).json.state).toBe('open');
+    expect((await detach('auto-resume', d.id, edge.id)).status).toBe(200);
+    expect((await getChange('auto-resume', dn)).json).toMatchObject({ state: 'merged' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -705,6 +873,57 @@ describe('integration train', () => {
     // All queued: one entry per principal per round, arrival order within a round and within a principal.
     const queued = rows.map((r) => ({ ...r, state: 'queued' }));
     expect(fairOrder(queued).map((r) => r.id)).toEqual(['a1', 'b1', 'a2', 'b2', 'a3', 'a4', 'a5']);
+  });
+
+  it('entries waiting on pins never hide a later prerequisite or unrelated work from a pass', async () => {
+    const { repo } = await seedRepo('hidden');
+    const saved = TRAIN_LIMITS.readAhead;
+    try {
+      const a = await workspace('hidden', 'a.txt', { change: 'review' });
+      const b1 = await workspace('hidden', 'b1.txt', { change: 'review' });
+      const b2 = await workspace('hidden', 'b2.txt', { change: 'review' });
+      const c = await workspace('hidden', 'c.txt', { change: 'review' });
+      for (const b of [b1, b2]) expect((await pin('hidden', b.id, a.id, a.head)).status).toBe(201);
+      for (const n of [b1.change!, b2.change!, a.change!, c.change!]) expect((await enqueue('hidden', n)).status).toBe(201);
+      TRAIN_LIMITS.readAhead = 2;
+      const run = await runTrain(env, repoIds.hidden!, MAIN, trainDeps());
+      expect(run.ejected).toEqual([]);
+      expect([...run.published].sort()).toEqual([a.change, b1.change, b2.change, c.change].sort());
+      expect(run.published.indexOf(a.change!)).toBeLessThan(run.published.indexOf(b1.change!));
+      expect(isAncestorOf(repo, a.head, repo.refs.get(MAIN)!)).toBe(true);
+    } finally {
+      TRAIN_LIMITS.readAhead = saved;
+    }
+  });
+
+  it('a source ejected from the train breaks only the pins on its ejected head, recoverable by repin', async () => {
+    for (const [name, cause] of [
+      ['eject-conflict', 'MERGE_CONFLICT'],
+      ['eject-checks', 'CHECKS_FAILED'],
+    ] as const) {
+      const { main } = await seedRepo(name);
+      const a = await workspace(name, 'a.txt', { change: 'review' });
+      const b = await workspace(name, 'b.txt', { change: 'review' });
+      const other = await workspace(name, 'o.txt', { change: 'review' });
+      const c = await workspace(name, 'c.txt');
+      const edge = (await pin(name, b.id, a.id, a.head)).json;
+      const unrelated = (await pin(name, c.id, other.id, other.head)).json;
+      for (const n of [a.change!, b.change!]) expect((await enqueue(name, n)).status).toBe(201);
+      let deps = trainDeps();
+      if (cause === 'MERGE_CONFLICT') await push(name, MAIN, { 'README.md': 'readme\n', 'a.txt': 'main a\n' }, [main]);
+      else deps = trainDeps({ gate: () => scriptedGate('failure').gate });
+      const run = await runTrain(env, repoIds[name]!, MAIN, deps);
+      expect(run.ejected, name).toEqual([{ number: a.change, code: cause }]);
+      expect(run.published, name).toEqual([]);
+      const listed = (await listDeps(name, b.id)).json.dependencies;
+      expect(listed, name).toEqual([expect.objectContaining({ id: edge.id, state: 'broken', reason: expect.objectContaining({ code: 'SOURCE_EJECTED' }) })]);
+      expect(listed[0].reason.message, name).toContain(cause);
+      expect((await listDeps(name, c.id)).json.dependencies, name).toEqual([expect.objectContaining({ id: unrelated.id, state: 'active' })]);
+      expect((await rows(name)).find((r) => r.change_number === b.change), name).toMatchObject({ state: 'queued', active: 1 });
+      const back = await repin(name, b.id, edge.id, { revision: a.head });
+      expect(back.status, name).toBe(200);
+      expect(back.json, name).toMatchObject({ state: 'active', previous: { state: 'broken', reason: { code: 'SOURCE_EJECTED' } } });
+    }
   });
 
   it('independent target partitions continue separately while a dependent waits', async () => {

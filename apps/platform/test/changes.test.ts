@@ -415,9 +415,10 @@ describe('authorization', () => {
     const { root, main } = await conflicting(repo);
     const t = await workspaceAgentToken('agent-implicit', 'cr-agent-implicit');
     expect((await create('agent-implicit', { title: 'x', base: 'main', head: 'feature', mergePolicy: 'auto' })).json.state).toBe('conflicted');
-    // The base moves back so the change is mergeable, with no push to its head; a read reopens it.
+    // The base moves back so the change is mergeable, with no push to its head; it is open but not yet
+    // merged (as between a base move and the base push event that resumes it).
     repo.refs.set('refs/heads/main', root.sha);
-    expect((await get('agent-implicit', 1)).json.state).toBe('open');
+    await env.DB.prepare(`UPDATE change_sets SET state = 'open', conflicts = NULL WHERE repo_id = ? AND number = 1`).bind(repoIds['agent-implicit']).run();
 
     const edited = await patch('agent-implicit', 1, { title: 'renamed by agent' }, t);
     expect(edited.status).toBe(200);
@@ -854,6 +855,26 @@ describe('merge', () => {
     expect(repo.count('receivePack:')).toBe(0);
     expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
     expect((await get('race-pack-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null });
+  });
+
+  it('a protection rule added while the pack is prepared applies to the publication', async () => {
+    const repo = await seedRepo('race-pack-rule');
+    const { main } = await divergent(repo);
+    await create('race-pack-rule', { title: 'x', base: 'main', head: 'feature' });
+    const deps = pausedAfterPack(async () => {
+      await env.DB.prepare(
+        `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals, created_by, created_at, updated_by, updated_at)
+         VALUES (?, ?, 'refs/heads/main', '[]', 1, ?, ?, ?, ?)`,
+      )
+        .bind(crypto.randomUUID(), repoIds['race-pack-rule'], userIds[OWNER], Date.now(), userIds[OWNER], Date.now())
+        .run();
+    });
+    const r = await mergeWith('race-pack-rule', 1, deps);
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'APPROVALS_REQUIRED' });
+    expect(deps.paused()).toBe(true);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-pack-rule', 1)).json).toMatchObject({ state: 'open', mergeCommit: null });
   });
 
   it('a head refresh that lands while the pack is prepared stops publication of the old head', async () => {

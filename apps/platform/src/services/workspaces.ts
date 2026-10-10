@@ -23,6 +23,7 @@ import type { ServiceResult } from '../repos/service';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import type { BranchRule } from './branchRules';
 import { createChange, normalizeBranch, type ChangeDetail } from './changes';
+import { RESOLVE_CONFLICT } from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
 import { normalizeDeclaration, type Declaration } from './intents/paths';
@@ -291,12 +292,15 @@ export function workspaceInsertStatement(
   now: number,
   intentJson: string | null = null,
   expiresAt: number | null = null,
+  /** A condition the insert requires, with its parameters bound from ?17 on. */
+  guard: { where: string; params: unknown[] } | null = null,
 ): D1PreparedStatement {
+  const values = `?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, '[]', ?8, ?8, ?11, ?15, ?16`;
   return cx.env.DB.prepare(
     `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_by, agent_id,
        created_at, updated_at, intent_paths, intent_updated_at, intent_expires_at,
        observed_paths, observed_base_sha, observed_head_sha, observed_at, arena_id, head_sha)
-     VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, '[]', ?8, ?8, ?11, ?15, ?16)`,
+     ${guard ? `SELECT ${values} WHERE ${guard.where}` : `VALUES (${values})`}`,
   ).bind(
     w.id,
     cx.repo.id,
@@ -314,6 +318,7 @@ export function workspaceInsertStatement(
     expiresAt,
     w.arenaId ?? null,
     w.headSha ?? null,
+    ...(guard?.params ?? []),
   );
 }
 
@@ -491,9 +496,10 @@ export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown):
         ).bind(cx.repo.id, row.id, change.id, now),
         cx.env.DB.prepare(
           `UPDATE change_sets SET state = 'closed', updated_at = ?4
-            WHERE repo_id = ?1 AND id = ?3 AND state = 'open'
+            WHERE repo_id = ?1 AND id = ?3 AND state IN ('open', 'conflicted')
               AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?2 AND w.change_set_id = change_sets.id)`,
         ).bind(cx.repo.id, row.id, change.id, now),
+        retireClosedChangeTask(cx.env.DB, '?2', [change.id], now),
       ]);
       if (link?.meta.changes) return null;
       return fail(409, 'the workspace got a change set or left active meanwhile; this change was closed', 'CHANGE_SET_EXISTS', {
@@ -521,6 +527,21 @@ export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown):
 // ---------------------------------------------------------------------------
 
 /**
+ * Retires the live (open or claimed) resolve-conflict task of the change
+ * `changeId` names (SQL over parameters ?2...) once that change is closed;
+ * a completed task is kept.
+ */
+function retireClosedChangeTask(db: D1Database, changeId: string, params: unknown[], now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE agent_tasks SET status = 'obsolete', updated_at = ?1
+        WHERE kind = '${RESOLVE_CONFLICT}' AND status IN ('open', 'claimed') AND change_set_id = ${changeId}
+          AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = agent_tasks.change_set_id AND c.state = 'closed')`,
+    )
+    .bind(now, ...params);
+}
+
+/**
  * POST workspaces/:id/abandon. The row turns `abandoned` first (so the git
  * gate stops agent pushes to it) and an open linked change set is closed in
  * the same batch; then the ref is deleted with its current head as expected
@@ -542,7 +563,7 @@ export function abandonWorkspace(
 
     if (row.status === 'active') {
       const now = Date.now();
-      const [, , , read] = await cx.env.DB.batch([
+      const [, , , , read] = await cx.env.DB.batch([
         cx.env.DB.prepare(
           `UPDATE workspaces SET status = 'abandoned', abandoned_at = ?3, updated_at = ?3, head_sha = COALESCE(?4, head_sha, base_sha)
             WHERE repo_id = ?1 AND id = ?2 AND status = 'active'`,
@@ -552,6 +573,7 @@ export function abandonWorkspace(
             WHERE repo_id = ?1 AND state IN ('open', 'conflicted')
               AND id = (SELECT w.change_set_id FROM workspaces w WHERE w.repo_id = ?1 AND w.id = ?2 AND w.status = 'abandoned')`,
         ).bind(cx.repo.id, row.id, now),
+        retireClosedChangeTask(cx.env.DB, `(SELECT w.change_set_id FROM workspaces w WHERE w.repo_id = ?2 AND w.id = ?3 AND w.status = 'abandoned')`, [cx.repo.id, row.id], now),
         // The intent signal leaves the active index; the declaration and observed set stay on the row.
         workspaceSignalCleanup(cx.env.DB, cx.repo.id, row.id),
         cx.env.DB.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, row.id),
