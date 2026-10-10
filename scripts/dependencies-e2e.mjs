@@ -16,9 +16,9 @@
  *             the pin and leaves the dependent intact (VAL-DEP-005, -006, -008)
  *   satisfy   preserved revision → satisfied → the dependent merges; a source
  *             force-moved before landing → never satisfied (VAL-DEP-007)
- *   train     enqueue B (pinned to A), then A, then unrelated C: B waits with a
- *             machine-readable reason on GET train, C is not blocked, A lands
- *             before B (VAL-DEP-009)
+ *   train     enqueue B (pinned to A), then unrelated C, then A: B waits with a
+ *             machine-readable reason on GET train, C is not held behind B, A
+ *             lands before B (VAL-DEP-009)
  *   cli       broken pin recovered through `forge deps list/repin` and a
  *             `forge deps detach`, CLI output equal to REST read-backs, the four
  *             CLI failure classes without a TTY, CLI vs REST state for intent,
@@ -479,18 +479,20 @@ await scenario('train', async (env) => {
   const wb = waiting.json?.entries?.find((e) => e.number === b.number);
   console.log(`enqueue b -> ${qb.status}; GET train -> b waiting ${JSON.stringify(wb?.waiting)} state=${wb?.state} (x-forge-cost ${cost('train', waiting)})`);
   check('VAL-DEP-009', 'B enqueued first waits with a machine-readable reason on GET train', qb.status === 201 && wb?.waiting?.code === 'DEPENDENCY_PENDING' && wb.state === 'queued');
-  const qa = await enqueue(env, a.number);
+  // C is enqueued (201: its entry exists) before A. Enqueued after A, C could miss the pass that publishes A, and B,
+  // eligible once A's pin is satisfied and ahead of C in enqueue order, would then rightly publish first.
   const qc = await enqueue(env, c.number);
+  const qa = await enqueue(env, a.number);
   const [ma, mc, mb] = [await waitMerged(env, a.number), await waitMerged(env, c.number), await waitMerged(env, b.number)];
   mustGit(['fetch', '-q', gitUrl(env.repo), '+refs/heads/main:refs/remotes/origin/main'], env.dir);
   const log = mustGit(['log', '--first-parent', '--format=%H %s', 'origin/main'], env.dir).split('\n');
   const pos = (sha) => log.findIndex((l) => l.startsWith(sha ?? '-'));
   const sat = await deps(env, b.id);
   const tree = mustGit(['ls-tree', '--name-only', 'origin/main'], env.dir).split('\n');
-  console.log(`enqueue a -> ${qa.status}, c -> ${qc.status}\nmerged: a ${short(ma?.mergeCommit)} c ${short(mc?.mergeCommit)} b ${short(mb?.mergeCommit)}\ngit log --first-parent main:\n  ${log.join('\n  ')}\nGET b deps -> ${sat.json?.dependencies?.[0]?.state}; tree ${tree.join(',')}`);
+  console.log(`enqueue c -> ${qc.status}, a -> ${qa.status}\nmerged: a ${short(ma?.mergeCommit)} c ${short(mc?.mergeCommit)} b ${short(mb?.mergeCommit)}\ngit log --first-parent main:\n  ${log.join('\n  ')}\nGET b deps -> ${sat.json?.dependencies?.[0]?.state}; tree ${tree.join(',')}`);
   check('VAL-DEP-009', 'all three land with distinct merge commits; A before B on first-parent main', ma && mb && mc && new Set([ma.mergeCommit, mb.mergeCommit, mc.mergeCommit]).size === 3 && pos(ma.mergeCommit) > pos(mb.mergeCommit) && pos(mb.mergeCommit) >= 0);
   check('VAL-DEP-009', "B's pin satisfied; A's result in B's ancestry; every file on main", sat.json?.dependencies?.[0]?.state === 'satisfied' && git(['merge-base', '--is-ancestor', a.head, mb?.mergeCommit ?? 'x'], env.dir).code === 0 && ['a.txt', 'b.txt', 'c.txt'].every((f) => tree.includes(f)));
-  check('VAL-DEP-009', 'C was not held behind B (it landed while or before B waited)', Boolean(mc) && pos(mc.mergeCommit) > pos(mb?.mergeCommit));
+  check('VAL-DEP-009', 'C, enqueued after the waiting B, was not held behind B (it landed while B waited)', qc.status === 201 && qa.status === 201 && Boolean(mc) && pos(mc.mergeCommit) > pos(mb?.mergeCommit));
 });
 
 // --- CLI: recovery, failures, parity, status, help ------------------------------------
@@ -585,8 +587,20 @@ await scenario('cli', async (env) => {
   check('VAL-CLI-003', 'task claim: claimant and lease generation equal across CLI, REST read-back and the REST-made claim', claimCli.code === 0 && claimRest.status === 200 && isDeepStrictEqual(view(claimCli.data?.task), view(claimBack.json)) && isDeepStrictEqual(view(claimCli.data?.task), view(claimRest.json?.task)));
 
   // VAL-CLI-005: status twice, no mutation, reads only.
-  await enqueue(env, (await workspace(env, 'q', { change: true })).number);
-  await sleep(1000);
+  // The train entry is held: q is pinned to p, whose change is never enqueued or merged, so the train cannot publish
+  // it while the snapshots are taken. The first pass records the wait reason once; later passes write nothing.
+  const [p, q] = [await workspace(env, 'p', { change: true }), await workspace(env, 'q', { change: true })];
+  const held = await pin(env, q.id, p.id, p.head);
+  const qq = await enqueue(env, q.number);
+  let heldEntry = null;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 120_000) {
+    heldEntry = (await http(`${env.api}/queue`)).json?.entries?.find((x) => x.number === q.number) ?? null;
+    if (heldEntry?.reason?.code === 'DEPENDENCY_PENDING') break;
+    await sleep(2000);
+  }
+  const isHeld = held.status === 201 && qq.status === 201 && heldEntry?.state === 'queued' && heldEntry.reason?.code === 'DEPENDENCY_PENDING';
+  console.log(`held entry: pin q→p -> ${held.status}; enqueue q -> ${qq.status}; GET queue q after ${Math.round((Date.now() - t0) / 1000)} s -> state=${heldEntry?.state} reason=${heldEntry?.reason?.code}`);
   const snap = async () => ({
     ls: lsRemote(env.repo),
     changes: (await http(`${env.api}/changes?state=all&limit=100`)).json,
@@ -598,10 +612,12 @@ await scenario('cli', async (env) => {
   const st1 = forge(['status', env.full]);
   const st2 = forge(['status', env.full]);
   const after = await snap();
+  const differing = Object.keys(before).filter((k) => !isDeepStrictEqual(stable(before[k]), stable(after[k])));
+  if (differing.length) console.log(`snapshot parts that changed: ${differing.join(',')}\n  before ${JSON.stringify(stable(before)).slice(0, 1500)}\n  after  ${JSON.stringify(stable(after)).slice(0, 1500)}`);
   const reads = await Promise.all([`${env.api}/workspaces?status=active&limit=100`, `${env.api}/train?limit=100`, `${env.api}/tasks?status=open&limit=100`].map((p) => http(p)));
   console.log(`forge status --json x2 -> exit ${st1.code}/${st2.code}; ${st1.out.length} bytes; workspaces=${st1.data?.workspaces?.length} pins=${st1.data?.workspaces?.reduce((n, w) => n + (w.dependencies?.length ?? 0), 0)} train=${st1.data?.train?.entries?.length} tasks=${st1.data?.tasks?.tasks?.length}\nunderlying reads: ${reads.map((r) => r.cost).join(' | ')}`);
   check('VAL-CLI-005', 'two runs exit 0 with parseable JSON that agrees on state (only volatile timestamps differ)', st1.code === 0 && st2.code === 0 && st1.data && isDeepStrictEqual(stable(st1.data), stable(st2.data)) && st1.data.train?.entries?.length >= 1 && st1.data.workspaces.some((w) => w.dependencies?.length > 0));
-  check('VAL-CLI-005', 'no mutation: ls-remote, changes, workspaces and queue unchanged; underlying reads q=0', isDeepStrictEqual(stable(before), stable(after)) && reads.every((r) => r.status === 200 && parseCost(r.cost).q === 0 && parseCost(r.cost).rw === 0));
+  check('VAL-CLI-005', 'no mutation around a held train entry: ls-remote, changes, workspaces and queue unchanged; underlying reads q=0', isHeld && isDeepStrictEqual(stable(before), stable(after)) && reads.every((r) => r.status === 200 && parseCost(r.cost).q === 0 && parseCost(r.cost).rw === 0));
 
   // VAL-CLI-001: help lists the finite command set; the registry of record documents it.
   const help = forge(['--help'], { json: false });
