@@ -442,11 +442,22 @@ await scenario(
     await pin(other, b2.id, a2.id, a2.head);
     // A's head is force-moved to a commit that does not contain R, then A lands.
     const rewritten = await pushTo(other, a2, { 'a.txt': 'a rewritten\n' }, 'a rewritten', true, other.main);
-    // A change merges its recorded head, which follows the push event; wait for it to name the rewrite.
-    for (let i = 0; i < 40 && (await change(other, a2.number)).json?.headSha !== rewritten; i++) await sleep(1500);
-    const ma2 = await merge(other, a2.number);
+    // Merge immediately after the push. Until the push event records the rewrite, the merge confirms the live
+    // head branch and refuses 409 HEAD_MOVED naming it; the client re-reads the change and merges again.
+    let ma2 = await merge(other, a2.number);
+    const movedReplies = [];
+    for (let i = 0; i < 40 && ma2.status === 409 && ma2.json?.code === 'HEAD_MOVED'; i++) {
+      movedReplies.push(ma2);
+      await sleep(1500);
+      await change(other, a2.number);
+      ma2 = await merge(other, a2.number);
+    }
+    if (movedReplies.length) console.log(`merge a right after the force-push -> 409 HEAD_MOVED ×${movedReplies.length}: ${movedReplies[0].text} (x-forge-cost ${cost('head moved', movedReplies[0])})`);
+    else console.log('merge a right after the force-push -> no HEAD_MOVED (the push event had already recorded the rewrite)');
+    check('VAL-DEP-007', '(b) an immediate merge after the force-push never publishes the previous head: HEAD_MOVED names the live rewrite', movedReplies.every((r) => r.json?.headSha === rewritten && r.json?.recordedHead === a2.head));
     mustGit(['fetch', '-q', gitUrl(other.repo), '+refs/heads/main:refs/remotes/origin/main2'], other.dir);
     const anc2 = git(['merge-base', '--is-ancestor', a2.head, 'origin/main2'], other.dir).code === 0;
+    check('VAL-DEP-007', '(b) the landed commit contains the force-pushed head', ma2.status === 200 && git(['merge-base', '--is-ancestor', rewritten, 'origin/main2'], other.dir).code === 0);
     const notSat = await waitDeps(other, b2.id, (ds) => ds[0]?.state === 'broken', 30_000);
     const mb2 = await merge(other, b2.number);
     console.log(`force-push a -> ${short(rewritten)}; merge a -> ${ma2.status}; is-ancestor R main=${anc2}; GET b deps -> ${notSat.text}; merge b -> ${mb2.status} ${mb2.json?.code}`);

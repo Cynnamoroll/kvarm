@@ -315,6 +315,8 @@ export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
   ref?: string;
   review?: ReviewBlockDetail;
   dependencies?: DependencyView[];
+  headSha?: string;
+  recordedHead?: string;
 };
 
 export function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
@@ -868,6 +870,24 @@ export function mergeRefusal(row: ChangeRow | null, mode: MergeMode, headSha?: s
   return null;
 }
 
+/**
+ * Compares the head branch as ls-refs reports it now with the head about to
+ * be published. The recorded head follows push events, which trail the push
+ * by seconds, so a merge issued right after a push (a force-push above all)
+ * would otherwise publish the previous head and drop the newest one. A
+ * deleted branch (null) is not a move: the change keeps its last head, as in
+ * push processing.
+ */
+export function liveHeadRefusal(headRef: string, recorded: string, live: string | null | undefined): Fail | null {
+  if (!live || live === recorded) return null;
+  return fail(
+    409,
+    `${headRef} points at ${live}, not at the change's recorded head ${recorded}; the push is still being processed, re-read the change and merge again`,
+    'HEAD_MOVED',
+    { headSha: live, recordedHead: recorded },
+  );
+}
+
 export interface HeadWorkspace {
   status: string;
   change_set_id: string | null;
@@ -940,7 +960,9 @@ export function mergedRecordStatements(
 
 /**
  * Merges an open change's recorded head into its base branch: plan against
- * the base tip read fresh, check branch rules against the checks-gate answer
+ * the base tip read fresh, in the same ls-refs round trip that confirms the
+ * head branch still points at the recorded head (else 409 HEAD_MOVED naming
+ * the live head), check branch rules against the checks-gate answer
  * for the exact merge tree, prepare the push (write token and pack), re-read
  * the change immediately before sending (state, policy and head must still
  * allow this merge, and a head workspace must still admit this change),
@@ -962,6 +984,7 @@ async function performMerge(
   if (!row.head_sha) return fail(409, 'the change has no head commit', 'NO_HEAD');
   const headSha = row.head_sha;
   const targetRef = branchRef(row.base_ref);
+  const headRef = branchRef(row.head_ref);
   const policy = effectivePolicy(cx.branchRules ?? [], targetRef);
   const facts = reviewFacts ?? parseReviewFacts(await reviewFactsSelectById(cx.env.DB, row.id).first<ReviewFactsRow>());
   const reviewBlock = await reviewRefusal(cx.env, row.id, facts, policy);
@@ -974,8 +997,11 @@ async function performMerge(
     const sources = artifactsMergeSources(ctx);
     let last: Fail | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const targetSha = (await lsRefs(ctx, [targetRef])).get(targetRef) ?? null;
+      const tips = await lsRefs(ctx, [targetRef, headRef]);
+      const targetSha = tips.get(targetRef) ?? null;
       if (!targetSha) return fail(409, `base branch ${row.base_ref} no longer exists`, 'BASE_NOT_FOUND');
+      const moved = liveHeadRefusal(headRef, headSha, tips.get(headRef));
+      if (moved) return moved;
       const prepared = await prepareMerge(sources, {
         targetSha,
         headSha,

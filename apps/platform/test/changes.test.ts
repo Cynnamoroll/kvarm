@@ -872,6 +872,64 @@ describe('merge', () => {
     expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
     expect((await get('race-pack-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha, mergeCommit: null });
   });
+
+  it('a merge right after a force-push, before its event, refuses HEAD_MOVED naming the live head and never publishes the previous head', async () => {
+    const repo = await seedRepo('live-force');
+    const { root, main, feature } = await divergent(repo);
+    await create('live-force', { title: 'x', base: 'main', head: 'feature' });
+    // The force-pushed head does not contain the recorded one; its push event has not been delivered.
+    const rewritten = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'rewritten\n' }, [root.sha]);
+    repo.refs.set('refs/heads/feature', rewritten.sha);
+    const r = await merge('live-force', 1);
+    expect([r.status, r.json.code, r.json.headSha, r.json.recordedHead]).toEqual([409, 'HEAD_MOVED', rewritten.sha, feature.sha]);
+    expect(r.json.error).toContain(rewritten.sha);
+    expect(r.cost.sub).toBe(1);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect((await get('live-force', 1)).json).toMatchObject({ state: 'open', headSha: feature.sha, mergeCommit: null });
+
+    await deliver(pushBody('live-force', 'refs/heads/feature', feature.sha, rewritten.sha, Date.now()));
+    const again = await merge('live-force', 1);
+    expect(again.json).toMatchObject({ state: 'merged', headSha: rewritten.sha });
+    const c = commitOf(repo, again.json.mergeCommit);
+    expect(c.parents).toEqual([main.sha, rewritten.sha]);
+    expect(treeNames(repo, c.tree)).toEqual({ 'README.md': 'readme\n', 'a.txt': 'A\n', 'b.txt': 'rewritten\n' });
+  });
+
+  it('a merge right after a fast-forward push, before its event, never fast-forwards the base to the previous head', async () => {
+    const repo = await seedRepo('live-ff');
+    const { main, feature } = await linear(repo);
+    await create('live-ff', { title: 'x', base: 'main', head: 'feature' });
+    const next = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'hello\nmore\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', next.sha);
+    const r = await merge('live-ff', 1);
+    expect([r.status, r.json.code, r.json.headSha, r.json.recordedHead]).toEqual([409, 'HEAD_MOVED', next.sha, feature.sha]);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+
+    await deliver(pushBody('live-ff', 'refs/heads/feature', feature.sha, next.sha, Date.now()));
+    const again = await merge('live-ff', 1);
+    expect(again.json).toMatchObject({ state: 'merged', mergeCommit: next.sha, merge: { kind: 'fast-forward' } });
+    // The live-head confirmation rides in the base ls-refs round trip: still one ls-refs and one receive-pack.
+    expect(again.cost.sub).toBe(2);
+    expect(repo.refs.get('refs/heads/main')).toBe(next.sha);
+  });
+
+  it('an auto merge right after a push, before its event, leaves the change open; the event then merges the live head', async () => {
+    const repo = await seedRepo('live-auto');
+    const { main, feature } = await linear(repo);
+    await create('live-auto', { title: 'x', base: 'main', head: 'feature' });
+    const next = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', next.sha);
+    const r = await patch('live-auto', 1, { mergePolicy: 'auto' });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ state: 'open', mergePolicy: 'auto', headSha: feature.sha, mergeCommit: null });
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+
+    await deliver(pushBody('live-auto', 'refs/heads/feature', feature.sha, next.sha, Date.now()));
+    expect((await get('live-auto', 1)).json).toMatchObject({ state: 'merged', headSha: next.sha, mergeCommit: next.sha });
+    expect(repo.refs.get('refs/heads/main')).toBe(next.sha);
+  });
 });
 
 describe('head refresh on push', () => {
@@ -1012,6 +1070,7 @@ describe('auto-merge selection', () => {
     await seedStuckAutoChanges('auto-all', feature.sha);
     await create('auto-all', { title: 'mine', base: 'main', head: 'feature', mergePolicy: 'auto' });
     const r21 = await commit(repo, { 'README.md': 'one\n', 'mine.txt': 'mine\n' }, [root.sha]);
+    repo.refs.set('refs/heads/feature', r21.sha);
     await env.DB.prepare(`UPDATE change_sets SET head_sha = ?, state = 'open', conflicts = NULL WHERE repo_id = ? AND number = 21`).bind(r21.sha, repoIds['auto-all']).run();
 
     const repoId = repoIds['auto-all']!;

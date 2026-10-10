@@ -52,6 +52,7 @@ import {
   fail,
   guarded,
   headWorkspaceSelect,
+  liveHeadRefusal,
   mergeRefusal,
   mergedRecordStatements,
   parseNumber,
@@ -942,7 +943,9 @@ async function trainPass(
   const db = env.DB;
   const now = deps.now();
   const out: PassOutcome = { progress: false, published: [], ejected: [], prepared: 0, checking: 0, waiting: false };
-  const target = (await lsRefs(ctx, [ref])).get(ref) ?? null;
+  // One ls-refs round trip reads the target tip and every window entry's live head branch.
+  const tips = await lsRefs(ctx, [ref, ...new Set(rows.map((r) => branchRef(r.c_head_ref)))]);
+  const target = tips.get(ref) ?? null;
   const gate = deps.gate(env);
   const policy = effectivePolicy(rules, ref);
   const overlay = new Map<string, GitObject>();
@@ -1034,6 +1037,19 @@ async function trainPass(
       plan.generation += 1;
       plan.headSha = e.c_head;
       out.progress = true;
+    }
+    const headRef = branchRef(e.c_head_ref);
+    const moved = liveHeadRefusal(headRef, plan.headSha, tips.get(headRef));
+    if (moved) {
+      if (e.c_policy !== 'auto') {
+        exit('HEAD_MOVED', `${headRef} moved from the approved ${plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
+        continue;
+      }
+      // The auto change follows its new head once its push event records it (that event kicks the train); the partition waits until then.
+      plan.next = 'queued';
+      blocked = true;
+      out.waiting = true;
+      continue;
     }
 
     // Reviews and escalations of the head being composed; an unmet requirement ejects (review and enqueue again).
@@ -1260,7 +1276,8 @@ function costDelta(a: CostCounters | null, b: CostCounters | null): Partial<Cost
 /**
  * Publishes one ready candidate: revalidate and claim (one batch), ask the
  * gate about the exact tree, take the lease, push one ref with the expected
- * old value, release, then record. The lease covers only the write
+ * old value, release, then record. The head revalidated and recorded is the
+ * one this pass composed, which its ls-refs confirmed as the live head branch. The lease covers only the write
  * credential, the pack and the receive-pack exchange.
  */
 async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, ref: string, plan: Plan, owner: string, deps: TrainDeps): Promise<PublishResult> {
@@ -1323,7 +1340,7 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
   };
 
   const row = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
-  const refused = mergeRefusal(row, 'explicit', e.head_sha) ?? workspaceAdmissionRefusal(row!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null);
+  const refused = mergeRefusal(row, 'explicit', plan.headSha) ?? workspaceAdmissionRefusal(row!, (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null);
   if (refused) return exit(refused.code ?? 'REFUSED', refused.error);
   const who = enqueuerActor(repo, ref, (facts?.results as FactsRow[] | undefined)?.[0], (agentRes?.results as AgentRow[] | undefined)?.[0], e, now);
   if (who.denied) return exit('AUTHORIZATION_REVOKED', who.denied);
@@ -1392,7 +1409,7 @@ async function publishCandidate(env: Env, ctx: ResolveContext, repo: RepoRow, re
     db,
     repo.id,
     { id: e.change_set_id, number: e.change_number },
-    { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha: e.head_sha },
+    { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha: plan.headSha },
     mergedAt,
   );
   const recorded = await db.batch([

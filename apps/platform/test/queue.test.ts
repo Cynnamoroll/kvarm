@@ -644,6 +644,58 @@ describe('integration train', () => {
     expect(firstParents(repo, main)).toHaveLength(2);
   });
 
+  it('a head push whose event is not yet delivered never lets the train publish the previous head', async () => {
+    const { repo, main, numbers } = await setup('live-head', 2);
+    const [review, auto] = numbers as [number, number];
+    await enqueue('live-head', review);
+    await enqueue('live-head', auto);
+    await env.DB.prepare(`UPDATE change_sets SET merge_policy = 'auto' WHERE repo_id = ? AND number = ?`).bind(repoIds['live-head'], auto).run();
+    await env.DB.prepare(`UPDATE merge_queue SET merge_policy = 'auto' WHERE repo_id = ? AND change_number = ?`).bind(repoIds['live-head'], auto).run();
+
+    // Change 1 is force-pushed to a rewrite, change 2 gets a new commit; neither push event has been delivered.
+    const old2 = repo.refs.get('refs/heads/b2')!;
+    const rewritten = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'rewritten\n' }, [main]);
+    const next2 = await commit(repo, { 'README.md': 'readme\n', 'f2.txt': 'file 2 v2\n' }, [old2]);
+    repo.refs.set('refs/heads/b1', rewritten.sha);
+    repo.refs.set('refs/heads/b2', next2.sha);
+
+    const run = await runTrain(env, repoIds['live-head']!, MAIN, trainDeps());
+    expect(run.published).toEqual([]);
+    expect(run.ejected).toEqual([{ number: review, code: 'HEAD_MOVED' }]);
+    expect(repo.refs.get(MAIN)).toBe(main);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect((await entries('live-head')).map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [review, 'stale', 'HEAD_MOVED'],
+      [auto, 'queued', null],
+    ]);
+    expect((await getChange('live-head', review)).json).toMatchObject({ state: 'open', mergeCommit: null });
+    expect((await getChange('live-head', auto)).json).toMatchObject({ state: 'open', mergeCommit: null });
+
+    // Once the event settles the auto change's head, the train publishes that head.
+    await deliver(pushBody('live-head', 'refs/heads/b2', old2, next2.sha, Date.now()));
+    const after = await runTrain(env, repoIds['live-head']!, MAIN, trainDeps());
+    expect(after.published).toEqual([auto]);
+    expect(repo.refs.get(MAIN)).toBe(next2.sha);
+    expect((await getChange('live-head', auto)).json).toMatchObject({ state: 'merged', headSha: next2.sha, mergeCommit: next2.sha });
+  });
+
+  it('an auto entry whose recorded head moved before its head-moved hook ran publishes and records that head', async () => {
+    const { repo, main, numbers } = await setup('auto-follow', 1, 'review');
+    const [n] = numbers as [number];
+    await enqueue('auto-follow', n);
+    await env.DB.prepare(`UPDATE change_sets SET merge_policy = 'auto' WHERE repo_id = ? AND number = ?`).bind(repoIds['auto-follow'], n).run();
+    await env.DB.prepare(`UPDATE merge_queue SET merge_policy = 'auto' WHERE repo_id = ? AND change_number = ?`).bind(repoIds['auto-follow'], n).run();
+    const next = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1 v2\n' }, [repo.refs.get('refs/heads/b1')!]);
+    repo.refs.set('refs/heads/b1', next.sha);
+    // The ingest batch moved the change's head; the hook that moves the queue entry has not run.
+    await env.DB.prepare('UPDATE change_sets SET head_sha = ? WHERE repo_id = ? AND number = ?').bind(next.sha, repoIds['auto-follow'], n).run();
+    const run = await runTrain(env, repoIds['auto-follow']!, MAIN, trainDeps());
+    expect(run.published).toEqual([n]);
+    expect(repo.refs.get(MAIN)).toBe(next.sha);
+    expect(firstParents(repo, main)).toEqual([next.sha, commitOf(repo, next.sha).parents[0]]);
+    expect((await getChange('auto-follow', n)).json).toMatchObject({ state: 'merged', headSha: next.sha, mergeCommit: next.sha });
+  });
+
   it('ejects a candidate whose enqueuer lost write access before publication', async () => {
     const { repo, main, numbers } = await setup('revoked', 1);
     await env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
