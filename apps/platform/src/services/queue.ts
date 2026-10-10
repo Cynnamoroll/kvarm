@@ -718,7 +718,7 @@ export async function trainStatus(env: Env, repo: RepoRow, q: { limit?: string; 
           ORDER BY q.target_ref, q.seq LIMIT ?3`,
       )
       .bind(repo.id, base, limit + 1),
-    dependencyRowsStatement(db, repo.id, { where: `w.change_set_id IN (${live})`, byChange: true }, base, limit),
+    dependencyRowsStatement(db, repo.id, { where: `w.change_set_id IN (${live})`, byChange: true, dependents: limit }, base, limit),
   ]);
   const rows = ((entriesRes?.results as EntryRow[] | undefined) ?? []).slice(0, limit);
   const pins = pinsByChange(pinsRes?.results as DependencyRow[] | undefined);
@@ -859,7 +859,7 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
     dependencyRowsStatement(
       db,
       repoId,
-      { where: `w.change_set_id IN (SELECT q.change_set_id FROM merge_queue q WHERE q.id IN (${WINDOW_IDS}))`, byChange: true },
+      { where: `w.change_set_id IN (SELECT q.change_set_id FROM merge_queue q WHERE q.id IN (${WINDOW_IDS}))`, byChange: true, dependents: 2 * TRAIN_LIMITS.readAhead },
       ref,
       TRAIN_LIMITS.readAhead,
     ),

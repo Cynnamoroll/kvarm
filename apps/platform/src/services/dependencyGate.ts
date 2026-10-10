@@ -143,6 +143,13 @@ export function dependencyView(r: DependencyRow): DependencyView {
 export interface DependencyScope {
   where: string;
   byChange?: boolean;
+  /**
+   * How many dependents the condition may match. The read then returns up to
+   * readMax edges per dependent: a dependent holds at most maxDirect edges
+   * (enforced inside the pin write), so no dependent's edges are cut off by
+   * another's in a shared read.
+   */
+  dependents?: number;
 }
 
 /**
@@ -153,6 +160,7 @@ export interface DependencyScope {
  * so the rows read follow the chain, never the repository's size.
  */
 export function dependencyRowsStatement(db: D1Database, repoId: string, scope: DependencyScope, ...params: unknown[]): D1PreparedStatement {
+  const limit = DEPENDENCY_LIMITS.readMax * Math.max(1, scope.dependents ?? 1);
   return db
     .prepare(
       `SELECT d.id, d.workspace_id, d.on_workspace, d.revision, d.created_login, d.agent_id, d.created_at, d.updated_at,
@@ -168,7 +176,7 @@ export function dependencyRowsStatement(db: D1Database, repoId: string, scope: D
          LEFT JOIN repo_refs f ON f.repo_id = s.repo_id AND f.ref = s.ref
         WHERE w.repo_id = ?1 AND (${scope.where})
         ORDER BY d.created_at, d.id
-        LIMIT ${DEPENDENCY_LIMITS.readMax}`,
+        LIMIT ${limit}`,
     )
     .bind(repoId, ...params);
 }

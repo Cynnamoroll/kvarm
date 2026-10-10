@@ -896,6 +896,58 @@ describe('integration train', () => {
     }
   });
 
+  it('a window whose pins exceed one read cap still sees every entry pin and never prepares a waiting dependent', async () => {
+    await seedRepo('pins-cap');
+    const saved = DEPENDENCY_LIMITS.readMax;
+    try {
+      const a = await workspace('pins-cap', 'a.txt', { change: 'review' });
+      const x = await workspace('pins-cap', 'x.txt', { change: 'review' });
+      const b1 = await workspace('pins-cap', 'b1.txt', { change: 'review' });
+      const b2 = await workspace('pins-cap', 'b2.txt', { change: 'review' });
+      const b3 = await workspace('pins-cap', 'b3.txt', { change: 'review' });
+      const c = await workspace('pins-cap', 'c.txt', { change: 'review' });
+      const edges = [
+        (await pin('pins-cap', b1.id, a.id, a.head)).json,
+        (await pin('pins-cap', b1.id, x.id, x.head)).json,
+        (await pin('pins-cap', b2.id, a.id, a.head)).json,
+        (await pin('pins-cap', b3.id, x.id, x.head)).json,
+      ];
+      for (const n of [b1.change!, b2.change!, b3.change!, c.change!]) expect((await enqueue('pins-cap', n)).status).toBe(201);
+      // Every workspace stays within the cap; the window's four pins together exceed it.
+      DEPENDENCY_LIMITS.readMax = 2;
+
+      const gate = scriptedGate('pending');
+      const deps = trainDeps({ gate: () => gate.gate });
+      const run = await runTrain(env, repoIds['pins-cap']!, MAIN, deps);
+      expect(run.published).toEqual([]);
+      expect(run.ejected).toEqual([]);
+      const window = deps.events.find((e): e is Extract<TrainEvent, { type: 'window' }> => e.type === 'window')!;
+      const state = new Map(window.states.map((s) => [s.number, s.state]));
+      for (const b of [b1, b2, b3]) expect(state.get(b.change!), `#${b.change}`).toBe('queued');
+      expect(state.get(c.change!)).not.toBe('queued');
+      const composed = deps.events.filter((e): e is Extract<TrainEvent, { type: 'checks' }> => e.type === 'checks').map((e) => e.number);
+      expect(composed).toEqual([c.change]);
+      expect((await rows('pins-cap')).filter((r) => r.change_number !== c.change).map((r) => r.reason_code)).toEqual([
+        'DEPENDENCY_PENDING',
+        'DEPENDENCY_PENDING',
+        'DEPENDENCY_PENDING',
+      ]);
+
+      const status = await trainStatus('pins-cap');
+      expect(status.status).toBe(200);
+      for (const b of [b1, b2, b3]) {
+        expect(status.json.entries.find((e: any) => e.number === b.change), `#${b.change}`).toMatchObject({ waiting: { code: 'DEPENDENCY_PENDING' } });
+      }
+      expect(status.json.entries.find((e: any) => e.number === b1.change).dependencies).toHaveLength(2);
+      expect(status.json.entries.find((e: any) => e.number === c.change).waiting).toBeNull();
+      expect(status.json.dependencies.map((d: any) => d.id).sort()).toEqual(edges.map((e) => e.id).sort());
+      expect(status.cost).toMatchObject({ rw: 0, q: 0, art: 0, do: 0 });
+      expect(status.cost.d1).toBeLessThanOrEqual(3);
+    } finally {
+      DEPENDENCY_LIMITS.readMax = saved;
+    }
+  });
+
   it('a source ejected from the train breaks only the pins on its ejected head, recoverable by repin', async () => {
     for (const [name, cause] of [
       ['eject-conflict', 'MERGE_CONFLICT'],
