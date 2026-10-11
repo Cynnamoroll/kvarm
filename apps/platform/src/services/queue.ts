@@ -51,7 +51,6 @@ import {
   dependencyRefusal,
   fail,
   guarded,
-  headWorkspaceSelect,
   liveHeadRefusal,
   memoGate,
   mergeRefusal,
@@ -66,19 +65,19 @@ import {
   type ChangeRow,
   type Fail,
   type HeadMoved,
-  type HeadWorkspace,
   type MergePolicy,
 } from './changes';
 import { guardPending } from './checks';
 import type { ChecksGate, RequiredChecks } from './checksGate';
 import {
   blockFromRows,
-  changeDependenciesStatement,
   changeNumberDependenciesStatement,
   dependencyRowsStatement,
   dependencyView,
   ejectedSourceStatement,
   handOffSettlement,
+  headWorkspacePins,
+  headWorkspacePinsStatement,
   noBlockedPinCondition,
   pinsVerified,
   preservationRefusal,
@@ -86,13 +85,14 @@ import {
   type DependencyBlock,
   type DependencyRow,
   type DependencyView,
+  type HeadWorkspacePinRow,
   type LandedRow,
 } from './dependencyGate';
 import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
 import { artifactsMergeSources, overlaySources, prepareMerge, type PreparedMerge } from './merge';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
-import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewFactsSelectById, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
+import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
 import { hasCiJobs, queueExactTreeCi } from './ci';
 
@@ -911,6 +911,14 @@ interface PassOutcome {
   waiting: boolean;
   retryAfterSeconds?: number;
   backoffAttempts?: number;
+  /**
+   * The entry a waiting pass charges its checks backstop to: the first entry
+   * of the pass's (fair) order that does not wait on a pin, else the first
+   * entry. A dependent waiting on an unlanded source can stay at the head
+   * of arrival order indefinitely; charging it would spend the bounded
+   * backstop budget for every entry behind it.
+   */
+  backstop?: { id: string; attempts: number };
 }
 
 function enqueuerAuthor(e: EntryRow): { name: string; email: string } | undefined {
@@ -1072,6 +1080,7 @@ async function trainPass(
     if (wait) {
       plan.next = 'queued';
       plan.wait = wait;
+      out.waiting = true;
       continue;
     }
 
@@ -1096,6 +1105,7 @@ async function trainPass(
       // It conflicts only with candidates ahead of it: wait until they publish, then compose on the real base.
       blocked = true;
       plan.next = 'queued';
+      out.waiting = true;
       continue;
     }
     if (p.value.kind === 'merge') {
@@ -1191,6 +1201,8 @@ async function trainPass(
     for (const o of p.value.objects) overlay.set(o.hash, o);
     base = p.value.mergeCommit;
   }
+  const head = plans.find((p) => !p.wait) ?? plans[0];
+  if (head) out.backstop = { id: head.e.id, attempts: head.e.attempts };
 
   // Record this pass's compositions (one batch, every write fenced by generation).
   for (const plan of plans) {
@@ -1453,15 +1465,19 @@ async function publishCandidate(
 
     // Everything above may have taken a while: the claim and every publication fact are read now.
     const agentMeta = parseJson<{ tokenId: string }>(e.agent_meta);
-    const [claim, change, ws, facts, agentRes, rulesRes, reviewRes, pinsRes] = await db.batch([
+    // The change row carries its review facts, and the head workspace read carries its pins: each row is read once.
+    const [claim, change, wsPins, facts, agentRes, rulesRes] = await db.batch([
       db
         .prepare(
           `UPDATE merge_queue SET state = 'publishing', generation = generation + 1, updated_at = ?3
             WHERE repo_id = ?4 AND id = ?1 AND generation = ?2 AND state = 'ready' AND active = 1 RETURNING generation`,
         )
         .bind(e.id, plan.generation, deps.now(), repo.id),
-      db.prepare('SELECT id, number, state, merge_policy, head_sha, base_ref FROM change_sets WHERE id = ?').bind(e.change_set_id),
-      headWorkspaceSelect(db, repo.id, e.change_number),
+      db
+        .prepare(`SELECT c.id, c.number, c.state, c.merge_policy, c.head_sha, c.base_ref, ${reviewFactsColumns('c')} FROM change_sets c WHERE c.id = ?1`)
+        .bind(e.change_set_id),
+      // A change's head ref never changes, so the pass's read of it names the same workspace.
+      headWorkspacePinsStatement(db, repo.id, branchRef(e.c_head_ref)),
       db
         .prepare(
           `SELECT u.*,
@@ -1483,8 +1499,6 @@ async function publishCandidate(
              FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
         )
         .bind(repo.id),
-      reviewFactsSelectById(db, e.change_set_id),
-      changeDependenciesStatement(db, repo.id, e.change_set_id),
     ]);
     if ((claim?.results?.length ?? 0) === 0) {
       await release();
@@ -1492,8 +1506,8 @@ async function publishCandidate(
     }
     fence = { generation: claimedGen, state: 'publishing' };
 
-    const row = (change?.results as ChangeRow[] | undefined)?.[0] ?? null;
-    const headWs = (ws?.results as HeadWorkspace[] | undefined)?.[0] ?? null;
+    const row = (change?.results as Array<ChangeRow & ReviewFactsRow> | undefined)?.[0] ?? null;
+    const { workspace: headWs, pins } = headWorkspacePins(wsPins?.results as HeadWorkspacePinRow[] | undefined);
     const refused = mergeRefusal(row, 'explicit', plan.headSha) ?? workspaceAdmissionRefusal(row!, headWs);
     if (refused) {
       await release();
@@ -1510,14 +1524,14 @@ async function publishCandidate(
     }
     // Rules may have been raised or added since the pass: approvals and required checks are judged by the current ones.
     const policy = effectivePolicy(((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow), ref);
-    const review = reviewGate(parseReviewFacts((reviewRes?.results as ReviewFactsRow[] | undefined)?.[0]), policy);
+    const review = reviewGate(parseReviewFacts(row), policy);
     if (review.block) {
       await release();
       if (review.missing.length > 0) await db.batch(review.missing.map((reason) => recordMissingEscalation(db, e.change_set_id, reason, deps.now())));
       return exit(review.block.code, review.block.error);
     }
-    const pins = pinsRes?.results as DependencyRow[] | undefined;
-    if (blockFromRows(pins, 'publish') || !pinsVerified(pins, plan.verifiedPins ?? new Set())) {
+    // Publication waits on any pin that is not satisfied, whatever its source's state.
+    if (pins.some((p) => !p.satisfied_commit) || !pinsVerified(pins, plan.verifiedPins ?? new Set())) {
       // A pin turned unresolved (or was repinned) since the pass: back to waiting in place (the next pass records why).
       await release();
       await back('queued');
@@ -1715,12 +1729,13 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
         if ((outcome.backoffAttempts ?? 0) < TRAIN_LIMITS.maxAttempts) await deps.kick(env, repoId, ref, 'backoff', result.retryAfterSeconds);
         return result;
       }
-      // No progress: the head waits for checks. Check completion kicks the train; a bounded backstop covers a lost kick.
+      // No progress: entries wait for checks, for candidates ahead of them or for their pins' sources. Check completion and
+      // landings kick the train; a bounded backstop covers a lost kick.
       const fin = await finishRun(env.DB, repoId, ref, claim, deps.now());
       if (fin === 'again') continue;
       result.state = 'waiting';
-      const head = rows[0]!;
-      if (outcome.waiting && head.attempts < TRAIN_LIMITS.maxAttempts) {
+      const head = outcome.backstop;
+      if (outcome.waiting && head && head.attempts < TRAIN_LIMITS.maxAttempts) {
         result.retryAfterSeconds = backoffSeconds(head.attempts);
         await env.DB.prepare('UPDATE merge_queue SET attempts = attempts + 1 WHERE repo_id = ?1 AND id = ?2 AND active = 1').bind(repoId, head.id).run();
         await deps.kick(env, repoId, ref, 'checks-backstop', result.retryAfterSeconds);

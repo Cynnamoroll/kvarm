@@ -301,6 +301,45 @@ export function withinBudget(cost, spec) {
   return { ok: violations.length === 0, violations };
 }
 
+/**
+ * The library/cost.md rows the run is compared with. Publications are keyed
+ * on incoming pins (a dependent's pins on its sources), as the enqueue
+ * comparison is; the documented publication row covers both classes.
+ */
+const PUBLICATION_ROW = 'd1<=3;rr<=12;rw<=8;art<=4;do=2;sub<=2';
+export const BUDGET_ROWS = Object.freeze({
+  workspaceList: 'd1<=2;art=0;do=0;sub=0',
+  overlap: 'd1<=2;art=0;do=0;sub=0',
+  forecast: 'd1<=2;art=0;do=0;sub=0',
+  enqueue: 'd1<=2;rr<=12;rw<=4;art=0;do<=1;q<=1',
+  publication: Object.freeze({ unpinned: PUBLICATION_ROW, pinned: PUBLICATION_ROW }),
+});
+
+export const CHECK_IDS = Object.freeze({ publication: 'VAL-SCALE-004d', monetary: 'VAL-SCALE-004d-monetary' });
+
+/**
+ * Each publication's stored counters against the row applicable to it:
+ * `rows.pinned` for a change with incoming pins (`pinnedNumbers`), else
+ * `rows.unpinned`.
+ */
+export function comparePublications(pubs, pinnedNumbers, rows) {
+  const classes = {
+    unpinned: { row: rows.unpinned, total: 0, within: 0 },
+    pinned: { row: rows.pinned, total: 0, within: 0 },
+  };
+  const outside = [];
+  for (const p of pubs) {
+    const pinned = pinnedNumbers.has(p.number);
+    const cls = classes[pinned ? 'pinned' : 'unpinned'];
+    const v = withinBudget(p.cost, cls.row);
+    cls.total++;
+    if (v.ok) cls.within++;
+    else outside.push({ number: p.number, pinned, row: cls.row, cost: fmtCounters(p.cost), violations: v.violations });
+  }
+  const detail = `unpinned ${classes.unpinned.within}/${classes.unpinned.total} within ${classes.unpinned.row}; with incoming pins ${classes.pinned.within}/${classes.pinned.total} within ${classes.pinned.row}`;
+  return { ok: outside.length === 0, classes, outside, detail };
+}
+
 const LITERALS = new Set([
   'repos', 'agents', 'tokens', 'user', 'changes', 'enqueue', 'queue', 'train', 'workspaces', 'overlap', 'change-set', 'intent',
   'dependencies', 'repin', 'forecast', 'tasks', 'claim', 'complete', 'heartbeat', 'mergeability', 'checks', 'merge', 'abandon', 'candidates',

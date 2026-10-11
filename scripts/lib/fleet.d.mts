@@ -83,6 +83,36 @@ export function retryAfterMs(header: string | null | undefined, fallbackMs: numb
 export function parseCost(header: string | null | undefined): Record<string, number | string>;
 export function sumCosts(list: Record<string, number | string>[]): Record<string, number>;
 export function withinBudget(cost: Record<string, number | string>, spec: string): { ok: boolean; violations: string[] };
+
+export interface PublicationRows {
+  unpinned: string;
+  pinned: string;
+}
+export const BUDGET_ROWS: Readonly<{
+  workspaceList: string;
+  overlap: string;
+  forecast: string;
+  enqueue: string;
+  publication: Readonly<PublicationRows>;
+}>;
+export const CHECK_IDS: Readonly<{ publication: string; monetary: string }>;
+export interface PublicationClass {
+  row: string;
+  total: number;
+  within: number;
+}
+export interface PublicationOutside {
+  number: number;
+  pinned: boolean;
+  row: string;
+  cost: string;
+  violations: string[];
+}
+export function comparePublications(
+  pubs: { number: number; cost: Record<string, number | string> }[],
+  pinnedNumbers: ReadonlySet<number>,
+  rows: PublicationRows,
+): { ok: boolean; classes: { unpinned: PublicationClass; pinned: PublicationClass }; outside: PublicationOutside[]; detail: string };
 export function endpointClass(method: string, url: string): string;
 
 export interface AcceptedPublication {

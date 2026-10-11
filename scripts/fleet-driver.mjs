@@ -49,11 +49,14 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { checkIsolatedName } from './lib/fixture-repo.mjs';
 import {
+  BUDGET_ROWS,
   CAMPAIGN_LIMITS,
+  CHECK_IDS,
   CONFIG_PATH,
   CeilingExceeded,
   RequestLedger,
   checkProjection,
+  comparePublications,
   countMarkers,
   createLimiter,
   editLine,
@@ -78,13 +81,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PREFIX = 'scale-staged-campaign';
 const NOTES_REF = 'refs/notes/forge-attribution';
 const MONETARY_CHECK = 'campaign report has no monetary amount or pricing derivation';
-const BUDGETS = {
-  workspaceList: 'd1<=2;art=0;do=0;sub=0',
-  overlap: 'd1<=2;art=0;do=0;sub=0',
-  forecast: 'd1<=2;art=0;do=0;sub=0',
-  enqueue: 'd1<=2;rr<=12;rw<=4;art=0;do<=1;q<=1',
-  publication: 'd1<=3;rr<=12;rw<=8;art<=4;do=2',
-};
+const BUDGETS = BUDGET_ROWS;
 
 const { values: opts } = parseArgs({
   options: {
@@ -788,14 +785,17 @@ async function main() {
     `first-parent positions A ${pos(plan.chain.A)}, B ${pos(plan.chain.B)}, C ${pos(plan.chain.C)} of ${graph.order.length}`,
   );
 
-  // Per-publication stored counters vs the documented publication row.
+  // Per-publication stored counters vs the documented publication row applicable to each, keyed on incoming pins as the
+  // enqueue comparison is (the chain's dependents B and C carry pins; A is only a source).
   const pubCosts = published.map((q) => ({ number: q.change_number, cost: safeJson(q.cost) ?? {} }));
-  const pubViolations = pubCosts.filter((p) => !withinBudget(p.cost, BUDGETS.publication).ok);
-  const pinnedNumbers = new Set([plan.chain.A, plan.chain.B, plan.chain.C].map((k) => ws.get(k).number));
-  log(`per-publication stored counters (merge_queue.cost): ${summarizeCosts(pubCosts.map((p) => p.cost))}`);
-  for (const v of pubViolations) log(`  outside ${BUDGETS.publication}: #${v.number}${pinnedNumbers.has(v.number) ? ' (pinned chain)' : ''} ${fmt(v.cost)} -> ${withinBudget(v.cost, BUDGETS.publication).violations.join(', ')}`);
-  check('VAL-SCALE-004d', `every per-publication stored counter set within the cost.md publication row ${BUDGETS.publication}`, pubViolations.length === 0, `${pubCosts.length - pubViolations.length}/${pubCosts.length} within`);
-  report.publicationsOutsideRow = pubViolations.map((v) => ({ number: v.number, pinned: pinnedNumbers.has(v.number), cost: fmt(v.cost) }));
+  const pinnedNumbers = new Set([...chainKeys].map((k) => ws.get(k).number));
+  const pubs = comparePublications(pubCosts, pinnedNumbers, BUDGETS.publication);
+  log(`per-publication stored counters (merge_queue.cost): unpinned ${summarizeCosts(pubCosts.filter((p) => !pinnedNumbers.has(p.number)).map((p) => p.cost))}`);
+  log(`  with incoming pins: ${pubCosts.filter((p) => pinnedNumbers.has(p.number)).map((p) => `#${p.number} ${fmt(p.cost)}`).join(' | ')}`);
+  for (const v of pubs.outside) log(`  outside ${v.row}: #${v.number}${v.pinned ? ' (incoming pins)' : ''} ${v.cost} -> ${v.violations.join(', ')}`);
+  check(CHECK_IDS.publication, 'every per-publication stored counter set within the applicable cost.md publication row', pubs.ok, pubs.detail);
+  report.publicationCosts = pubCosts.map((p) => ({ number: p.number, pinned: pinnedNumbers.has(p.number), cost: fmt(p.cost) }));
+  report.publicationsOutsideRow = pubs.outside.map((v) => ({ number: v.number, pinned: v.pinned, row: v.row, cost: v.cost }));
 
   // Sentinel, ledger reconciliation, bootstrap.
   const sentinel = ws.get(plan.sentinel);
@@ -1100,11 +1100,11 @@ report.notes = [
     .map((e) => `Pinned dependent ${e.key} enqueue counters \`${e.cost}\` (the cost.md workspace-backed enqueue row was measured on unpinned changes).`),
   ...Object.entries(
     (report.publicationsOutsideRow ?? []).reduce((acc, v) => {
-      const k = `${v.pinned ? 'pinned-chain' : 'unpinned'} \`${v.cost}\``;
+      const k = `${v.pinned ? 'with-incoming-pins' : 'unpinned'} \`${v.cost}\` publication(s) outside the publication row ${v.row ?? BUDGETS.publication.unpinned}`;
       (acc[k] ??= []).push(`#${v.number}`);
       return acc;
     }, {}),
-  ).map(([k, nums]) => `${nums.length} ${k} publication(s) outside the publication row ${BUDGETS.publication}: ${nums.slice(0, 12).join(', ')}${nums.length > 12 ? ', …' : ''}.`),
+  ).map(([k, nums]) => `${nums.length} ${k}: ${nums.slice(0, 12).join(', ')}${nums.length > 12 ? ', …' : ''}.`),
   ...gitReadFailures.map((f) => `Read-only git ${f.op} failed at ${f.stage} (attempt ${f.attempt}) and was retried: ${f.error.split('\n')[0].slice(0, 160)}`),
   ...incomplete.map((i) => `Incomplete #${i.number} (${i.key}, ${i.role}): ${i.reason}.`),
 ];
@@ -1112,7 +1112,7 @@ const json = JSON.stringify(report, null, 2);
 const complete = Boolean(report.burst) && !abortedAt;
 const draftMd = complete ? renderBenchmarkMarkdown(report) : null;
 const monetary = [...findMonetary(json), ...(draftMd ? findMonetary(draftMd) : []), ...findMonetary(transcript.join('\n'))];
-check('VAL-SCALE-004d', MONETARY_CHECK, monetary.length === 0, monetary.slice(0, 3).join(', '));
+check(CHECK_IDS.monetary, MONETARY_CHECK, monetary.length === 0, monetary.slice(0, 3).join(', '));
 report.checks = results;
 report.passed = results.filter((r) => r.ok).length;
 report.failed = results.filter((r) => !r.ok).length;

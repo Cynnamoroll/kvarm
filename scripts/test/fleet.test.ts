@@ -8,9 +8,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  BUDGET_ROWS,
   CAMPAIGN_LIMITS,
+  CHECK_IDS,
   CeilingExceeded,
   checkProjection,
+  comparePublications,
   configText,
   countMarkers,
   createLimiter,
@@ -210,6 +213,51 @@ describe('cost parsing and budgets', () => {
       'POST /repos/:o/:r/workspaces/:id/change-set',
     );
     expect(endpointClass('GET', '/api/v1/repos/cynthia/r-1/workspaces/overlap?base=main')).toBe('GET /repos/:o/:r/workspaces/overlap');
+  });
+});
+
+describe('comparePublications', () => {
+  const rows = { unpinned: 'd1<=3;rr<=12;do=2', pinned: 'd1<=3;rr<=14;do=2' };
+  const pubs = [
+    { number: 1, cost: parseCost('d1=3;rr=12;do=2') },
+    { number: 2, cost: parseCost('d1=3;rr=14;do=2') },
+    { number: 3, cost: parseCost('d1=3;rr=13;do=2') },
+    { number: 4, cost: parseCost('d1=3;rr=9;do=2') },
+  ];
+
+  it('compares each publication with the row applicable to its incoming pins', () => {
+    const r = comparePublications(pubs, new Set([2, 3]), rows);
+    expect(r.ok).toBe(true);
+    expect(r.classes.unpinned).toMatchObject({ row: rows.unpinned, total: 2, within: 2 });
+    expect(r.classes.pinned).toMatchObject({ row: rows.pinned, total: 2, within: 2 });
+    expect(r.outside).toEqual([]);
+  });
+
+  it('a pinned publication judged by the unpinned row, or the reverse, is outside', () => {
+    const r = comparePublications(pubs, new Set([1, 4]), rows);
+    expect(r.ok).toBe(false);
+    expect(r.outside).toEqual([
+      { number: 2, pinned: false, row: rows.unpinned, cost: 'd1=3;rr=14;do=2', violations: ['rr=14 > 12'] },
+      { number: 3, pinned: false, row: rows.unpinned, cost: 'd1=3;rr=13;do=2', violations: ['rr=13 > 12'] },
+    ]);
+    expect(r.classes.unpinned).toMatchObject({ total: 2, within: 0 });
+    expect(r.classes.pinned).toMatchObject({ total: 2, within: 2 });
+    expect(r.detail).toBe(`unpinned 0/2 within ${rows.unpinned}; with incoming pins 2/2 within ${rows.pinned}`);
+  });
+
+  it('the transcribed publication row is the documented one, git subrequests included, for both classes', () => {
+    const documented = 'd1<=3;rr<=12;rw<=8;art<=4;do=2;sub<=2';
+    expect(BUDGET_ROWS.publication).toEqual({ unpinned: documented, pinned: documented });
+    const r = comparePublications([{ number: 7, cost: parseCost('d1=3;rr=9;rw=3;art=0;do=2;sub=3') }], new Set([7]), BUDGET_ROWS.publication);
+    expect(r.outside.map((o) => o.violations)).toEqual([['sub=3 > 2']]);
+  });
+});
+
+describe('check ids', () => {
+  it('the monetary scan has its own check id, distinct from the per-publication counters check', () => {
+    expect(CHECK_IDS.publication).toBe('VAL-SCALE-004d');
+    expect(CHECK_IDS.monetary).not.toBe(CHECK_IDS.publication);
+    expect(CHECK_IDS.monetary).toMatch(/^VAL-SCALE-004d-/);
   });
 });
 

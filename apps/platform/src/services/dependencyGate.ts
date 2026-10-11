@@ -316,8 +316,51 @@ export async function preservationRefusal(
 }
 
 /** True when every satisfied pin in `rows` is one `verified` names (same edge, same revision). */
-export function pinsVerified(rows: readonly DependencyRow[] | undefined, verified: ReadonlySet<string>): boolean {
+export function pinsVerified(rows: readonly Pick<DependencyRow, 'id' | 'revision' | 'satisfied_commit'>[] | undefined, verified: ReadonlySet<string>): boolean {
   return (rows ?? []).every((r) => !r.satisfied_commit || verified.has(pinKey(r)));
+}
+
+/** One row of `headWorkspacePinsStatement`: the head workspace, with one of its pins or (no pins) none. */
+export interface HeadWorkspacePinRow {
+  ws_status: string;
+  ws_change_set_id: string | null;
+  id: string | null;
+  revision: string | null;
+  satisfied_commit: string | null;
+}
+
+/**
+ * The workspace whose ref is `headRef` and its pins, in one statement that
+ * reads the workspace once (unique repo + ref) and each pin's edge row. It
+ * carries exactly what a publication decides on: the workspace's status
+ * and link (admission), and per pin whether it is satisfied and at which
+ * revision (any unsatisfied pin blocks publication, whatever its source's
+ * state; satisfied pins must be the ones the composition was verified to
+ * preserve). A workspace is only ever linked to a change opened from its
+ * own ref, so when admission holds these are the pins of the change's
+ * workspace.
+ */
+export function headWorkspacePinsStatement(db: D1Database, repoId: string, headRef: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT w.status AS ws_status, w.change_set_id AS ws_change_set_id, d.id, d.revision, d.satisfied_commit
+         FROM workspaces w
+         LEFT JOIN workspace_dependencies d INDEXED BY idx_dep_edge ON d.repo_id = w.repo_id AND d.workspace_id = w.id
+        WHERE w.repo_id = ?1 AND w.ref = ?2
+        LIMIT ${DEPENDENCY_LIMITS.readMax}`,
+    )
+    .bind(repoId, headRef);
+}
+
+/** Splits `headWorkspacePinsStatement` rows into the workspace (null: none at the ref) and its pins. */
+export function headWorkspacePins(rows: readonly HeadWorkspacePinRow[] | undefined): {
+  workspace: { status: string; change_set_id: string | null } | null;
+  pins: Array<{ id: string; revision: string; satisfied_commit: string | null }>;
+} {
+  const first = rows?.[0];
+  if (!first) return { workspace: null, pins: [] };
+  const pins = (rows ?? []).flatMap((r) => (r.id && r.revision ? [{ id: r.id, revision: r.revision, satisfied_commit: r.satisfied_commit }] : []));
+  return { workspace: { status: first.ws_status, change_set_id: first.ws_change_set_id }, pins };
 }
 
 // ---------------------------------------------------------------------------
