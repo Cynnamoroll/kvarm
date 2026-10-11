@@ -492,8 +492,12 @@ await scenario('arena', async (repo) => {
   const arenasCount = async () => (await http(`${api}/arenas?limit=100`)).json?.arenas?.length;
   const wsCount = async () => (await http(`${api}/workspaces?limit=100`)).json?.workspaces?.length;
 
+  // The agent creates the arena (and so its workspaces) and pushes; selection,
+  // the final-selection confirmation and the merge stay with the human PAT.
+  const tok = await agentToken(repo, 'arena');
+
   // VAL-ARENA-001
-  const mk = await http(`${api}/arenas`, { method: 'POST', json: { brief: 'Refactor auth module', base: 'main', candidates: 3 }, label: 'POST arenas (3)' });
+  const mk = await http(`${api}/arenas`, { method: 'POST', json: { brief: 'Refactor auth module', base: 'main', candidates: 3 }, token: tok, label: 'POST arenas (3)' });
   const arena = mk.json ?? {};
   console.log(`POST arenas {candidates:3} -> ${mk.status} (x-forge-cost ${mk.cost}) id=${arena.id} state=${arena.state} workspaces=${JSON.stringify(arena.workspaces?.map((w) => ({ id: w.id, ref: w.ref, headSha: w.headSha?.slice(0, 8), arena: w.arena })))}`);
   const refs0 = lsRemoteAll(url);
@@ -512,20 +516,19 @@ await scenario('arena', async (repo) => {
   const nA = await arenasCount();
   const nW = await wsCount();
   for (const n of [1, 9]) {
-    const r = await http(`${api}/arenas`, { method: 'POST', json: { brief: 'out of bounds', base: 'main', candidates: n } });
+    const r = await http(`${api}/arenas`, { method: 'POST', json: { brief: 'out of bounds', base: 'main', candidates: n }, token: tok });
     const after = [await arenasCount(), await wsCount()];
     check('VAL-ARENA-001', `candidates:${n} → 4xx {error} with no arena row and no workspace`, r.status >= 400 && r.status < 500 && typeof r.json?.error === 'string' && eq(after, [nA, nW]), `${r.status} ${r.text}; arenas ${nA}->${after[0]} workspaces ${nW}->${after[1]}`);
   }
   const refsMid = lsRemoteAll(url);
   check('VAL-ARENA-001', 'rejected requests created no refs', Object.keys(refsMid).length === Object.keys(refs0).length);
   for (const n of [2, 8]) {
-    const r = await http(`${api}/arenas`, { method: 'POST', json: { brief: `bounds ${n}`, base: 'main', candidates: n }, label: `POST arenas (${n})` });
+    const r = await http(`${api}/arenas`, { method: 'POST', json: { brief: `bounds ${n}`, base: 'main', candidates: n }, token: tok, label: `POST arenas (${n})` });
     check('VAL-ARENA-001', `candidates:${n} accepted with ${n} workspaces`, r.status === 201 && r.json?.workspaces?.length === n, `${r.status} (x-forge-cost ${r.cost})`);
   }
 
   // VAL-ARENA-002
   const [W1, W2, W3] = arena.workspaces;
-  const tok = await agentToken(repo, 'arena');
   await pushWork(env, W1, { 'src/auth.ts': AUTH_TS.replace('"v0"', '"v1"'), 'src/w1.ts': 'export const w1 = 1;\n' }, 'W1 refactor', tok);
   await pushWork(env, W2, { 'src/auth.ts': AUTH_TS.replace('"base";\n', '"v2";\nexport const extra = 2;\n') }, 'W2 refactor', tok);
   await pushWork(env, W3, { 'lib/auth/index.ts': 'export const auth = "v3";\n' }, 'W3 refactor', tok);
