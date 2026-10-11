@@ -238,7 +238,9 @@ function guardStatus(s: GuardSummary): { status: RunStatus; conclusion: string }
 
 /**
  * Records a guard run for a change's head; a no-op when the change already
- * has one for that head (push deliveries repeat).
+ * has one for that head judged against the same base tree (push deliveries
+ * repeat). A head whose merge base moved (a stacked change whose base
+ * landed) gets a second run for the new base.
  */
 export function guardRunInsert(
   db: D1Database,
@@ -250,16 +252,32 @@ export function guardRunInsert(
       `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, tree_sha, name, status, conclusion, summary, attempt, required, quarantined,
                                started_at, finished_at, created_at)
        SELECT ?1, ?2, ?3, ?4, ?5, '${GUARD_CHECK}', ?6, ?7, ?8, 1, 1, 0, ?9, ?10, ?10
-        WHERE NOT EXISTS (SELECT 1 FROM check_runs k WHERE k.repo_id = ?2 AND k.head_sha = ?4 AND k.name = '${GUARD_CHECK}' AND k.change_set_id = ?3)`,
+        WHERE NOT EXISTS (SELECT 1 FROM check_runs k WHERE k.repo_id = ?2 AND k.head_sha = ?4 AND k.name = '${GUARD_CHECK}' AND k.change_set_id = ?3
+                            AND json_extract(k.summary, '$.baseTree') IS json_extract(?8, '$.baseTree'))`,
     )
     .bind(crypto.randomUUID(), run.repoId, run.changeId, run.headSha, run.treeSha, status, conclusion, JSON.stringify(run.summary), run.startedAt, run.now);
 }
 
-/** Whether the change already has a guard run for the head (one indexed probe). */
-export function guardRunExists(db: D1Database, repoId: string, changeId: string, headSha: string): D1PreparedStatement {
-  return db
-    .prepare(`SELECT 1 AS found FROM check_runs k WHERE k.repo_id = ?1 AND k.head_sha = ?2 AND k.name = '${GUARD_CHECK}' AND k.change_set_id = ?3 LIMIT 1`)
-    .bind(repoId, headSha, changeId);
+/**
+ * Whether the change already has a guard run for the head (one indexed
+ * probe), or, given `baseTree`, one judged against that base tree.
+ */
+export function guardRunExists(db: D1Database, repoId: string, changeId: string, headSha: string, baseTree?: string): D1PreparedStatement {
+  return baseTree === undefined
+    ? db
+        .prepare(`SELECT 1 AS found FROM check_runs k WHERE k.repo_id = ?1 AND k.head_sha = ?2 AND k.name = '${GUARD_CHECK}' AND k.change_set_id = ?3 LIMIT 1`)
+        .bind(repoId, headSha, changeId)
+    : db
+        .prepare(
+          `SELECT 1 AS found FROM check_runs k WHERE k.repo_id = ?1 AND k.head_sha = ?2 AND k.name = '${GUARD_CHECK}' AND k.change_set_id = ?3
+              AND json_extract(k.summary, '$.baseTree') = ?4 LIMIT 1`,
+        )
+        .bind(repoId, headSha, changeId, baseTree);
+}
+
+/** Whether a gate answer's `forge/guard` entry is pending. */
+export function guardPending(checks: { required: ReadonlyArray<{ name: string; state: string }> }): boolean {
+  return checks.required.some((c) => c.name === GUARD_CHECK && c.state === 'pending');
 }
 
 // ---------------------------------------------------------------------------

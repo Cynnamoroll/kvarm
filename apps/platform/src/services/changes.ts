@@ -24,7 +24,17 @@ import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import { effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
-import { CHECK_RUN_COLUMNS, checkRunView, evaluateGuard, guardRunExists, guardRunInsert, type CheckRunRow, type CheckRunView, type GuardSummary } from './checks';
+import {
+  CHECK_RUN_COLUMNS,
+  checkRunView,
+  evaluateGuard,
+  guardPending,
+  guardRunExists,
+  guardRunInsert,
+  type CheckRunRow,
+  type CheckRunView,
+  type GuardSummary,
+} from './checks';
 import { defaultChecksGate, type ChecksGate, type ChecksSubject, type RequiredChecks } from './checksGate';
 import { treePairBody, treePairRating, type CompareBody } from './compare';
 import {
@@ -479,19 +489,33 @@ async function guardFor(
 /**
  * Records the guard run for a live change at `headSha` unless it has one:
  * one read batch (repo, change, existing run), the guard's reads, one
- * insert. Skips a change that moved on or left the live states.
+ * insert. Skips a change that moved on or left the live states. With
+ * `rejudgeBaseTree` (a gate question whose guard answered pending for that
+ * merge-base tree) it only re-judges a head that already has a run for
+ * another base, and records the run only while the live base still yields
+ * that tree; the first judgment of a head stays with creation and the push
+ * hook.
  */
-export async function recordGuard(env: Env, repoId: string, changeId: string, headSha: string): Promise<'recorded' | 'skipped'> {
+export async function recordGuard(
+  env: Env,
+  repoId: string,
+  changeId: string,
+  headSha: string,
+  opts: { rejudgeBaseTree?: string } = {},
+): Promise<'recorded' | 'skipped'> {
   const db = env.DB;
-  const [repoRes, changeRes, existing] = await db.batch([
+  const rejudge = opts.rejudgeBaseTree;
+  const [repoRes, changeRes, existing, judged] = await db.batch([
     db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
     db.prepare('SELECT id, base_ref, head_sha, state FROM change_sets WHERE id = ? AND repo_id = ?').bind(changeId, repoId),
-    guardRunExists(db, repoId, changeId, headSha),
+    guardRunExists(db, repoId, changeId, headSha, rejudge),
+    ...(rejudge === undefined ? [] : [guardRunExists(db, repoId, changeId, headSha)]),
   ]);
   const repo = (repoRes?.results as RepoRow[] | undefined)?.[0];
   const change = (changeRes?.results as Array<{ id: string; base_ref: string; head_sha: string | null; state: ChangeState }> | undefined)?.[0];
   if (!repo || !change || change.head_sha !== headSha || !isLive({ state: change.state } as ChangeRow)) return 'skipped';
   if ((existing?.results?.length ?? 0) > 0) return 'skipped';
+  if (rejudge !== undefined && (judged?.results?.length ?? 0) === 0) return 'skipped';
   const pending: Promise<unknown>[] = [];
   try {
     return await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
@@ -505,12 +529,40 @@ export async function recordGuard(env: Env, repoId: string, changeId: string, he
       if (!base || !head) throw new RefStoreUnavailable(`commits of change ${changeId} could not be read`);
       const started = Date.now();
       const plan = await mergePlanFor(ctx, baseSha, headSha);
-      const summary = await guardFor(ctx, { baseSha, baseTree: base.tree, headTree: head.tree, mergeBase: plan.mergeBase });
-      await guardRunInsert(db, { repoId, changeId, headSha, treeSha: head.tree, summary, startedAt: started, now: Date.now() }).run();
-      return 'recorded' as const;
+      let guardBase: { sha: string; tree: string } = base;
+      if (plan.mergeBase !== null && plan.mergeBase !== baseSha) {
+        const mb = (await resolveCommitish(ctx, [plan.mergeBase])).get(plan.mergeBase);
+        if (!mb) throw new RefStoreUnavailable(`merge base ${plan.mergeBase} could not be read`);
+        guardBase = mb;
+      }
+      if (rejudge !== undefined && guardBase.tree !== rejudge) return 'skipped' as const;
+      const summary = await guardFor(ctx, { baseSha: guardBase.sha, baseTree: guardBase.tree, headTree: head.tree, mergeBase: null });
+      const inserted = await guardRunInsert(db, { repoId, changeId, headSha, treeSha: head.tree, summary, startedAt: started, now: Date.now() }).run();
+      return (inserted.meta.changes ?? 0) > 0 ? ('recorded' as const) : ('skipped' as const);
     });
   } finally {
     await Promise.allSettled(pending);
+  }
+}
+
+/**
+ * A gate question found `change`'s guard pending for `baseTree` (its merge
+ * base moved since the head was judged, e.g. the change it was stacked on
+ * landed): judges the head against that base and, once recorded, resumes
+ * the change as a reported check would.
+ */
+export async function rejudgeGuard(
+  env: Env,
+  repoId: string,
+  change: { id: string; number: number; policy: string; baseRef: string; queued: boolean },
+  headSha: string,
+  baseTree: string,
+  waitUntil: (p: Promise<unknown>) => void,
+): Promise<void> {
+  try {
+    if ((await recordGuard(env, repoId, change.id, headSha, { rejudgeBaseTree: baseTree })) === 'recorded') await resumeAfterCheck(env, repoId, change, waitUntil);
+  } catch (err) {
+    console.warn(JSON.stringify({ guardRejudgeFailed: { repoId, change: change.number, error: String(err).slice(0, 200) } }));
   }
 }
 
@@ -1154,6 +1206,10 @@ async function performMerge(
       if (!guardBase) return fail(503, 'the merge base could not be read', 'MERGE_READ_FAILED');
       const subject: ChecksSubject = { changeId: row.id, headSha: prepared.value.headSha, guardBaseTree: guardBase.treeHash };
       const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null, subject);
+      if (guardPending(checks)) {
+        const change = { id: row.id, number: row.number, policy: row.merge_policy, baseRef: row.base_ref, queued: false };
+        cx.waitUntil(rejudgeGuard(cx.env, cx.repo.id, change, prepared.value.headSha, guardBase.treeHash, cx.waitUntil));
+      }
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
       // The last change read runs after every asynchronous preparation step (checks, write token, pack).

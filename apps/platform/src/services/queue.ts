@@ -57,6 +57,7 @@ import {
   mergeRefusal,
   mergedRecordStatements,
   parseNumber,
+  recordGuard,
   resolveCtx,
   resumeAutoDependents,
   reviewRefusal,
@@ -68,6 +69,7 @@ import {
   type HeadWorkspace,
   type MergePolicy,
 } from './changes';
+import { guardPending } from './checks';
 import type { ChecksGate, RequiredChecks } from './checksGate';
 import {
   blockFromRows,
@@ -939,6 +941,7 @@ async function trainPass(
   pass: number,
   owner: string,
   deps: TrainDeps,
+  rejudged: Set<string>,
 ): Promise<PassOutcome> {
   const db = env.DB;
   const now = deps.now();
@@ -1156,6 +1159,16 @@ async function trainPass(
     const subject = { changeId: e.change_set_id, headSha: p.value.headSha, guardBaseTree: guardBase.treeHash };
     const checks = await gate.requiredChecksFor({ id: repo.id }, p.value.treeSha, null, subject);
     deps.observe?.({ type: 'checks', number: e.change_number, treeSha: p.value.treeSha, baseSha: p.value.targetSha, state: checks.state, leaseHeld: false, phase: 'prepare' });
+    const rejudgeKey = `${e.change_set_id}:${p.value.headSha}:${guardBase.treeHash}`;
+    if (guardPending(checks) && !rejudged.has(rejudgeKey)) {
+      // A head judged against an older merge base (its stacked base landed) is never judged again by a push.
+      rejudged.add(rejudgeKey);
+      ctx.waitUntil(
+        recordGuard(env, repo.id, e.change_set_id, p.value.headSha, { rejudgeBaseTree: guardBase.treeHash })
+          .then((r) => (r === 'recorded' ? deps.kick(env, repo.id, ref, 'guard-recorded') : undefined))
+          .catch((err: unknown) => console.warn(JSON.stringify({ guardRejudgeFailed: { repo: repo.id, change: e.change_number, error: String(err).slice(0, 200) } }))),
+      );
+    }
     const ruleBlock = branchPolicyBlock(policy, checks);
     if (checks.state === 'failure' || ruleBlock?.code === 'REQUIRED_CHECKS_FAILED') {
       exit('CHECKS_FAILED', ruleBlock?.error ?? 'a required check failed on the composed tree');
@@ -1650,6 +1663,7 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
     return result;
   }
   const waitUntil: Promise<unknown>[] = [];
+  const rejudged = new Set<string>();
   try {
     for (let pass = 0; pass < TRAIN_LIMITS.maxPasses; pass++) {
       result.passes = pass + 1;
@@ -1677,6 +1691,7 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
             pass,
             owner,
             deps,
+            rejudged,
           ),
         );
       } catch (err) {

@@ -1724,6 +1724,57 @@ describe('integration train', () => {
     expect((await rows('train-order')).map((r) => r.state)).toEqual(['published', 'published', 'published']);
   });
 
+  it('a stacked dependent whose merge base moved when its source landed is judged again by the guard and publishes', async () => {
+    const { repo, main } = await seedRepo('train-stacked');
+    const a = await workspace('train-stacked', 'a.txt', { change: 'review' });
+    const created = await call('POST', api('train-stacked', '/workspaces'), tok.owner, { task: 'work on b.txt over a', agent: 'agent' });
+    expect(created.status).toBe(201);
+    const bHead = await push('train-stacked', created.json.ref, { 'README.md': 'readme\n', 'a.txt': 'a.txt\n', 'b.txt': 'b.txt\n' }, [a.head]);
+    const bChange = await call('POST', api('train-stacked', `/workspaces/${created.json.id}/change-set`), tok.owner, { title: 'Change b.txt', mergePolicy: 'review' });
+    expect(bChange.status).toBe(201);
+    const b = bChange.json.number as number;
+    expect((await pin('train-stacked', created.json.id, a.id, a.head)).status).toBe(201);
+    for (const n of [b, a.change!]) expect((await enqueue('train-stacked', n)).status).toBe(201);
+    const guardBases = async () =>
+      (
+        await env.DB.prepare(
+          `SELECT json_extract(summary, '$.baseTree') AS base FROM check_runs WHERE repo_id = ?1 AND head_sha = ?2 AND name = 'forge/guard' ORDER BY created_at`,
+        )
+          .bind(repoIds['train-stacked'], bHead)
+          .all<{ base: string }>()
+      ).results.map((r) => r.base);
+    expect(await guardBases()).toEqual([commitOf(repo, main).tree]);
+
+    sent.length = 0;
+    const first = await runTrain(env, repoIds['train-stacked']!, MAIN, trainDeps());
+    expect(first.published).toEqual([a.change]);
+    // The source landed: B's merge base is now A's head, so its creation-time guard (judged against main's old tree) no longer answers.
+    expect(await guardBases()).toEqual([commitOf(repo, main).tree, commitOf(repo, a.head).tree]);
+    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'guard-recorded' }));
+
+    const second = await runTrain(env, repoIds['train-stacked']!, MAIN, trainDeps());
+    expect(second.published).toEqual([b]);
+    expect(repo.refs.get(MAIN)).toBe(bHead);
+    expect((await rows('train-stacked')).map((r) => r.state)).toEqual(['published', 'published']);
+    // A repeated pass over a judged head records nothing more.
+    expect(await guardBases()).toHaveLength(2);
+  });
+
+  it('an explicit merge of a stacked change after its base landed answers pending once and judges the new base for the retry', async () => {
+    await seedRepo('merge-stacked');
+    const a = await workspace('merge-stacked', 'a.txt', { change: 'review' });
+    const created = await call('POST', api('merge-stacked', '/workspaces'), tok.owner, { task: 'work on b.txt over a', agent: 'agent' });
+    await push('merge-stacked', created.json.ref, { 'README.md': 'readme\n', 'a.txt': 'a.txt\n', 'b.txt': 'b.txt\n' }, [a.head]);
+    const b = (await call('POST', api('merge-stacked', `/workspaces/${created.json.id}/change-set`), tok.owner, { title: 'Change b.txt', mergePolicy: 'review' })).json
+      .number as number;
+    expect((await merge('merge-stacked', a.change!)).status).toBe(200);
+    const refused = await merge('merge-stacked', b);
+    expect(refused.status).toBe(409);
+    expect(refused.json.code).toBe('REQUIRED_CHECKS_PENDING');
+    const retried = await merge('merge-stacked', b);
+    expect(retried.status, JSON.stringify(retried.json)).toBe(200);
+  });
+
   it('a broken pin keeps the queued dependent waiting (never ejected); detaching lets it publish', async () => {
     const { repo, main } = await seedRepo('train-broken');
     const a = await workspace('train-broken', 'a.txt', { change: 'review' });

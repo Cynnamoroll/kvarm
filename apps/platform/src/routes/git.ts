@@ -77,6 +77,22 @@ function agentMethodAllowed(subpath: string, method: string): boolean {
   return method === 'GET' || method === 'HEAD';
 }
 
+/**
+ * git gzips upload-pack request bodies over 1024 bytes (fetches naming many
+ * refs) but Artifacts reads only plain pkt-lines, so the proxy decodes them
+ * as a stream. Encodings git never sends are refused before any upstream work.
+ */
+function decodedRequestBody(
+  request: Request,
+): { ok: true; body: ReadableStream<Uint8Array> | null } | { ok: false; response: Response } {
+  const encoding = (request.headers.get('content-encoding') ?? '').trim().toLowerCase();
+  if (encoding === '' || encoding === 'identity') return { ok: true, body: request.body };
+  if (encoding === 'gzip' || encoding === 'x-gzip') {
+    return { ok: true, body: request.body?.pipeThrough(new DecompressionStream('gzip')) ?? null };
+  }
+  return { ok: false, response: new Response('unsupported request content-encoding\n', { status: 415 }) };
+}
+
 function operation(subpath: string, service: string | null): 'read' | 'write' {
   if (subpath === 'git-receive-pack') return 'write';
   if (subpath === 'info/refs' && service === 'git-receive-pack') return 'write';
@@ -155,6 +171,13 @@ export async function handleGitRequest(
     return new Response('method not allowed\n', { status: 405 });
   }
 
+  let uploadBody: ReadableStream<Uint8Array> | null = null;
+  if (subpath === 'git-upload-pack' && c.req.method === 'POST') {
+    const decoded = decodedRequestBody(c.req.raw);
+    if (!decoded.ok) return decoded.response;
+    uploadBody = decoded.body;
+  }
+
   // Agent tokens are confined to their granted refs (workspace refs also to
   // an active workspace the agent may use), protected refs refuse direct
   // pushes from everyone (instance admin included), and human credentials
@@ -225,7 +248,7 @@ export async function handleGitRequest(
 
   const init: RequestInit = { method: c.req.method, headers };
   if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
-    init.body = pushBody ?? c.req.raw.body;
+    init.body = pushBody ?? uploadBody ?? c.req.raw.body;
   }
   const upstreamRes = await fetch(upstream.toString(), init);
 
