@@ -41,7 +41,7 @@ import {
   type TreeEntry,
 } from '@forge/gitops';
 import { isLockfilePath } from '@forge/review';
-import type { ChecksGate, ChecksRepo, RequiredChecks } from './checksGate';
+import type { ChecksGate, ChecksRepo, ChecksSubject, RequiredChecks } from './checksGate';
 import type { GitPusher } from './gitwrite';
 import { EMPTY_TREE, RefStoreUnavailable, readCommitInfo, type ResolveContext } from './refs';
 
@@ -135,6 +135,7 @@ export interface MergeabilityInput {
   targetSha: string;
   headSha: string;
   configId?: string | null;
+  subject?: ChecksSubject;
   budgets?: MergeBudgets;
 }
 
@@ -168,6 +169,7 @@ export interface MergeTarget {
   /** Full ref name, e.g. `refs/heads/main`. */
   ref: string;
   configId?: string | null;
+  subject?: ChecksSubject;
 }
 
 export interface MergePublished {
@@ -331,7 +333,7 @@ export async function computeMergePlan(sources: MergeSources, input: Omit<Mergea
 
 export async function computeMergeability(sources: MergeSources, gate: ChecksGate, input: MergeabilityInput): Promise<Mergeability> {
   const p = await computeMergePlan(sources, input);
-  const checks = p.treeSha ? await gate.requiredChecksFor(input.repo, p.treeSha, input.configId ?? null, { headSha: input.headSha }) : null;
+  const checks = p.treeSha ? await gate.requiredChecksFor(input.repo, p.treeSha, input.configId ?? null, input.subject) : null;
   return { ...p, checks, mergeable: (p.status === 'fast-forward' || p.status === 'clean') && checks?.state === 'success' };
 }
 
@@ -376,7 +378,7 @@ function checkNames(checks: RequiredChecks, state: 'failure' | 'pending'): strin
 }
 
 export async function publishMerge(deps: PublishDeps, target: MergeTarget, prepared: PreparedMerge): Promise<MergeResult<MergePublished>> {
-  const checks = await deps.gate.requiredChecksFor(target.repo, prepared.treeSha, target.configId ?? null, { headSha: prepared.headSha });
+  const checks = await deps.gate.requiredChecksFor(target.repo, prepared.treeSha, target.configId ?? null, target.subject);
   if (checks.state === 'failure') {
     return { ok: false, status: 409, error: `required check ${checkNames(checks, 'failure')} failed`, code: 'REQUIRED_CHECKS_FAILED', checks };
   }

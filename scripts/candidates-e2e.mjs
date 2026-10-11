@@ -56,6 +56,7 @@ const PREFIX = 'm6a-candidates-overlap';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
 const results = [];
 const costs = {};
+const scratchAgents = new Set();
 
 function die(msg) {
   console.error(`candidates-e2e: ${msg}`);
@@ -155,6 +156,9 @@ async function scenario(purpose, body) {
         await body(repo);
       } catch (err) {
         check(purpose, `section ${purpose} ran to completion`, false, String(err?.stack ?? err).slice(0, 400));
+      } finally {
+        for (const agentId of scratchAgents) await http(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
+        scratchAgents.clear();
       }
     },
   );
@@ -204,14 +208,14 @@ function commitOn(dir, from, files, msg) {
   return mustGit(['rev-parse', 'HEAD'], dir);
 }
 
-function pushTo(dir, url, sha, ref) {
-  const r = git(['push', '--porcelain', url, `${sha}:${ref}`], dir);
+function pushTo(dir, url, sha, ref, token = PAT) {
+  const r = git(['push', '--porcelain', url, `${sha}:${ref}`], dir, token);
   const okLine = r.out.split('\n').find((l) => l.includes(ref));
   return { ...r, ok: r.code === 0 && Boolean(okLine) && !okLine.startsWith('!'), line: okLine ?? '' };
 }
 
-async function createWs(api, body) {
-  const r = await http(`${api}/workspaces`, { method: 'POST', json: body });
+async function createWs(api, body, token = PAT) {
+  const r = await http(`${api}/workspaces`, { method: 'POST', json: body, token });
   if (r.status !== 201) throw new Error(`create workspace -> ${r.status} ${r.text}`);
   return r.json;
 }
@@ -228,9 +232,9 @@ async function waitObserved(api, id, sha, timeoutMs = 90_000) {
 }
 
 /** Commits `files` on main, pushes them to the workspace ref and waits until the index observed them. */
-async function pushWork(env, ws, files, msg) {
+async function pushWork(env, ws, files, msg, token = PAT) {
   const sha = commitOn(env.dir, env.main, files, msg);
-  const r = pushTo(env.dir, env.url, sha, ws.ref);
+  const r = pushTo(env.dir, env.url, sha, ws.ref, token);
   if (!r.ok) throw new Error(`push ${msg}: ${r.err || r.line}`);
   await waitObserved(env.api, ws.id, sha);
   return sha;
@@ -675,11 +679,20 @@ await scenario('compose', async (repo) => {
 await scenario('gate', async (repo) => {
   const env = await seeded(repo);
   const { api } = env;
-  const A = await createWs(api, { task: 'gate A', agent: 'gate-a' });
-  const B = await createWs(api, { task: 'gate B', agent: 'gate-b' });
+  const agent = await http('/api/v1/agents', { method: 'POST', json: { name: `${PREFIX}-gate-${TS}`, description: 'candidates gate e2e' } });
+  if (agent.status !== 201) throw new Error(`create gate agent -> ${agent.status} ${agent.text}`);
+  scratchAgents.add(agent.json.agent.id);
+  const minted = await http(`/api/v1/agents/${agent.json.agent.id}/tokens`, {
+    method: 'POST',
+    json: { repo: `${OWNER}/${repo}`, role: 'write', refs: ['refs/heads/agents/*'], expiresIn: 900 },
+  });
+  if (minted.status !== 201) throw new Error(`mint gate agent token -> ${minted.status} ${minted.text}`);
+  const agentToken = minted.json.token;
+  const A = await createWs(api, { task: 'gate A' }, agentToken);
+  const B = await createWs(api, { task: 'gate B' }, agentToken);
   // Structurally alike edits, so nothing but the reported checks separates them.
-  const shaA = await pushWork(env, A, { 'src/a.ts': 'export const a = 1;\n' }, 'A');
-  const shaB = await pushWork(env, B, { 'src/b.ts': 'export const b = 1;\n' }, 'B');
+  const shaA = await pushWork(env, A, { 'src/a.ts': 'export const a = 1;\n' }, 'A', agentToken);
+  const shaB = await pushWork(env, B, { 'src/b.ts': 'export const b = 1;\n' }, 'B', agentToken);
   for (const [name, ws] of [['A', A], ['B', B]]) {
     const r = await http(`${api}/workspaces/${ws.id}/change-set`, { method: 'POST', json: { title: `gate ${name}` } });
     console.log(`POST workspaces/${ws.id}/change-set -> ${r.status} #${r.json?.number} checks=${JSON.stringify(r.json?.checks?.map((c) => [c.name, c.headSha?.slice(0, 8), c.status]))}`);

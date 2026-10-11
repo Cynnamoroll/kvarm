@@ -24,6 +24,7 @@ import {
 import { internalKey, writeCachedJson } from '../src/cache/internal';
 import { withLazyRepo, type LazyRepo } from '../src/artifacts/repo';
 import type { RepoRow } from '../src/db/repos';
+import { memoGate } from '../src/services/changes';
 import { checksGate, type ChecksProducer, type RequiredCheck } from '../src/services/checksGate';
 import { artifactsPusher, type GitPusher } from '../src/services/gitwrite';
 import {
@@ -120,6 +121,26 @@ describe('checksGate', () => {
     expect(r.required.map((c) => `${c.producer}:${c.name}:${c.state}`)).toEqual(['fake-ci:unit:success', 'fake-ci:lint:pending', 'fake-ci:e2e:failure']);
     expect(seen).toEqual([{ repo: REPO.id, treeSha: 'b'.repeat(40), configId: 'cfg-1' }]);
     expect((await checksGate([producer([{ name: 'lint', state: 'pending' }])]).requiredChecksFor(REPO, 'c'.repeat(40), null)).state).toBe('pending');
+  });
+
+  it('memoizes only identical change, head and guard-base subjects', async () => {
+    const seen: unknown[] = [];
+    const inner = checksGate([
+      {
+        name: 'identity',
+        async requiredChecksFor(_repo, _treeSha, _configId, subject) {
+          seen.push(subject);
+          return [];
+        },
+      },
+    ]);
+    const gate = memoGate(inner);
+    const common = { headSha: 'a'.repeat(40), guardBaseTree: 'b'.repeat(40) };
+    await gate.requiredChecksFor(REPO, 'c'.repeat(40), null, { changeId: 'change-1', ...common });
+    await gate.requiredChecksFor(REPO, 'c'.repeat(40), null, { changeId: 'change-1', ...common });
+    await gate.requiredChecksFor(REPO, 'c'.repeat(40), null, { changeId: 'change-2', ...common });
+    await gate.requiredChecksFor(REPO, 'c'.repeat(40), null, { changeId: 'change-1', ...common, guardBaseTree: 'd'.repeat(40) });
+    expect(seen).toHaveLength(3);
   });
 });
 

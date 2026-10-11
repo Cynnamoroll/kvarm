@@ -493,6 +493,27 @@ describe('integration train', () => {
     expect((await leaseStatus('guard-eject')).lease).toBeNull();
   });
 
+  it('does not let a passing guard from another change mask a queued failure on the same head', async () => {
+    const repo = await seedRepo('guard-same-head');
+    const main = await commit(repo, { 'README.md': 'readme\n' });
+    const shared = await commit(repo, { 'README.md': 'readme\n', 'secret.txt': `token=${'forge_pat_' + 'a'.repeat(64)}\n` }, [main.sha]);
+    repo.refs.set(MAIN, main.sha);
+    repo.refs.set('refs/heads/b1', shared.sha);
+    repo.refs.set('refs/heads/b2', shared.sha);
+    const first = (await createChange('guard-same-head', 'b1')).json.number as number;
+    const second = await call('POST', api('guard-same-head', '/changes'), tok.owner, {
+      title: 'clean same head',
+      base: 'b1',
+      head: 'b2',
+      mergePolicy: 'review',
+    });
+    expect(second.status).toBe(201);
+    await enqueue('guard-same-head', first);
+    const run = await runTrain(env, repoIds['guard-same-head']!, MAIN, trainDeps());
+    expect(run.ejected).toEqual([{ number: first, code: 'CHECKS_FAILED' }]);
+    expect(run.published).toEqual([]);
+  });
+
   it('checks the exact composition: a failing combined tree ejects only the candidate that formed it', async () => {
     const { repo, main, numbers } = await setup('compose', 3);
     const [one, two, three] = numbers as [number, number, number];

@@ -24,7 +24,7 @@
 import { withLazyRepo } from '../artifacts/repo';
 import type { ServiceResult } from '../repos/service';
 import { credentialMayUpdateRef } from './authz';
-import { normalizeBranch } from './changes';
+import { mergePlanFor, normalizeBranch } from './changes';
 import { defaultChecksGate, type CheckState, type ChecksGate, type RequiredCheck } from './checksGate';
 import { treePairBody, type CompareBody, type CompareFile } from './compare';
 import { ADVISORY_NOTE, setOverlap, setOverlapStatements, type SetOverlap, type SetOverlapPair } from './intents/forecast';
@@ -359,7 +359,8 @@ async function compareSet(
 
   return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
     const ctx: ResolveContext = { env: cx.env, repo: cx.repo, artifacts, bypass: false, waitUntil: cx.waitUntil };
-    const resolved = await resolveCommitish(ctx, [baseRef, ...active.map((r) => r.ref!)]);
+    const publicationBases = active.map((r) => `refs/heads/${r.base_ref ?? base}`);
+    const resolved = await resolveCommitish(ctx, [baseRef, ...active.map((r) => r.ref!), ...publicationBases]);
     const baseCommit = resolved.get(baseRef);
     if (!baseCommit) return fail(422, `base branch not found: ${base}`, 'REF_NOT_FOUND', { ref: base });
 
@@ -374,7 +375,28 @@ async function compareSet(
     await runPool(members, CANDIDATE_LIMITS.bodyConcurrency, async (m, i) => {
       bodies[i] = (await treePairBody(ctx, baseCommit.tree, m.tree)).body;
     });
-    const checks = await Promise.all(members.map((m) => gate.requiredChecksFor({ id: cx.repo.id }, m.tree, null, { headSha: m.sha })));
+    const gateQuestions = await Promise.all(
+      members.map(async (m) => {
+        if (!m.row.change_set_id) return { member: m };
+        const target = resolved.get(`refs/heads/${m.row.base_ref ?? base}`);
+        if (!target) return { member: m };
+        const plan = await mergePlanFor(ctx, target.sha, m.sha);
+        if (!plan.mergeBase) return { member: m };
+        const guardBase =
+          plan.mergeBase === target.sha
+            ? target
+            : plan.mergeBase === m.sha
+              ? { sha: m.sha, tree: m.tree }
+              : (await resolveCommitish(ctx, [plan.mergeBase])).get(plan.mergeBase);
+        if (!guardBase) throw new RefStoreUnavailable(`merge base ${plan.mergeBase} could not be read`);
+        return { member: m, subject: { changeId: m.row.change_set_id, headSha: m.sha, guardBaseTree: guardBase.tree } };
+      }),
+    );
+    // Resolve every publication plan first, then ask every question in one synchronous
+    // turn so the producer can coalesce them into its single per-request batch.
+    const checks = await Promise.all(
+      gateQuestions.map(({ member, subject }) => gate.requiredChecksFor({ id: cx.repo.id }, member.tree, null, subject)),
+    );
 
     const reasons: string[] = [];
     const candidates = members.map((m, i): CandidateSummary => {

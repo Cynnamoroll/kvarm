@@ -155,6 +155,11 @@ async function agentToken(repo: string, name: string, refs = ['refs/heads/agents
   return { token: minted.json.token as string, agentId: agent.json.agent.id as string };
 }
 
+async function workspacePush(repo: string, cmds: string[]): Promise<{ status: number; report: string[] }> {
+  const agent = await agentToken(repo, `push-${crypto.randomUUID()}`);
+  return gitPush(repo, agent.token, cmds);
+}
+
 beforeAll(async () => {
   installFakeGitRemote();
   tok.owner = (await mintPAT(env, await seedUser(OWNER), 'owner', FULL)).token;
@@ -250,7 +255,7 @@ describe('pushes and change sets', () => {
     const a = (await createWs('push', { task: 'a', agent: 'one' })).json;
     const b = (await createWs('push', { task: 'b', agent: 'two' })).json;
     const work = await commit(repo, { 'README.md': 'readme\n', 'a.txt': 'A\n' }, [main.sha]);
-    const pushed = await gitPush('push', tok.owner, [`${main.sha} ${work.sha} ${a.ref}`]);
+    const pushed = await workspacePush('push', [`${main.sha} ${work.sha} ${a.ref}`]);
     expect(pushed.report).toEqual(['unpack ok', `ok ${a.ref}`]);
     expect(repo.refs.get(a.ref)).toBe(work.sha);
     expect(repo.refs.get(b.ref)).toBe(main.sha);
@@ -264,7 +269,7 @@ describe('pushes and change sets', () => {
     const main = await based(repo);
     const ws = (await createWs('change', { task: 'fix login', agent: 'claude' })).json;
     const first = await commit(repo, { 'README.md': 'readme\n', 'login.ts': 'v1\n' }, [main.sha]);
-    expect((await gitPush('change', tok.owner, [`${main.sha} ${first.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
+    expect((await workspacePush('change', [`${main.sha} ${first.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
     await deliver(pushEvent('change', ws.ref, main.sha, first.sha, Date.now()));
 
     const opened = await openChange('change', ws.id, { title: 'fix login' });
@@ -281,7 +286,7 @@ describe('pushes and change sets', () => {
     expect([again.status, again.json.code]).toEqual([409, 'CHANGE_SET_EXISTS']);
 
     const second = await commit(repo, { 'README.md': 'readme\n', 'login.ts': 'v2\n' }, [first.sha]);
-    expect((await gitPush('change', tok.owner, [`${first.sha} ${second.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
+    expect((await workspacePush('change', [`${first.sha} ${second.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
     await deliver(pushEvent('change', ws.ref, first.sha, second.sha, Date.now() + 1000));
     expect((await getChange('change', 1)).json).toMatchObject({ number: 1, headSha: second.sha, state: 'open' });
     const changes = await call('GET', `/api/v1/repos/${OWNER}/change/changes?state=all`, tok.owner);
@@ -295,7 +300,7 @@ describe('pushes and change sets', () => {
     for (const policy of ['draft', 'auto', 'review'] as const) {
       const ws = (await createWs('policy', { task: policy, agent: 'x' })).json;
       const c = await commit(repo, { 'README.md': 'readme\n', [`${policy}.txt`]: policy }, [repo.refs.get('refs/heads/main') ?? main.sha]);
-      expect((await gitPush('policy', tok.owner, [`${ws.baseSha} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
+      expect((await workspacePush('policy', [`${ws.baseSha} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
       const r = await openChange('policy', ws.id, { title: policy, mergePolicy: policy });
       expect(r.status).toBe(201);
       results[policy] = (await getChange('policy', r.json.number)).json.mergePolicy;
@@ -314,7 +319,7 @@ describe('pushes and change sets', () => {
     const main = await based(repo);
     const ws = (await createWs('merged', { task: 'm', agent: 'x' })).json;
     const c = await commit(repo, { 'README.md': 'readme\n', 'm.txt': 'm\n' }, [main.sha]);
-    await gitPush('merged', tok.owner, [`${main.sha} ${c.sha} ${ws.ref}`]);
+    await workspacePush('merged', [`${main.sha} ${c.sha} ${ws.ref}`]);
     const opened = await openChange('merged', ws.id, { title: 'm' });
     const merged = await call('POST', `/api/v1/repos/${OWNER}/merged/changes/${opened.json.number}/merge`, tok.owner);
     expect(merged.status).toBe(200);
@@ -335,7 +340,7 @@ describe('list and abandon', () => {
     const main = await based(repo);
     const ws = (await createWs('abandon', { task: 'gone', agent: 'x' })).json;
     const c = await commit(repo, { 'README.md': 'readme\n', 'g.txt': 'g\n' }, [main.sha]);
-    await gitPush('abandon', tok.owner, [`${main.sha} ${c.sha} ${ws.ref}`]);
+    await workspacePush('abandon', [`${main.sha} ${c.sha} ${ws.ref}`]);
     const opened = await openChange('abandon', ws.id, { title: 'gone' });
 
     const r = await abandon('abandon', ws.id);
@@ -531,7 +536,7 @@ describe('workspace admission comes before automatic publication', () => {
     const main = await based(repo);
     const ws = (await createWs(name, { task: 'race', agent: 'x' })).json;
     const c = await commit(repo, { 'README.md': 'readme\n', 'race.txt': 'r\n' }, [main.sha]);
-    expect((await gitPush(name, tok.owner, [`${main.sha} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
+    expect((await workspacePush(name, [`${main.sha} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
     return { repo, main, ws, head: c.sha };
   }
 
@@ -578,7 +583,7 @@ describe('workspace admission comes before automatic publication', () => {
     const moved = await commit(repo, { 'README.md': 'readme on main\n' }, [main.sha]);
     repo.refs.set('refs/heads/main', moved.sha);
     const c = await commit(repo, { 'README.md': 'readme in the workspace\n', 'race.txt': 'r\n' }, [head]);
-    expect((await gitPush(name, tok.owner, [`${head} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
+    expect((await workspacePush(name, [`${head} ${c.sha} ${ws.ref}`])).report).toContain(`ok ${ws.ref}`);
     return { repo, ws };
   }
 
@@ -691,7 +696,7 @@ describe('repo delete', () => {
     const main = await based(repo);
     const ws = (await createWs('delete', { task: 'd', agent: 'x' })).json;
     const c = await commit(repo, { 'README.md': 'readme\n', 'd.txt': 'd\n' }, [main.sha]);
-    await gitPush('delete', tok.owner, [`${main.sha} ${c.sha} ${ws.ref}`]);
+    await workspacePush('delete', [`${main.sha} ${c.sha} ${ws.ref}`]);
     await openChange('delete', ws.id, { title: 'd' });
     const row = await getRepoById(env.DB, repoIds.delete!);
     expect((await deleteRepo(env, row!)).ok).toBe(true);

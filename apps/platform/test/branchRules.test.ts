@@ -5,8 +5,10 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import {
   directPushDenial,
+  directHumanPushDenial,
   effectivePolicy,
   normalizeRulePattern,
+  RESERVED_REF_REASON,
   PROTECTED_REF_REASON,
   type BranchRule,
 } from '../src/services/branchRules';
@@ -200,6 +202,13 @@ describe('branch rule evaluation', () => {
     expect(directPushDenial([rule('r', 'refs/heads/main')], 'refs/heads//main')).toBe('invalid ref name');
     expect(directPushDenial([], 'refs/heads//main')).toBeNull();
   });
+
+  it('reserves platform branch namespaces from human pushes without branch rules', () => {
+    for (const ref of ['refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+      expect(directHumanPushDenial([], ref)).toBe(RESERVED_REF_REASON);
+    }
+    expect(directHumanPushDenial([], 'refs/heads/feature/x')).toBeNull();
+  });
 });
 
 describe('branch rule management', () => {
@@ -362,14 +371,34 @@ describe('protected direct pushes', () => {
     await allowed.body?.cancel();
   });
 
-  it('leaves pushes to repos without rules unparsed and unchanged', async () => {
-    // A malformed body would be rejected by the gate; without rules it is forwarded as-is.
-    const res = await push(pat.writer, PLAIN, new TextEncoder().encode('zzzz'));
-    expect(res.status).toBe(503);
-    await res.body?.cancel();
+  it('leaves ordinary branch pushes to repos without rules unchanged', async () => {
     const main = await push(pat.owner, PLAIN, pushBody([`${A} ${B} refs/heads/main`]));
     expect(main.status).toBe(503);
     await main.body?.cancel();
+  });
+
+  it('denies human create, update and delete in platform-reserved namespaces without rules', async () => {
+    const commands = [
+      `${ZERO_OID} ${B}`,
+      `${A} ${B}`,
+      `${A} ${ZERO_OID}`,
+    ];
+    for (const who of ['owner', 'writer', 'admin'] as const) {
+      for (const ref of ['refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+        for (const command of commands) {
+          const res = await push(pat[who], PLAIN, pushBody([`${command} ${ref}`]));
+          expect(res.status, `${who} ${command} ${ref}`).toBe(200);
+          expect(await reportStatus(res)).toEqual(['unpack ok', `ng ${ref} ${RESERVED_REF_REASON}`]);
+        }
+      }
+    }
+  });
+
+  it('rejects reserved refs locally without extra upstream work', async () => {
+    const res = await push(pat.owner, PLAIN, pushBody([`${ZERO_OID} ${B} refs/heads/forge-ci/x`]));
+    const cost = parseCostHeader(res.headers.get(COST_HEADER));
+    await res.body?.cancel();
+    expect(cost).toMatchObject({ d1: 1, art: 0, do: 0, sub: 0 });
   });
 
   it('still requires write access before any rule is consulted', async () => {

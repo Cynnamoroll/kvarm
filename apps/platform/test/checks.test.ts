@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
-import { GUARD_BUDGETS } from '../src/services/checks';
+import { CHECK_LIMITS, GUARD_BUDGETS, checkRunsProducer } from '../src/services/checks';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -263,6 +263,115 @@ describe('guard findings', () => {
 });
 
 describe('the guard as the checks gate', () => {
+  it('selects the guard by change and head and rejects a verdict for a different guard base', async () => {
+    const repo = await seedRepo('guard-identity');
+    const { feature } = await fixture(repo, BASE, { 'secrets.txt': `aws_key=${AWS_KEY}\n` });
+    repo.refs.set('refs/heads/copy', feature.sha);
+    expect((await create('guard-identity')).status).toBe(201);
+    expect((await create('guard-identity', { base: 'feature', head: 'copy' })).status).toBe(201);
+    const rows =
+      (
+        await env.DB.prepare(
+          `SELECT c.id AS change_id, k.id AS run_id, k.summary
+             FROM change_sets c JOIN check_runs k ON k.change_set_id = c.id
+            WHERE c.repo_id = ? AND k.name = 'forge/guard'
+            ORDER BY c.number`,
+        )
+          .bind(repoIds['guard-identity'])
+          .all<{ change_id: string; run_id: string; summary: string }>()
+      ).results ?? [];
+    expect(rows).toHaveLength(2);
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE check_runs SET created_at = 100 WHERE id = ?`).bind(rows[0]!.run_id),
+      env.DB.prepare(`UPDATE check_runs SET created_at = 200 WHERE id = ?`).bind(rows[1]!.run_id),
+    ]);
+    const baseTree = (JSON.parse(rows[0]!.summary) as { baseTree: string }).baseTree;
+    const cleanBaseTree = (JSON.parse(rows[1]!.summary) as { baseTree: string }).baseTree;
+    const crowded: D1PreparedStatement[] = [];
+    for (let number = 3; number <= 100; number++) {
+      const changeId = crypto.randomUUID();
+      crowded.push(
+        env.DB.prepare(
+          `INSERT INTO change_sets
+             (id, repo_id, number, title, base_ref, head_ref, head_sha, state, merge_policy, kind, created_at, updated_at, head_event_at)
+           VALUES (?, ?, ?, ?, 'main', ?, ?, 'open', 'review', 'change', ?, ?, ?)`,
+        ).bind(changeId, repoIds['guard-identity'], number, `shared ${number}`, `shared-${number}`, feature.sha, number, number, number),
+        env.DB.prepare(
+          `INSERT INTO check_runs
+             (id, repo_id, change_set_id, head_sha, tree_sha, name, status, conclusion, summary, attempt, required, quarantined, created_at)
+           VALUES (?, ?, ?, ?, ?, 'forge/guard', 'success', 'success', ?, 1, 1, 0, ?)`,
+        ).bind(crypto.randomUUID(), repoIds['guard-identity'], changeId, feature.sha, feature.tree, rows[0]!.summary, 200 + number),
+      );
+    }
+    await env.DB.batch(crowded);
+    const blocked = await call('POST', `${R('guard-identity')}/changes/1/merge`, tok.owner);
+    expect([blocked.status, blocked.json.code]).toEqual([409, 'REQUIRED_CHECKS_FAILED']);
+    const gate = checkRunsProducer(env);
+    const [first, second, staleBase] = await Promise.all([
+      gate.requiredChecksFor(
+        { id: repoIds['guard-identity']! },
+        feature.tree,
+        null,
+        { changeId: rows[0]!.change_id, headSha: feature.sha, guardBaseTree: baseTree },
+      ),
+      gate.requiredChecksFor(
+        { id: repoIds['guard-identity']! },
+        feature.tree,
+        null,
+        { changeId: rows[1]!.change_id, headSha: feature.sha, guardBaseTree: cleanBaseTree },
+      ),
+      gate.requiredChecksFor(
+        { id: repoIds['guard-identity']! },
+        feature.tree,
+        null,
+        { changeId: rows[0]!.change_id, headSha: feature.sha, guardBaseTree: 'f'.repeat(40) },
+      ),
+    ]);
+    expect(first.find((c) => c.name === 'forge/guard')?.state).toBe('failure');
+    expect(second.find((c) => c.name === 'forge/guard')?.state).toBe('success');
+    expect(staleBase.find((c) => c.name === 'forge/guard')).toMatchObject({ state: 'pending' });
+    expect(first).toContainEqual({ name: 'forge/checks-window', state: 'pending' });
+  });
+
+  it('marks a full exact-tree result window pending without penalizing an under-full tree', async () => {
+    const repo = await seedRepo('checks-window');
+    const { feature } = await fixture(repo, BASE, { 'feature.txt': 'feature\n' });
+    expect((await create('checks-window')).status).toBe(201);
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds['checks-window'])
+      .first<{ id: string }>();
+    const guard = await env.DB.prepare(`SELECT summary FROM check_runs WHERE change_set_id = ? AND name = 'forge/guard'`)
+      .bind(change!.id)
+      .first<{ summary: string }>();
+    const baseTree = (JSON.parse(guard!.summary) as { baseTree: string }).baseTree;
+    const fullTree = 'd'.repeat(40);
+    const shortTree = 'e'.repeat(40);
+    const inserts: D1PreparedStatement[] = [];
+    for (const [tree, count] of [
+      [fullTree, CHECK_LIMITS.gateRowsPerTree],
+      [shortTree, CHECK_LIMITS.gateRowsPerTree - 1],
+    ] as const) {
+      for (let i = 0; i < count; i++) {
+        inserts.push(
+          env.DB.prepare(
+            `INSERT INTO check_runs
+               (id, repo_id, change_set_id, head_sha, tree_sha, name, status, conclusion, attempt, required, quarantined, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'success', 'success', 1, 1, 0, ?)`,
+          ).bind(crypto.randomUUID(), repoIds['checks-window'], change!.id, feature.sha, tree, `ci/${tree[0]}-${i}`, i),
+        );
+      }
+    }
+    await env.DB.batch(inserts);
+    const subject = { changeId: change!.id, headSha: feature.sha, guardBaseTree: baseTree };
+    const gate = checkRunsProducer(env);
+    const [full, short] = await Promise.all([
+      gate.requiredChecksFor({ id: repoIds['checks-window']! }, fullTree, null, subject),
+      gate.requiredChecksFor({ id: repoIds['checks-window']! }, shortTree, null, subject),
+    ]);
+    expect(full).toContainEqual({ name: 'forge/checks-window', state: 'pending' });
+    expect(short).not.toContainEqual(expect.objectContaining({ name: 'forge/checks-window' }));
+  });
+
   it('an auto change with a failing guard stays open; the clean head pushed over it merges on its own (VAL-MERGE-006)', async () => {
     const repo = await seedRepo('auto');
     const { feature } = await fixture(repo, BASE, { 'secrets.txt': `aws_key=${AWS_KEY}\n` });
@@ -451,6 +560,40 @@ describe('CI pipeline runner', () => {
     const status = await call('GET', `${R('ci-runner')}/commits/${feature.sha}/status`, tok.owner);
     expect(status.json).toMatchObject({ state: 'success' });
     expect(status.json.checks.find((r: any) => r.name === 'build')).toMatchObject({ status: 'success', summary: { output: 'marker-at-head' } });
+  });
+
+  it('counts report summaries in UTF-8 bytes and reclaims the same job after an oversized report expires', async () => {
+    const repo = await seedRepo('ci-summary-bytes');
+    const config = ci([{ name: 'test', run: 'echo ok', required: true }]);
+    await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'one.txt': 'one\n' });
+    await create('ci-summary-bytes');
+    const claimPath = `${R('ci-summary-bytes')}/ci/jobs/claim`;
+    const first = await call('POST', claimPath, tok.ci, { runnerId: 'runner-a' });
+    expect(first.status).toBe(200);
+
+    const accepted = await call('POST', `${R('ci-summary-bytes')}/ci/jobs/${first.json.job.id}/report`, tok.ci, {
+      runnerId: 'runner-a',
+      generation: 1,
+      conclusion: 'success',
+      summary: { output: '漢'.repeat(21_000) },
+    });
+    expect(accepted.status).toBe(200);
+
+    const secondChange = await create('ci-summary-bytes');
+    expect(secondChange.status).toBe(201);
+    const second = await call('POST', claimPath, tok.ci, { runnerId: 'runner-b' });
+    expect(second.status).toBe(200);
+    const oversized = await call('POST', `${R('ci-summary-bytes')}/ci/jobs/${second.json.job.id}/report`, tok.ci, {
+      runnerId: 'runner-b',
+      generation: 1,
+      conclusion: 'failure',
+      summary: { output: '漢'.repeat(21_846) },
+    });
+    expect([oversized.status, oversized.json.code]).toEqual([422, 'SUMMARY_TOO_LARGE']);
+    await env.DB.prepare('UPDATE ci_jobs SET lease_until = ? WHERE id = ?').bind(Date.now() - 1, second.json.job.id).run();
+    const reclaimed = await call('POST', claimPath, tok.ci, { runnerId: 'runner-c' });
+    expect(reclaimed.status).toBe(200);
+    expect(reclaimed.json.job).toMatchObject({ id: second.json.job.id, generation: 2, runnerId: 'runner-c' });
   });
 
   it('queues a fresh job set after the change head moves (VAL-CI-002)', async () => {

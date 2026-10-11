@@ -29,7 +29,10 @@ export const CHECK_NAME_MAX = 100;
 export const REQUIRED_APPROVALS_MAX = 10;
 
 export const PROTECTED_REF_REASON = 'protected branch: direct pushes are not allowed';
+export const RESERVED_REF_REASON = 'platform-reserved branch: direct pushes are not allowed';
 export const INVALID_REF_REASON = 'invalid ref name';
+
+const RESERVED_BRANCH_NAMESPACES = ['refs/heads/forge-ci', 'refs/heads/agents'] as const;
 
 export interface BranchRule {
   id: string;
@@ -162,6 +165,12 @@ export function directPushDenial(rules: readonly BranchRule[], ref: string): str
   if (rules.length === 0) return null;
   if (!isSafeRefName(ref)) return INVALID_REF_REASON;
   return matchingRules(rules, ref).length > 0 ? PROTECTED_REF_REASON : null;
+}
+
+/** Human git credentials may never write the platform-owned branch namespaces. */
+export function directHumanPushDenial(rules: readonly BranchRule[], ref: string): string | null {
+  if (RESERVED_BRANCH_NAMESPACES.some((namespace) => ref === namespace || ref.startsWith(`${namespace}/`))) return RESERVED_REF_REASON;
+  return directPushDenial(rules, ref);
 }
 
 // ---------------------------------------------------------------------------

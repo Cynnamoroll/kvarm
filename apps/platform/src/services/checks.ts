@@ -22,6 +22,7 @@ import { runPool } from './pool';
 import { resolveCommitish, type ResolveContext } from './refs';
 
 export const GUARD_CHECK = 'forge/guard';
+export const CHECKS_WINDOW_CHECK = 'forge/checks-window';
 export const GUARD_VERSION = 'guard/v1';
 const PRODUCER = 'check-runs';
 
@@ -271,29 +272,46 @@ interface GateRow {
   status: string;
   tree_sha: string | null;
   head_sha: string;
+  summary: string | null;
   created_at: number;
 }
 
-const GATE_COLUMNS = 'k.id, k.name, k.status, k.tree_sha, k.head_sha, k.created_at';
+const GATE_COLUMNS = 'k.id, k.name, k.status, k.tree_sha, k.head_sha, k.summary, k.created_at';
 
 interface Pending {
   treeSha: string;
-  headSha: string | null;
+  subject: ChecksSubject | null;
   resolve(v: Array<Omit<RequiredCheck, 'producer'>>): void;
   reject(err: unknown): void;
 }
 
-function answer(rows: readonly GateRow[], treeSha: string, headSha: string | null): Array<Omit<RequiredCheck, 'producer'>> {
-  const newest = new Map<string, GateRow>();
-  const expected = new Set<string>([GUARD_CHECK]);
-  // Rows arrive newest first: the first row per name is its current run.
-  for (const r of rows) {
-    if (headSha !== null && r.head_sha === headSha) expected.add(r.name);
-    const applies = r.tree_sha === treeSha || (r.name === GUARD_CHECK && headSha !== null && r.head_sha === headSha);
-    if (applies && !newest.has(r.name)) newest.set(r.name, r);
+function guardBaseOf(row: GateRow): string | null {
+  if (row.summary === null) return null;
+  try {
+    const parsed = JSON.parse(row.summary) as { baseTree?: unknown };
+    return typeof parsed.baseTree === 'string' ? parsed.baseTree : null;
+  } catch {
+    return null;
   }
+}
+
+function answer(
+  treeRows: readonly GateRow[],
+  guardRows: readonly GateRow[],
+  subject: ChecksSubject | null,
+  treeWindowFull: boolean,
+): Array<Omit<RequiredCheck, 'producer'>> {
+  const newest = new Map<string, GateRow>();
+  // Rows arrive newest first: the first row per name is its current run.
+  for (const r of treeRows) if (r.name !== GUARD_CHECK && !newest.has(r.name)) newest.set(r.name, r);
   const out: Array<Omit<RequiredCheck, 'producer'>> = [...newest.values()].map((r) => ({ name: r.name, state: stateOf(r.status), runId: r.id }));
-  for (const name of expected) if (!newest.has(name)) out.push({ name, state: 'pending' });
+  const guard = subject ? guardRows[0] : undefined;
+  out.push(
+    guard && guardBaseOf(guard) === subject!.guardBaseTree
+      ? { name: GUARD_CHECK, state: stateOf(guard.status), runId: guard.id }
+      : { name: GUARD_CHECK, state: 'pending' },
+  );
+  if (treeWindowFull) out.push({ name: CHECKS_WINDOW_CHECK, state: 'pending' });
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
@@ -304,30 +322,36 @@ export function checkRunsProducer(env: Pick<Env, 'DB'>): ChecksProducer {
 
   const flush = async (repoId: string, batch: Pending[]) => {
     try {
-      const keys: Array<{ tree: string } | { head: string }> = [
-        ...[...new Set(batch.map((p) => p.treeSha))].map((tree) => ({ tree })),
-        ...[...new Set(batch.flatMap((p) => (p.headSha ? [p.headSha] : [])))].map((head) => ({ head })),
-      ];
+      const trees = [...new Set(batch.map((p) => p.treeSha))].map((value) => ({ kind: 'tree' as const, value }));
+      const guards = new Map(
+        batch.flatMap((p) =>
+          p.subject ? [[`${p.subject.changeId}:${p.subject.headSha}`, { kind: 'guard' as const, value: p.subject.headSha, changeId: p.subject.changeId }] as const] : [],
+        ),
+      ).values();
+      const keys: Array<{ kind: 'tree'; value: string } | { kind: 'guard'; value: string; changeId: string }> = [...trees, ...guards];
       // One statement per key, each a bounded index range (a tree's newest counted runs, a head's newest
       // guard run), in one batch: D1 caps the terms of a compound SELECT well below the keys of a request.
       const statements = keys.map((k) =>
-        'tree' in k
+        k.kind === 'tree'
           ? env.DB.prepare(
               `SELECT ${GATE_COLUMNS} FROM check_runs k INDEXED BY idx_checks_tree_gate
                 WHERE k.repo_id = ?1 AND k.tree_sha = ?2 AND k.required = 1 AND k.quarantined = 0
                 ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHECK_LIMITS.gateRowsPerTree}`,
-            ).bind(repoId, k.tree)
+            ).bind(repoId, k.value)
           : env.DB.prepare(
               `SELECT ${GATE_COLUMNS} FROM check_runs k INDEXED BY idx_checks_sha_name_newest
-                WHERE k.repo_id = ?1 AND k.head_sha = ?2 AND k.name = '${GUARD_CHECK}' AND k.required = 1 AND k.quarantined = 0
-                ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHECK_LIMITS.gateRowsPerTree}`,
-            ).bind(repoId, k.head),
+                WHERE k.repo_id = ?1 AND k.head_sha = ?2 AND k.name = '${GUARD_CHECK}' AND k.change_set_id = ?3
+                  AND k.required = 1 AND k.quarantined = 0
+                ORDER BY k.created_at DESC, k.id DESC LIMIT 1`,
+            ).bind(repoId, k.value, k.changeId),
       );
       const results = await env.DB.batch<GateRow>(statements);
-      const rows = results
-        .flatMap((r) => r.results ?? [])
-        .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-      for (const p of batch) p.resolve(answer(rows, p.treeSha, p.headSha));
+      const rows = new Map(keys.map((k, i) => [`${k.kind}:${k.kind === 'guard' ? `${k.changeId}:` : ''}${k.value}`, results[i]?.results ?? []]));
+      for (const p of batch) {
+        const treeRows = rows.get(`tree:${p.treeSha}`) ?? [];
+        const guardRows = p.subject ? (rows.get(`guard:${p.subject.changeId}:${p.subject.headSha}`) ?? []) : [];
+        p.resolve(answer(treeRows, guardRows, p.subject, treeRows.length === CHECK_LIMITS.gateRowsPerTree));
+      }
     } catch (err) {
       for (const p of batch) p.reject(err);
     }
@@ -338,7 +362,7 @@ export function checkRunsProducer(env: Pick<Env, 'DB'>): ChecksProducer {
     requiredChecksFor(repo, treeSha, _configId, subject?: ChecksSubject) {
       return new Promise((resolve, reject) => {
         const list = queued.get(repo.id) ?? [];
-        list.push({ treeSha, headSha: subject?.headSha ?? null, resolve, reject });
+        list.push({ treeSha, subject: subject ?? null, resolve, reject });
         queued.set(repo.id, list);
         if (scheduled) return;
         scheduled = true;

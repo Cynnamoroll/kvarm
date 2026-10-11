@@ -1151,7 +1151,10 @@ async function trainPass(
       continue;
     }
     plan.verifiedPins = kept.verified;
-    const checks = await gate.requiredChecksFor({ id: repo.id }, p.value.treeSha, null, { headSha: p.value.headSha });
+    const guardBase = await sources.readCommit(p.value.mergeBase);
+    if (!guardBase) throw new RefStoreUnavailable(`merge base ${p.value.mergeBase} could not be read`);
+    const subject = { changeId: e.change_set_id, headSha: p.value.headSha, guardBaseTree: guardBase.treeHash };
+    const checks = await gate.requiredChecksFor({ id: repo.id }, p.value.treeSha, null, subject);
     deps.observe?.({ type: 'checks', number: e.change_number, treeSha: p.value.treeSha, baseSha: p.value.targetSha, state: checks.state, leaseHeld: false, phase: 'prepare' });
     const ruleBlock = branchPolicyBlock(policy, checks);
     if (checks.state === 'failure' || ruleBlock?.code === 'REQUIRED_CHECKS_FAILED') {
@@ -1383,7 +1386,14 @@ async function publishCandidate(
       .run();
   };
 
-  const checks = await gate.requiredChecksFor({ id: repo.id }, pv.treeSha, null, { headSha: pv.headSha });
+  const guardBase = await artifactsMergeSources(ctx).readCommit(pv.mergeBase);
+  if (!guardBase) throw new RefStoreUnavailable(`merge base ${pv.mergeBase} could not be read`);
+  const checks = await gate.requiredChecksFor(
+    { id: repo.id },
+    pv.treeSha,
+    null,
+    { changeId: e.change_set_id, headSha: pv.headSha, guardBaseTree: guardBase.treeHash },
+  );
   deps.observe?.({ type: 'checks', number: e.change_number, treeSha: pv.treeSha, baseSha: pv.targetSha, state: checks.state, leaseHeld: false, phase: 'publish' });
   const checksVerdict = async (policy: BranchPolicy): Promise<PublishResult | null> => {
     const block = branchPolicyBlock(policy, checks);

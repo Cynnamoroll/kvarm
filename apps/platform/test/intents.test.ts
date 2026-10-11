@@ -96,6 +96,23 @@ const setIntent = (repo: string, id: string, body: unknown, token = tok.owner) =
 const forecast = (repo: string, q: string, token: string | undefined = tok.owner) => call('GET', `${R(repo)}/forecast?${q}`, token);
 const overlap = (repo: string, q = 'base=main', token: string | undefined = tok.owner) => call('GET', `${R(repo)}/workspaces/overlap?${q}`, token);
 const abandon = (repo: string, id: string) => call('POST', `${R(repo)}/workspaces/${id}/abandon`, tok.owner);
+const workspaceTokens = new Map<string, string>();
+
+async function workspaceToken(repo: string): Promise<string> {
+  const cached = workspaceTokens.get(repo);
+  if (cached) return cached;
+  const agent = await call('POST', '/api/v1/agents', tok.owner, { name: `push-${repo}` });
+  expect(agent.status).toBe(201);
+  const minted = await call('POST', `/api/v1/agents/${agent.json.agent.id}/tokens`, tok.owner, {
+    repo: `${OWNER}/${repo}`,
+    role: 'write',
+    refs: ['refs/heads/agents/*'],
+  });
+  expect(minted.status).toBe(201);
+  const token = minted.json.token as string;
+  workspaceTokens.set(repo, token);
+  return token;
+}
 
 async function gitPush(repo: string, token: string, cmds: string[]): Promise<string[]> {
   const parts = cmds.map((c, i) => pktLine(i === 0 ? `${c}\0report-status agent=git/2.47\n` : `${c}\n`));
@@ -139,7 +156,7 @@ let clock = Date.now();
 /** Pushes `files` as a commit on top of `from` to the workspace ref and delivers its push event. */
 async function push(repoName: string, repo: FakeRepo, ws: Record<string, any>, from: string, files: Files): Promise<string> {
   const c = await commit(repo, files, [from]);
-  const report = await gitPush(repoName, tok.owner, [`${from} ${c.sha} ${ws.ref}`]);
+  const report = await gitPush(repoName, await workspaceToken(repoName), [`${from} ${c.sha} ${ws.ref}`]);
   expect(report).toEqual(['unpack ok', `ok ${ws.ref}`]);
   await deliver(pushEvent(repoName, ws.ref, from, c.sha, (clock += 1000)));
   return c.sha;
@@ -360,7 +377,7 @@ describe('observed index', () => {
     const ws = (await createWs('ordering', { task: 'o', agent: 'a' })).json;
     const c1 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n' }, [main.sha]);
     const c2 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n', 'two.txt': '2\n' }, [c1.sha]);
-    await gitPush('ordering', tok.owner, [`${main.sha} ${c2.sha} ${ws.ref}`]);
+    await gitPush('ordering', await workspaceToken('ordering'), [`${main.sha} ${c2.sha} ${ws.ref}`]);
     const t1 = (clock += 1000);
     const t2 = (clock += 1000);
     await deliver(pushEvent('ordering', ws.ref, c1.sha, c2.sha, t2));
@@ -375,7 +392,7 @@ describe('observed index', () => {
     const ws = (await createWs('equal-ts', { task: 'eq', agent: 'a' })).json;
     const c1 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n' }, [main.sha]);
     const c2 = await commit(repo, { ...BASE_FILES, 'one.txt': '1\n', 'two.txt': '2\n' }, [c1.sha]);
-    await gitPush('equal-ts', tok.owner, [`${main.sha} ${c2.sha} ${ws.ref}`]);
+    await gitPush('equal-ts', await workspaceToken('equal-ts'), [`${main.sha} ${c2.sha} ${ws.ref}`]);
     // Same event time; the ingest tiebreak (event id) makes the c1→c2 push the current one.
     const at = (clock += 1000);
     const sourceIds = ['eq-x', 'eq-y'];

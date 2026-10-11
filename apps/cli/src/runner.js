@@ -13,11 +13,73 @@ import { checkout } from './checkout.js';
 import { CliError } from './checkout.js';
 
 const OUTPUT_LIMIT = 16 * 1024;
+const SUMMARY_SERVER_LIMIT = 64 * 1024;
+const SUMMARY_SAFETY_MARGIN = 1024;
+const SUMMARY_LIMIT = SUMMARY_SERVER_LIMIT - SUMMARY_SAFETY_MARGIN;
+const TRUNCATED = '\n[output truncated]\n';
 const IDLE_MS = 2_000;
+const utf8 = new TextEncoder();
 
 /** @param {string} text */
 function bounded(text) {
-  return text.length <= OUTPUT_LIMIT ? text : `${text.slice(0, OUTPUT_LIMIT)}\n[output truncated]\n`;
+  const points = [...text];
+  return points.length <= OUTPUT_LIMIT ? text : `${points.slice(0, OUTPUT_LIMIT).join('')}${TRUNCATED}`;
+}
+
+/** @param {unknown} value */
+function jsonBytes(value) {
+  return utf8.encode(JSON.stringify(value)).length;
+}
+
+/**
+ * Trim one output field as far as necessary while retaining a marker.
+ * Measuring the complete serialized summary accounts for JSON escaping too.
+ * @param {Record<string, unknown>} summary
+ * @param {'stdout'|'stderr'} field
+ */
+function trimSummaryField(summary, field) {
+  const original = typeof summary[field] === 'string' ? summary[field] : '';
+  if (!original) return;
+  const points = [...original];
+  summary[field] = TRUNCATED;
+  if (jsonBytes(summary) > SUMMARY_LIMIT) return;
+  let low = 0;
+  let high = points.length;
+  let best = '';
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = `${points.slice(0, middle).join('')}${TRUNCATED}`;
+    summary[field] = candidate;
+    if (jsonBytes(summary) <= SUMMARY_LIMIT) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  summary[field] = best || TRUNCATED;
+}
+
+/** @template {Record<string, unknown>} T @param {T} summary @returns {T} */
+function boundedSummary(summary) {
+  if (jsonBytes(summary) <= SUMMARY_LIMIT) return summary;
+  const result = { ...summary };
+  trimSummaryField(result, 'stdout');
+  if (jsonBytes(result) > SUMMARY_LIMIT) trimSummaryField(result, 'stderr');
+  return /** @type {T} */ (result);
+}
+
+function repositoryEnvironment() {
+  const portable = new Set(['PATH', 'HOME', 'LANG', 'TZ', 'TMPDIR']);
+  const windows = new Set(['SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE']);
+  /** @type {NodeJS.ProcessEnv} */
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    const upper = key.toUpperCase();
+    if (portable.has(upper) || upper.startsWith('LC_') || (process.platform === 'win32' && windows.has(upper))) env[key] = value;
+  }
+  env.GIT_TERMINAL_PROMPT = '0';
+  return env;
 }
 
 /**
@@ -30,11 +92,7 @@ export function executeShell(command, cwd, timeoutSeconds) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const grouped = process.platform !== 'win32';
-    const env = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([key]) => key !== 'FORGE_PAT' && key !== 'FORGE_E2E_TOKEN' && key !== 'GIT_ASKPASS' && key !== 'GIT_TERMINAL_PROMPT' && !key.startsWith('GIT_CONFIG_'),
-      ),
-    );
+    const env = repositoryEnvironment();
     const child = spawn(command, { cwd, shell: true, detached: grouped, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -153,7 +211,7 @@ export async function runRunner(options) {
       if (materialized.sha !== job.sha) throw new Error(`checkout returned ${materialized.sha}, expected ${job.sha}`);
       const result = await execute(job.command, work, job.timeoutSeconds);
       const conclusion = result.code === 0 && !result.timedOut ? 'success' : 'failure';
-      const summary = {
+      const summary = boundedSummary({
         command: job.command,
         exitCode: result.code,
         timedOut: result.timedOut,
@@ -162,10 +220,10 @@ export async function runRunner(options) {
         stderr: result.stderr,
         source: materialized.source,
         sha: materialized.sha,
-      };
+      });
       reportBody = { runnerId, generation: job.generation, conclusion, summary };
     } catch (err) {
-      const summary = {
+      const summary = boundedSummary({
         command: job.command,
         exitCode: null,
         timedOut: false,
@@ -173,7 +231,7 @@ export async function runRunner(options) {
         stdout: '',
         stderr: bounded(err instanceof Error ? err.message : String(err)),
         sha: job.sha,
-      };
+      });
       reportBody = { runnerId, generation: job.generation, conclusion: 'failure', summary };
     }
     try {

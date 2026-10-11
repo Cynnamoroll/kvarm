@@ -362,10 +362,10 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
         });
       }
       if (result.treeHash === baseCommit.tree) return fail(422, `the selection changes nothing on ${p.base}`, 'EMPTY_COMPOSITION');
-      return { ok: true as const, value: { baseSha, treeSha: result.treeHash, objects: result.objects, recorded } };
+      return { ok: true as const, value: { baseSha, baseTree: baseCommit.tree, treeSha: result.treeHash, objects: result.objects, recorded } };
     });
     if (!composed.ok) return composed;
-    const { baseSha, treeSha, objects, recorded } = composed.value;
+    const { baseSha, baseTree, treeSha, objects, recorded } = composed.value;
 
     const time = Math.floor(Date.now() / 1000);
     const committer: GitIdent = { ...FORGE_COMMITTER, time };
@@ -375,7 +375,10 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     const commit = await buildCommit({ tree: treeSha, parents: [baseSha], author, committer, message: `${task}\n\n${lines.join('\n')}\n` });
 
     const gate = cx.gate ?? deps.gate(cx.env);
-    const checks = await gate.requiredChecksFor({ id: cx.repo.id }, treeSha, null, { headSha: commit.hash });
+    // Before the composed change exists there is deliberately no guard subject:
+    // the provisional answer remains pending rather than borrowing another
+    // change's verdict for the same commit.
+    const checks = await gate.requiredChecksFor({ id: cx.repo.id }, treeSha, null);
     const conflict = semanticConflict(checks);
 
     const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref, oldOid: ZERO_SHA, newOid: commit.hash }, [commit, ...objects]);
@@ -443,7 +446,15 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     // Opening the composed change may register CI jobs for this exact tree.
     // Persist the post-registration gate answer, rather than the provisional
     // answer taken before the immutable composed ref existed.
-    const currentChecks = await gate.requiredChecksFor({ id: cx.repo.id }, treeSha, null, { headSha: commit.hash });
+    const changeId = change.ok
+      ? await db.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2').bind(cx.repo.id, change.value.number).first<string>('id')
+      : null;
+    const currentChecks = await gate.requiredChecksFor(
+      { id: cx.repo.id },
+      treeSha,
+      null,
+      changeId ? { changeId, headSha: commit.hash, guardBaseTree: baseTree } : undefined,
+    );
     await db
       .prepare(`UPDATE compositions SET checks = ?3, conflict_kind = ?4 WHERE repo_id = ?1 AND id = ?2`)
       .bind(cx.repo.id, compositionId, JSON.stringify(currentChecks), semanticConflict(currentChecks) ? 'semantic' : null)

@@ -108,6 +108,21 @@ describe('artifactsPusher', () => {
     expect(await refGeneration(repo.id)).not.toBe(genBefore);
   });
 
+  it('allows the platform direct writer to stage a reserved CI ref', async () => {
+    const repo = await seedRepo('gw-ci-stage');
+    const { commit, objects } = await sampleCommit();
+    const ref = 'refs/heads/forge-ci/run-1';
+    const remote = fakeRemote(() => new Response(buildReportStatus([{ ref, ok: true }], 'none')));
+
+    const result = await artifactsPusher(baseEnv, repo, { fetch: remote.fetch }).updateRef(
+      { ref, oldOid: ZERO_OID, newOid: commit.hash },
+      objects,
+    );
+
+    expect(result).toEqual({ status: 'ok', httpStatus: 200 });
+    expect(dec.decode(remote.seen[0]!.body)).toContain(`${ZERO_OID} ${commit.hash} ${ref}\0`);
+  });
+
   it('one-ref CAS: ng stale ref on HTTP 200 is a stale outcome and records nothing', async () => {
     const repo = await seedRepo('gw-stale');
     const body = concat(pktLine('unpack ok\n'), pktLine('ng refs/heads/main stale ref\n'), encode('0000'));

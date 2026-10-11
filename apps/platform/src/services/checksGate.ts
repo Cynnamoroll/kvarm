@@ -39,7 +39,11 @@ export interface ChecksRepo {
  * tree (the guard) answer for it; tree-exact producers ignore it.
  */
 export interface ChecksSubject {
+  /** The change whose edits are being published. */
+  changeId: string;
   headSha: string;
+  /** The tree the change's guard compared its head against. */
+  guardBaseTree: string;
 }
 
 export interface ChecksProducer {

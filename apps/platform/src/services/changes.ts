@@ -25,7 +25,7 @@ import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type A
 import { credentialMayUpdateRef, type Actor } from './authz';
 import { effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import { CHECK_RUN_COLUMNS, checkRunView, evaluateGuard, guardRunExists, guardRunInsert, type CheckRunRow, type CheckRunView, type GuardSummary } from './checks';
-import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
+import { defaultChecksGate, type ChecksGate, type ChecksSubject, type RequiredChecks } from './checksGate';
 import { treePairBody, treePairRating, type CompareBody } from './compare';
 import {
   blockFromRows,
@@ -429,9 +429,15 @@ function cacheablePlan(m: CachedPlan): boolean {
  * immutable, so it is cached per repo and pair; required checks always come
  * fresh from the checks-gate.
  */
-export async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, targetSha: string, headSha: string): Promise<Mergeability> {
+export async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, targetSha: string, headSha: string, changeId: string): Promise<Mergeability> {
   const plan = await mergePlanFor(ctx, targetSha, headSha);
-  const checks = plan.treeSha ? await gate.requiredChecksFor({ id: ctx.repo.id }, plan.treeSha, null, { headSha }) : null;
+  let subject: ChecksSubject | undefined;
+  if (plan.treeSha && plan.mergeBase) {
+    const base = (await resolveCommitish(ctx, [plan.mergeBase])).get(plan.mergeBase);
+    if (!base) throw new RefStoreUnavailable(`merge base ${plan.mergeBase} could not be read`);
+    subject = { changeId, headSha, guardBaseTree: base.tree };
+  }
+  const checks = plan.treeSha ? await gate.requiredChecksFor({ id: ctx.repo.id }, plan.treeSha, null, subject) : null;
   const mergeable = (plan.status === 'fast-forward' || plan.status === 'clean') && checks?.state === 'success';
   return { ...plan, checks, mergeable };
 }
@@ -534,7 +540,7 @@ async function liveState(
   const base = resolved.get(baseName) ?? null;
   const head = resolved.get(row.head_sha) ?? null;
   if (!base || !head) return { rating: null, mergeability: null, baseSha: base?.sha ?? null };
-  const [rating, m] = await Promise.all([treePairRating(ctx, base.tree, head.tree), mergeabilityFor(ctx, gate, base.sha, head.sha)]);
+  const [rating, m] = await Promise.all([treePairRating(ctx, base.tree, head.tree), mergeabilityFor(ctx, gate, base.sha, head.sha, row.id)]);
   return { rating, mergeability: m, baseSha: base.sha };
 }
 
@@ -597,7 +603,7 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
       const resolved = await resolveCommitish(ctx, [baseName]);
       const base = resolved.get(baseName);
       if (!base) return fail(409, `base branch ${row.base_ref} no longer exists`, 'BASE_NOT_FOUND');
-      const m = await mergeabilityFor(ctx, defaultChecksGate(cx.env), base.sha, row.head_sha!);
+      const m = await mergeabilityFor(ctx, defaultChecksGate(cx.env), base.sha, row.head_sha!, row.id);
       const current = await reconciled(cx, row, m);
       return { ok: true, value: { number: row.number, state: current.state, mergeability: mergeabilityView(m) } };
     });
@@ -871,7 +877,7 @@ export function memoGate(inner: ChecksGate): ChecksGate {
   const seen = new Map<string, Promise<RequiredChecks>>();
   return {
     requiredChecksFor(repo, treeSha, configId, subject) {
-      const k = `${repo.id}:${treeSha}:${configId ?? ''}:${subject?.headSha ?? ''}`;
+      const k = `${repo.id}:${treeSha}:${configId ?? ''}:${subject?.changeId ?? ''}:${subject?.headSha ?? ''}:${subject?.guardBaseTree ?? ''}`;
       let p = seen.get(k);
       if (!p) {
         p = inner.requiredChecksFor(repo, treeSha, configId, subject);
@@ -1144,7 +1150,10 @@ async function performMerge(
           if (!queued.ok) return queued;
         }
       }
-      const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null, { headSha: prepared.value.headSha });
+      const guardBase = await sources.readCommit(prepared.value.mergeBase);
+      if (!guardBase) return fail(503, 'the merge base could not be read', 'MERGE_READ_FAILED');
+      const subject: ChecksSubject = { changeId: row.id, headSha: prepared.value.headSha, guardBaseTree: guardBase.treeHash };
+      const checks = await gate.requiredChecksFor({ id: cx.repo.id }, prepared.value.treeSha, null, subject);
       const blocked = branchPolicyBlock(policy, checks);
       if (blocked) return blocked;
       // The last change read runs after every asynchronous preparation step (checks, write token, pack).
@@ -1178,7 +1187,7 @@ async function performMerge(
         }
         return verdict.refusal === null;
       };
-      const published = await publishMerge({ pusher, gate, beforeSend }, { repo: { id: cx.repo.id }, ref: targetRef }, prepared.value);
+      const published = await publishMerge({ pusher, gate, beforeSend }, { repo: { id: cx.repo.id }, ref: targetRef, subject }, prepared.value);
       if (verdict.refusal) {
         // A review refusal records the escalations it found missing.
         if (verdict.refusal.review && verdict.facts) return (await reviewRefusal(cx.env, row.id, verdict.facts, verdict.policy)) ?? verdict.refusal;

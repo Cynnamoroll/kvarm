@@ -93,6 +93,23 @@ const R = (repo: string) => `/api/v1/repos/${OWNER}/${repo}`;
 const createWs = (repo: string, task: string) => call('POST', `${R(repo)}/workspaces`, tok.owner, { task, agent: 'agent' });
 const cands = (repo: string, ids: string[], token: string | undefined = tok.owner, base = 'main') =>
   call('GET', `${R(repo)}/candidates?base=${base}&workspaces=${ids.join(',')}`, token);
+const workspaceTokens = new Map<string, string>();
+
+async function workspaceToken(repo: string): Promise<string> {
+  const cached = workspaceTokens.get(repo);
+  if (cached) return cached;
+  const agent = await call('POST', '/api/v1/agents', tok.owner, { name: `push-${repo}` });
+  expect(agent.status).toBe(201);
+  const minted = await call('POST', `/api/v1/agents/${agent.json.agent.id}/tokens`, tok.owner, {
+    repo: `${OWNER}/${repo}`,
+    role: 'write',
+    refs: ['refs/heads/agents/*'],
+  });
+  expect(minted.status).toBe(201);
+  const token = minted.json.token as string;
+  workspaceTokens.set(repo, token);
+  return token;
+}
 
 async function gitPush(repo: string, token: string, cmds: string[]): Promise<string[]> {
   const parts = cmds.map((c, i) => pktLine(i === 0 ? `${c}\0report-status agent=git/2.47\n` : `${c}\n`));
@@ -133,7 +150,7 @@ async function deliver(repoName: string, ref: string, before: string, after: str
 /** Pushes `files` as a commit on `from` to the workspace ref and reconciles its observed paths. */
 async function push(repoName: string, repo: FakeRepo, ws: Record<string, any>, from: string, files: Files): Promise<string> {
   const c = await commit(repo, files, [from]);
-  expect(await gitPush(repoName, tok.owner, [`${from} ${c.sha} ${ws.ref}`])).toEqual(['unpack ok', `ok ${ws.ref}`]);
+  expect(await gitPush(repoName, await workspaceToken(repoName), [`${from} ${c.sha} ${ws.ref}`])).toEqual(['unpack ok', `ok ${ws.ref}`]);
   await deliver(repoName, ws.ref, from, c.sha);
   return c.sha;
 }
@@ -267,6 +284,32 @@ describe('candidates', () => {
     expect(bHead).toBeTruthy();
     expect(r.value.ranking.map((e) => e.workspace)).toEqual([a.id, b.id]);
     expect(r.value.ranking[1]!.factors).toMatchObject({ checks: 'failure', failingChecks: ['test'] });
+  });
+
+  it('ranks same-head changes by their own guards instead of another change guard', async () => {
+    const repo = await seedRepo('ck-same-head');
+    const main = await based(repo);
+    const shared = await commit(repo, { ...BASE, 'secret.txt': `token=${'forge_pat_' + 'a'.repeat(64)}\n` }, [main.sha]);
+    repo.refs.set('refs/heads/clean-base', shared.sha);
+    const a = (await createWs('ck-same-head', 'a')).json;
+    const b = (await call('POST', `${R('ck-same-head')}/workspaces`, tok.owner, { task: 'b', agent: 'agent', base: 'clean-base' })).json;
+    repo.refs.set(a.ref, shared.sha);
+    await deliver('ck-same-head', a.ref, main.sha, shared.sha);
+    for (const ws of [a, b]) {
+      const opened = await call('POST', `${R('ck-same-head')}/workspaces/${ws.id}/change-set`, tok.owner, {
+        title: ws.task,
+        mergePolicy: 'review',
+        ...(ws.id === b.id ? { base: 'clean-base' } : {}),
+      });
+      expect(opened.status).toBe(201);
+    }
+    const result = await cands('ck-same-head', [a.id, b.id]);
+    expect(result.status).toBe(200);
+    expect(result.json.candidates.map((c: any) => [c.workspace, c.checks.state])).toEqual([
+      [a.id, 'failure'],
+      [b.id, 'success'],
+    ]);
+    expect(result.json.ranking.map((c: any) => c.workspace)).toEqual([b.id, a.id]);
   });
 
   it('bounds the request: caps, malformed and unknown ids, inactive workspaces excluded, concealment', async () => {
