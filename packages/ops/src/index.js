@@ -640,7 +640,7 @@ export const OPERATIONS = Object.freeze([
     name: 'resolve_escalation',
     command: ['review', 'resolve'],
     family: 'reviews',
-    description: 'Close an open escalation as a human (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human resolves every open escalation too.',
+    description: 'Close an open escalation as a human (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.',
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve',
     params: [

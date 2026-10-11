@@ -15,6 +15,20 @@ A git platform for the agentic era, built on [Cloudflare Artifacts](https://deve
 - [ ] M6 agent layer + parity finish
 - [ ] M7 hardening + submission package
 
+## Demo
+
+One command drives four scripted agent principals (two authors, two reviewers) and one human through MCP against a deployed worker, on a fresh private repository. No hosted model is called.
+
+```sh
+set -a; . apps/platform/.dev.vars.validation; set +a   # FORGE_BASE_URL, FORGE_PAT
+node scripts/demo-harness.mjs              # the seven agent-coordination steps
+node scripts/demo-harness.mjs --container  # plus the Container CI runner (cold vs snapshot-warm)
+```
+
+The seven steps: workspaces and declared intents, the overlap forecast, pushes and change sets, agent reviews with one escalation answered by the human, a composed outcome published through the merge queue, a textual conflict dispatched as a task and resolved by an agent, and a decision record read back with `get_context`. Each step prints its tool calls with timings. The script exits non-zero when any step fails and deletes its repository, agents and tokens at exit (`--keep` keeps the repository).
+
+`--container` adds the Container CI runner showcase (Cloudflare Containers, public beta): an instance-admin route runs one `forge runner --once` job inside a `cloudflare/debian-trixie` container through the native `ctx.container` API. Run 1 prepares the container and saves it with `snapshotContainer`; run 2 starts from that snapshot and skips setup. Both check runs record through the standard CI endpoints. The user-owned `forge runner` CLI remains the primary runner.
+
 ## License
 
 MIT

@@ -58,13 +58,27 @@
       { "name": "TOKENS", "class_name": "TokenCache" },
       { "name": "RATE_LIMIT", "class_name": "RateLimiter" },
       { "name": "REALTIME", "class_name": "RealtimeHub" },
-      { "name": "MERGE_LOCK", "class_name": "MergeLock" }
+      { "name": "MERGE_LOCK", "class_name": "MergeLock" },
+      { "name": "CI_SANDBOX", "class_name": "CiRunnerSandbox" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["TokenCache", "RateLimiter", "RealtimeHub", "MergeLock"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["CiRunnerSandbox"]
+    }
+  ],
+  // Container CI runner showcase (public beta). No image or dockerfile key:
+  // the Cloudflare-managed cloudflare/debian-trixie image is chosen at
+  // ctx.container.start(), which only the durable_object policy allows.
+  "containers": [
+    {
+      "class_name": "CiRunnerSandbox",
+      "scheduling_policy": "durable_object"
     }
   ],
   "workflows": [
