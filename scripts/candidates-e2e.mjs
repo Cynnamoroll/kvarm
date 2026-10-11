@@ -19,7 +19,8 @@
  *            (VAL-WORKFLOW-004, VAL-COST-025)
  *   arena    create 3 (and 2, 8; 1 and 9 rejected), ranked candidates with a
  *            separate duplication report, 120 s stasis, recorded selection,
- *            winner merged through its change set, loser abandoned
+ *            a human resolves the final-selection escalation, winner merged
+ *            through its change set, loser abandoned
  *            (VAL-ARENA-001..004)
  *   compose  disjoint composition equal to `git merge-tree --write-tree`,
  *            path selection from conflicting attempts, incompatible and
@@ -29,6 +30,10 @@
  *            checks-gate producer) judges both heads; a required `test` run
  *            reported failing on B and passing on A (POST check-runs, ci
  *            scope) ranks A above B with B's failing check shown (VAL-CAND-005)
+ *
+ * refs/heads/agents/** is reserved against human pushes, so each section
+ * mints a short-lived write agent token (refs/heads/agents/*) for workspace
+ * creation and pushes, and revokes it and its scratch agent at section end.
  *
  * Tokens come from env by NAME and are never printed:
  *   set -a; . apps/platform/.dev.vars.validation; set +a
@@ -57,6 +62,7 @@ const only = opts.only ? new Set(opts.only.split(',')) : null;
 const results = [];
 const costs = {};
 const scratchAgents = new Set();
+const scratchTokens = new Map();
 
 function die(msg) {
   console.error(`candidates-e2e: ${msg}`);
@@ -157,6 +163,8 @@ async function scenario(purpose, body) {
       } catch (err) {
         check(purpose, `section ${purpose} ran to completion`, false, String(err?.stack ?? err).slice(0, 400));
       } finally {
+        for (const [tokenId, agentId] of scratchTokens) await http(`/api/v1/agents/${agentId}/tokens/${tokenId}`, { method: 'DELETE' });
+        scratchTokens.clear();
         for (const agentId of scratchAgents) await http(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
         scratchAgents.clear();
       }
@@ -214,6 +222,24 @@ function pushTo(dir, url, sha, ref, token = PAT) {
   return { ...r, ok: r.code === 0 && Boolean(okLine) && !okLine.startsWith('!'), line: okLine ?? '' };
 }
 
+/**
+ * Mints a short-lived write agent token for refs/heads/agents/* on `repo`:
+ * that namespace is reserved against human pushes, so workspace pushes need an
+ * agent principal. The agent and token are revoked when the scenario ends.
+ */
+async function agentToken(repo, purpose) {
+  const agent = await http('/api/v1/agents', { method: 'POST', json: { name: `${PREFIX}-${purpose}-${TS}`, description: `candidates ${purpose} e2e` } });
+  if (agent.status !== 201) throw new Error(`create ${purpose} agent -> ${agent.status} ${agent.text}`);
+  scratchAgents.add(agent.json.agent.id);
+  const minted = await http(`/api/v1/agents/${agent.json.agent.id}/tokens`, {
+    method: 'POST',
+    json: { repo: `${OWNER}/${repo}`, role: 'write', refs: ['refs/heads/agents/*'], expiresIn: 900 },
+  });
+  if (minted.status !== 201) throw new Error(`mint ${purpose} agent token -> ${minted.status} ${minted.json?.code ?? ''}`);
+  scratchTokens.set(minted.json.id, agent.json.agent.id);
+  return minted.json.token;
+}
+
 async function createWs(api, body, token = PAT) {
   const r = await http(`${api}/workspaces`, { method: 'POST', json: body, token });
   if (r.status !== 201) throw new Error(`create workspace -> ${r.status} ${r.text}`);
@@ -265,12 +291,13 @@ function totalOrder(ranking, ids) {
 await scenario('cand', async (repo) => {
   const env = await seeded(repo);
   const { api, url, dir } = env;
-  const A = await createWs(api, { task: 'approach A', agent: 'cand-a', intent: { paths: ['src/'] } });
-  const B = await createWs(api, { task: 'approach B', agent: 'cand-b' });
-  const C = await createWs(api, { task: 'approach C', agent: 'cand-c', intent: { paths: ['src/app.ts'] } });
-  const shaA = await pushWork(env, A, { 'src/app.ts': 'export const app = "A";\n', 'src/a.ts': 'export const a = 1;\n' }, 'A');
-  const shaB = await pushWork(env, B, { 'docs/b.md': '# b\n', 'lib/b.ts': 'export const b = 2;\n' }, 'B');
-  const shaC = await pushWork(env, C, { 'src/app.ts': 'export const app = "C";\nexport const c = 3;\n', 'src/c.ts': 'export const c = 3;\n' }, 'C');
+  const tok = await agentToken(repo, 'cand');
+  const A = await createWs(api, { task: 'approach A', agent: 'cand-a', intent: { paths: ['src/'] } }, tok);
+  const B = await createWs(api, { task: 'approach B', agent: 'cand-b' }, tok);
+  const C = await createWs(api, { task: 'approach C', agent: 'cand-c', intent: { paths: ['src/app.ts'] } }, tok);
+  const shaA = await pushWork(env, A, { 'src/app.ts': 'export const app = "A";\n', 'src/a.ts': 'export const a = 1;\n' }, 'A', tok);
+  const shaB = await pushWork(env, B, { 'docs/b.md': '# b\n', 'lib/b.ts': 'export const b = 2;\n' }, 'B', tok);
+  const shaC = await pushWork(env, C, { 'src/app.ts': 'export const app = "C";\nexport const c = 3;\n', 'src/c.ts': 'export const c = 3;\n' }, 'C', tok);
 
   // VAL-CROSS-010: the forecast for the shared path shows the overlapping workspaces with a confidence class.
   const f0 = await http(`${api}/forecast?paths=src/app.ts&base=main`, { label: 'GET forecast' });
@@ -377,13 +404,14 @@ await scenario('bounds', async (repo) => {
   const env = await seeded(repo);
   const { api, dir, url, main } = env;
   await pushRetry(dir, url, [`${main}:refs/heads/dev`]);
+  const tok = await agentToken(repo, 'bounds');
   const ws = [];
   const addWorkspaces = async (from, to) => {
     for (let i = from; i < to; i++) {
-      const w = await createWs(api, { task: `tiny ${i}`, agent: `bound-${i}` });
+      const w = await createWs(api, { task: `tiny ${i}`, agent: `bound-${i}` }, tok);
       const files = { [`own/f${i}.ts`]: `export const f = ${i};\n` };
       if (i < 9) files['shared/common.ts'] = `export const by = ${i};\n`;
-      await pushWork(env, w, files, `tiny ${i}`);
+      await pushWork(env, w, files, `tiny ${i}`, tok);
       ws.push(w);
     }
   };
@@ -454,8 +482,12 @@ await scenario('bounds', async (repo) => {
   );
 });
 
+// W1 and W2 edit distant lines of this file: they still share src/auth.ts in the
+// duplication report, but W2 merges cleanly after W1, so the loser stays open.
+const AUTH_TS = ['export const auth = "v0";', ...Array.from({ length: 8 }, (_, i) => `// note ${i + 1}`), 'export const mode = "base";'].join('\n') + '\n';
+
 await scenario('arena', async (repo) => {
-  const env = await seeded(repo);
+  const env = await seeded(repo, { ...BASE_FILES, 'src/auth.ts': AUTH_TS });
   const { api, url, main, dir } = env;
   const arenasCount = async () => (await http(`${api}/arenas?limit=100`)).json?.arenas?.length;
   const wsCount = async () => (await http(`${api}/workspaces?limit=100`)).json?.workspaces?.length;
@@ -493,9 +525,10 @@ await scenario('arena', async (repo) => {
 
   // VAL-ARENA-002
   const [W1, W2, W3] = arena.workspaces;
-  await pushWork(env, W1, { 'src/auth.ts': 'export const auth = "v1";\n', 'src/w1.ts': 'export const w1 = 1;\n' }, 'W1 refactor');
-  await pushWork(env, W2, { 'src/auth.ts': 'export const auth = "v2";\nexport const extra = 2;\n' }, 'W2 refactor');
-  await pushWork(env, W3, { 'lib/auth/index.ts': 'export const auth = "v3";\n' }, 'W3 refactor');
+  const tok = await agentToken(repo, 'arena');
+  await pushWork(env, W1, { 'src/auth.ts': AUTH_TS.replace('"v0"', '"v1"'), 'src/w1.ts': 'export const w1 = 1;\n' }, 'W1 refactor', tok);
+  await pushWork(env, W2, { 'src/auth.ts': AUTH_TS.replace('"base";\n', '"v2";\nexport const extra = 2;\n') }, 'W2 refactor', tok);
+  await pushWork(env, W3, { 'lib/auth/index.ts': 'export const auth = "v3";\n' }, 'W3 refactor', tok);
   const q = `${api}/arenas/${arena.id}/candidates`;
   const c1 = await http(q, { label: 'GET arenas/:id/candidates' });
   const c2 = await http(q, { label: 'GET arenas/:id/candidates' });
@@ -564,10 +597,14 @@ await scenario('arena', async (repo) => {
     if (!eq(s.changes, ['open', 'open', 'open']) || s.main !== main) quiet = false;
   }
   check('VAL-ARENA-003', '60 s after selection: all change sets still open and base unmoved (selection is not an action)', quiet);
+  // The selection opens a final-selection escalation on the winner's change set; the normal review path has a human confirm it.
+  const esc = ((await http(`${api}/changes/${cs[W1.id]}/reviews`)).json?.escalations ?? []).find((e) => e.reason === 'final-selection' && e.state === 'open');
+  const confirm = await http(`${api}/changes/${cs[W1.id]}/escalations/${esc?.id}/resolve`, { method: 'POST', json: { resolution: 'resolve', note: 'selection confirmed' } });
+  console.log(`final-selection escalation ${esc?.id} (opened by ${esc?.openedBy}) -> human resolve ${confirm.status} state=${confirm.json?.escalation?.state}`);
   const mg = await http(`${api}/changes/${cs[W1.id]}/merge`, { method: 'POST' });
   mustGit(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main'], dir);
   const head = mustGit(['log', 'origin/main', '-1', '--format=%H %P'], dir);
-  console.log(`POST changes/${cs[W1.id]}/merge -> ${mg.status} state=${mg.json?.state}; origin/main: ${head}`);
+  console.log(`POST changes/${cs[W1.id]}/merge -> ${mg.status} state=${mg.json?.state}${mg.status === 200 ? '' : ` ${mg.text.slice(0, 300)}`}; origin/main: ${head}`);
   check('VAL-ARENA-003', 'winner merged through its change set; merge commit on main', mg.status === 200 && mg.json?.state === 'merged' && head.startsWith(mg.json?.mergeCommit ?? '-') && head.includes(main));
   const losers = await Promise.all(
     [W2, W3].map(async (w) => ({ change: (await http(`${api}/changes/${cs[w.id]}`)).json?.state, status: (await http(`${api}/workspaces/${w.id}`)).json?.status })),
@@ -587,10 +624,11 @@ await scenario('arena', async (repo) => {
 await scenario('compose', async (repo) => {
   const env = await seeded(repo);
   const { api, url, main, dir } = env;
-  const A = await createWs(api, { task: 'compose A', agent: 'comp-a' });
-  const B = await createWs(api, { task: 'compose B', agent: 'comp-b' });
-  const shaA = await pushWork(env, A, { 'src/a.ts': 'export const a = "A";\n' }, 'A edits src/a.ts');
-  const shaB = await pushWork(env, B, { 'docs/b.md': '# B\n' }, 'B edits docs/b.md');
+  const tok = await agentToken(repo, 'compose');
+  const A = await createWs(api, { task: 'compose A', agent: 'comp-a' }, tok);
+  const B = await createWs(api, { task: 'compose B', agent: 'comp-b' }, tok);
+  const shaA = await pushWork(env, A, { 'src/a.ts': 'export const a = "A";\n' }, 'A edits src/a.ts', tok);
+  const shaB = await pushWork(env, B, { 'docs/b.md': '# B\n' }, 'B edits docs/b.md', tok);
 
   // VAL-COMPOSE-001
   const mk = await http(`${api}/candidates/compose`, { method: 'POST', json: { base: 'main', workspaces: [A.id, B.id] }, label: 'POST candidates/compose' });
@@ -629,10 +667,10 @@ await scenario('compose', async (repo) => {
   );
 
   // Compatible pieces chosen by path from attempts that conflict as a whole.
-  const C = await createWs(api, { task: 'compose C', agent: 'comp-c' });
-  const D = await createWs(api, { task: 'compose D', agent: 'comp-d' });
-  await pushWork(env, C, { 'src/app.ts': 'export const app = "C";\n', 'docs/c.md': '# C\n' }, 'C');
-  await pushWork(env, D, { 'src/app.ts': 'export const app = "D";\n', 'lib/d.ts': 'export const d = 4;\n' }, 'D');
+  const C = await createWs(api, { task: 'compose C', agent: 'comp-c' }, tok);
+  const D = await createWs(api, { task: 'compose D', agent: 'comp-d' }, tok);
+  await pushWork(env, C, { 'src/app.ts': 'export const app = "C";\n', 'docs/c.md': '# C\n' }, 'C', tok);
+  await pushWork(env, D, { 'src/app.ts': 'export const app = "D";\n', 'lib/d.ts': 'export const d = 4;\n' }, 'D', tok);
   const pick = await http(`${api}/candidates/compose`, {
     method: 'POST',
     json: { base: 'main', workspaces: [{ workspace: C.id, paths: ['src/app.ts'] }, { workspace: D.id, paths: ['lib/'] }] },
@@ -649,10 +687,10 @@ await scenario('compose', async (repo) => {
   );
 
   // VAL-COMPOSE-002
-  const E = await createWs(api, { task: 'compose E', agent: 'comp-e' });
-  const F = await createWs(api, { task: 'compose F', agent: 'comp-f' });
-  await pushWork(env, E, { 'shared.txt': SHARED_TXT.replace('line 2\n', 'line 2 by E\n'), 'src/app.ts': 'export const app = "E";\n' }, 'E');
-  await pushWork(env, F, { 'shared.txt': SHARED_TXT.replace('line 11\n', 'line 11 by F\n'), 'src/app.ts': 'export const app = "F";\n' }, 'F');
+  const E = await createWs(api, { task: 'compose E', agent: 'comp-e' }, tok);
+  const F = await createWs(api, { task: 'compose F', agent: 'comp-f' }, tok);
+  await pushWork(env, E, { 'shared.txt': SHARED_TXT.replace('line 2\n', 'line 2 by E\n'), 'src/app.ts': 'export const app = "E";\n' }, 'E', tok);
+  await pushWork(env, F, { 'shared.txt': SHARED_TXT.replace('line 11\n', 'line 11 by F\n'), 'src/app.ts': 'export const app = "F";\n' }, 'F', tok);
   const before = { list: (await http(`${api}/compositions?limit=100`)).json?.compositions?.length, refs: lsRemoteAll(url) };
   const bad = await http(`${api}/candidates/compose`, { method: 'POST', json: { base: 'main', workspaces: [C.id, D.id] }, label: 'POST candidates/compose (conflict)' });
   console.log(`compose C+D (same line of src/app.ts) -> ${bad.status} ${bad.text} (x-forge-cost ${bad.cost})`);
