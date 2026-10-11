@@ -339,14 +339,18 @@ export interface HeadWorkspacePinRow {
  * preserve). A workspace is only ever linked to a change opened from its
  * own ref, so when admission holds these are the pins of the change's
  * workspace.
+ *
+ * `idx_ws_repo_ref` is a partial unique index, so SQLite does not treat the
+ * ref probe as a one-row lookup and would step onto the next index entry
+ * (one more row read) to end the range; the inner `LIMIT 1` stops at the
+ * one workspace a ref can name.
  */
 export function headWorkspacePinsStatement(db: D1Database, repoId: string, headRef: string): D1PreparedStatement {
   return db
     .prepare(
       `SELECT w.status AS ws_status, w.change_set_id AS ws_change_set_id, d.id, d.revision, d.satisfied_commit
-         FROM workspaces w
+         FROM (SELECT id, repo_id, status, change_set_id FROM workspaces WHERE repo_id = ?1 AND ref = ?2 LIMIT 1) w
          LEFT JOIN workspace_dependencies d INDEXED BY idx_dep_edge ON d.repo_id = w.repo_id AND d.workspace_id = w.id
-        WHERE w.repo_id = ?1 AND w.ref = ?2
         LIMIT ${DEPENDENCY_LIMITS.readMax}`,
     )
     .bind(repoId, headRef);

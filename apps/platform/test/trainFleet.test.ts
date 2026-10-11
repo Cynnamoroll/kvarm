@@ -15,6 +15,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { CostMeter, runWithMeter, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
+import { headWorkspacePins, headWorkspacePinsStatement, type HeadWorkspacePinRow } from '../src/services/dependencyGate';
 import { TRAIN_LIMITS, backoffSeconds, defaultTrainDeps, runTrain, type TrainDeps, type TrainEvent } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -337,10 +338,74 @@ describe('workspace-backed publication window', () => {
     expect(published).toEqual([a.change, b.change, c.change]);
     expect(repo.refs.get(MAIN)).toBe((await entries(name)).get(c.change)!.merge_commit);
     const cost = JSON.parse((await entries(name)).get(c.change)!.cost!) as CostCounters;
-    // rr is reported, not asserted: two pin edges read 12-13 rows depending on index range terminators, at or one
-    // row over the publication row's rr <= 12, which is not raised here.
-    expect({ ...cost, rr: 0 }).toSatisfy((x: CostCounters) => within(x));
-    expect(cost.rr).toBeGreaterThan(0);
     console.log(JSON.stringify({ twoPinPublication: cost }));
+    expect(within(cost), JSON.stringify(cost)).toBe(true);
+  });
+
+  /**
+   * The publication window's head workspace read, against a fixture where
+   * both index ranges it probes are followed by another entry (a later ref
+   * in the same repo, a later dependent's edge), as in a busy live database.
+   */
+  it('the head workspace and its pins are read once each, whatever entry follows the ref in its index', async () => {
+    const db = env.DB;
+    const repoId = crypto.randomUUID();
+    await db
+      .prepare(`INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at) VALUES (?, ?, ?, ?, 'x', 'public', 'main', 0)`)
+      .bind(repoId, OWNER, `pin-read-${repoId}`, `pin-read-${repoId}`)
+      .run();
+    const ws = (n: string) => `${repoId}-${n}`;
+    const changeC = crypto.randomUUID();
+    await db
+      .prepare(`INSERT INTO change_sets (id, repo_id, number, title, base_ref, head_ref, created_at) VALUES (?, ?, 1, 'c', 'main', 'agents/c', 0)`)
+      .bind(changeC, repoId)
+      .run();
+    for (const n of ['a', 'b', 'c', 'd', 'zz'])
+      await db
+        .prepare(`INSERT INTO workspaces (id, repo_id, artifacts_name, status, change_set_id, created_at, ref) VALUES (?, ?, 'x', ?, ?, 0, ?)`)
+        .bind(ws(n), repoId, n === 'a' ? 'merged' : 'active', n === 'c' ? changeC : null, `refs/heads/agents/${n}`)
+        .run();
+    const edge = (id: string, dependent: string, source: string, revision: string, satisfied: string | null) =>
+      db
+        .prepare(`INSERT INTO workspace_dependencies (repo_id, id, workspace_id, on_workspace, revision, created_at, updated_at, satisfied_commit) VALUES (?, ?, ?, ?, ?, 0, 0, ?)`)
+        .bind(repoId, id, ws(dependent), ws(source), revision, satisfied);
+    await db.batch([
+      edge('e-ba', 'b', 'a', 'rev-a', 'landed-a'),
+      edge('e-ca', 'c', 'a', 'rev-a', 'landed-a'),
+      edge('e-cb', 'c', 'b', 'rev-b', null),
+      edge('e-zzc', 'zz', 'c', 'rev-c', null),
+    ]);
+    const read = async (ref: string) => {
+      const res = await headWorkspacePinsStatement(db, repoId, ref).all<HeadWorkspacePinRow>();
+      const out = headWorkspacePins(res.results);
+      return { rowsRead: res.meta.rows_read, workspace: out.workspace, pins: [...out.pins].sort((x, y) => x.id.localeCompare(y.id)) };
+    };
+
+    const two = await read('refs/heads/agents/c');
+    expect(two.workspace).toEqual({ status: 'active', change_set_id: changeC });
+    expect(two.pins).toEqual([
+      { id: 'e-ca', revision: 'rev-a', satisfied_commit: 'landed-a' },
+      { id: 'e-cb', revision: 'rev-b', satisfied_commit: null },
+    ]);
+    // The workspace once, each pin once, and the one entry that ends the pin range.
+    expect(two.rowsRead).toBe(1 + 2 + 1);
+
+    const one = await read('refs/heads/agents/b');
+    expect(one.workspace).toEqual({ status: 'active', change_set_id: null });
+    expect(one.pins).toEqual([{ id: 'e-ba', revision: 'rev-a', satisfied_commit: 'landed-a' }]);
+    expect(one.rowsRead).toBe(1 + 1 + 1);
+
+    const none = await read('refs/heads/agents/d');
+    expect(none.workspace).toEqual({ status: 'active', change_set_id: null });
+    expect(none.pins).toEqual([]);
+    expect(none.rowsRead).toBe(1);
+
+    const merged = await read('refs/heads/agents/a');
+    expect(merged.workspace).toEqual({ status: 'merged', change_set_id: null });
+    expect(merged.pins).toEqual([]);
+
+    const missing = await read('refs/heads/agents/missing');
+    expect(missing.workspace).toBeNull();
+    expect(missing.pins).toEqual([]);
   });
 });
