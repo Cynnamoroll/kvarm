@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { executeShell, runRunner } from '../src/runner.js';
 import { tempDir } from './helpers';
 
@@ -141,7 +142,7 @@ describe('forge runner', () => {
           ? Response.json({ job: { id: 'job-2', name: 'test', command: 'exit 1', sha: 'c'.repeat(40), treeSha: 'd'.repeat(40), generation: 1, runnerId: body.runnerId, timeoutSeconds: 1 } })
           : new Response(null, { status: 204 });
       }
-      reports.push(body);
+      if (path.endsWith('/report')) reports.push(body);
       return Response.json({ run: { status: 'failure' } });
     };
     const checkoutFn = async (o: any) => {
@@ -324,5 +325,201 @@ describe('forge runner', () => {
       sha,
     });
     expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
+  });
+
+  it('grows the idle claim delay from 2 s to a 10 s cap', async () => {
+    const { idleDelayMs } = await import('../src/runner.js');
+    expect([0, 1, 2, 3, 4, 5, 12].map((consecutive) => idleDelayMs(consecutive))).toEqual([
+      2_000, 4_000, 8_000, 10_000, 10_000, 10_000, 10_000,
+    ]);
+  });
+
+  it('waits adaptively between idle claims, resets after a job, and polls exactly one claim per wait', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const claims: number[] = [];
+      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        calls.push(path);
+        if (path.endsWith('/claim')) {
+          claims.push(Date.now());
+          if (claims.length === 4) {
+            return Response.json({ job: { id: 'j', name: 'build', command: 'true', sha: 'b'.repeat(40), generation: 1, timeoutSeconds: 30 } });
+          }
+          if (claims.length >= 7) return Response.json({ error: 'runner stopped' }, { status: 500 });
+          return new Response(null, { status: 204 });
+        }
+        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
+        return Response.json({});
+      };
+      const run = runRunner({
+        baseUrl: 'https://forge.test',
+        pat: 'p',
+        repo: 'cynthia/demo',
+        apiFetch,
+        checkoutFn: async (o: any) => {
+          mkdirSync(o.dir, { recursive: true });
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        execute: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false, durationMs: 1 }),
+        stdout: () => {},
+        stderr: () => {},
+        tempRoot: root,
+        workRoot: join(root, 'backoff-work'),
+      });
+      const done = expect(run).rejects.toThrow(/runner stopped/);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await done;
+      const waits = claims.slice(1).map((t, i) => t - claims[i]!);
+      expect(waits).toEqual([2_000, 4_000, 8_000, 0, 2_000, 4_000]);
+      // Each idle poll is one claim; the only other call is the job's report.
+      const nonClaim = calls.filter((c) => !c.endsWith('/claim'));
+      expect(nonClaim).toHaveLength(1);
+      expect(nonClaim[0]).toMatch(/\/report$/);
+      expect(calls.filter((c) => c.endsWith('/claim'))).toHaveLength(7);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('materializes a warm job through the compare delta without a checkout and reports source delta', async () => {
+    const a = 'a'.repeat(40);
+    const b = 'b'.repeat(40);
+    const blobSha = (content: string) => {
+      const bytes = Buffer.from(content);
+      return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    };
+    const jobs = [
+      { id: 'ja', name: 'build', command: 'true', sha: a, generation: 1, timeoutSeconds: 30 },
+      { id: 'jb', name: 'build', command: 'true', sha: b, generation: 1, timeoutSeconds: 30 },
+    ];
+    let checkouts = 0;
+    const contentsGets: string[] = [];
+    const reports: any[] = [];
+    const stdout: string[] = [];
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const path = url.pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (path.endsWith('/claim')) {
+        const next = jobs.shift();
+        return next ? Response.json({ job: next }) : new Response(null, { status: 204 });
+      }
+      if (path.endsWith('/report')) {
+        reports.push(body);
+        return Response.json({ run: { status: body.conclusion } });
+      }
+      if (path === `/api/v1/repos/cynthia/demo/compare/${a}...${b}`) {
+        return Response.json({
+          files: [
+            { path: 'a.txt', status: 'modified', oldHash: blobSha('v1\n'), newHash: blobSha('v2\n'), oldMode: '100644', newMode: '100644' },
+          ],
+          truncated: false,
+        });
+      }
+      if (path === '/api/v1/repos/cynthia/demo/contents') {
+        contentsGets.push(String(url.searchParams.get('path')));
+        return Response.json({ ref: b, path: 'a.txt', size: 4, encoding: 'utf-8', content: 'v2\n' });
+      }
+      return Response.json({ error: 'not found' }, { status: 404 });
+    };
+    const options = {
+      baseUrl: 'https://forge.test',
+      pat: 'p',
+      repo: 'cynthia/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        checkouts++;
+        mkdirSync(o.dir, { recursive: true });
+        writeFileSync(join(o.dir, 'a.txt'), o.ref === a ? 'v1\n' : 'v2\n');
+        writeFileSync(join(o.dir, 'b.txt'), 'same\n');
+        return { source: 'snapshot' as const, sha: o.ref };
+      },
+      execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+      stdout: (line: string) => stdout.push(line),
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'delta-work'),
+    };
+    const first = await runRunner(options);
+    expect(first).toEqual({ claimed: 1, reported: 1 });
+    expect(stdout.join('\n')).toContain('workdir: fresh');
+    expect(stdout.join('\n')).not.toContain('workdir: warm');
+    expect(checkouts).toBe(1);
+
+    const second = await runRunner(options);
+    expect(second).toEqual({ claimed: 1, reported: 1 });
+    // The warm job used the delta: no second checkout, one compare, one file transfer.
+    expect(checkouts).toBe(1);
+    expect(contentsGets).toEqual(['a.txt']);
+    expect(stdout.join('\n')).toContain('workdir: warm');
+    expect(reports[1]).toMatchObject({ conclusion: 'success', summary: { sha: b, source: 'delta' } });
+    const work = join(root, 'delta-work', 'cynthia', 'demo', 'slot-0', 'work');
+    expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('v2\n');
+    expect(readFileSync(join(work, 'b.txt'), 'utf8')).toBe('same\n');
+  });
+
+  it('falls back to a full checkout when the delta exceeds the changed-path budget', async () => {
+    const a = 'a'.repeat(40);
+    const c = 'c'.repeat(40);
+    const jobs = [
+      { id: 'ka', name: 'build', command: 'true', sha: a, generation: 1, timeoutSeconds: 30 },
+      { id: 'kc', name: 'build', command: 'true', sha: c, generation: 1, timeoutSeconds: 30 },
+    ];
+    let checkouts = 0;
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const apiFetch = async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/claim')) {
+        const next = jobs.shift();
+        return next ? Response.json({ job: next }) : new Response(null, { status: 204 });
+      }
+      if (path.endsWith('/report')) return Response.json({ run: { status: 'success' } });
+      if (path === `/api/v1/repos/cynthia/demo/compare/${a}...${c}`) {
+        return Response.json({
+          files: Array.from({ length: 1_500 }, (_, i) => ({
+            path: `f${i}.txt`,
+            status: 'added',
+            oldHash: null,
+            oldMode: null,
+            newHash: String(i).padStart(40, '0'),
+            newMode: '100644',
+          })),
+          truncated: false,
+        });
+      }
+      return Response.json({ error: 'not found' }, { status: 404 });
+    };
+    const options = {
+      baseUrl: 'https://forge.test',
+      pat: 'p',
+      repo: 'cynthia/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        checkouts++;
+        mkdirSync(o.dir, { recursive: true });
+        writeFileSync(join(o.dir, 'seed.txt'), `seed ${o.ref}\n`);
+        return { source: 'snapshot' as const, sha: o.ref };
+      },
+      execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+      stdout: (line: string) => stdout.push(line),
+      stderr: (line: string) => stderr.push(line),
+      tempRoot: root,
+      workRoot: join(root, 'delta-budget-work'),
+    };
+    const first = await runRunner(options);
+    expect(first).toEqual({ claimed: 1, reported: 1 });
+    const second = await runRunner(options);
+    expect(second).toEqual({ claimed: 1, reported: 1 });
+    expect(checkouts).toBe(2);
+    expect(stderr.join('\n')).toMatch(/warm sync failed: .*warm budget/);
+    expect(stdout.join('\n')).not.toContain('workdir: warm');
+    const work = join(root, 'delta-budget-work', 'cynthia', 'demo', 'slot-0', 'work');
+    expect(readFileSync(join(work, 'seed.txt'), 'utf8')).toBe(`seed ${c}\n`);
   });
 });
