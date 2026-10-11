@@ -165,6 +165,15 @@ async function based(repo: FakeRepo, files: Files = BASE) {
   return main;
 }
 
+const PLANTED = `token=${'forge_pat_' + 'b'.repeat(64)}\n`;
+
+/** `dev` = main + a planted secret: a branch a workspace may start from while its change opens against main. */
+async function secretBranch(repo: FakeRepo, mainSha: string) {
+  const dev = await commit(repo, { ...BASE, 'secret.txt': PLANTED }, [mainSha]);
+  repo.refs.set('refs/heads/dev', dev.sha);
+  return dev;
+}
+
 beforeAll(async () => {
   installFakeGitRemote();
   ownerId = await seedUser(OWNER);
@@ -310,6 +319,58 @@ describe('candidates', () => {
       [b.id, 'success'],
     ]);
     expect(result.json.ranking.map((c: any) => c.workspace)).toEqual([b.id, a.id]);
+  });
+
+  it('ranks a change by its own base guard when its workspace started on another branch', async () => {
+    const name = 'ck-bases';
+    const repo = await seedRepo(name);
+    const main = await based(repo);
+    const dev = await secretBranch(repo, main.sha);
+    const x = (await call('POST', `${R(name)}/workspaces`, tok.owner, { task: 'x', agent: 'agent', base: 'dev' })).json;
+    const f = (await createWs(name, 'f')).json;
+    const p = (await createWs(name, 'p')).json;
+    await push(name, repo, x, dev.sha, { ...BASE, 'secret.txt': PLANTED, 'notes.txt': 'clean\n' });
+    await push(name, repo, f, main.sha, { ...BASE, 'secret.txt': PLANTED });
+    await push(name, repo, p, main.sha, { ...BASE, 'p.txt': 'p\n' });
+    // x opens against the default base main, not the dev branch its workspace started from.
+    const changeX = await call('POST', `${R(name)}/workspaces/${x.id}/change-set`, tok.owner, { title: 'x' });
+    expect([changeX.status, changeX.json.base]).toEqual([201, 'main']);
+    expect((await call('POST', `${R(name)}/workspaces/${f.id}/change-set`, tok.owner, { title: 'f' })).status).toBe(201);
+    const run = (await call('GET', `${R(name)}/changes/${changeX.json.number}/checks`, tok.owner)).json.checks[0];
+    expect(run).toMatchObject({ name: 'forge/guard', status: 'failure', summary: { baseTree: main.tree } });
+
+    const r = await cands(name, [x.id, f.id, p.id]);
+    expect(r.status).toBe(200);
+    const sx = r.json.candidates.find((c: any) => c.workspace === x.id);
+    expect(sx).toMatchObject({ workspaceBase: 'dev', checks: { state: 'failure', required: [{ name: 'forge/guard', state: 'failure' }] } });
+    const ranking = r.json.ranking as any[];
+    expect(ranking[0]).toMatchObject({ workspace: p.id, factors: { checks: 'pending', failingChecks: [] } });
+    expect(ranking.slice(1).map((e) => e.workspace).sort()).toEqual([x.id, f.id].sort());
+    for (const e of ranking.slice(1)) expect(e.factors).toMatchObject({ checks: 'failure', failingChecks: ['forge/guard'] });
+
+    const merge = await call('POST', `${R(name)}/changes/${changeX.json.number}/merge`, tok.owner);
+    expect([merge.status, merge.json.code]).toEqual([409, 'REQUIRED_CHECKS_FAILED']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+
+    // Same request shape as every other candidate set: authority, the workspace batch, one coalesced gate read.
+    expect((await cands(name, [x.id, f.id, p.id])).cost).toMatchObject({ d1: 3, art: 0, do: 0 });
+  });
+
+  it('answers pending, never success, when the recorded guard judged another base than the ranking plan', async () => {
+    const name = 'ck-moved-base';
+    const repo = await seedRepo(name);
+    const main = await based(repo);
+    const dev = await secretBranch(repo, main.sha);
+    const x = (await call('POST', `${R(name)}/workspaces`, tok.owner, { task: 'x', agent: 'agent', base: 'dev' })).json;
+    await push(name, repo, x, dev.sha, { ...BASE, 'secret.txt': PLANTED, 'notes.txt': 'clean\n' });
+    expect((await call('POST', `${R(name)}/workspaces/${x.id}/change-set`, tok.owner, { title: 'x' })).status).toBe(201);
+    // main fast-forwards to dev: the publication plan's merge base is now dev's tip, which the guard never judged.
+    repo.refs.set('refs/heads/main', dev.sha);
+    await deliver(name, 'refs/heads/main', main.sha, dev.sha);
+    const r = await cands(name, [x.id]);
+    expect(r.status).toBe(200);
+    expect(r.json.candidates[0].checks).toMatchObject({ state: 'pending', required: [{ name: 'forge/guard', state: 'pending' }] });
+    expect(r.json.ranking[0].factors).toMatchObject({ checks: 'pending', failingChecks: [] });
   });
 
   it('bounds the request: caps, malformed and unknown ids, inactive workspaces excluded, concealment', async () => {
@@ -476,6 +537,35 @@ describe('arenas', () => {
       [a.id, 'merged'],
       [b.id, 'abandoned'],
     ]);
+  });
+
+  it('ranks an arena candidate by its change base guard when the arena started on another branch', async () => {
+    const name = 'arena-bases';
+    const repo = await seedRepo(name);
+    const main = await based(repo);
+    const dev = await secretBranch(repo, main.sha);
+    const arena = (await call('POST', `${R(name)}/arenas`, tok.owner, { brief: 'tidy notes', base: 'dev', candidates: 2 })).json;
+    const [x, y] = arena.workspaces;
+    expect([x.base, y.base]).toEqual(['dev', 'dev']);
+    await push(name, repo, x, dev.sha, { ...BASE, 'secret.txt': PLANTED, 'notes.txt': 'clean\n' });
+    await push(name, repo, y, dev.sha, { ...BASE, 'secret.txt': PLANTED, 'y.txt': 'y\n' });
+    const changeX = await call('POST', `${R(name)}/workspaces/${x.id}/change-set`, tok.owner, { title: 'x' });
+    expect([changeX.status, changeX.json.base]).toEqual([201, 'main']);
+    const run = (await call('GET', `${R(name)}/changes/${changeX.json.number}/checks`, tok.owner)).json.checks[0];
+    expect(run).toMatchObject({ name: 'forge/guard', status: 'failure', summary: { baseTree: main.tree } });
+
+    const r = await call('GET', `${R(name)}/arenas/${arena.id}/candidates`, tok.owner);
+    expect(r.status).toBe(200);
+    expect(r.json.candidates.map((c: any) => [c.workspace, c.checks.state])).toEqual([
+      [x.id, 'failure'],
+      // No linked change: nothing judged y, so its always-required guard stays pending.
+      [y.id, 'pending'],
+    ]);
+    expect(r.json.ranking.map((e: any) => [e.workspace, e.factors.checks, e.factors.failingChecks])).toEqual([
+      [y.id, 'pending', []],
+      [x.id, 'failure', ['forge/guard']],
+    ]);
+    expect((await call('GET', `${R(name)}/arenas/${arena.id}/candidates`, tok.owner)).cost).toMatchObject({ d1: 4, art: 0, do: 0 });
   });
 });
 

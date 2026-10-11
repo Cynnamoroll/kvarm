@@ -356,10 +356,12 @@ async function compareSet(
   });
   const gate = cx.gate ?? defaultChecksGate(cx.env);
   const baseRef = `refs/heads/${base}`;
+  // The recorded guard judged the linked change's base, not the branch its workspace started from.
+  const publicationBase = (r: WorkspaceRow) => `refs/heads/${r.change_base_ref ?? r.base_ref ?? base}`;
 
   return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
     const ctx: ResolveContext = { env: cx.env, repo: cx.repo, artifacts, bypass: false, waitUntil: cx.waitUntil };
-    const publicationBases = active.map((r) => `refs/heads/${r.base_ref ?? base}`);
+    const publicationBases = active.map(publicationBase);
     const resolved = await resolveCommitish(ctx, [baseRef, ...active.map((r) => r.ref!), ...publicationBases]);
     const baseCommit = resolved.get(baseRef);
     if (!baseCommit) return fail(422, `base branch not found: ${base}`, 'REF_NOT_FOUND', { ref: base });
@@ -378,7 +380,7 @@ async function compareSet(
     const gateQuestions = await Promise.all(
       members.map(async (m) => {
         if (!m.row.change_set_id) return { member: m };
-        const target = resolved.get(`refs/heads/${m.row.base_ref ?? base}`);
+        const target = resolved.get(publicationBase(m.row));
         if (!target) return { member: m };
         const plan = await mergePlanFor(ctx, target.sha, m.sha);
         if (!plan.mergeBase) return { member: m };

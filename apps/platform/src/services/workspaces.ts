@@ -61,6 +61,8 @@ export interface WorkspaceRow {
   head_sha: string | null;
   change_set_id: string | null;
   change_number: number | null;
+  /** The linked change's publication base, which may differ from the workspace's creation base. */
+  change_base_ref: string | null;
   created_by_login: string | null;
   /** The ref position from push events (repo_refs); may lag a push by seconds. */
   ref_sha: string | null;
@@ -74,7 +76,7 @@ export interface WorkspaceRow {
 }
 
 export const WORKSPACE_SELECT = `SELECT w.id, w.task, w.agent, w.agent_id, w.status, w.ref, w.base_ref, w.base_sha, w.head_sha,
-       w.change_set_id, c.number AS change_number, u.login AS created_by_login, f.sha AS ref_sha,
+       w.change_set_id, c.number AS change_number, c.base_ref AS change_base_ref, u.login AS created_by_login, f.sha AS ref_sha,
        w.created_at, w.updated_at, w.abandoned_at, w.merged_at, w.intent_paths, w.arena_id, w.rowid AS seq
   FROM workspaces w
   LEFT JOIN change_sets c ON c.id = w.change_set_id
