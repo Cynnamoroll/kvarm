@@ -3,6 +3,10 @@
  * CLI execution, required/optional rollup and merge gates, scope denial,
  * generation-fenced lease expiry, and claim/report cost headers.
  *
+ * refs/heads/agents/** is reserved against human pushes, so the compose
+ * section mints a short-lived write agent token (refs/heads/agents/*) for its
+ * workspace creation and pushes, and revokes it and its scratch agent at exit.
+ *
  * Usage (after loading apps/platform/.dev.vars.validation):
  *   node scripts/ci-e2e.mjs [--keep] [--skip-lease]
  */
@@ -56,10 +60,10 @@ async function api(path, { method = 'GET', body, token = PAT } = {}) {
   } catch {}
   return { status: res.status, json, text, rawCost: res.headers.get('x-forge-cost'), cost: cost(res.headers.get('x-forge-cost')) };
 }
-function git(args) {
+function git(args, token = PAT) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd: work,
-    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: PAT },
+    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token },
     encoding: 'utf8',
   });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
@@ -84,6 +88,25 @@ function runCli() {
   });
   console.log(r.stdout.trim());
   if (r.status !== 0) throw new Error(`runner failed: ${r.stderr}`);
+}
+const scratchAgents = new Set();
+const scratchTokens = new Map();
+/**
+ * Mints a short-lived write agent token for refs/heads/agents/* on the scratch
+ * repo: that namespace is reserved against human pushes, so workspace pushes
+ * need an agent principal. The agent and token are revoked at exit.
+ */
+async function agentToken(purpose) {
+  const agent = await api('/api/v1/agents', { method: 'POST', body: { name: `${repo}-${purpose}`, description: `ci ${purpose} e2e` } });
+  if (agent.status !== 201) throw new Error(`create ${purpose} agent -> ${agent.status} ${agent.text}`);
+  scratchAgents.add(agent.json.agent.id);
+  const minted = await api(`/api/v1/agents/${agent.json.agent.id}/tokens`, {
+    method: 'POST',
+    body: { repo: `${OWNER}/${repo}`, role: 'write', refs: ['refs/heads/agents/*'], expiresIn: 900 },
+  });
+  if (minted.status !== 201) throw new Error(`mint ${purpose} agent token -> ${minted.status} ${minted.json?.code ?? ''}`);
+  scratchTokens.set(minted.json.id, agent.json.agent.id);
+  return minted.json.token;
 }
 
 let created = false;
@@ -138,8 +161,9 @@ try {
   git(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main']);
   const composedBase = git(['rev-parse', 'refs/remotes/origin/main']);
   const semanticConfig = `${JSON.stringify({ jobs: [{ name: 'semantic', run: 'test ! -f a.txt -o ! -f b.txt', required: true }] })}\n`;
-  const wa = await api(`${R}/workspaces`, { method: 'POST', body: { task: 'semantic a', agent: 'ci-e2e' } });
-  const wb = await api(`${R}/workspaces`, { method: 'POST', body: { task: 'semantic b', agent: 'ci-e2e' } });
+  const tok = await agentToken('compose');
+  const wa = await api(`${R}/workspaces`, { method: 'POST', body: { task: 'semantic a', agent: 'ci-e2e' }, token: tok });
+  const wb = await api(`${R}/workspaces`, { method: 'POST', body: { task: 'semantic b', agent: 'ci-e2e' }, token: tok });
   if (wa.status !== 201 || wb.status !== 201) throw new Error(`workspace create failed: ${wa.status}/${wb.status}`);
   git(['checkout', '-q', '--detach', composedBase]);
   writeFileSync(join(work, '.forge', 'ci.json'), semanticConfig);
@@ -147,14 +171,14 @@ try {
   git(['add', '-A']);
   git(['commit', '-q', '-m', 'semantic a']);
   const aSha = git(['rev-parse', 'HEAD']);
-  git(['push', '-q', url, `HEAD:${wa.json.ref}`]);
+  git(['push', '-q', url, `HEAD:${wa.json.ref}`], tok);
   git(['checkout', '-q', '--detach', composedBase]);
   writeFileSync(join(work, '.forge', 'ci.json'), semanticConfig);
   writeFileSync(join(work, 'b.txt'), 'b\n');
   git(['add', '-A']);
   git(['commit', '-q', '-m', 'semantic b']);
   const bSha = git(['rev-parse', 'HEAD']);
-  git(['push', '-q', url, `HEAD:${wb.json.ref}`]);
+  git(['push', '-q', url, `HEAD:${wb.json.ref}`], tok);
   const observedBy = async (workspace, sha) => {
     const end = Date.now() + 60_000;
     while (Date.now() < end) {
@@ -208,6 +232,8 @@ try {
     check('VAL-COST-012', 'report cost is d1<=2, do=0, q=0', report.cost.d1 <= 2 && report.cost.do === 0 && report.cost.q === 0, report.rawCost);
   }
 } finally {
+  for (const [tokenId, agentId] of scratchTokens) await api(`/api/v1/agents/${agentId}/tokens/${tokenId}`, { method: 'DELETE' });
+  for (const agentId of scratchAgents) await api(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
   if (created && !values.keep) {
     const deleted = await api(R, { method: 'DELETE' });
     check('cleanup', 'scratch repo deleted', deleted.status === 200, String(deleted.status));
