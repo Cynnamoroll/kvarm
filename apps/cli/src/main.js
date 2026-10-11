@@ -1,4 +1,6 @@
 // @ts-check
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { findCommand } from '@forge/ops';
 import { CliError, checkout } from './checkout.js';
@@ -10,7 +12,8 @@ const USAGE = `usage: forge <command> [args]
 
 commands:
   checkout <owner/repo> <ref> <dir>   materialize <ref> into <dir> from a snapshot, or git clone
-  runner --repo <owner/repo> [--once] claim and run CI jobs on this machine
+  runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]
+                                      claim and run CI jobs on this machine
   status <owner/repo> [--json]        read-only status: active workspaces with their pins, the train, open tasks
   help [command]                      show help (for API commands: help <group> <verb>)
 
@@ -50,13 +53,24 @@ first, for example:
 "git status" is clean right after the reset because the snapshot tree equals
 the commit tree.`;
 
-const RUNNER_HELP = `usage: forge runner --repo <owner/repo> [--once]
+const RUNNER_HELP = `usage: forge runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]
 
 Claims CI jobs for the repository, materializes each job's exact immutable
 commit through snapshot checkout (with clone fallback), runs the configured
 command in a shell, heartbeats the 120-second lease, and reports a bounded
 summary. The command runs only because the user explicitly started this
-runner. --once exits after one job, or immediately when none is queued.`;
+runner. --once exits after one job, or immediately when none is queued.
+
+Jobs run in a persistent working directory per repository, locked to this
+runner process (a concurrent runner uses another one), under --workdir
+(default $XDG_CACHE_HOME/forge/runner, else ~/.cache/forge/runner). The
+first job checks out fully; later jobs sync the directory to the new commit:
+tracked files are rewritten exactly, files the new commit lacks are deleted,
+and other untracked paths are removed except dependency caches
+(node_modules, .venv, venv, target, .cache, .gradle, .turbo, __pycache__,
+.pytest_cache, .mypy_cache, .tox), so installs do not repeat. Any sync
+error falls back to a full checkout. --fresh rematerializes every job from
+an empty directory.`;
 
 /**
  * @param {string[]} argv
@@ -146,6 +160,8 @@ async function runCiRunner(args, io) {
       options: {
         repo: { type: 'string' },
         once: { type: 'boolean', default: false },
+        fresh: { type: 'boolean', default: false },
+        workdir: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -167,6 +183,10 @@ async function runCiRunner(args, io) {
     pat,
     repo,
     once: parsed.values.once,
+    fresh: parsed.values.fresh,
+    workRoot: parsed.values.workdir
+      ? resolve(parsed.values.workdir)
+      : join(io.env.XDG_CACHE_HOME && isAbsolute(io.env.XDG_CACHE_HOME) ? io.env.XDG_CACHE_HOME : join(io.env.HOME || homedir(), '.cache'), 'forge', 'runner'),
     stdout: io.stdout,
     stderr: io.stderr,
     apiFetch: io.apiFetch,

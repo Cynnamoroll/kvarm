@@ -116,7 +116,7 @@ the commit tree. `scripts/cli-checkout-e2e.mjs` checks this recipe live,
 including the final push. When an agent needs history from the start, a clone
 is the better choice.
 
-## `forge runner --repo <owner/repo> [--once]`
+## `forge runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]`
 
 Starts a user-owned CI runner. It claims a queued `.forge/ci.json` job with a
 120-second generation-fenced lease, materializes the job's exact immutable
@@ -125,6 +125,26 @@ in a shell with its timeout, heartbeats while it runs, and reports a bounded
 summary. `--once` exits after one job, or immediately when the queue is empty.
 The PAT must have `ci` scope. Repository commands run only because the user
 explicitly starts this process.
+
+Jobs run in a persistent working directory per repository
+(`<workdir>/<owner>/<repo>/slot-<n>/work`; default root
+`$XDG_CACHE_HOME/forge/runner`, else `~/.cache/forge/runner`). A runner
+process locks its slot (`slot-<n>.lock`, owner pid and host) for its whole
+lifetime; a concurrent runner for the same repository takes the next free
+slot, and a lock whose process has died is reclaimed. The first job in a slot
+is a full snapshot checkout. Later jobs, including later `--once` processes,
+check the new commit out into a staging directory and sync it in: every
+tracked file is moved in from the new snapshot, files of the previous tree
+that the new tree lacks are deleted, and any other untracked path is removed
+unless it is inside a dependency cache directory (`node_modules`, `.venv`,
+`venv`, `target`, `.cache`, `.gradle`, `.turbo`, `__pycache__`,
+`.pytest_cache`, `.mypy_cache`, `.tox`, matched by name at any depth). The
+tracked tree therefore equals a fresh snapshot checkout while installs are
+reused. Any error on the warm path falls back to a full checkout into an
+emptied directory, so the job never fails because of the fast path. `--fresh`
+rematerializes every job from an empty directory (caches included). The
+runner prints `workdir: warm` or `workdir: fresh` per job and
+`reported <conclusion> for <job> (<id>) in <ms> ms` (claim to report).
 
 ## Performance
 

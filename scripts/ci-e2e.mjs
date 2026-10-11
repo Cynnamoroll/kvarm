@@ -76,7 +76,7 @@ async function waitChecks(number, predicate, ms = 60_000) {
   throw new Error(`checks timeout: ${JSON.stringify(last?.json)}`);
 }
 function runCli() {
-  const r = spawnSync(process.execPath, ['apps/cli/bin/forge.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once'], {
+  const r = spawnSync(process.execPath, ['apps/cli/bin/forge.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', join(root, 'runner')], {
     cwd: new URL('..', import.meta.url).pathname,
     env: { ...process.env, FORGE_BASE_URL: BASE, FORGE_PAT: PAT },
     encoding: 'utf8',

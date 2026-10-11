@@ -1,16 +1,17 @@
 // @ts-check
 /**
  * User-owned CI runner: claim one immutable job, materialize its exact SHA
- * through the snapshot-first checkout, execute the repository command in a
- * shell with a timeout, and report through the fenced claim generation.
+ * in the runner's persistent per-repository workdir (snapshot checkout, then
+ * warm syncs; see workdir.js), execute the repository command in a shell with
+ * a timeout, and report through the fenced claim generation.
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkout } from './checkout.js';
 import { CliError } from './checkout.js';
+import { materialize, openWorkdir } from './workdir.js';
 
 const OUTPUT_LIMIT = 16 * 1024;
 const SUMMARY_SERVER_LIMIT = 64 * 1024;
@@ -161,6 +162,9 @@ async function post(baseUrl, repo, pat, path, body, apiFetch) {
  * @property {(line:string)=>void} stdout
  * @property {(line:string)=>void} stderr
  * @property {string} [tempRoot]
+ * @property {string} [workRoot] root of the persistent workdirs (defaults below tempRoot)
+ * @property {boolean} [fresh] fully rematerialize every job instead of syncing warm
+ * @property {import('./workdir.js').SyncFn} [syncFn]
  */
 
 /**
@@ -173,86 +177,99 @@ export async function runRunner(options) {
   const execute = options.execute ?? executeShell;
   const runnerId = options.runnerId ?? `forge-runner-${crypto.randomUUID()}`;
   const tempRoot = options.tempRoot ?? tmpdir();
+  const workRoot = options.workRoot ?? join(tempRoot, 'forge-runner');
+  /** @type {import('./workdir.js').Slot | undefined} */
+  let slot;
   let claimed = 0;
   let reported = 0;
-  for (;;) {
-    const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
-    if (got.status === 204) {
-      if (options.once) return { claimed, reported };
-      await sleep(IDLE_MS);
-      continue;
-    }
-    const job = got.body?.job;
-    if (!job || typeof job.id !== 'string' || typeof job.sha !== 'string') throw new CliError('claim returned an invalid job');
-    claimed++;
-    options.stdout(`claimed ${job.name} (${job.id}) at ${job.sha}`);
-    const root = mkdtempSync(join(tempRoot, 'forge-ci-'));
-    const work = join(root, 'work');
-    let heartbeat;
-    let reportBody;
-    try {
-      const every = Math.max(10_000, Math.floor(120_000 / 3));
-      heartbeat = setInterval(() => {
-        void post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
-          options.stderr(`heartbeat: ${err instanceof Error ? err.message : String(err)}`),
-        );
-      }, every);
-      heartbeat.unref();
-      const quiet = () => {};
-      const materialized = await checkoutFn({
-        baseUrl: options.baseUrl,
-        pat: options.pat,
-        repo: options.repo,
-        ref: job.sha,
-        dir: work,
-        stdout: quiet,
-        stderr: (line) => options.stderr(`checkout: ${line}`),
-      });
-      if (materialized.sha !== job.sha) throw new Error(`checkout returned ${materialized.sha}, expected ${job.sha}`);
-      const result = await execute(job.command, work, job.timeoutSeconds);
-      const conclusion = result.code === 0 && !result.timedOut ? 'success' : 'failure';
-      const summary = boundedSummary({
-        command: job.command,
-        exitCode: result.code,
-        timedOut: result.timedOut,
-        durationMs: result.durationMs,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        source: materialized.source,
-        sha: materialized.sha,
-      });
-      reportBody = { runnerId, generation: job.generation, conclusion, summary };
-    } catch (err) {
-      const summary = boundedSummary({
-        command: job.command,
-        exitCode: null,
-        timedOut: false,
-        durationMs: 0,
-        stdout: '',
-        stderr: bounded(err instanceof Error ? err.message : String(err)),
-        sha: job.sha,
-      });
-      reportBody = { runnerId, generation: job.generation, conclusion: 'failure', summary };
-    }
-    try {
-      let reportError;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/report`, reportBody, apiFetch);
-          reportError = undefined;
-          break;
-        } catch (err) {
-          reportError = err;
-          if (attempt < 2) await sleep(250 * 2 ** attempt);
-        }
+  try {
+    for (;;) {
+      const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
+      if (got.status === 204) {
+        if (options.once) return { claimed, reported };
+        await sleep(IDLE_MS);
+        continue;
       }
-      if (reportError) throw reportError;
-      reported++;
-      options.stdout(`reported ${reportBody.conclusion} for ${job.name} (${job.id})`);
-    } finally {
-      if (heartbeat) clearInterval(heartbeat);
-      rmSync(root, { recursive: true, force: true });
+      const claimedAt = Date.now();
+      const job = got.body?.job;
+      if (!job || typeof job.id !== 'string' || typeof job.sha !== 'string') throw new CliError('claim returned an invalid job');
+      claimed++;
+      options.stdout(`claimed ${job.name} (${job.id}) at ${job.sha}`);
+      let heartbeat;
+      let reportBody;
+      try {
+        const every = Math.max(10_000, Math.floor(120_000 / 3));
+        heartbeat = setInterval(() => {
+          void post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
+            options.stderr(`heartbeat: ${err instanceof Error ? err.message : String(err)}`),
+          );
+        }, every);
+        heartbeat.unref();
+        slot ??= openWorkdir({ workRoot, repo: options.repo, tempRoot, stderr: options.stderr });
+        const quiet = () => {};
+        const materialized = await materialize(slot, {
+          sha: job.sha,
+          fresh: options.fresh,
+          sync: options.syncFn,
+          stderr: options.stderr,
+          checkout: (dir) =>
+            checkoutFn({
+              baseUrl: options.baseUrl,
+              pat: options.pat,
+              repo: options.repo,
+              ref: job.sha,
+              dir,
+              stdout: quiet,
+              stderr: (line) => options.stderr(`checkout: ${line}`),
+            }),
+        });
+        options.stdout(`workdir: ${materialized.workdir}`);
+        const result = await execute(job.command, slot.work, job.timeoutSeconds);
+        const conclusion = result.code === 0 && !result.timedOut ? 'success' : 'failure';
+        const summary = boundedSummary({
+          command: job.command,
+          exitCode: result.code,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          source: materialized.source,
+          sha: materialized.sha,
+        });
+        reportBody = { runnerId, generation: job.generation, conclusion, summary };
+      } catch (err) {
+        const summary = boundedSummary({
+          command: job.command,
+          exitCode: null,
+          timedOut: false,
+          durationMs: 0,
+          stdout: '',
+          stderr: bounded(err instanceof Error ? err.message : String(err)),
+          sha: job.sha,
+        });
+        reportBody = { runnerId, generation: job.generation, conclusion: 'failure', summary };
+      }
+      try {
+        let reportError;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/report`, reportBody, apiFetch);
+            reportError = undefined;
+            break;
+          } catch (err) {
+            reportError = err;
+            if (attempt < 2) await sleep(250 * 2 ** attempt);
+          }
+        }
+        if (reportError) throw reportError;
+        reported++;
+        options.stdout(`reported ${reportBody.conclusion} for ${job.name} (${job.id}) in ${Date.now() - claimedAt} ms`);
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+      }
+      if (options.once) return { claimed, reported };
     }
-    if (options.once) return { claimed, reported };
+  } finally {
+    slot?.release();
   }
 }
