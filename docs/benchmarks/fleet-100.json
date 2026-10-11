@@ -1,11 +1,11 @@
 {
   "run": {
-    "repo": "cynthia/scale-staged-campaign-fleet-1791703431",
+    "repo": "cynthia/scale-staged-campaign-fleet-1791734157",
     "smoke": false,
-    "startedAt": "2026-10-11T07:23:52.014Z",
-    "head": "8fb9b75",
-    "worker": "343607c6-df88-492e-a6b6-1cf061d111d7",
-    "finishedAt": "2026-10-11T07:37:10.604Z"
+    "startedAt": "2026-10-11T15:55:57.607Z",
+    "head": "777ce61",
+    "worker": "3e0d79ae-f9c0-489d-aeb5-a4ab5cf80c79",
+    "finishedAt": "2026-10-11T16:07:34.375Z"
   },
   "limits": {
     "gitChildren": 3,
@@ -160,10 +160,10 @@
   "fleet": {
     "workspaces": 100,
     "burst": 99,
-    "createAndPushMs": 199059,
+    "createAndPushMs": 200309,
     "peakGitChildren": 1,
     "peakHttp": 1,
-    "lastPushToAllObservedMs": 4494,
+    "lastPushToAllObservedMs": 5194,
     "overlapPairs": 69
   },
   "verifyPre": {
@@ -209,12 +209,12 @@
     {
       "key": "w003",
       "pinned": true,
-      "cost": "d1=2;rr=15;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+      "cost": "d1=2;rr=16;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
     },
     {
       "key": "w002",
       "pinned": true,
-      "cost": "d1=2;rr=16;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+      "cost": "d1=2;rr=15;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
     },
     {
       "key": "w004",
@@ -324,7 +324,7 @@
     {
       "key": "w025",
       "pinned": false,
-      "cost": "d1=2;rr=10;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
     },
     {
       "key": "w026",
@@ -629,7 +629,7 @@
     {
       "key": "w086",
       "pinned": false,
-      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+      "cost": "d1=2;rr=10;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
     },
     {
       "key": "w087",
@@ -705,503 +705,504 @@
   "conflictKinds": {
     "content conflict on shared/config.txt": 3
   },
-  "publicationsOutsideRow": [
+  "publicationCosts": [
+    {
+      "number": 5,
+      "pinned": true,
+      "cost": "d1=3;rr=12;rw=3;art=0;do=2;q=0;sub=2"
+    },
     {
       "number": 4,
       "pinned": true,
-      "cost": "d1=3;rr=20;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=11;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 3,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=2;do=2;q=0;sub=2"
     },
     {
       "number": 2,
-      "pinned": true,
-      "cost": "d1=3;rr=19;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 1,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=2;do=2;q=0;sub=2"
-    },
-    {
-      "number": 5,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 6,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 7,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 8,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 9,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 10,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 11,
+      "number": 7,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 14,
+      "number": 8,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 9,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 15,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 12,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 13,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 17,
+      "number": 14,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 16,
+      "number": 11,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 18,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 19,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 20,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 16,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 17,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 18,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 19,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 21,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 22,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 24,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 23,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 25,
       "pinned": false,
-      "cost": "d1=3;rr=13;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 23,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 26,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 27,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 28,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 29,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 30,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 31,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 33,
+      "number": 27,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 32,
+      "number": 28,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 30,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 34,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 32,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 33,
+      "pinned": false,
+      "cost": "d1=3;rr=9;rw=1;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 35,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 37,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 38,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 36,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 37,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 40,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 39,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 44,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 45,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 41,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 38,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 42,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 44,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 43,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 45,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 46,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 47,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 48,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 49,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 50,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 55,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 51,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 49,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 52,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 54,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 53,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 59,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 60,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 56,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 54,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 57,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 55,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 58,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 61,
+      "number": 59,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 62,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 60,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 61,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 63,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 64,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 65,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 66,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 68,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 67,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 66,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 69,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 70,
+      "number": 68,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 71,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 70,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 72,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 73,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 74,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 75,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 76,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
-      "number": 77,
+      "number": 75,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 78,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 79,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 81,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 82,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 83,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 88,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 86,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 85,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 87,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 89,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 91,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 90,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 92,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 97,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 95,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 94,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 96,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 98,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 99,
-      "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
-    },
-    {
-      "number": 3,
-      "pinned": true,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 80,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 81,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 79,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 84,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 87,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 86,
+      "pinned": false,
+      "cost": "d1=3;rr=9;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 83,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 92,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 91,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 89,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 88,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     },
     {
       "number": 93,
       "pinned": false,
-      "cost": "d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2"
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 94,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 95,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 96,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 97,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 98,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 99,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 1,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 77,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 85,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 90,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
     }
   ],
+  "publicationsOutsideRow": [],
   "reconciliation": {
     "created": 103,
     "ok": true,
@@ -1234,638 +1235,443 @@
     "acceptedInBurstWindow": 96,
     "resolvedAndPublished": 3,
     "incomplete": 0,
-    "windowMs": 504106,
-    "throughputPerMin": 11.43,
+    "windowMs": 361946,
+    "throughputPerMin": 15.91,
     "latencyMs": {
-      "p50": 61013,
-      "p90": 399457,
-      "max": 504106,
+      "p50": 94045,
+      "p90": 219098,
+      "max": 361946,
       "samples": 96
+    },
+    "longestIdle": {
+      "ms": 79684,
+      "fromMs": 235061,
+      "toMs": 314745,
+      "endedBy": "#90 ejected MERGE_CONFLICT"
     },
     "backlogMax": 64,
     "backlogSamples": [
       [
-        87,
+        230,
         1,
         0
       ],
       [
-        4220,
-        7,
+        4557,
+        8,
         0
       ],
       [
-        8360,
-        14,
+        8948,
+        15,
         0
       ],
       [
-        12475,
-        17,
-        4
+        13366,
+        20,
+        3
       ],
       [
-        16691,
-        21,
-        7
+        17780,
+        24,
+        6
       ],
       [
-        20806,
-        27,
+        22172,
+        29,
         8
       ],
       [
-        24989,
-        31,
+        26590,
+        36,
+        9
+      ],
+      [
+        31030,
+        41,
         11
       ],
       [
-        29128,
-        34,
-        14
+        35401,
+        46,
+        13
       ],
       [
-        33320,
-        41,
+        39895,
+        52,
         15
       ],
       [
-        37458,
-        45,
+        44294,
+        58,
+        16
+      ],
+      [
+        48728,
+        64,
+        16
+      ],
+      [
+        53081,
+        62,
         18
       ],
       [
-        41597,
-        48,
-        22
+        57414,
+        59,
+        21
       ],
       [
-        45767,
-        54,
+        61848,
+        57,
         23
       ],
       [
-        49961,
-        59,
-        25
+        66128,
+        56,
+        24
       ],
       [
-        54124,
-        62,
-        29
+        70547,
+        56,
+        24
       ],
       [
-        58256,
-        64,
+        74953,
+        54,
+        26
+      ],
+      [
+        79170,
+        54,
+        28
+      ],
+      [
+        83487,
+        58,
         31
       ],
       [
-        62508,
-        63,
+        87740,
+        64,
         32
       ],
       [
-        66670,
+        92007,
+        64,
+        32
+      ],
+      [
+        96312,
+        62,
+        34
+      ],
+      [
+        100678,
         59,
-        36
+        37
       ],
       [
-        70844,
+        105030,
         56,
-        39
+        40
       ],
       [
-        75103,
+        109388,
         56,
-        39
+        40
       ],
       [
-        79311,
+        113733,
+        55,
+        41
+      ],
+      [
+        118183,
         52,
-        42
+        44
       ],
       [
-        83531,
-        49,
-        46
-      ],
-      [
-        87695,
-        50,
+        122551,
+        52,
         47
       ],
       [
-        91853,
+        127171,
         51,
         48
       ],
       [
-        96042,
-        47,
-        52
+        131718,
+        51,
+        48
       ],
       [
-        100333,
-        44,
-        55
+        136506,
+        49,
+        50
       ],
       [
-        104535,
-        44,
-        55
+        140964,
+        46,
+        53
       ],
       [
-        108748,
+        145295,
+        43,
+        56
+      ],
+      [
+        149852,
+        43,
+        56
+      ],
+      [
+        154241,
+        43,
+        56
+      ],
+      [
+        158534,
         41,
-        58
+        57
       ],
       [
-        112947,
+        163952,
         38,
-        61
+        60
       ],
       [
-        117180,
-        36,
-        63
-      ],
-      [
-        121392,
+        168262,
         35,
         64
       ],
       [
-        125614,
+        172766,
+        35,
+        64
+      ],
+      [
+        177093,
+        35,
+        64
+      ],
+      [
+        181572,
+        34,
+        65
+      ],
+      [
+        186043,
         31,
         68
       ],
       [
-        129782,
+        190655,
         28,
         71
       ],
       [
-        133970,
+        195023,
         27,
         72
       ],
       [
-        138148,
-        26,
+        199332,
+        27,
         72
       ],
       [
-        142313,
+        203972,
+        25,
+        73
+      ],
+      [
+        208279,
         23,
         75
       ],
       [
-        146470,
+        212935,
+        20,
+        78
+      ],
+      [
+        217170,
         19,
         79
       ],
       [
-        150629,
+        221440,
         19,
         79
       ],
       [
-        154866,
-        19,
-        79
+        225994,
+        17,
+        80
       ],
       [
-        159067,
-        16,
-        81
+        230344,
+        14,
+        82
       ],
       [
-        163287,
+        234638,
         12,
         85
       ],
       [
-        167451,
+        238977,
         11,
         86
       ],
       [
-        171639,
+        243264,
         11,
         86
       ],
       [
-        175797,
+        247732,
         11,
         86
       ],
       [
-        179969,
+        252271,
         11,
         86
       ],
       [
-        184169,
+        256737,
         11,
         86
       ],
       [
-        188347,
+        261215,
         11,
         86
       ],
       [
-        192502,
+        265740,
         11,
         86
       ],
       [
-        196708,
+        270022,
         11,
         86
       ],
       [
-        200881,
+        274349,
         11,
         86
       ],
       [
-        205134,
+        278672,
         11,
         86
       ],
       [
-        209314,
+        283103,
         11,
         86
       ],
       [
-        213472,
+        287368,
         11,
         86
       ],
       [
-        217635,
+        291663,
         11,
         86
       ],
       [
-        221933,
+        296012,
         11,
         86
       ],
       [
-        226113,
+        300303,
         11,
         86
       ],
       [
-        230282,
+        304705,
         11,
         86
       ],
       [
-        234455,
+        308969,
         11,
         86
       ],
       [
-        238621,
+        313425,
         11,
         86
       ],
       [
-        242776,
+        317763,
         11,
         86
       ],
       [
-        246937,
+        322391,
         11,
         86
       ],
       [
-        251093,
+        326802,
         11,
         86
       ],
       [
-        255275,
-        11,
-        86
-      ],
-      [
-        259456,
-        11,
-        86
-      ],
-      [
-        263625,
-        11,
-        86
-      ],
-      [
-        267797,
-        11,
-        86
-      ],
-      [
-        271956,
-        11,
-        86
-      ],
-      [
-        276128,
-        11,
-        86
-      ],
-      [
-        280285,
-        11,
-        86
-      ],
-      [
-        284443,
-        11,
-        86
-      ],
-      [
-        288614,
-        11,
-        86
-      ],
-      [
-        292845,
-        11,
-        86
-      ],
-      [
-        297003,
-        11,
-        86
-      ],
-      [
-        301165,
-        11,
-        86
-      ],
-      [
-        305338,
-        11,
-        86
-      ],
-      [
-        309504,
-        11,
-        86
-      ],
-      [
-        313668,
-        11,
-        86
-      ],
-      [
-        317867,
-        11,
-        86
-      ],
-      [
-        322030,
-        11,
-        86
-      ],
-      [
-        326193,
-        11,
-        86
-      ],
-      [
-        330359,
-        11,
-        86
-      ],
-      [
-        334552,
-        11,
-        86
-      ],
-      [
-        338793,
-        11,
-        86
-      ],
-      [
-        343041,
-        11,
-        86
-      ],
-      [
-        347204,
-        11,
-        86
-      ],
-      [
-        351366,
-        11,
-        86
-      ],
-      [
-        355528,
-        11,
-        86
-      ],
-      [
-        359721,
-        11,
-        86
-      ],
-      [
-        363879,
-        11,
-        86
-      ],
-      [
-        368035,
-        11,
-        86
-      ],
-      [
-        372204,
-        11,
-        86
-      ],
-      [
-        376361,
-        11,
-        86
-      ],
-      [
-        380571,
-        11,
-        86
-      ],
-      [
-        384755,
-        11,
-        86
-      ],
-      [
-        388919,
-        11,
-        86
-      ],
-      [
-        393159,
-        11,
-        86
-      ],
-      [
-        397319,
-        11,
-        86
-      ],
-      [
-        401524,
-        11,
-        86
-      ],
-      [
-        405734,
-        11,
-        86
-      ],
-      [
-        409893,
-        11,
-        86
-      ],
-      [
-        414062,
-        11,
-        86
-      ],
-      [
-        418225,
-        11,
-        86
-      ],
-      [
-        422397,
-        11,
-        86
-      ],
-      [
-        426602,
-        11,
-        86
-      ],
-      [
-        430830,
-        11,
-        86
-      ],
-      [
-        434999,
-        11,
-        86
-      ],
-      [
-        439162,
-        11,
-        86
-      ],
-      [
-        443370,
-        11,
-        86
-      ],
-      [
-        447544,
-        11,
-        86
-      ],
-      [
-        451707,
-        11,
-        86
-      ],
-      [
-        455902,
-        11,
-        86
-      ],
-      [
-        460123,
-        11,
-        86
-      ],
-      [
-        464301,
-        11,
-        86
-      ],
-      [
-        468488,
-        11,
-        86
-      ],
-      [
-        472655,
-        11,
-        86
-      ],
-      [
-        476817,
-        11,
-        86
-      ],
-      [
-        480975,
-        10,
-        86
+        331282,
+        9,
+        87
       ],
       [
-        485135,
-        7,
-        89
+        335765,
+        6,
+        90
       ],
       [
-        489337,
+        340329,
         3,
-        92
+        93
       ],
       [
-        493537,
+        344745,
         2,
         94
       ],
       [
-        497713,
+        349020,
+        2,
+        94
+      ],
+      [
+        353332,
         1,
         95
       ],
       [
-        501887,
+        357931,
         1,
         95
       ],
       [
-        506096,
+        362566,
         0,
         96
       ]
     ],
-    "queueFull429": 1,
-    "retries": 1,
+    "queueFull429": 2,
+    "retries": 2,
     "fastForwards": 4,
     "mergeCommits": 95,
-    "admission": "backpressure fired: 1 enqueue(s) answered 429 QUEUE_FULL with Retry-After and were retried after the stated wait",
-    "longestIdle": {
-      "ms": 306596,
-      "fromMs": 164154,
-      "toMs": 470750,
-      "endedBy": "#93 ejected MERGE_CONFLICT"
-    }
+    "admission": "backpressure fired: 2 enqueue(s) answered 429 QUEUE_FULL with Retry-After and were retried after the stated wait"
   },
   "conflicts": {
     "same-file edits on separate lines, landed as clean merges (both edits present)": 6,
@@ -1886,20 +1692,20 @@
   "abortedAt": null,
   "incomplete": [],
   "stageMs": {
-    "setup": 4015,
-    "fleet": 203056,
-    "observe": 4176,
-    "verify-pre": 814,
-    "burst": 517886,
-    "resolve": 52228,
-    "verify-final": 4630,
-    "cleanup": 11785
+    "setup": 5891,
+    "fleet": 204664,
+    "observe": 4474,
+    "verify-pre": 1713,
+    "burst": 378339,
+    "resolve": 66760,
+    "verify-final": 12741,
+    "cleanup": 22186
   },
   "requests": {
     "projected": 3314,
-    "observed": 1336,
+    "observed": 1261,
     "byKind": {
-      "http": 892,
+      "http": 817,
       "git": 444
     },
     "byStage": {
@@ -1921,15 +1727,15 @@
       },
       "burst": {
         "projected": 298,
-        "observed": 199
+        "observed": 200
       },
       "polls": {
         "projected": 1800,
-        "observed": 244
+        "observed": 166
       },
       "resolve": {
         "projected": 232,
-        "observed": 48
+        "observed": 50
       },
       "verify-final": {
         "projected": 35,
@@ -1945,7 +1751,7 @@
     "retries": {
       "http429": 0,
       "git429": 0,
-      "queueFull": 1,
+      "queueFull": 2,
       "gitRead": 0,
       "budget": 100
     },
@@ -1976,8 +1782,8 @@
       },
       "sum": {
         "d1": 2,
-        "rr": 1527,
-        "rw": 710,
+        "rr": 1536,
+        "rw": 716,
         "art": 1,
         "do": 0,
         "r2a": 0,
@@ -2005,14 +1811,14 @@
       }
     },
     "GET /repos/:o/:r/changes": {
-      "count": 123,
+      "count": 84,
       "statuses": {
-        "200": 123
+        "200": 84
       },
       "sum": {
-        "d1": 246,
-        "rr": 39340,
-        "rw": 1,
+        "d1": 168,
+        "rr": 27715,
+        "rw": 0,
         "art": 0,
         "do": 0,
         "r2a": 0,
@@ -2022,13 +1828,13 @@
       }
     },
     "GET /repos/:o/:r/changes/:n": {
-      "count": 12,
+      "count": 14,
       "statuses": {
-        "200": 12
+        "200": 14
       },
       "sum": {
-        "d1": 33,
-        "rr": 161,
+        "d1": 39,
+        "rr": 183,
         "rw": 15,
         "art": 290,
         "do": 0,
@@ -2045,7 +1851,7 @@
       },
       "sum": {
         "d1": 6,
-        "rr": 1652,
+        "rr": 1656,
         "rw": 0,
         "art": 0,
         "do": 0,
@@ -2056,13 +1862,13 @@
       }
     },
     "GET /repos/:o/:r/queue": {
-      "count": 124,
+      "count": 85,
       "statuses": {
-        "200": 124
+        "200": 85
       },
       "sum": {
-        "d1": 248,
-        "rr": 2811,
+        "d1": 170,
+        "rr": 2771,
         "rw": 0,
         "art": 0,
         "do": 0,
@@ -2147,8 +1953,8 @@
       },
       "sum": {
         "d1": 2,
-        "rr": 4,
-        "rw": 0,
+        "rr": 5,
+        "rw": 1,
         "art": 0,
         "do": 0,
         "r2a": 0,
@@ -2164,8 +1970,8 @@
       },
       "sum": {
         "d1": 200,
-        "rr": 501,
-        "rw": 601,
+        "rr": 500,
+        "rw": 600,
         "art": 0,
         "do": 0,
         "r2a": 0,
@@ -2209,15 +2015,15 @@
       }
     },
     "POST /repos/:o/:r/changes/:n/enqueue": {
-      "count": 103,
+      "count": 104,
       "statuses": {
         "201": 102,
-        "429": 1
+        "429": 2
       },
       "sum": {
-        "d1": 207,
-        "rr": 1241,
-        "rw": 408,
+        "d1": 210,
+        "rr": 1254,
+        "rw": 409,
         "art": 0,
         "do": 0,
         "r2a": 0,
@@ -2284,9 +2090,9 @@
       },
       "sum": {
         "d1": 396,
-        "rr": 2471,
+        "rr": 2470,
         "rw": 1584,
-        "art": 1174,
+        "art": 1178,
         "do": 0,
         "r2a": 0,
         "r2b": 0,
@@ -2313,71 +2119,71 @@
     }
   },
   "background": {
-    "push events (D1 push_events)": 406,
-    "push event deliveries": 406,
-    "push event arrival after the Artifacts event, avg / max ms": "5298 / 41856",
-    "push event effects completion after arrival, avg / max ms": "388 / 59397",
+    "push events (D1 push_events)": 407,
+    "push event deliveries": 407,
+    "push event arrival after the Artifacts event, avg / max ms": "6151 / 54046",
+    "push event effects completion after arrival, avg / max ms": "287 / 2086",
     "queue entries (published / other)": "99 / 3",
     "summed stored per-publication counters (merge_queue.cost)": {
       "d1": 297,
-      "rr": 1492,
-      "rw": 297,
+      "rr": 991,
+      "rw": 295,
       "art": 2,
       "do": 198,
       "q": 0,
       "sub": 198
     },
     "check runs recorded": 104,
-    "snapshot commits (by state)": "ready 91",
-    "snapshot tree builds, summed build counters": "91: steps=273;d1=273;rr=1365;rw=728;art=5130;r2a=91;r2b=0;sub=0;treeReads=363;blobReads=4494;parts=0;objects=91;bytes=4880896;largestBlob=62763;peakBuffer=4880896;peakHeld=65824"
+    "snapshot commits (by state)": "ready 95",
+    "snapshot tree builds, summed build counters": "95: steps=285;d1=285;rr=1425;rw=760;art=5455;r2a=95;r2b=0;sub=0;treeReads=379;blobReads=4791;parts=0;objects=95;bytes=5197312;largestBlob=65744;peakBuffer=5197312;peakHeld=71427"
   },
   "d1": {
     "queue": [
       {
+        "change_number": 5,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "50b6bd6123d1e1e90987179d5e5d2e46057e2f89",
+        "previous_sha": "a68f50745b85509f9ba63122521778cf054886a9",
+        "cost": "{\"d1\":3,\"rr\":12,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734390117,
+        "updated_at": 1791734752063,
+        "attempts": 1,
+        "generation": 1
+      },
+      {
         "change_number": 4,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "7d250963aa1e4b290bf3fd229a9042389f1a1312",
-        "previous_sha": "c90cbe1498ad4ededcbde30616049586d16a5bdb",
-        "cost": "{\"d1\":3,\"rr\":20,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703655860,
-        "updated_at": 1791704159966,
-        "attempts": 2,
+        "merge_commit": "a68f50745b85509f9ba63122521778cf054886a9",
+        "previous_sha": "864da5ed78d5fe924aa8059a6538a2852581d9f6",
+        "cost": "{\"d1\":3,\"rr\":11,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734390729,
+        "updated_at": 1791734743133,
+        "attempts": 1,
+        "generation": 1
+      },
+      {
+        "change_number": 3,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "818df4cd96900f0c010649c9bd727294d349ba24",
+        "previous_sha": "0fb51255c626c8431b8726968101b3b5d6442dee",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":2,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734391389,
+        "updated_at": 1791734399939,
+        "attempts": 0,
         "generation": 1
       },
       {
         "change_number": 2,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "c90cbe1498ad4ededcbde30616049586d16a5bdb",
-        "previous_sha": "3b7df93ed2b43a425a2e85d82429448f94b361fd",
-        "cost": "{\"d1\":3,\"rr\":19,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703656456,
-        "updated_at": 1791704153123,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 1,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "4fced2cd3de3d882aa09bf3b17a06b0df9a62d41",
-        "previous_sha": "a1db8e45601a8618d31695de893fff696ce99ef3",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":2,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703657129,
-        "updated_at": 1791703664550,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 5,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "0d8e75070a71e6de673f7f89a56ed5007f49a7bf",
-        "previous_sha": "4fced2cd3de3d882aa09bf3b17a06b0df9a62d41",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703657657,
-        "updated_at": 1791703665273,
+        "merge_commit": "91124f0a51ce00c0c3d29acf5a1b5736495609a8",
+        "previous_sha": "818df4cd96900f0c010649c9bd727294d349ba24",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734391922,
+        "updated_at": 1791734400802,
         "attempts": 0,
         "generation": 1
       },
@@ -2385,47 +2191,11 @@
         "change_number": 6,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "acf57e629d18343a74b3ecc2fe3548a08a9f7c4d",
-        "previous_sha": "0d8e75070a71e6de673f7f89a56ed5007f49a7bf",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703658266,
-        "updated_at": 1791703666455,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 7,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "4ce6d606cb2833090d65feb59d8a5c8440e1217a",
-        "previous_sha": "acf57e629d18343a74b3ecc2fe3548a08a9f7c4d",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703658857,
-        "updated_at": 1791703667571,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 8,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "a7cde0e066ef2098c6855b1fb55a50bcff777b40",
-        "previous_sha": "4ce6d606cb2833090d65feb59d8a5c8440e1217a",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703659455,
-        "updated_at": 1791703668829,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 9,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "bf1575a2237d93c4ac55a1477063559b735965c8",
-        "previous_sha": "a7cde0e066ef2098c6855b1fb55a50bcff777b40",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703660064,
-        "updated_at": 1791703670436,
+        "merge_commit": "988713ea491d1ba01c71fb47d24c6dc8c269f842",
+        "previous_sha": "91124f0a51ce00c0c3d29acf5a1b5736495609a8",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734392531,
+        "updated_at": 1791734402249,
         "attempts": 0,
         "generation": 1
       },
@@ -2433,35 +2203,47 @@
         "change_number": 10,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "daa03c544703d9035126b6e325d7b1eeba3370cb",
-        "previous_sha": "bf1575a2237d93c4ac55a1477063559b735965c8",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703660673,
-        "updated_at": 1791703671630,
+        "merge_commit": "42365fe0ea6f6aa2f08d9ddfec3f521d8312e555",
+        "previous_sha": "988713ea491d1ba01c71fb47d24c6dc8c269f842",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734393127,
+        "updated_at": 1791734403818,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 11,
+        "change_number": 7,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "71b96452a7e9d4814c521ab53abf2434d78040e7",
-        "previous_sha": "daa03c544703d9035126b6e325d7b1eeba3370cb",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703661260,
-        "updated_at": 1791703675754,
+        "merge_commit": "1d9394df1a9dd23ec0afe3f2da5d921549f5aed1",
+        "previous_sha": "42365fe0ea6f6aa2f08d9ddfec3f521d8312e555",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734393718,
+        "updated_at": 1791734405347,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 14,
+        "change_number": 8,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "f8962c1f1233fbb360e284e4591838154bbc3ecf",
-        "previous_sha": "71b96452a7e9d4814c521ab53abf2434d78040e7",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703661864,
-        "updated_at": 1791703676970,
+        "merge_commit": "26ec31f038fa7ac826b5415ad6df1d0ee99a5f5f",
+        "previous_sha": "1d9394df1a9dd23ec0afe3f2da5d921549f5aed1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734394332,
+        "updated_at": 1791734406955,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 9,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "07ecb1a9fc33ad340ff698a417b13fb95943321a",
+        "previous_sha": "26ec31f038fa7ac826b5415ad6df1d0ee99a5f5f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734394918,
+        "updated_at": 1791734408388,
         "attempts": 0,
         "generation": 1
       },
@@ -2469,11 +2251,11 @@
         "change_number": 15,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "33b26070e9aa820c0a50f6ed4459ec0a2d43518b",
-        "previous_sha": "f8962c1f1233fbb360e284e4591838154bbc3ecf",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703662461,
-        "updated_at": 1791703678177,
+        "merge_commit": "38a73cc36a2976ed937286e31309767e4f9237ae",
+        "previous_sha": "07ecb1a9fc33ad340ff698a417b13fb95943321a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734395512,
+        "updated_at": 1791734409829,
         "attempts": 0,
         "generation": 1
       },
@@ -2481,11 +2263,11 @@
         "change_number": 12,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "e30b577d9ee9bab93b29103a32e6d208ab254239",
-        "previous_sha": "33b26070e9aa820c0a50f6ed4459ec0a2d43518b",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703663062,
-        "updated_at": 1791703679487,
+        "merge_commit": "cbb878c23a9feb2b163770e0d87cba483dbce53a",
+        "previous_sha": "38a73cc36a2976ed937286e31309767e4f9237ae",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734396127,
+        "updated_at": 1791734416108,
         "attempts": 0,
         "generation": 1
       },
@@ -2493,59 +2275,35 @@
         "change_number": 13,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "32f8029b645ae45d4e1d93c82a2beca9498b8ab4",
-        "previous_sha": "e30b577d9ee9bab93b29103a32e6d208ab254239",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703663662,
-        "updated_at": 1791703680816,
+        "merge_commit": "14e4bb2f56c61329f4b9dc30d5aa15688feb2085",
+        "previous_sha": "cbb878c23a9feb2b163770e0d87cba483dbce53a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734396717,
+        "updated_at": 1791734418331,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 17,
+        "change_number": 14,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "07f9c3678c530de893d19dce76a794ef55c0f832",
-        "previous_sha": "32f8029b645ae45d4e1d93c82a2beca9498b8ab4",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703664264,
-        "updated_at": 1791703682088,
+        "merge_commit": "500b623fb1d11e86139cd9a7e352f55b486db1a4",
+        "previous_sha": "14e4bb2f56c61329f4b9dc30d5aa15688feb2085",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734397318,
+        "updated_at": 1791734419837,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 16,
+        "change_number": 11,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "dcaf46b9e38e3a8d7c7dcf9d07e641708ff8e712",
-        "previous_sha": "07f9c3678c530de893d19dce76a794ef55c0f832",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703664895,
-        "updated_at": 1791703683408,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 18,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "7313d13eb43a03c712c4146c722e27edf65789c0",
-        "previous_sha": "dcaf46b9e38e3a8d7c7dcf9d07e641708ff8e712",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703665456,
-        "updated_at": 1791703684870,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 19,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "0fa608482526480a050ba668ee99c28781cfb833",
-        "previous_sha": "7313d13eb43a03c712c4146c722e27edf65789c0",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703666064,
-        "updated_at": 1791703689593,
+        "merge_commit": "4b1f7329fd1796e2c14a4d824be3134585f29901",
+        "previous_sha": "500b623fb1d11e86139cd9a7e352f55b486db1a4",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734398043,
+        "updated_at": 1791734422311,
         "attempts": 0,
         "generation": 1
       },
@@ -2553,11 +2311,59 @@
         "change_number": 20,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "943e67e32bc8bc37850b85587066dd7a39ecc1db",
-        "previous_sha": "0fa608482526480a050ba668ee99c28781cfb833",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703666658,
-        "updated_at": 1791703690840,
+        "merge_commit": "e81c6047b0b908910002fcb3f6faeaa94ef8c5cc",
+        "previous_sha": "4b1f7329fd1796e2c14a4d824be3134585f29901",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734398515,
+        "updated_at": 1791734424230,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 16,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f4e28c111731194fd44cfd9b2892989fd51a8cbf",
+        "previous_sha": "e81c6047b0b908910002fcb3f6faeaa94ef8c5cc",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734399117,
+        "updated_at": 1791734425836,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 17,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "86e09d7ab1330627f2a90701c289a508add7e155",
+        "previous_sha": "f4e28c111731194fd44cfd9b2892989fd51a8cbf",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734399820,
+        "updated_at": 1791734428309,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 18,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "d5d6ac79ac7c17d23c54780b3efdf96821114988",
+        "previous_sha": "86e09d7ab1330627f2a90701c289a508add7e155",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734400325,
+        "updated_at": 1791734430589,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 19,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "499e4ea715eb1fb40c7d7d67b3a52da2fc0a6a1a",
+        "previous_sha": "d5d6ac79ac7c17d23c54780b3efdf96821114988",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734401085,
+        "updated_at": 1791734439257,
         "attempts": 0,
         "generation": 1
       },
@@ -2565,11 +2371,11 @@
         "change_number": 21,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "8edfa391ecd786a61e31567ba80015e157e8472a",
-        "previous_sha": "943e67e32bc8bc37850b85587066dd7a39ecc1db",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703667281,
-        "updated_at": 1791703692071,
+        "merge_commit": "a742c9c9e7d45bf8efd0509b207b14934510ccda",
+        "previous_sha": "499e4ea715eb1fb40c7d7d67b3a52da2fc0a6a1a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734401528,
+        "updated_at": 1791734440834,
         "attempts": 0,
         "generation": 1
       },
@@ -2577,11 +2383,11 @@
         "change_number": 22,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "88dd3567fe7cfee431424dd0e0398277ad39b146",
-        "previous_sha": "8edfa391ecd786a61e31567ba80015e157e8472a",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703667860,
-        "updated_at": 1791703693320,
+        "merge_commit": "f7a1a4f602fd4844b6cdbbd0e38013ec077d9dc1",
+        "previous_sha": "a742c9c9e7d45bf8efd0509b207b14934510ccda",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734402131,
+        "updated_at": 1791734443276,
         "attempts": 0,
         "generation": 1
       },
@@ -2589,23 +2395,11 @@
         "change_number": 24,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "dd55097ef8e8399fe19de58e7aeddd541a1c54ba",
-        "previous_sha": "88dd3567fe7cfee431424dd0e0398277ad39b146",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703668462,
-        "updated_at": 1791703694540,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 23,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "814ac6cb8dd75415cabed53739b86d2d234eff59",
-        "previous_sha": "dd55097ef8e8399fe19de58e7aeddd541a1c54ba",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703669067,
-        "updated_at": 1791703695758,
+        "merge_commit": "337c0e73f59a61e522d809b7097bbec49fab95bc",
+        "previous_sha": "f7a1a4f602fd4844b6cdbbd0e38013ec077d9dc1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734402798,
+        "updated_at": 1791734444988,
         "attempts": 0,
         "generation": 1
       },
@@ -2613,11 +2407,23 @@
         "change_number": 25,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "7eaf309b31774acf0bd90153debd37e1813078cd",
-        "previous_sha": "814ac6cb8dd75415cabed53739b86d2d234eff59",
-        "cost": "{\"d1\":3,\"rr\":13,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703669658,
-        "updated_at": 1791703696989,
+        "merge_commit": "ca9dc14e0ab97712d5e4e7702f64ceff6c898fa2",
+        "previous_sha": "337c0e73f59a61e522d809b7097bbec49fab95bc",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734403336,
+        "updated_at": 1791734446872,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 23,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "58ee35a1e6ef82388aecb6ec9f4786584bb0dc25",
+        "previous_sha": "ca9dc14e0ab97712d5e4e7702f64ceff6c898fa2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734403938,
+        "updated_at": 1791734449104,
         "attempts": 0,
         "generation": 1
       },
@@ -2625,35 +2431,11 @@
         "change_number": 26,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "76da40314544ecc6c4691b184f90e8d1294d05ed",
-        "previous_sha": "7eaf309b31774acf0bd90153debd37e1813078cd",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703670261,
-        "updated_at": 1791703698186,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 27,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "4a4d09e59f524e6c60e9b4a7470aca1d566b0bb0",
-        "previous_sha": "76da40314544ecc6c4691b184f90e8d1294d05ed",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703670860,
-        "updated_at": 1791703703070,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 28,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "a8f8ed626516c493f285aed1e23ada3671a3f748",
-        "previous_sha": "4a4d09e59f524e6c60e9b4a7470aca1d566b0bb0",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703671460,
-        "updated_at": 1791703704571,
+        "merge_commit": "ae6888c90b4e5aea6cea40db678504144cadb7a7",
+        "previous_sha": "58ee35a1e6ef82388aecb6ec9f4786584bb0dc25",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734404526,
+        "updated_at": 1791734451100,
         "attempts": 0,
         "generation": 1
       },
@@ -2661,23 +2443,11 @@
         "change_number": 29,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "3eef57275f63144ce0cfed566f84f6713482e1ea",
-        "previous_sha": "a8f8ed626516c493f285aed1e23ada3671a3f748",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703672072,
-        "updated_at": 1791703705810,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 30,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "60416731783f11f80eff187f804318d231e91874",
-        "previous_sha": "3eef57275f63144ce0cfed566f84f6713482e1ea",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703672658,
-        "updated_at": 1791703707028,
+        "merge_commit": "1ddb6f43aff114bf26138ce88f32cb449840c3e2",
+        "previous_sha": "ae6888c90b4e5aea6cea40db678504144cadb7a7",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734405125,
+        "updated_at": 1791734452935,
         "attempts": 0,
         "generation": 1
       },
@@ -2685,35 +2455,47 @@
         "change_number": 31,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "a0433f3a17c55f57067a14c7565ec12b3ccc9b4b",
-        "previous_sha": "60416731783f11f80eff187f804318d231e91874",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703673258,
-        "updated_at": 1791703708227,
+        "merge_commit": "c0b21b90266539e5316d74d92b383ff904ee9dce",
+        "previous_sha": "1ddb6f43aff114bf26138ce88f32cb449840c3e2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734405737,
+        "updated_at": 1791734462603,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 33,
+        "change_number": 27,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "4850436d93743712acaa42b0783a2f60e96f26cd",
-        "previous_sha": "a0433f3a17c55f57067a14c7565ec12b3ccc9b4b",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703673860,
-        "updated_at": 1791703709396,
+        "merge_commit": "c38195783d122f00d08ce62f7f3d8a7ba375a076",
+        "previous_sha": "c0b21b90266539e5316d74d92b383ff904ee9dce",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734406445,
+        "updated_at": 1791734464483,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 32,
+        "change_number": 28,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "674d8ad21440136bdccbbf54b178451d881852ad",
-        "previous_sha": "4850436d93743712acaa42b0783a2f60e96f26cd",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703674455,
-        "updated_at": 1791703710624,
+        "merge_commit": "3358932f7f7f4fbdecaa4464e729747812f311d0",
+        "previous_sha": "c38195783d122f00d08ce62f7f3d8a7ba375a076",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734406927,
+        "updated_at": 1791734465933,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 30,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "5c7a31093348124c91ad1c3bfe0b37b9c974870e",
+        "previous_sha": "3358932f7f7f4fbdecaa4464e729747812f311d0",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734407528,
+        "updated_at": 1791734467527,
         "attempts": 0,
         "generation": 1
       },
@@ -2721,11 +2503,35 @@
         "change_number": 34,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "2b1e34c5e0a571124983275dd1d64ee66f56a307",
-        "previous_sha": "674d8ad21440136bdccbbf54b178451d881852ad",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703675071,
-        "updated_at": 1791703711900,
+        "merge_commit": "23cf10234354828baee17f220b6bcd994a339e7e",
+        "previous_sha": "5c7a31093348124c91ad1c3bfe0b37b9c974870e",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734408128,
+        "updated_at": 1791734469174,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 32,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "a7167bade8cc17120ab74d4aaa6f18a07f4875c1",
+        "previous_sha": "23cf10234354828baee17f220b6bcd994a339e7e",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734408790,
+        "updated_at": 1791734470716,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 33,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "0f275b4003d330dafc4408cea36ba236bd502ccb",
+        "previous_sha": "a7167bade8cc17120ab74d4aaa6f18a07f4875c1",
+        "cost": "{\"d1\":3,\"rr\":9,\"rw\":1,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734409392,
+        "updated_at": 1791734472260,
         "attempts": 0,
         "generation": 1
       },
@@ -2733,35 +2539,11 @@
         "change_number": 35,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "c62aca164be35153df7e4a85cf2f3354de9e2080",
-        "previous_sha": "2b1e34c5e0a571124983275dd1d64ee66f56a307",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703675657,
-        "updated_at": 1791703717067,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 37,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "e7e3de33b6af6de3b29f6160b48140213ba23cfb",
-        "previous_sha": "c62aca164be35153df7e4a85cf2f3354de9e2080",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703676262,
-        "updated_at": 1791703718315,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 38,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "cb9f17a44ea5640045396f04905f6aa941fbedb6",
-        "previous_sha": "e7e3de33b6af6de3b29f6160b48140213ba23cfb",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703676855,
-        "updated_at": 1791703719526,
+        "merge_commit": "95f408a2cdbb94e26ebd269e5df46eb5a40311ef",
+        "previous_sha": "0f275b4003d330dafc4408cea36ba236bd502ccb",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734409951,
+        "updated_at": 1791734474320,
         "attempts": 0,
         "generation": 1
       },
@@ -2769,11 +2551,23 @@
         "change_number": 36,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "954c00cb28ab9c8ab53c95cdf059a173756c4cb3",
-        "previous_sha": "cb9f17a44ea5640045396f04905f6aa941fbedb6",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703677463,
-        "updated_at": 1791703720671,
+        "merge_commit": "362ffda1491cbd3f663164efd024e2f8207a10dc",
+        "previous_sha": "95f408a2cdbb94e26ebd269e5df46eb5a40311ef",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734410546,
+        "updated_at": 1791734483019,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 37,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "59bcaaef39ae65b5c2c6fc25b174e25c17316ef8",
+        "previous_sha": "362ffda1491cbd3f663164efd024e2f8207a10dc",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734411200,
+        "updated_at": 1791734484670,
         "attempts": 0,
         "generation": 1
       },
@@ -2781,11 +2575,11 @@
         "change_number": 40,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "051ff52794b2126e68e405038702e777a4db12a8",
-        "previous_sha": "954c00cb28ab9c8ab53c95cdf059a173756c4cb3",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703678055,
-        "updated_at": 1791703722075,
+        "merge_commit": "3d609cf556daafd31744e1f72fcbefa238c3ba66",
+        "previous_sha": "59bcaaef39ae65b5c2c6fc25b174e25c17316ef8",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734411796,
+        "updated_at": 1791734486359,
         "attempts": 0,
         "generation": 1
       },
@@ -2793,35 +2587,11 @@
         "change_number": 39,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "b40fbe0941a1cf61ab67de959c474d4776773815",
-        "previous_sha": "051ff52794b2126e68e405038702e777a4db12a8",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703678663,
-        "updated_at": 1791703723311,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 44,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "4219765fbf64a888c446c6bd79de7d7475846b98",
-        "previous_sha": "b40fbe0941a1cf61ab67de959c474d4776773815",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703679259,
-        "updated_at": 1791703724575,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 45,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "880e5254cf5874bdc807a32574e93dd5d875ecfc",
-        "previous_sha": "4219765fbf64a888c446c6bd79de7d7475846b98",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703679867,
-        "updated_at": 1791703725819,
+        "merge_commit": "faf30528964f69f812ce2a5d01f7ebac46370b0a",
+        "previous_sha": "3d609cf556daafd31744e1f72fcbefa238c3ba66",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734412314,
+        "updated_at": 1791734487856,
         "attempts": 0,
         "generation": 1
       },
@@ -2829,11 +2599,23 @@
         "change_number": 41,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "bf0eed61fa5e7ff0e5198af859307fe6631e6bc6",
-        "previous_sha": "880e5254cf5874bdc807a32574e93dd5d875ecfc",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703680466,
-        "updated_at": 1791703731145,
+        "merge_commit": "f72f54c930908841a2acbed90b02607b9290c6d8",
+        "previous_sha": "faf30528964f69f812ce2a5d01f7ebac46370b0a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734412938,
+        "updated_at": 1791734489468,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 38,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "258612c43c0e594d0c0a6a8133e906ffb6c6282b",
+        "previous_sha": "f72f54c930908841a2acbed90b02607b9290c6d8",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734413528,
+        "updated_at": 1791734490944,
         "attempts": 0,
         "generation": 1
       },
@@ -2841,11 +2623,23 @@
         "change_number": 42,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "3090122a058a96f6ec8ae30df747bb73b114c3a3",
-        "previous_sha": "bf0eed61fa5e7ff0e5198af859307fe6631e6bc6",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703681060,
-        "updated_at": 1791703732385,
+        "merge_commit": "22adea602504079381ff1ce62667e3ecab715039",
+        "previous_sha": "258612c43c0e594d0c0a6a8133e906ffb6c6282b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734414121,
+        "updated_at": 1791734492600,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 44,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "8cb1727e89cc0b6adefa589c431ae14b89b93189",
+        "previous_sha": "22adea602504079381ff1ce62667e3ecab715039",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734414837,
+        "updated_at": 1791734494145,
         "attempts": 0,
         "generation": 1
       },
@@ -2853,11 +2647,23 @@
         "change_number": 43,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "d126cd60726350b519f5cb5fdaafbfe5ba9cb3c7",
-        "previous_sha": "3090122a058a96f6ec8ae30df747bb73b114c3a3",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703681693,
-        "updated_at": 1791703733598,
+        "merge_commit": "61525ad7a7e38f4ea3a7cbb1797174b2d733039d",
+        "previous_sha": "8cb1727e89cc0b6adefa589c431ae14b89b93189",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734415318,
+        "updated_at": 1791734502732,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 45,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "390d32de42ec136db16506275029385f4d57bdd5",
+        "previous_sha": "61525ad7a7e38f4ea3a7cbb1797174b2d733039d",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734416007,
+        "updated_at": 1791734504310,
         "attempts": 0,
         "generation": 1
       },
@@ -2865,11 +2671,11 @@
         "change_number": 46,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "cb0761cb87774d4ac767efaf9d3724becea65435",
-        "previous_sha": "d126cd60726350b519f5cb5fdaafbfe5ba9cb3c7",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703682255,
-        "updated_at": 1791703735065,
+        "merge_commit": "2ad09c5738426d168d6b4c82650bf3cda1afd3b6",
+        "previous_sha": "390d32de42ec136db16506275029385f4d57bdd5",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734416510,
+        "updated_at": 1791734505844,
         "attempts": 0,
         "generation": 1
       },
@@ -2877,11 +2683,11 @@
         "change_number": 47,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "2326e8885db4c638fc2c2deddcc49b4804a69e8a",
-        "previous_sha": "cb0761cb87774d4ac767efaf9d3724becea65435",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703682895,
-        "updated_at": 1791703736190,
+        "merge_commit": "eab3d47f5568d9a01f52638cc4fd2350e332a47f",
+        "previous_sha": "2ad09c5738426d168d6b4c82650bf3cda1afd3b6",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734417140,
+        "updated_at": 1791734507267,
         "attempts": 0,
         "generation": 1
       },
@@ -2889,23 +2695,11 @@
         "change_number": 48,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "f7f43fbd68695017a9b0ebbd6c03fcc9654b0949",
-        "previous_sha": "2326e8885db4c638fc2c2deddcc49b4804a69e8a",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703683496,
-        "updated_at": 1791703737428,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 49,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "cc5394c1dca13617a6197b736ef45c84f2d7e49d",
-        "previous_sha": "f7f43fbd68695017a9b0ebbd6c03fcc9654b0949",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703684062,
-        "updated_at": 1791703738664,
+        "merge_commit": "f988f34a6acadce7e4c0684f5deb254ff871ae8b",
+        "previous_sha": "eab3d47f5568d9a01f52638cc4fd2350e332a47f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734417732,
+        "updated_at": 1791734509000,
         "attempts": 0,
         "generation": 1
       },
@@ -2913,23 +2707,11 @@
         "change_number": 50,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "26f5976cb78e1e2da6e95f84b5eac8f546affba2",
-        "previous_sha": "cc5394c1dca13617a6197b736ef45c84f2d7e49d",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703684666,
-        "updated_at": 1791703740259,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 55,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "cb796926964615845f55939107db6dca0c4db870",
-        "previous_sha": "26f5976cb78e1e2da6e95f84b5eac8f546affba2",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703685256,
-        "updated_at": 1791703746269,
+        "merge_commit": "760bbd3754bb38ff7b1559e636e6e236bfe11870",
+        "previous_sha": "f988f34a6acadce7e4c0684f5deb254ff871ae8b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734418312,
+        "updated_at": 1791734510547,
         "attempts": 0,
         "generation": 1
       },
@@ -2937,11 +2719,23 @@
         "change_number": 51,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "67a873589679bdd48c4f4cea3f1e93581ab557da",
-        "previous_sha": "cb796926964615845f55939107db6dca0c4db870",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703685910,
-        "updated_at": 1791703747699,
+        "merge_commit": "75bb8a5dee9e9c6a27172612772667dc1b0c0339",
+        "previous_sha": "760bbd3754bb38ff7b1559e636e6e236bfe11870",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734419046,
+        "updated_at": 1791734512064,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 49,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "ad7a260092f1ea6ed09e1ee1354a855fb957174d",
+        "previous_sha": "75bb8a5dee9e9c6a27172612772667dc1b0c0339",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734419524,
+        "updated_at": 1791734513569,
         "attempts": 0,
         "generation": 1
       },
@@ -2949,23 +2743,11 @@
         "change_number": 52,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "edbc05f655c7c0d0327a725da0557994cd6f88f5",
-        "previous_sha": "67a873589679bdd48c4f4cea3f1e93581ab557da",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703686463,
-        "updated_at": 1791703748994,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 54,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "95c3e84e03c4a939a2bf986c06aa9834e8619a9e",
-        "previous_sha": "edbc05f655c7c0d0327a725da0557994cd6f88f5",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703687071,
-        "updated_at": 1791703750192,
+        "merge_commit": "c39e67752bb13780bf25111fdf54c29fd649228c",
+        "previous_sha": "ad7a260092f1ea6ed09e1ee1354a855fb957174d",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734420115,
+        "updated_at": 1791734524112,
         "attempts": 0,
         "generation": 1
       },
@@ -2973,35 +2755,11 @@
         "change_number": 53,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "c5908eae856a6aa85c67d378c53b9594e372d955",
-        "previous_sha": "95c3e84e03c4a939a2bf986c06aa9834e8619a9e",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703687665,
-        "updated_at": 1791703751387,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 59,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "5e6aab419ef5f63a8aa45b440447e2a308496a12",
-        "previous_sha": "c5908eae856a6aa85c67d378c53b9594e372d955",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703688272,
-        "updated_at": 1791703752602,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 60,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "500cb07ed5b4304f54c82c40acf437ea8b714946",
-        "previous_sha": "5e6aab419ef5f63a8aa45b440447e2a308496a12",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703688936,
-        "updated_at": 1791703753781,
+        "merge_commit": "34a4bca11e9644a7e2ccd51fb05597497e75a79a",
+        "previous_sha": "c39e67752bb13780bf25111fdf54c29fd649228c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734420737,
+        "updated_at": 1791734525682,
         "attempts": 0,
         "generation": 1
       },
@@ -3009,11 +2767,23 @@
         "change_number": 56,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "55730bc83e166d06f9c621476960f8a693a6bc8b",
-        "previous_sha": "500cb07ed5b4304f54c82c40acf437ea8b714946",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703689458,
-        "updated_at": 1791703754958,
+        "merge_commit": "5cc039d928da4fb1db5ce68589e4c50d3835ad13",
+        "previous_sha": "34a4bca11e9644a7e2ccd51fb05597497e75a79a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734421335,
+        "updated_at": 1791734527510,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 54,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f89ce4501298f031b97edd5f74d668695e71dcea",
+        "previous_sha": "5cc039d928da4fb1db5ce68589e4c50d3835ad13",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734422029,
+        "updated_at": 1791734528953,
         "attempts": 0,
         "generation": 1
       },
@@ -3021,11 +2791,23 @@
         "change_number": 57,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "0b05eafb27d820e3d07394eb6b4379e5da4efd26",
-        "previous_sha": "55730bc83e166d06f9c621476960f8a693a6bc8b",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703690090,
-        "updated_at": 1791703761235,
+        "merge_commit": "e26ff5766e9e737f9914342710f37726166ad32b",
+        "previous_sha": "f89ce4501298f031b97edd5f74d668695e71dcea",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734422535,
+        "updated_at": 1791734530320,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 55,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "cc189c9526157b5444f2a8832981226644574bba",
+        "previous_sha": "e26ff5766e9e737f9914342710f37726166ad32b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734423146,
+        "updated_at": 1791734531678,
         "attempts": 0,
         "generation": 1
       },
@@ -3033,23 +2815,23 @@
         "change_number": 58,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "35e7eaf42957c46e20a46a2bfe0c18e8416350c0",
-        "previous_sha": "0b05eafb27d820e3d07394eb6b4379e5da4efd26",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703690660,
-        "updated_at": 1791703762449,
+        "merge_commit": "7b71e1e9c7f709049204ea1b5fb52bea7feb43e3",
+        "previous_sha": "cc189c9526157b5444f2a8832981226644574bba",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734423731,
+        "updated_at": 1791734533103,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 61,
+        "change_number": 59,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "e5736e68b017af4c1bee59306ee33f1fbcd422a7",
-        "previous_sha": "35e7eaf42957c46e20a46a2bfe0c18e8416350c0",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703691262,
-        "updated_at": 1791703763786,
+        "merge_commit": "7388e551086a3fc3e24124cfc9fb6e9c275862b9",
+        "previous_sha": "7b71e1e9c7f709049204ea1b5fb52bea7feb43e3",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734424391,
+        "updated_at": 1791734534538,
         "attempts": 0,
         "generation": 1
       },
@@ -3057,11 +2839,35 @@
         "change_number": 62,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "75ebbcab2b89c0987fbbdf0b0cab9ef20fcb929a",
-        "previous_sha": "e5736e68b017af4c1bee59306ee33f1fbcd422a7",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703691858,
-        "updated_at": 1791703765054,
+        "merge_commit": "0d9f53bc880a787626a59b104f8e2b093c677934",
+        "previous_sha": "7388e551086a3fc3e24124cfc9fb6e9c275862b9",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734424927,
+        "updated_at": 1791734547084,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 60,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "60b4ba6a42865a1c7107134e36370ae93fef911f",
+        "previous_sha": "0d9f53bc880a787626a59b104f8e2b093c677934",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734425530,
+        "updated_at": 1791734548482,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 61,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "4555a8749ab0fad21218cf5dc7ec7e9080895084",
+        "previous_sha": "60b4ba6a42865a1c7107134e36370ae93fef911f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734426166,
+        "updated_at": 1791734549935,
         "attempts": 0,
         "generation": 1
       },
@@ -3069,11 +2875,11 @@
         "change_number": 63,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "a4281b87bf2a9716ce8266c3adc881354552d20d",
-        "previous_sha": "75ebbcab2b89c0987fbbdf0b0cab9ef20fcb929a",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703692461,
-        "updated_at": 1791703766199,
+        "merge_commit": "89ff73b3c90a8387805fc4e25671b8dff6383fb7",
+        "previous_sha": "4555a8749ab0fad21218cf5dc7ec7e9080895084",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734426797,
+        "updated_at": 1791734551355,
         "attempts": 0,
         "generation": 1
       },
@@ -3081,11 +2887,11 @@
         "change_number": 64,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "511eca476ff55c64761969cf378efe66156176df",
-        "previous_sha": "a4281b87bf2a9716ce8266c3adc881354552d20d",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703693062,
-        "updated_at": 1791703767439,
+        "merge_commit": "212dfd26f0f629a5696eb9d17fcdaa56b801731c",
+        "previous_sha": "89ff73b3c90a8387805fc4e25671b8dff6383fb7",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734427320,
+        "updated_at": 1791734553046,
         "attempts": 0,
         "generation": 1
       },
@@ -3093,35 +2899,11 @@
         "change_number": 65,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "77d6f2cbd4b7a9e452b6016962bca1757a5ed8ea",
-        "previous_sha": "511eca476ff55c64761969cf378efe66156176df",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703693659,
-        "updated_at": 1791703768768,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 66,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "175aa1c8b6febe9591d0b02a703ca4e7367a0a0f",
-        "previous_sha": "77d6f2cbd4b7a9e452b6016962bca1757a5ed8ea",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703694260,
-        "updated_at": 1791703769984,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 68,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "4d967bd47e0a68dfec21cb7f6dce9e5d2b288c5d",
-        "previous_sha": "175aa1c8b6febe9591d0b02a703ca4e7367a0a0f",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703694859,
-        "updated_at": 1791703776371,
+        "merge_commit": "34e4d3ec0a0fce859ef021534e8c3bc42bfc8c75",
+        "previous_sha": "212dfd26f0f629a5696eb9d17fcdaa56b801731c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734427992,
+        "updated_at": 1791734554653,
         "attempts": 0,
         "generation": 1
       },
@@ -3129,11 +2911,23 @@
         "change_number": 67,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "f5f25806e12f4ad26eb8135bcc4c1b74f4471281",
-        "previous_sha": "4d967bd47e0a68dfec21cb7f6dce9e5d2b288c5d",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703695463,
-        "updated_at": 1791703777539,
+        "merge_commit": "ffd14600d7f7c2bd451d1d39e802ff3207fbe31b",
+        "previous_sha": "34e4d3ec0a0fce859ef021534e8c3bc42bfc8c75",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734428517,
+        "updated_at": 1791734556370,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 66,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "889cb0e1ad4c1c0a6381d0daa6a79a792b96b142",
+        "previous_sha": "ffd14600d7f7c2bd451d1d39e802ff3207fbe31b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734429132,
+        "updated_at": 1791734557831,
         "attempts": 0,
         "generation": 1
       },
@@ -3141,23 +2935,23 @@
         "change_number": 69,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "f41fe94d9734e11eb2f258af482250cefaf7d664",
-        "previous_sha": "f5f25806e12f4ad26eb8135bcc4c1b74f4471281",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703696065,
-        "updated_at": 1791703778707,
+        "merge_commit": "02ae555dfc9ade23837bd0d0b57c4d18bf9446f1",
+        "previous_sha": "889cb0e1ad4c1c0a6381d0daa6a79a792b96b142",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734429757,
+        "updated_at": 1791734570087,
         "attempts": 0,
         "generation": 1
       },
       {
-        "change_number": 70,
+        "change_number": 68,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "92aa275d8b8fafff179a7e557b1d689ba721660f",
-        "previous_sha": "f41fe94d9734e11eb2f258af482250cefaf7d664",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703696666,
-        "updated_at": 1791703779852,
+        "merge_commit": "1676f04fafcd36227ab1e254dc54168d606712eb",
+        "previous_sha": "02ae555dfc9ade23837bd0d0b57c4d18bf9446f1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734430440,
+        "updated_at": 1791734571614,
         "attempts": 0,
         "generation": 1
       },
@@ -3165,11 +2959,23 @@
         "change_number": 71,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "b87363206fa2f2dafd8f00097a5b1f692aa1b745",
-        "previous_sha": "92aa275d8b8fafff179a7e557b1d689ba721660f",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703697257,
-        "updated_at": 1791703781056,
+        "merge_commit": "2a18d1572b57639bca70e45d9e1d47fd13fe4f59",
+        "previous_sha": "1676f04fafcd36227ab1e254dc54168d606712eb",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734431032,
+        "updated_at": 1791734573208,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 70,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "e7f1fb0ba99a510cd2e84f75aadf836869cb3f5b",
+        "previous_sha": "2a18d1572b57639bca70e45d9e1d47fd13fe4f59",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734431537,
+        "updated_at": 1791734574646,
         "attempts": 0,
         "generation": 1
       },
@@ -3177,11 +2983,11 @@
         "change_number": 72,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "11ca61195017264f54afa5d9e6629351925d1fcf",
-        "previous_sha": "b87363206fa2f2dafd8f00097a5b1f692aa1b745",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703697860,
-        "updated_at": 1791703782186,
+        "merge_commit": "653992a045314861cc022b585d4854b268eee3d1",
+        "previous_sha": "e7f1fb0ba99a510cd2e84f75aadf836869cb3f5b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734432114,
+        "updated_at": 1791734576319,
         "attempts": 0,
         "generation": 1
       },
@@ -3189,11 +2995,11 @@
         "change_number": 73,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "1afd4fffc83ef81f8cfaf02bebb4264eb4faa7a8",
-        "previous_sha": "11ca61195017264f54afa5d9e6629351925d1fcf",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703698458,
-        "updated_at": 1791703783471,
+        "merge_commit": "453e5e9466812ccb1479332d150000fd5995c917",
+        "previous_sha": "653992a045314861cc022b585d4854b268eee3d1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734432715,
+        "updated_at": 1791734577816,
         "attempts": 0,
         "generation": 1
       },
@@ -3201,35 +3007,11 @@
         "change_number": 74,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "b6cb3edd5e688dd27c744e0af663b6a82bd4d1c2",
-        "previous_sha": "1afd4fffc83ef81f8cfaf02bebb4264eb4faa7a8",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703699095,
-        "updated_at": 1791703784838,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 75,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "46d4cf960db6bcd5e9231b2eee95f2565608e29f",
-        "previous_sha": "b6cb3edd5e688dd27c744e0af663b6a82bd4d1c2",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703699660,
-        "updated_at": 1791703787757,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 80,
-        "state": "ejected",
-        "reason_code": "MERGE_CONFLICT",
-        "merge_commit": null,
-        "previous_sha": null,
-        "cost": null,
-        "enqueued_at": 1791703700263,
-        "updated_at": 1791703788387,
+        "merge_commit": "6a997fb2dfa7d9ab81e3d68329fea734e7483f03",
+        "previous_sha": "453e5e9466812ccb1479332d150000fd5995c917",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734433336,
+        "updated_at": 1791734579351,
         "attempts": 0,
         "generation": 1
       },
@@ -3237,23 +3019,35 @@
         "change_number": 76,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "f9b627b5a8064853ae4c2a04663087c1071f610b",
-        "previous_sha": "46d4cf960db6bcd5e9231b2eee95f2565608e29f",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703700861,
-        "updated_at": 1791703794684,
+        "merge_commit": "868727e4b668368234ec3cf738eee2bc0a9bbd15",
+        "previous_sha": "6a997fb2dfa7d9ab81e3d68329fea734e7483f03",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734433913,
+        "updated_at": 1791734581279,
         "attempts": 0,
         "generation": 1
       },
       {
         "change_number": 77,
+        "state": "ejected",
+        "reason_code": "MERGE_CONFLICT",
+        "merge_commit": null,
+        "previous_sha": null,
+        "cost": null,
+        "enqueued_at": 1791734434526,
+        "updated_at": 1791734582194,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 75,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "fc520f42d06fafae96d37ca936afb2f65e3146b7",
-        "previous_sha": "f9b627b5a8064853ae4c2a04663087c1071f610b",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703701456,
-        "updated_at": 1791703795816,
+        "merge_commit": "30f42b84fa2e950dedd1f62d58326fa6f9b89c90",
+        "previous_sha": "868727e4b668368234ec3cf738eee2bc0a9bbd15",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734435141,
+        "updated_at": 1791734593796,
         "attempts": 0,
         "generation": 1
       },
@@ -3261,35 +3055,11 @@
         "change_number": 78,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "aa034137047f2b0215ba9432b74e0426dfd6dc13",
-        "previous_sha": "fc520f42d06fafae96d37ca936afb2f65e3146b7",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703702067,
-        "updated_at": 1791703797138,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 79,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "7a4cc96f1edc6edb016bd77b265b312469c1c195",
-        "previous_sha": "aa034137047f2b0215ba9432b74e0426dfd6dc13",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703702656,
-        "updated_at": 1791703798312,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 81,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "b834b500eccfff3d3fd0d144905b694de325a456",
-        "previous_sha": "7a4cc96f1edc6edb016bd77b265b312469c1c195",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703703259,
-        "updated_at": 1791703799460,
+        "merge_commit": "fefc939bcd3eb528479e11f6e4eaa78898baa71b",
+        "previous_sha": "30f42b84fa2e950dedd1f62d58326fa6f9b89c90",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734435842,
+        "updated_at": 1791734595334,
         "attempts": 0,
         "generation": 1
       },
@@ -3297,227 +3067,11 @@
         "change_number": 82,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "a31a5529fc3f371052d4d7661253c62fd80308c2",
-        "previous_sha": "b834b500eccfff3d3fd0d144905b694de325a456",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703703863,
-        "updated_at": 1791703800759,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 83,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "1bc9dc56ab2e33bdf189f90d0167ca0254ba4fe1",
-        "previous_sha": "a31a5529fc3f371052d4d7661253c62fd80308c2",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703704464,
-        "updated_at": 1791703802076,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 84,
-        "state": "ejected",
-        "reason_code": "MERGE_CONFLICT",
-        "merge_commit": null,
-        "previous_sha": null,
-        "cost": null,
-        "enqueued_at": 1791703705067,
-        "updated_at": 1791703803540,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 88,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "4932b36b9cf4914481785957cfbd18324d76eba9",
-        "previous_sha": "1bc9dc56ab2e33bdf189f90d0167ca0254ba4fe1",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703705654,
-        "updated_at": 1791703812149,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 86,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "c02277058265588d1993cedb6667d38022cbc9c1",
-        "previous_sha": "4932b36b9cf4914481785957cfbd18324d76eba9",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703706257,
-        "updated_at": 1791703813445,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 85,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "3aca033bc2954648e7b41bd117075d2949a94e12",
-        "previous_sha": "c02277058265588d1993cedb6667d38022cbc9c1",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703706854,
-        "updated_at": 1791703815005,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 87,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "42923ce6c78fc862956e882d6cdee0424517c6bd",
-        "previous_sha": "3aca033bc2954648e7b41bd117075d2949a94e12",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703707466,
-        "updated_at": 1791703816385,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 89,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "e444204f09b635f36acb0cb161506d6fde232027",
-        "previous_sha": "42923ce6c78fc862956e882d6cdee0424517c6bd",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703708084,
-        "updated_at": 1791703817658,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 91,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "5062030f47293697bfa1dcf07413861044acc704",
-        "previous_sha": "e444204f09b635f36acb0cb161506d6fde232027",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703708654,
-        "updated_at": 1791703818814,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 90,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "98bdd22f6c2efb0afda6c3a0fa9e439fec85b9ff",
-        "previous_sha": "5062030f47293697bfa1dcf07413861044acc704",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703709271,
-        "updated_at": 1791703820014,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 93,
-        "state": "ejected",
-        "reason_code": "MERGE_CONFLICT",
-        "merge_commit": null,
-        "previous_sha": null,
-        "cost": null,
-        "enqueued_at": 1791703709866,
-        "updated_at": 1791704126610,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 92,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "b48e5e9efb95bb380615d0e5c5a1cecb2e68024c",
-        "previous_sha": "98bdd22f6c2efb0afda6c3a0fa9e439fec85b9ff",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703710487,
-        "updated_at": 1791704136966,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 97,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "de6fb9bd55984b223d8dfc7c607285c8c2f4002f",
-        "previous_sha": "b48e5e9efb95bb380615d0e5c5a1cecb2e68024c",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703711063,
-        "updated_at": 1791704138291,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 95,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "4a90acdfaf6d52beceb43ea197b24e816cff8b1e",
-        "previous_sha": "de6fb9bd55984b223d8dfc7c607285c8c2f4002f",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703711774,
-        "updated_at": 1791704139847,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 94,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "1d2b8927b1de5c47e67c2c04fa50cd978bff6e6e",
-        "previous_sha": "4a90acdfaf6d52beceb43ea197b24e816cff8b1e",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703712273,
-        "updated_at": 1791704141077,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 96,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "10ee25b79fc8e977699cc33a8eefc4962fc5340f",
-        "previous_sha": "1d2b8927b1de5c47e67c2c04fa50cd978bff6e6e",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703742987,
-        "updated_at": 1791704142444,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 98,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "810a056fdfc57f10e3e850d9e760cc380a987afc",
-        "previous_sha": "10ee25b79fc8e977699cc33a8eefc4962fc5340f",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703743401,
-        "updated_at": 1791704143759,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 99,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "6f45adebc77da6e85abac5810880bfa3f4682c28",
-        "previous_sha": "810a056fdfc57f10e3e850d9e760cc380a987afc",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703744002,
-        "updated_at": 1791704145060,
-        "attempts": 0,
-        "generation": 1
-      },
-      {
-        "change_number": 3,
-        "state": "published",
-        "reason_code": null,
-        "merge_commit": "3b7df93ed2b43a425a2e85d82429448f94b361fd",
-        "previous_sha": "6f45adebc77da6e85abac5810880bfa3f4682c28",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791703744601,
-        "updated_at": 1791704146378,
+        "merge_commit": "430b2f1361ab38774fedfecefbf860cdbff7847c",
+        "previous_sha": "fefc939bcd3eb528479e11f6e4eaa78898baa71b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734436453,
+        "updated_at": 1791734596761,
         "attempts": 0,
         "generation": 1
       },
@@ -3525,73 +3079,325 @@
         "change_number": 80,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "0ac239fe6ee4f59516e44cebff08f890f262805f",
-        "previous_sha": "7d250963aa1e4b290bf3fd229a9042389f1a1312",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791704169945,
-        "updated_at": 1791704183260,
-        "attempts": 6,
+        "merge_commit": "cca27e8beb3f77bfaa8dce4a747f133692c1d2b2",
+        "previous_sha": "430b2f1361ab38774fedfecefbf860cdbff7847c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734437001,
+        "updated_at": 1791734598398,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 81,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "726360278fc71a7184db8e4df7b21124f5a0b45f",
+        "previous_sha": "cca27e8beb3f77bfaa8dce4a747f133692c1d2b2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734437511,
+        "updated_at": 1791734599921,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 79,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f5ea3c2274a0468d8dc47bddd51df8aca39c37d2",
+        "previous_sha": "726360278fc71a7184db8e4df7b21124f5a0b45f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734468323,
+        "updated_at": 1791734601383,
+        "attempts": 0,
         "generation": 1
       },
       {
         "change_number": 84,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "cf8ffac5c25a9ac8c137cb336a97caaa09ec2616",
-        "previous_sha": "0ac239fe6ee4f59516e44cebff08f890f262805f",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791704189937,
-        "updated_at": 1791704200112,
-        "attempts": 1,
+        "merge_commit": "f2a8a6a9101ffc0b4becd779e2d6ac42c9fa937c",
+        "previous_sha": "f5ea3c2274a0468d8dc47bddd51df8aca39c37d2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734468736,
+        "updated_at": 1791734603275,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 85,
+        "state": "ejected",
+        "reason_code": "MERGE_CONFLICT",
+        "merge_commit": null,
+        "previous_sha": null,
+        "cost": null,
+        "enqueued_at": 1791734469355,
+        "updated_at": 1791734604066,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 87,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "a9d18efe2388d384ee91bffcc85294f6b11fca0b",
+        "previous_sha": "f2a8a6a9101ffc0b4becd779e2d6ac42c9fa937c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734469926,
+        "updated_at": 1791734615229,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 86,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "01a330365ea75a94527432b845949be2d6693e06",
+        "previous_sha": "a9d18efe2388d384ee91bffcc85294f6b11fca0b",
+        "cost": "{\"d1\":3,\"rr\":9,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734470538,
+        "updated_at": 1791734617295,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 83,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "8159d57640de8a3df78ef07a313e72177136388d",
+        "previous_sha": "01a330365ea75a94527432b845949be2d6693e06",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734471140,
+        "updated_at": 1791734618747,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 92,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f811454f292b3f42747571dee1b2e87f497f6779",
+        "previous_sha": "8159d57640de8a3df78ef07a313e72177136388d",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734471841,
+        "updated_at": 1791734620294,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 91,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "6ef89ca51b5ea1d4a722422efd757311b9af6480",
+        "previous_sha": "f811454f292b3f42747571dee1b2e87f497f6779",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734472358,
+        "updated_at": 1791734621686,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 89,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "52b9a63a1e73ce6547ade84624c2d8d0937be9de",
+        "previous_sha": "6ef89ca51b5ea1d4a722422efd757311b9af6480",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734473165,
+        "updated_at": 1791734623765,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 88,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "00cda3665f40200b14b071bd92779d5540943bc7",
+        "previous_sha": "52b9a63a1e73ce6547ade84624c2d8d0937be9de",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734473714,
+        "updated_at": 1791734625178,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 90,
+        "state": "ejected",
+        "reason_code": "MERGE_CONFLICT",
+        "merge_commit": null,
+        "previous_sha": null,
+        "cost": null,
+        "enqueued_at": 1791734474446,
+        "updated_at": 1791734704862,
+        "attempts": 0,
         "generation": 1
       },
       {
         "change_number": 93,
         "state": "published",
         "reason_code": null,
-        "merge_commit": "3a43e52a7545e25a9ff8bf15a4732412114e440e",
-        "previous_sha": "cf8ffac5c25a9ac8c137cb336a97caaa09ec2616",
-        "cost": "{\"d1\":3,\"rr\":15,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
-        "enqueued_at": 1791704205610,
-        "updated_at": 1791704211807,
+        "merge_commit": "c5bf9c4f36e88eeff3304c4d47c855357c7ffb08",
+        "previous_sha": "00cda3665f40200b14b071bd92779d5540943bc7",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734475095,
+        "updated_at": 1791734719860,
         "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 94,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "c18bb22276ad118d211f0e2e3f5fde678810b697",
+        "previous_sha": "c5bf9c4f36e88eeff3304c4d47c855357c7ffb08",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734475521,
+        "updated_at": 1791734721405,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 95,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "0102f20eaa29c29ef8cf761fd55e4a2367b51a5f",
+        "previous_sha": "c18bb22276ad118d211f0e2e3f5fde678810b697",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734476124,
+        "updated_at": 1791734722769,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 96,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "02dd0b2d4a5ab077564d2591070e88473e675216",
+        "previous_sha": "0102f20eaa29c29ef8cf761fd55e4a2367b51a5f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734476834,
+        "updated_at": 1791734724442,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 97,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "7ed9ef85bb8b4bf57d7c7a8ab4e5360b1c22e115",
+        "previous_sha": "02dd0b2d4a5ab077564d2591070e88473e675216",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734477321,
+        "updated_at": 1791734725938,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 98,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "9fc78d95df27c8bc845c47ef53a8dd4d93743ddf",
+        "previous_sha": "7ed9ef85bb8b4bf57d7c7a8ab4e5360b1c22e115",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734508270,
+        "updated_at": 1791734727368,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 99,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "cd23ad608842b9bff1dbb1469d59000320a04378",
+        "previous_sha": "9fc78d95df27c8bc845c47ef53a8dd4d93743ddf",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734508596,
+        "updated_at": 1791734729113,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 1,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "864da5ed78d5fe924aa8059a6538a2852581d9f6",
+        "previous_sha": "cd23ad608842b9bff1dbb1469d59000320a04378",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734509197,
+        "updated_at": 1791734730634,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 77,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "32427b26c4e2c0474a5cc53ea6a7f92b4ac71969",
+        "previous_sha": "50b6bd6123d1e1e90987179d5e5d2e46057e2f89",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734760475,
+        "updated_at": 1791734783449,
+        "attempts": 6,
+        "generation": 1
+      },
+      {
+        "change_number": 85,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "0a7ca8caafd3138ad82f84bba9d98631f320d6ed",
+        "previous_sha": "32427b26c4e2c0474a5cc53ea6a7f92b4ac71969",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734790886,
+        "updated_at": 1791734798373,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 90,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "fe66398eb667ab306e4722ccda444f1fc94a4c23",
+        "previous_sha": "0a7ca8caafd3138ad82f84bba9d98631f320d6ed",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734805407,
+        "updated_at": 1791734815184,
+        "attempts": 1,
         "generation": 1
       }
     ],
     "pushEvents": {
-      "events": 406,
-      "deliveries": 406,
+      "events": 407,
+      "deliveries": 407,
       "incomplete": 0,
-      "avgEffectMs": 388,
-      "maxEffectMs": 59397,
-      "avgArrivalMs": 5298,
-      "maxArrivalMs": 41856
+      "avgEffectMs": 287,
+      "maxEffectMs": 2086,
+      "avgArrivalMs": 6151,
+      "maxArrivalMs": 54046
     },
     "snapshots": {
       "commits": [
         {
           "state": "ready",
-          "n": 91
+          "n": 95
         }
       ],
-      "trees": 91,
+      "trees": 95,
       "treeBuildCost": {
-        "steps": 273,
-        "d1": 273,
-        "rr": 1365,
-        "rw": 728,
-        "art": 5130,
-        "r2a": 91,
+        "steps": 285,
+        "d1": 285,
+        "rr": 1425,
+        "rw": 760,
+        "art": 5455,
+        "r2a": 95,
         "r2b": 0,
         "sub": 0,
-        "treeReads": 363,
-        "blobReads": 4494,
+        "treeReads": 379,
+        "blobReads": 4791,
         "parts": 0,
-        "objects": 91,
-        "bytes": 4880896,
-        "largestBlob": 62763,
-        "peakBuffer": 4880896,
-        "peakHeld": 65824
+        "objects": 95,
+        "bytes": 5197312,
+        "largestBlob": 65744,
+        "peakBuffer": 5197312,
+        "peakHeld": 71427
       }
     },
     "checkRuns": [
@@ -3619,13 +3425,13 @@
     },
     {
       "id": "setup",
-      "label": "cynthia/scale-staged-campaign-fleet-1791703431 does not exist yet",
+      "label": "cynthia/scale-staged-campaign-fleet-1791734157 does not exist yet",
       "ok": true,
       "detail": "GET 404"
     },
     {
       "id": "setup",
-      "label": "created cynthia/scale-staged-campaign-fleet-1791703431",
+      "label": "created cynthia/scale-staged-campaign-fleet-1791734157",
       "ok": true,
       "detail": "POST 201"
     },
@@ -3633,7 +3439,7 @@
       "id": "VAL-SCALE-002",
       "label": "100 workspaces created by 100 distinct agent principals and pushed",
       "ok": true,
-      "detail": "199059 ms"
+      "detail": "200309 ms"
     },
     {
       "id": "VAL-SCALE-003",
@@ -3645,7 +3451,7 @@
       "id": "VAL-SCALE-002",
       "label": "the Nexus index observed all 100 pushed heads",
       "ok": true,
-      "detail": "4494 ms after the last push (poll granularity 4000 ms)"
+      "detail": "5194 ms after the last push (poll granularity 4000 ms)"
     },
     {
       "id": "VAL-SCALE-002a",
@@ -3735,7 +3541,7 @@
       "id": "VAL-SCALE-003",
       "label": "fresh clone: each accepted change's unique marker present exactly once, none for unaccepted changes or the sentinel (111 markers over 105 files)",
       "ok": true,
-      "detail": "main 3a43e52a7545e25a9ff8bf15a4732412114e440e"
+      "detail": "main fe66398eb667ab306e4722ccda444f1fc94a4c23"
     },
     {
       "id": "VAL-SCALE-003",
@@ -3757,21 +3563,21 @@
     },
     {
       "id": "VAL-SCALE-004d",
-      "label": "every per-publication stored counter set within the cost.md publication row d1<=3;rr<=12;rw<=8;art<=4;do=2",
-      "ok": false,
-      "detail": "0/99 within"
+      "label": "every per-publication stored counter set within the applicable cost.md publication row",
+      "ok": true,
+      "detail": "unpinned 97/97 within d1<=3;rr<=12;rw<=8;art<=4;do=2;sub<=2; with incoming pins 2/2 within d1<=3;rr<=12;rw<=8;art<=4;do=2;sub<=2"
     },
     {
       "id": "VAL-SCALE-004a",
       "label": "early sentinel workspace w000 still active at its recorded sha (GET + ls-remote)",
       "ok": true,
-      "detail": "status active, GET head 3b14b3efc90bf70586a08cad5b89d3db9e66fa71, ls-remote 3b14b3efc90bf70586a08cad5b89d3db9e66fa71, recorded 3b14b3efc90bf70586a08cad5b89d3db9e66fa71"
+      "detail": "status active, GET head 23bfdf1c234906a6bcc26048acdba1af9015b743, ls-remote 23bfdf1c234906a6bcc26048acdba1af9015b743, recorded 23bfdf1c234906a6bcc26048acdba1af9015b743"
     },
     {
       "id": "VAL-SCALE-004c",
       "label": "refs/notes/forge-attribution notes exactly the 98 Forge merge commits and resolution commits, once each",
       "ok": true,
-      "detail": "98 noted at d13f4b00330cf95604215f3a0bc5b822673086b4; missing none; unexpected none"
+      "detail": "98 noted at 2a2d15e69d45092021ee72452f002a2f8899b0b0; missing none; unexpected none"
     },
     {
       "id": "VAL-SCALE-004c",
@@ -3795,7 +3601,7 @@
       "id": "VAL-SCALE-003",
       "label": "admission/backpressure statement recorded (429 honored or capacity not reached)",
       "ok": true,
-      "detail": "backpressure fired: 1 enqueue(s) answered 429 QUEUE_FULL with Retry-After and were retried after the stated wait"
+      "detail": "backpressure fired: 2 enqueue(s) answered 429 QUEUE_FULL with Retry-After and were retried after the stated wait"
     },
     {
       "id": "VAL-SCALE-004b",
@@ -3805,27 +3611,21 @@
     },
     {
       "id": "VAL-SCALE-004b",
-      "label": "deleted only the repo this run created (cynthia/scale-staged-campaign-fleet-1791703431): DELETE then owner GET 404",
+      "label": "deleted only the repo this run created (cynthia/scale-staged-campaign-fleet-1791734157): DELETE then owner GET 404",
       "ok": true,
       "detail": "DELETE 200, GET 404"
     },
     {
-      "id": "VAL-SCALE-004d",
+      "id": "VAL-SCALE-004d-monetary",
       "label": "campaign report has no monetary amount or pricing derivation",
       "ok": true,
       "detail": ""
     }
   ],
-  "passed": 33,
-  "failed": 1,
+  "passed": 34,
+  "failed": 0,
   "notes": [
-    "Pinned dependent w003 enqueue counters `d1=2;rr=15;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes).",
-    "Pinned dependent w002 enqueue counters `d1=2;rr=16;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes).",
-    "1 pinned-chain `d1=3;rr=20;rw=3;art=0;do=2;q=0;sub=2` publication(s) outside the publication row d1<=3;rr<=12;rw<=8;art<=4;do=2: #4.",
-    "1 pinned-chain `d1=3;rr=19;rw=3;art=0;do=2;q=0;sub=2` publication(s) outside the publication row d1<=3;rr<=12;rw<=8;art<=4;do=2: #2.",
-    "1 unpinned `d1=3;rr=15;rw=3;art=2;do=2;q=0;sub=2` publication(s) outside the publication row d1<=3;rr<=12;rw<=8;art<=4;do=2: #1.",
-    "94 unpinned `d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2` publication(s) outside the publication row d1<=3;rr<=12;rw<=8;art<=4;do=2: #5, #6, #7, #8, #9, #10, #11, #14, #15, #12, #13, #17, ….",
-    "1 unpinned `d1=3;rr=13;rw=3;art=0;do=2;q=0;sub=2` publication(s) outside the publication row d1<=3;rr<=12;rw<=8;art<=4;do=2: #25.",
-    "1 pinned-chain `d1=3;rr=15;rw=3;art=0;do=2;q=0;sub=2` publication(s) outside the publication row d1<=3;rr<=12;rw<=8;art<=4;do=2: #3."
+    "Pinned dependent w003 enqueue counters `d1=2;rr=16;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes).",
+    "Pinned dependent w002 enqueue counters `d1=2;rr=15;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes)."
   ]
 }
