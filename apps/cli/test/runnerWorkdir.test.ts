@@ -388,6 +388,32 @@ describe('forge runner warm workdir', () => {
     expect(observed).not.toHaveProperty('stray.log');
   });
 
+  it('--fresh rematerializes the whole workdir from the snapshot, skips the delta and drops caches', async () => {
+    const workRoot = join(root, 'fresh');
+    const outside = join(root, 'outside-fresh');
+    mkdirSync(outside);
+    const seen: string[] = [];
+    await runOnce(workRoot, [job('j1', history.c1)], dirtyFirstJob(outside, seen));
+    const before = snapshotDownloads.count;
+    let observed: Record<string, string> = {};
+    const second = await runOnce(
+      workRoot,
+      [job('j2', history.c2)],
+      async (_command, cwd) => {
+        observed = treeState(cwd);
+        return ok;
+      },
+      { fresh: true },
+    );
+    expect(second.reports[0]).toMatchObject({ conclusion: 'success', summary: { sha: history.c2, source: 'snapshot' } });
+    expect(second.stdout).toContain('workdir: fresh');
+    expect(snapshotDownloads.count).toBe(before + 1);
+    expect(second.restGets.filter((g) => g === 'compare')).toEqual([]);
+    expect(observed).toEqual(treeState(await freshCheckout(history.c2)));
+    expect(observed).not.toHaveProperty('node_modules/dep');
+    expect(observed).not.toHaveProperty('.venv');
+  });
+
   it('falls back to a full snapshot checkout when the delta sync fails mid-flight and the job still completes', async () => {
     const workRoot = join(root, 'fallback');
     const outside = join(root, 'outside-fallback');
