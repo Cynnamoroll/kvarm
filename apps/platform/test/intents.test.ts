@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines, sha256Hex } from '@forge/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import { INTENT_LIMITS, collapseObserved, normalizeDeclaration } from '../src/services/intents/paths';
+import { INTENT_LIMITS, collapseObserved, minimalCover, normalizeDeclaration } from '../src/services/intents/paths';
 import { collectPairs, setOverlap, setOverlapStatements } from '../src/services/intents/forecast';
 import { COMPARE_BUDGETS } from '../src/services/compare';
 import worker from '../src/index';
@@ -234,6 +234,70 @@ describe('path normalization (pure)', () => {
     expect(c.collapsed).toBe(true);
     const small = collapseObserved(['b.ts', 'a.ts'], 10);
     expect(small).toEqual({ paths: ['a.ts', 'b.ts'], collapsed: false, truncated: false });
+  });
+
+  // The quadratic definitions the sorted sweep replaced, kept as the reference.
+  const byStr = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const refCover = (entries: Iterable<string>) => {
+    const sorted = [...new Set(entries)].sort(byStr);
+    const prefixes = sorted.filter((p) => p.endsWith('/'));
+    return sorted.filter((p) => !prefixes.some((q) => q !== p && (p === q || p.startsWith(q))));
+  };
+  const refCollapse = (paths: Iterable<string>, max: number) => {
+    const unique = [...new Set(paths)].sort(byStr);
+    if (unique.length <= max) return { paths: unique, collapsed: false, truncated: false };
+    const depth = Math.max(...unique.map((p) => p.split('/').length));
+    for (let d = depth - 1; d >= 1; d--) {
+      const level = refCover(unique.map((p) => (p.split('/').length > d ? `${p.split('/').slice(0, d).join('/')}/` : p)));
+      if (level.length <= max) return { paths: level, collapsed: true, truncated: false };
+    }
+    const top = refCover(unique.map((p) => (p.includes('/') ? `${p.split('/')[0]}/` : p)));
+    return { paths: top.slice(0, max), collapsed: true, truncated: true };
+  };
+
+  it('cover and collapse match the reference definitions on random path sets', () => {
+    let seed = 7;
+    const rnd = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      return seed % n;
+    };
+    const names = ['a', 'b', 'a.b', 'a-b', 'ab', 'z', 'é'];
+    for (let round = 0; round < 200; round++) {
+      const entries: string[] = [];
+      for (let i = 0, n = 1 + rnd(40); i < n; i++) {
+        const segs = Array.from({ length: 1 + rnd(5) }, () => names[rnd(names.length)]!);
+        entries.push(segs.join('/') + (rnd(3) === 0 ? '/' : ''));
+      }
+      expect(minimalCover(entries), JSON.stringify(entries)).toEqual(refCover(entries));
+      const files = entries.map((e) => (e.endsWith('/') ? `${e}f` : e));
+      for (const max of [1, 2, 3, 5, 8, 50]) expect(collapseObserved(files, max), `${max} ${JSON.stringify(files)}`).toEqual(refCollapse(files, max));
+    }
+  });
+
+  it('collapses a 20,000-path deep and wide observed set in linearithmic time', () => {
+    const n = 20_000;
+    // Wide: every file in its own top-level directory, so even the top level does not fit.
+    const wide = Array.from({ length: n }, (_, i) => `d${i}/sub/f.ts`);
+    // Deep: a binary directory tree 15 levels down plus a long tail, 31 segments per path.
+    const deep = Array.from({ length: n }, (_, i) => {
+      const segs = Array.from({ length: 15 }, (_, j) => `s${(i >> j) & 1}`);
+      return [...segs, ...Array.from({ length: 15 }, (_, j) => `t${j}`), `f${i}.ts`].join('/');
+    });
+    // Many prefixes at once: the cover of 20,000 sibling prefixes and their files.
+    const prefixes = Array.from({ length: n }, (_, i) => `p/${i}/`).concat(Array.from({ length: n }, (_, i) => `p/${i}/x.ts`));
+    const started = performance.now();
+    const w = collapseObserved(wide);
+    const d = collapseObserved(deep);
+    const cover = minimalCover(prefixes);
+    const elapsed = performance.now() - started;
+    expect(w).toMatchObject({ collapsed: true, truncated: true });
+    expect(w.paths).toHaveLength(INTENT_LIMITS.observedMax);
+    expect(d).toMatchObject({ collapsed: true, truncated: false });
+    expect(d.paths.length).toBeLessThanOrEqual(INTENT_LIMITS.observedMax);
+    for (const p of deep.slice(0, 500)) expect(d.paths.some((e) => p === e || (e.endsWith('/') && p.startsWith(e)))).toBe(true);
+    expect(cover).toHaveLength(n);
+    // The push-consumer CPU budget for the intent-index effect's cover work (library/cost.md).
+    expect(elapsed).toBeLessThan(1_000);
   });
 });
 
@@ -771,5 +835,177 @@ describe('active-workspace overlap', () => {
     const kept = new Set(ids.slice(0, m));
     for (const p of r.json.pairs) for (const w of p.workspaces) expect(kept.has(w)).toBe(true);
     expect(r.cost).toMatchObject({ d1: 2, art: 0, do: 0 });
+  });
+});
+
+describe('Nexus reads at fleet scale', () => {
+  /**
+   * The fleet shape (scripts/lib/fleet.mjs): every member adds its own
+   * marker file, twelve also edit shared/config.txt, and a pinned chain of
+   * three stacks iface/ files. Seeded straight into D1, as the push consumer
+   * would have indexed it.
+   */
+  async function seedFleet(name: string, n: number): Promise<string[]> {
+    await seedRepo(name);
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind(name).first<{ id: string }>())!.id;
+    const now = Date.now();
+    const ids = Array.from({ length: n }, (_, i) => `${name.replace(/[^0-9a-z]/g, '')}w${String(i).padStart(3, '0')}`);
+    const shared = new Set(Array.from({ length: 12 }, (_, k) => 4 + Math.floor((k * (n - 4)) / 12)));
+    const pathsOf = (i: number) => {
+      const p = [`fleet/w${String(i).padStart(3, '0')}.txt`];
+      if (shared.has(i)) p.push('shared/config.txt');
+      if (i >= 1 && i <= 3) p.push(...['iface/a.txt', 'iface/b.txt', 'iface/c.txt'].slice(0, i));
+      return p.sort();
+    };
+    await env.DB.batch(
+      ids.flatMap((id, i) => [
+        env.DB.prepare(
+          `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at,
+             observed_paths, observed_head_sha, observed_at, observed_prefixes)
+           VALUES (?1, ?2, 'x', ?1, 'a', 'active', 'refs/heads/agents/' || ?1 || '/t', 'main', ?3, ?4, ?4, ?5, ?3, ?4, 0)`,
+        ).bind(id, repoId, '1'.repeat(40), now, JSON.stringify(pathsOf(i))),
+        ...pathsOf(i).map((p) =>
+          env.DB.prepare(`INSERT INTO workspace_paths (repo_id, kind, path, workspace_id) VALUES (?, 'observed', ?, ?)`).bind(repoId, p, id),
+        ),
+      ]),
+    );
+    return ids;
+  }
+
+  it('overlap and forecast read only the shared paths and the page, not every indexed row', async () => {
+    await seedFleet('fleet-16', 16);
+    await seedFleet('fleet-100', 100);
+    const results: Record<string, CostCounters> = {};
+    for (const name of ['fleet-16', 'fleet-100']) {
+      const o = await overlap(name, 'base=main&limit=50');
+      expect(o.status).toBe(200);
+      // 12 shared-file members (66 pairs) and the chain (3 pairs).
+      expect(o.json.pairs).toHaveLength(50);
+      expect(o.json.nextCursor).not.toBeNull();
+      const o2 = await overlap(name, `base=main&limit=50&cursor=${encodeURIComponent(o.json.nextCursor)}`);
+      expect(o.json.pairs.length + o2.json.pairs.length).toBe(69);
+      const f = await forecast(name, 'paths=shared/config.txt&limit=100');
+      expect(f.status).toBe(200);
+      expect(f.json.matches).toHaveLength(12);
+      expect(f.json.truncated).toBe(false);
+      results[`${name} overlap`] = o.cost;
+      results[`${name} overlap page 2`] = o2.cost;
+      results[`${name} forecast`] = f.cost;
+    }
+    console.log(JSON.stringify(Object.fromEntries(Object.entries(results).map(([k, c]) => [k, `d1=${c.d1};rr=${c.rr};rw=${c.rw}`]))));
+    for (const c of Object.values(results)) expect(c).toMatchObject({ d1: 2, art: 0, do: 0, sub: 0 });
+    // Rows read follow the shared paths and the page, not the fleet size (library/cost.md overlap/forecast rows).
+    expect(results['fleet-100 overlap']!.rr).toBeLessThanOrEqual(80);
+    expect(results['fleet-100 overlap page 2']!.rr).toBeLessThanOrEqual(80);
+    expect(results['fleet-100 forecast']!.rr).toBeLessThanOrEqual(40);
+    expect(results['fleet-100 overlap']!.rr - results['fleet-16 overlap']!.rr).toBeLessThanOrEqual(5);
+    expect(results['fleet-100 forecast']!.rr - results['fleet-16 forecast']!.rr).toBeLessThanOrEqual(5);
+  });
+
+  it('a popular path costs one page of rows per forecast page, and the pages stay complete', async () => {
+    const ids = await seedFleet('fleet-hot', 16);
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('fleet-hot').first<{ id: string }>())!.id;
+    await env.DB.batch(ids.map((id) => env.DB.prepare(`INSERT INTO workspace_paths (repo_id, kind, path, workspace_id) VALUES (?, 'observed', 'hot.ts', ?)`).bind(repoId, id)));
+    const extra = Array.from({ length: 140 }, (_, i) => `fleethotx${String(i).padStart(3, '0')}`);
+    const now = Date.now();
+    await env.DB.batch(
+      extra.flatMap((id) => [
+        env.DB.prepare(
+          `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at, observed_paths, observed_head_sha, observed_at)
+           VALUES (?1, ?2, 'x', ?1, 'a', 'active', 'refs/heads/agents/' || ?1 || '/t', 'main', ?3, ?4, ?4, '["hot.ts"]', ?3, ?4)`,
+        ).bind(id, repoId, '1'.repeat(40), now),
+        env.DB.prepare(`INSERT INTO workspace_paths (repo_id, kind, path, workspace_id) VALUES (?, 'observed', 'hot.ts', ?)`).bind(repoId, id),
+      ]),
+    );
+    const all = [...ids, ...extra].sort();
+    const seen: string[] = [];
+    const costs: number[] = [];
+    let cursor: string | null = null;
+    do {
+      const r: Reply = await forecast('fleet-hot', `paths=hot.ts&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      expect(r.status).toBe(200);
+      seen.push(...r.json.matches.map((m: any) => m.workspace));
+      for (const m of r.json.matches) expect(m.evidence).toEqual([{ kind: 'observed', path: 'hot.ts', query: 'hot.ts' }]);
+      costs.push(r.cost.rr);
+      cursor = r.json.nextCursor;
+    } while (cursor && costs.length < 20);
+    expect(seen).toEqual(all);
+    // 156 matching workspaces, 20 per page: each page reads its 21 hits and their workspaces, never all 156.
+    for (const rr of costs) expect(rr).toBeLessThanOrEqual(2 * 21 + 10);
+  });
+
+  it('a query prefix reads a bounded number of entries and says when it stopped', async () => {
+    await seedRepo('fc-range');
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('fc-range').first<{ id: string }>())!.id;
+    const now = Date.now();
+    const ids = ['rangea', 'rangeb', 'rangec'];
+    const max = INTENT_LIMITS.forecastRangeHitMax;
+    await env.DB.batch(
+      ids.map((id) =>
+        env.DB.prepare(
+          `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at, observed_paths, observed_head_sha, observed_at)
+           VALUES (?1, ?2, 'x', ?1, 'a', 'active', 'refs/heads/agents/' || ?1 || '/t', 'main', ?3, ?4, ?4, '[]', ?3, ?4)`,
+        ).bind(id, repoId, '1'.repeat(40), now),
+      ),
+    );
+    // rangea holds max entries below gen/, so rangeb's single entry sorts past the bound; rangec matches the exact key.
+    const rows = Array.from({ length: max }, (_, i) => ['rangea', `gen/a${String(i).padStart(5, '0')}.ts`]).concat([
+      ['rangeb', 'gen/z.ts'],
+      ['rangec', 'gen/'],
+    ]);
+    for (let i = 0; i < rows.length; i += 500) {
+      await env.DB.batch(
+        rows.slice(i, i + 500).map(([id, p]) => env.DB.prepare(`INSERT INTO workspace_paths (repo_id, kind, path, workspace_id) VALUES (?, 'observed', ?, ?)`).bind(repoId, p, id)),
+      );
+    }
+    const r = await forecast('fc-range', 'paths=gen/&limit=100');
+    expect(r.status).toBe(200);
+    expect(r.json.truncated).toBe(true);
+    expect(r.json.truncatedReason).toContain(`more than ${max} index entries match below gen/`);
+    expect(r.json.matches.map((m: any) => m.workspace)).toEqual(['rangea', 'rangec']);
+    expect(r.cost.rr).toBeLessThanOrEqual(2 * (max + 1) + 20);
+    const narrow = await forecast('fc-range', 'paths=gen/z.ts&limit=100');
+    expect(narrow.json).toMatchObject({ truncated: false });
+    expect(narrow.json.matches.map((m: any) => m.workspace)).toEqual(['rangeb', 'rangec']);
+  });
+
+  it('share counts follow the observed index through pushes, abandon and repo delete', async () => {
+    const repo = await seedRepo('shares');
+    const main = await based(repo, BASE_FILES);
+    const ws: Record<string, any>[] = [];
+    for (let i = 0; i < 3; i++) ws.push((await createWs('shares', { task: `s${i}`, agent: 'a' })).json);
+    const heads: string[] = [];
+    heads[0] = await push('shares', repo, ws[0]!, main.sha, { ...BASE_FILES, 'src/app.ts': '0\n', 'one.ts': '0\n' });
+    heads[1] = await push('shares', repo, ws[1]!, main.sha, { ...BASE_FILES, 'src/app.ts': '1\n', 'one.ts': '1\n' });
+    heads[2] = await push('shares', repo, ws[2]!, main.sha, { ...BASE_FILES, 'src/app.ts': '2\n' });
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('shares').first<{ id: string }>())!.id;
+    const counts = async () =>
+      (await env.DB.prepare('SELECT base_ref, path, members FROM workspace_path_shares WHERE repo_id = ? ORDER BY base_ref, path').bind(repoId).all()).results;
+    const derived = async () =>
+      (
+        await env.DB.prepare(
+          `SELECT w.base_ref, p.path, COUNT(*) AS members FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
+            WHERE p.repo_id = ? AND p.kind = 'observed' GROUP BY w.base_ref, p.path ORDER BY w.base_ref, p.path`,
+        )
+          .bind(repoId)
+          .all()
+      ).results;
+    expect(await counts()).toEqual([
+      { base_ref: 'main', path: 'one.ts', members: 2 },
+      { base_ref: 'main', path: 'src/app.ts', members: 3 },
+    ]);
+    // ws[1] reverts one.ts: only the row that left the set is deleted.
+    await push('shares', repo, ws[1]!, heads[1]!, { ...BASE_FILES, 'src/app.ts': '1\n' });
+    expect(await counts()).toEqual([
+      { base_ref: 'main', path: 'one.ts', members: 1 },
+      { base_ref: 'main', path: 'src/app.ts', members: 3 },
+    ]);
+    expect(await counts()).toEqual(await derived());
+    expect((await overlap('shares')).json.pairs.map((p: any) => p.paths)).toEqual([['src/app.ts'], ['src/app.ts'], ['src/app.ts']]);
+    expect((await abandon('shares', ws[0]!.id)).status).toBe(200);
+    expect(await counts()).toEqual([{ base_ref: 'main', path: 'src/app.ts', members: 2 }]);
+    expect((await overlap('shares')).json.pairs).toHaveLength(1);
+    expect((await call('DELETE', R('shares'), tok.owner)).status).toBe(200);
+    expect(await counts()).toEqual([]);
   });
 });

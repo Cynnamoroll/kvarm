@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { snapshotInstanceId } from '../src/services/events';
+import { matchSnapshot, streamAndStore } from '../src/cache/snapshot';
 import {
   BLOBS_PER_STEP,
   READ_AHEAD,
@@ -903,6 +904,114 @@ describe('snapshot API', () => {
     }
     expect((await call(snap('flip', 'main'), { token: tok.owner })).status).toBe(200);
     expect((await call(snap('flip', 'main/download'), { token: tok.owner })).status).toBe(200);
+  });
+
+  it('a repeat download of a ready commit is served from the repo-scoped cache: same bytes and etag, r2b=0, d1=1', async () => {
+    const { repo } = await seedRepo('dlcache');
+    // Several hundred kilobytes, so the tarball streams in many chunks on the miss.
+    const files: Files = { ...SMALL, ...manyFiles(30, 12_000, 'dl') };
+    const c = await commit(repo, files);
+    repo.refs.set('refs/heads/main', c.sha);
+    await call(snap('dlcache', 'main'), { method: 'POST', token: tok.owner });
+    await builder.drain();
+    const meta = await call(snap('dlcache', 'main'), { token: tok.owner });
+    expect(meta.status).toBe(200);
+
+    const first = await call(snap('dlcache', `${c.sha}/download`), { token: tok.owner });
+    expect(first.status).toBe(200);
+    expect(first.cost).toMatchObject({ r2b: 1, r2a: 0, art: 0, do: 0, sub: 0, cache: 'miss' });
+    expect(first.cost.d1).toBeLessThanOrEqual(2);
+    expect(first.bytes.length).toBe(meta.json.size);
+    expect(Number(first.headers.get('content-length'))).toBe(meta.json.size);
+    expect(first.bytes.length).toBeGreaterThan(300_000);
+    checkTar(readTar(first.bytes), files);
+
+    const second = await call(snap('dlcache', `${c.sha}/download`), { token: tok.owner });
+    expect(second.status).toBe(200);
+    expect(second.cost).toMatchObject({ r2b: 0, r2a: 0, art: 0, do: 0, sub: 0, cache: 'hit' });
+    expect(second.cost.d1).toBe(1);
+    expect(second.bytes).toEqual(first.bytes);
+    expect(second.headers.get('etag')).toBe(`"${c.tree}"`);
+    for (const h of ['content-type', 'content-length', 'content-disposition', 'etag', 'cache-control', 'x-forge-snapshot-sha']) {
+      expect(second.headers.get(h), h).toBe(first.headers.get(h));
+    }
+    expect(second.headers.get('cache-control')).toContain('no-store');
+    expect(second.headers.get('cache-control')).not.toContain('public');
+
+    // A ref name resolves (cached) to the same commit and hits the same entry.
+    const byRef = await call(snap('dlcache', 'main/download'), { token: tok.owner });
+    expect(byRef.cost).toMatchObject({ r2b: 0, cache: 'hit' });
+    expect(byRef.bytes).toEqual(first.bytes);
+
+    // The attachment name follows the current repo name, not the cached one.
+    await env.DB.prepare("UPDATE repos SET name = 'dlcache-renamed' WHERE name = 'dlcache' AND owner_login = ?").bind(OWNER).run();
+    const renamed = await call(snap('dlcache-renamed', `${c.sha}/download`), { token: tok.owner });
+    expect(renamed.cost).toMatchObject({ r2b: 0, cache: 'hit' });
+    expect(renamed.headers.get('content-disposition')).toBe(`attachment; filename="dlcache-renamed-${c.sha.slice(0, 12)}.tar"`);
+    expect(renamed.bytes).toEqual(first.bytes);
+  });
+
+  it('a caller that goes away mid-download still leaves a complete cache entry', async () => {
+    const chunks = Array.from({ length: 8 }, (_, i) => new Uint8Array(64 * 1024).fill(i + 1));
+    const size = chunks.reduce((n, ch) => n + ch.length, 0);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = chunks.shift();
+        if (next) controller.enqueue(next);
+        else controller.close();
+      },
+    });
+    const repoId = crypto.randomUUID();
+    const sha = 'c'.repeat(40);
+    const ctx = createExecutionContext();
+    const client = streamAndStore(ctx, repoId, sha, 'd'.repeat(40), { body, size } as unknown as R2ObjectBody);
+    const reader = client.getReader();
+    expect((await reader.read()).value?.length).toBeGreaterThan(0);
+    await reader.cancel();
+    await waitOnExecutionContext(ctx);
+    const cached = await matchSnapshot(repoId, sha);
+    expect(cached).not.toBeNull();
+    expect(cached!.size).toBe(size);
+    expect(cached!.tree).toBe('d'.repeat(40));
+    const bytes = new Uint8Array(await new Response(cached!.body).arrayBuffer());
+    expect(bytes.length).toBe(size);
+    for (let i = 0; i < 8; i++) expect(bytes[i * 64 * 1024]).toBe(i + 1);
+  });
+
+  it('a cached download is never served to a denied caller: concealment 404 before any cache lookup', async () => {
+    const { repo } = await seedRepo('dlcache-private', 'private');
+    const c = await commit(repo, { ...SMALL, 'private.txt': 'private\n' });
+    repo.refs.set('refs/heads/main', c.sha);
+    await call(snap('dlcache-private', 'main'), { method: 'POST', token: tok.owner });
+    await builder.drain();
+    const owner1 = await call(snap('dlcache-private', `${c.sha}/download`), { token: tok.owner });
+    const owner2 = await call(snap('dlcache-private', `${c.sha}/download`), { token: tok.owner });
+    expect(owner1.cost.cache).toBe('miss');
+    expect(owner2.cost.cache).toBe('hit');
+    for (const token of [undefined, tok.outsider]) {
+      const denied = await call(snap('dlcache-private', `${c.sha}/download`), { token });
+      expect(denied.status).toBe(404);
+      expect(denied.headers.get('content-type')).not.toBe('application/x-tar');
+      expect(denied.bytes.length).toBeLessThan(200);
+      expect(denied.cost).toMatchObject({ d1: 1, r2b: 0, cache: 'none' });
+    }
+
+    // Warmed while public, then flipped private: denied before the entry is consulted.
+    const { id: pubId, repo: pubRepo } = await seedRepo('dlcache-flip');
+    const p = await commit(pubRepo, { ...SMALL, 'flip.txt': 'flip\n' });
+    pubRepo.refs.set('refs/heads/main', p.sha);
+    await call(snap('dlcache-flip', 'main'), { method: 'POST', token: tok.owner });
+    await builder.drain();
+    expect((await call(snap('dlcache-flip', `${p.sha}/download`))).cost.cache).toBe('miss');
+    expect((await call(snap('dlcache-flip', `${p.sha}/download`))).cost.cache).toBe('hit');
+    await env.DB.prepare("UPDATE repos SET visibility = 'private' WHERE id = ?").bind(pubId).run();
+    for (const token of [undefined, tok.outsider]) {
+      const denied = await call(snap('dlcache-flip', `${p.sha}/download`), { token });
+      expect(denied.status).toBe(404);
+      expect(denied.cost).toMatchObject({ r2b: 0, cache: 'none' });
+      expect(denied.headers.get('x-forge-snapshot-sha')).toBeNull();
+    }
+    expect((await call(snap('dlcache-flip', `${p.sha}/download`), { token: tok.owner })).cost.cache).toBe('hit');
   });
 
   it('deleting a repo removes its snapshot rows and tarballs within the DELETE budget (d1 <= 2)', async () => {

@@ -8,7 +8,7 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { OPERATIONS } from '@forge/ops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
@@ -464,6 +464,53 @@ describe('MCP tools match REST', () => {
     expect(ranked.isError).toBe(false);
     expect(ranked.data).toEqual((await rest('GET', `${R('arena')}/arenas/${arena.data.id}/candidates`)).json);
     expect(ranked.data.ranking).toHaveLength(2);
+  });
+});
+
+describe('MCP tool result text', () => {
+  async function rawText(method: string, path: string, body?: unknown): Promise<string> {
+    const ctx = createExecutionContext();
+    const headers: Record<string, string> = { Authorization: `Bearer ${tok.owner}`, ...ACCEPT };
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+    const text = await res.text();
+    await waitOnExecutionContext(ctx);
+    return text;
+  }
+
+  async function toolText(name: string, args: Record<string, unknown>): Promise<string> {
+    const envelope = JSON.parse(await rawText('POST', '/mcp', rpc('tools/call', { name, arguments: args }))) as {
+      result: { isError?: boolean; content: Array<{ text: string }> };
+    };
+    expect(envelope.result.isError).toBeUndefined();
+    return envelope.result.content[0]!.text;
+  }
+
+  it('is the REST reply text byte for byte, and a successful JSON reply is not parsed again', async () => {
+    const repo = fakeRepos.get(`${OWNER}--main-repo`)!;
+    const files = { ...BASE, 'docs/naïve ✓ "q" \\ \u2028.md': 'unicode\n', 'src/a.ts': 'export const a = "é\\u0000";\n' };
+    const head = await commit(repo, files, [shas['main-repo']!]);
+    repo.refs.set('refs/heads/text-bytes', head.sha);
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ['compare', { repo: `${OWNER}/main-repo`, base: 'main', head: 'text-bytes' }, `/api/v1${R('main-repo')}/compare/main...text-bytes`],
+      ['get_tree', { repo: `${OWNER}/main-repo`, path: 'docs', ref: 'text-bytes' }, `/api/v1${R('main-repo')}/tree?path=docs&ref=text-bytes`],
+      ['read_file', { repo: `${OWNER}/main-repo`, path: 'src/a.ts', ref: 'text-bytes' }, `/api/v1${R('main-repo')}/contents?path=src%2Fa.ts&ref=text-bytes`],
+      ['list_repos', {}, '/api/v1/repos'],
+    ];
+    for (const [name, args, path] of cases) {
+      const restText = await rawText('GET', path);
+      expect(restText.startsWith('{'), name).toBe(true);
+      const parse = vi.spyOn(JSON, 'parse');
+      let viaTool: string;
+      try {
+        viaTool = await toolText(name, args);
+        expect(parse.mock.calls.filter(([text]) => text === restText).length, name).toBe(0);
+      } finally {
+        parse.mockRestore();
+      }
+      expect(viaTool, name).toBe(restText);
+    }
   });
 });
 

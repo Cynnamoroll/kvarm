@@ -82,6 +82,12 @@ function inputShapes(): Map<string, Record<string, z.ZodType>> {
 
 const text = (data: unknown): Array<{ type: 'text'; text: string }> => [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }];
 
+function isJsonContainer(res: Response, body: string): boolean {
+  if (!(res.headers.get('content-type') ?? '').startsWith('application/json')) return false;
+  const first = body.charCodeAt(0);
+  return first === 0x7b || first === 0x5b;
+}
+
 function errorResult(status: number, error: string, code: string): ToolResult {
   return { isError: true, content: text({ status, error, code }) };
 }
@@ -118,6 +124,10 @@ async function callOperation(op: Operation, args: Record<string, unknown>, cx: C
     return errorResult(500, 'internal error while running the tool; retry', 'INTERNAL');
   }
   const body = await res.text();
+  // REST JSON is JSON.stringify output (c.json), for which a parse and
+  // re-stringify is the identity, so a success object or array is passed on
+  // as is instead of paying ~2 ms per MB for the round trip.
+  if (res.ok && isJsonContainer(res, body)) return { content: text(body) };
   let parsed: unknown = body;
   try {
     parsed = JSON.parse(body);

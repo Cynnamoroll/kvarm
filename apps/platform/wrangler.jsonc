@@ -57,7 +57,6 @@
     "bindings": [
       { "name": "TOKENS", "class_name": "TokenCache" },
       { "name": "RATE_LIMIT", "class_name": "RateLimiter" },
-      { "name": "REALTIME", "class_name": "RealtimeHub" },
       { "name": "MERGE_LOCK", "class_name": "MergeLock" },
       { "name": "CI_SANDBOX", "class_name": "CiRunnerSandbox" }
     ]
@@ -70,6 +69,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["CiRunnerSandbox"]
+    },
+    {
+      "tag": "v3",
+      "deleted_classes": ["RealtimeHub"]
     }
   ],
   // Container CI runner showcase (public beta). No image or dockerfile key:

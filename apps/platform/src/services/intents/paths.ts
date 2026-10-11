@@ -17,6 +17,8 @@ export const INTENT_LIMITS = {
   forecastPathsMax: 20,
   forecastPageDefault: 50,
   forecastPageMax: 100,
+  /** Index entries read below each query prefix (a range is ordered by path, so it cannot stop at the page). */
+  forecastRangeHitMax: 1_000,
   /** Evidence items returned per forecast match (the count still covers all). */
   evidenceMax: 20,
   overlapPageDefault: 50,
@@ -83,11 +85,22 @@ export function prefixUpper(prefix: string): string {
 
 const byString = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** Sorted, deduplicated, without entries a declared prefix already covers. */
+/**
+ * Sorted, deduplicated, without entries a declared prefix already covers.
+ * One sweep after the sort: the entries a prefix covers are exactly the
+ * contiguous run that follows it in sorted order, so only the latest kept
+ * prefix can cover the next entry.
+ */
 export function minimalCover(entries: Iterable<string>): string[] {
   const sorted = [...new Set(entries)].sort(byString);
-  const prefixes = sorted.filter(isPrefix);
-  return sorted.filter((p) => !prefixes.some((q) => q !== p && covers(q, p)));
+  const out: string[] = [];
+  let open: string | null = null;
+  for (const p of sorted) {
+    if (open !== null && p.startsWith(open)) continue;
+    out.push(p);
+    if (isPrefix(p)) open = p;
+  }
+  return out;
 }
 
 export interface Declaration {
@@ -144,16 +157,31 @@ export interface Collapsed {
 export function collapseObserved(paths: Iterable<string>, max: number = INTENT_LIMITS.observedMax): Collapsed {
   const unique = [...new Set(paths)].sort(byString);
   if (unique.length <= max) return { paths: unique, collapsed: false, truncated: false };
-  const depth = Math.max(...unique.map((p) => p.split('/').length));
-  for (let d = depth - 1; d >= 1; d--) {
-    const level = minimalCover(
-      unique.map((p) => {
-        const segments = p.split('/');
-        return segments.length > d ? `${segments.slice(0, d).join('/')}/` : p;
-      }),
-    );
-    if (level.length <= max) return { paths: level, collapsed: true, truncated: false };
+  // Offsets of each path's separators, so a level is a slice instead of a split and join.
+  const cuts = unique.map((p) => {
+    const at: number[] = [];
+    for (let i = p.indexOf('/'); i !== -1; i = p.indexOf('/', i + 1)) at.push(i);
+    return at;
+  });
+  let depth = 1;
+  for (const at of cuts) depth = Math.max(depth, at.length + 1);
+  const level = (d: number) => minimalCover(unique.map((p, i) => (cuts[i]!.length >= d ? p.slice(0, cuts[i]![d - 1]! + 1) : p)));
+  // A shallower level never has more entries than a deeper one (each of its
+  // prefixes stands for a non-empty group of the deeper level's entries), so
+  // the deepest level that fits is found by binary search.
+  let lo = 1;
+  let hi = depth - 1;
+  let fit: string[] | null = null;
+  while (lo <= hi) {
+    const d = (lo + hi) >> 1;
+    const cover = level(d);
+    if (cover.length <= max) {
+      fit = cover;
+      lo = d + 1;
+    } else {
+      hi = d - 1;
+    }
   }
-  const top = minimalCover(unique.map((p) => (p.includes('/') ? `${p.split('/')[0]}/` : p)));
-  return { paths: top.slice(0, max), collapsed: true, truncated: true };
+  if (fit !== null) return { paths: fit, collapsed: true, truncated: false };
+  return { paths: level(1).slice(0, max), collapsed: true, truncated: true };
 }

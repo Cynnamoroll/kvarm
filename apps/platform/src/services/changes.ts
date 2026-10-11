@@ -389,6 +389,12 @@ export interface ChangePage {
   nextCursor: string | null;
 }
 
+/** A list page's SQL: binds ?1 repo id, ?2 exclusive number cursor, and ?3 state unless `state` is 'all'. */
+export function listChangesSql(state: string, rows: number): string {
+  const where = state === 'all' ? 'c.repo_id = ?1 AND c.number < ?2' : 'c.repo_id = ?1 AND c.state = ?3 AND c.number < ?2';
+  return `${CHANGE_SELECT} WHERE ${where} ORDER BY c.number DESC LIMIT ${rows}`;
+}
+
 /** GET changes?state=&limit=&cursor= — newest first; one bounded indexed query. */
 export async function listChanges(
   env: Env,
@@ -412,8 +418,7 @@ export async function listChanges(
     if (n === null) return fail(400, 'cursor is invalid', 'INVALID_CURSOR');
     before = n;
   }
-  const where = state === 'all' ? 'c.repo_id = ?1 AND c.number < ?2' : 'c.repo_id = ?1 AND c.state = ?3 AND c.number < ?2';
-  const stmt = env.DB.prepare(`${CHANGE_SELECT} WHERE ${where} ORDER BY c.number DESC LIMIT ${limit + 1}`);
+  const stmt = env.DB.prepare(listChangesSql(state, limit + 1));
   const { results } = await (state === 'all' ? stmt.bind(repo.id, before) : stmt.bind(repo.id, before, state)).all<ChangeRow>();
   const rows = results ?? [];
   const page = rows.slice(0, limit);

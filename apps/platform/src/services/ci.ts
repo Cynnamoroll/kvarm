@@ -29,9 +29,16 @@ interface CiJobConfig {
   timeoutSeconds: number;
 }
 
-interface CiConfig {
+export interface CiConfig {
   jobs: CiJobConfig[];
 }
+
+/**
+ * Parsed configs keyed by (Artifacts repo, commit). A commit's config never
+ * changes, so one train run reads each head's config once however many
+ * passes and calls ask for it.
+ */
+export type CiConfigMemo = Map<string, Promise<ServiceResult<CiConfig | null>>>;
 
 type Fail = Extract<ServiceResult<never>, { ok: false }>;
 const fail = (status: number, error: string, code: string): Fail => ({ ok: false, status, error, code });
@@ -78,7 +85,7 @@ function parseConfig(text: string): ServiceResult<CiConfig> {
   return { ok: true, value: { jobs } };
 }
 
-async function configAt(env: Env, artifactsName: string, headSha: string): Promise<ServiceResult<CiConfig | null>> {
+async function readConfigAt(env: Env, artifactsName: string, headSha: string): Promise<ServiceResult<CiConfig | null>> {
   return withLazyRepo(env, artifactsName, async (repo) => {
     const blob = await (await repo.get()).readFile({ ref: headSha, path: CI_CONFIG_PATH });
     if (!blob) return { ok: true, value: null };
@@ -87,8 +94,21 @@ async function configAt(env: Env, artifactsName: string, headSha: string): Promi
   });
 }
 
-export async function hasCiJobs(env: Env, artifactsName: string, headSha: string): Promise<ServiceResult<boolean>> {
-  const config = await configAt(env, artifactsName, headSha);
+function configAt(env: Env, artifactsName: string, headSha: string, memo?: CiConfigMemo): Promise<ServiceResult<CiConfig | null>> {
+  if (!memo) return readConfigAt(env, artifactsName, headSha);
+  const key = `${artifactsName}:${headSha}`;
+  let read = memo.get(key);
+  if (!read) {
+    read = readConfigAt(env, artifactsName, headSha);
+    memo.set(key, read);
+    // A failed read (storage, not config) is retried by the next caller instead of being remembered.
+    read.catch(() => memo.delete(key));
+  }
+  return read;
+}
+
+export async function hasCiJobs(env: Env, artifactsName: string, headSha: string, memo?: CiConfigMemo): Promise<ServiceResult<boolean>> {
+  const config = await configAt(env, artifactsName, headSha, memo);
   return config.ok ? { ok: true, value: (config.value?.jobs.length ?? 0) > 0 } : config;
 }
 
@@ -104,8 +124,9 @@ async function queueJobs(
   configSha: string,
   headSha: string,
   treeSha: string | undefined,
+  memo?: CiConfigMemo,
 ): Promise<ServiceResult<QueuedPipeline>> {
-  const config = await configAt(env, repo.artifacts_name, configSha);
+  const config = await configAt(env, repo.artifacts_name, configSha, memo);
   if (!config.ok) {
     const tree = await withLazyRepo(env, repo.artifacts_name, async (r) => (await (await r.get()).readCommit(headSha))?.treeHash);
     if (tree) {
@@ -187,8 +208,9 @@ export function queueExactTreeCi(
   configSha: string,
   executionSha: string,
   treeSha: string,
+  memo?: CiConfigMemo,
 ): Promise<ServiceResult<QueuedPipeline>> {
-  return queueJobs(env, repo, changeId, configSha, executionSha, treeSha);
+  return queueJobs(env, repo, changeId, configSha, executionSha, treeSha, memo);
 }
 
 interface JobRow {

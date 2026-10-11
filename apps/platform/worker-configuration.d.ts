@@ -15,7 +15,6 @@ interface __BaseEnv_Env {
 	WORKOS_REDIRECT_URI: "http://localhost:8787/auth/callback";
 	TOKENS: DurableObjectNamespace<import("./src/index").TokenCache>;
 	RATE_LIMIT: DurableObjectNamespace<import("./src/index").RateLimiter>;
-	REALTIME: DurableObjectNamespace<import("./src/index").RealtimeHub>;
 	MERGE_LOCK: DurableObjectNamespace<import("./src/index").MergeLock>;
 	CI_SANDBOX: DurableObjectNamespace<import("./src/index").CiRunnerSandbox>;
 	SNAPSHOT_BUILDER: Workflow<Parameters<import("./src/index").SnapshotBuilder['run']>[0]['payload']>;
@@ -26,7 +25,7 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "TokenCache" | "RateLimiter" | "RealtimeHub" | "MergeLock" | "CiRunnerSandbox";
+		durableNamespaces: "TokenCache" | "RateLimiter" | "MergeLock" | "CiRunnerSandbox";
 	}
 	interface Env extends __BaseEnv_Env {}
 }

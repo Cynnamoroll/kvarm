@@ -335,7 +335,7 @@ const INCOMPLETE_REASON = 'COALESCE(w.observed_omitted, w.observed_truncated)';
 function incompleteStatement(db: D1Database, repoId: string, base: string | null, exclude: string | null): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT w.id AS workspace, ${INCOMPLETE_REASON} AS reason FROM workspaces w
+      `SELECT w.id AS workspace, ${INCOMPLETE_REASON} AS reason FROM workspaces w INDEXED BY idx_ws_index_incomplete
         WHERE w.repo_id = ?1 AND w.status = 'active' AND ${INDEX_INCOMPLETE}
           AND (?2 IS NULL OR w.base_ref = ?2) AND (?3 IS NULL OR w.id != ?3)
         ORDER BY w.id LIMIT ${INTENT_LIMITS.incompleteListMax + 1}`,
@@ -368,7 +368,45 @@ interface ForecastRow {
   observed_truncated: string | null;
   intent_updated_at: number | null;
   intent_expires_at: number | null;
-  ev: string;
+  ev: Array<[Evidence['kind'], string]>;
+}
+
+/** One index hit with its workspace: `[kind, path, ...ForecastRow columns in declaration order]`. */
+type HitTuple = [
+  Evidence['kind'],
+  string,
+  string,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+  number | null,
+  string | null,
+  number | null,
+  number | null,
+];
+
+const HIT_JSON = `json_array(p.kind, p.path, w.id, w.task, w.agent, w.agent_id, w.base_ref, w.base_sha, w.observed_head_sha,
+  w.observed_base_sha, w.observed_at, w.observed_truncated, w.intent_updated_at, w.intent_expires_at)`;
+
+/**
+ * The conditions every forecast probe applies before its LIMIT (?3 now, ?4
+ * base, ?5 cursor or '', ?6 exclude). The cursor bounds the index column
+ * itself so a later page starts its probe at the cursor.
+ */
+const HIT_FILTER = `p.workspace_id > ?5 AND w.repo_id = ?1 AND w.status = 'active'
+  AND (p.kind = 'observed' OR w.intent_expires_at IS NULL OR w.intent_expires_at > ?3)
+  AND (?4 IS NULL OR w.base_ref = ?4) AND (?6 IS NULL OR w.id != ?6)`;
+
+function hitsOf(result: D1Result | undefined): HitTuple[] {
+  const out: HitTuple[] = [];
+  for (const r of (result?.results as Array<{ hits: string | null }> | undefined) ?? []) {
+    if (r.hits) out.push(...(JSON.parse(r.hits) as HitTuple[]));
+  }
+  return out;
 }
 
 function parseLimit(raw: string | undefined, def: number, max: number): number | Fail {
@@ -426,32 +464,66 @@ export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<Ser
     for (const a of ancestorPrefixes(p)) exact.add(a);
     if (isPrefix(p)) ranges.push(p);
   }
-  const hitTerms = [
-    `SELECT workspace_id, kind, path FROM workspace_paths
-      WHERE repo_id = ?1 AND kind IN ('declared', 'observed') AND path IN (SELECT value FROM json_each(?2))`,
-    ...ranges.map(
-      (_, i) => `SELECT workspace_id, kind, path FROM workspace_paths
-      WHERE repo_id = ?1 AND kind IN ('declared', 'observed') AND path >= ?${7 + 2 * i} AND path < ?${8 + 2 * i}`,
-    ),
-  ];
-  const sql = `WITH hits(workspace_id, kind, path) AS (${hitTerms.join(' UNION ')})
-    SELECT w.id, w.task, w.agent, w.agent_id, w.base_ref, w.base_sha, w.observed_head_sha, w.observed_base_sha, w.observed_at,
-           w.observed_truncated, w.intent_updated_at, w.intent_expires_at,
-           json_group_array(json_array(h.kind, h.path)) AS ev
-      FROM hits h JOIN workspaces w ON w.id = h.workspace_id
-     WHERE w.repo_id = ?1 AND w.status = 'active'
-       AND (h.kind = 'observed' OR w.intent_expires_at IS NULL OR w.intent_expires_at > ?3)
-       AND (?4 IS NULL OR w.base_ref = ?4)
-       AND (?5 IS NULL OR w.id > ?5)
-       AND (?6 IS NULL OR w.id != ?6)
-     GROUP BY w.id ORDER BY w.id LIMIT ${limit + 1}`;
+  // Each exact key is probed in workspace-id order and stops after the page:
+  // the page's workspaces are the first `limit` ids of the union, and every
+  // one of them is within the first `limit` ids of each probe it matches, so
+  // the page and its evidence are complete while a popular path costs one
+  // page of rows instead of one row per matching workspace.
+  const exactSql = `SELECT (SELECT json_group_array(json(hit)) FROM (
+        SELECT ${HIT_JSON} AS hit FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
+         WHERE p.repo_id = ?1 AND p.kind = k.kind AND p.path = k.path AND ${HIT_FILTER}
+         ORDER BY p.workspace_id LIMIT ${limit + 1})) AS hits
+      FROM (SELECT kinds.value AS kind, keys.value AS path FROM json_each('["declared","observed"]') kinds, json_each(?2) keys) k`;
+  // Entries below a query prefix are ordered by path, not workspace, so each range reads at most a fixed number of hits and says when it stopped.
+  const rangeMax = INTENT_LIMITS.forecastRangeHitMax;
+  const rangeSql = `SELECT json_group_array(json(hit)) AS hits FROM (
+        SELECT ${HIT_JSON} AS hit FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
+         WHERE p.repo_id = ?1 AND p.kind IN ('declared', 'observed') AND p.path >= ?2 AND p.path < ?7 AND ${HIT_FILTER}
+         LIMIT ${rangeMax + 1})`;
   const now = Date.now();
   const db = cx.env.DB;
-  const [hitRes, incompleteRes] = await db.batch([
-    db.prepare(sql).bind(cx.repo.id, JSON.stringify([...exact]), now, base, cursor, exclude, ...ranges.flatMap((r) => [r, prefixUpper(r)])),
+  const results = await db.batch([
+    db.prepare(exactSql).bind(cx.repo.id, JSON.stringify([...exact]), now, base, cursor ?? '', exclude),
+    ...ranges.map((r) => db.prepare(rangeSql).bind(cx.repo.id, r, now, base, cursor ?? '', exclude, prefixUpper(r))),
     incompleteStatement(db, cx.repo.id, base, exclude),
   ]);
-  const rows = (hitRes?.results as ForecastRow[] | undefined) ?? [];
+  const incompleteRes = results[results.length - 1];
+  const hits = hitsOf(results[0]);
+  const cutRanges: string[] = [];
+  ranges.forEach((r, i) => {
+    const got = hitsOf(results[1 + i]);
+    if (got.length > rangeMax) cutRanges.push(r);
+    hits.push(...got.slice(0, rangeMax));
+  });
+  const byId = new Map<string, ForecastRow>();
+  const seen = new Set<string>();
+  for (const [kind, path, id, ...w] of hits) {
+    const key = `${id}\0${kind}\0${path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let row = byId.get(id);
+    if (!row) {
+      const [task, agent, agentId, baseRef, baseSha, observedHead, observedBase, observedAt, observedTruncated, intentUpdated, intentExpires] = w;
+      row = {
+        id,
+        task,
+        agent,
+        agent_id: agentId,
+        base_ref: baseRef,
+        base_sha: baseSha,
+        observed_head_sha: observedHead,
+        observed_base_sha: observedBase,
+        observed_at: observedAt as number | null,
+        observed_truncated: observedTruncated as string | null,
+        intent_updated_at: intentUpdated as number | null,
+        intent_expires_at: intentExpires as number | null,
+        ev: [],
+      };
+      byId.set(id, row);
+    }
+    row.ev.push([kind, path]);
+  }
+  const rows = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const page = rows.slice(0, limit);
   const matches = page.map((row) => forecastMatch(row, paths));
@@ -459,6 +531,11 @@ export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<Ser
   const incomplete = incompleteOf(incompleteRes);
   const reasons: string[] = [];
   if (more) reasons.push(`more than ${limit} matching workspaces; follow nextCursor for the rest`);
+  if (cutRanges.length > 0) {
+    reasons.push(
+      `more than ${rangeMax} index entries match below ${cutRanges.join(', ')}; workspaces matching only beyond them are not reported, narrow the prefix`,
+    );
+  }
   if (incomplete) reasons.push(incomplete.reason);
   const out: ForecastResponse = {
     query: { paths, base, exclude },
@@ -475,7 +552,7 @@ export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<Ser
 }
 
 function forecastMatch(row: ForecastRow, queries: string[]): ForecastMatch {
-  const hits = (JSON.parse(row.ev) as Array<[Evidence['kind'], string]>).map(([kind, path]): Evidence => ({
+  const hits = row.ev.map(([kind, path]): Evidence => ({
     kind,
     path,
     query: queries.find((q) => intersects(path, q)) ?? path,
@@ -646,26 +723,30 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
   }
 
   const db = cx.env.DB;
-  // A group aggregates at most one member beyond the per-group cap, so collectPairs can tell it was cut.
+  // Shared paths come from the per-(repo, base, path) share counts, so only
+  // paths at least two workspaces touch are read; each group reads its
+  // members in id order and aggregates at most one beyond the per-group cap,
+  // so collectPairs can tell it was cut.
   const [groups, prefixHits, incompleteRes] = await db.batch([
     db
       .prepare(
-        `SELECT path, json_group_array(json(head)) AS ws FROM (
-           SELECT p.path, ${HEAD_JSON('w')} AS head, ROW_NUMBER() OVER (PARTITION BY p.path ORDER BY w.id) AS rn
-             FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
-            WHERE p.repo_id = ?1 AND p.kind = 'observed' AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2)
-          WHERE rn <= ${INTENT_LIMITS.overlapGroupMembersMax + 1}
-          GROUP BY path HAVING COUNT(*) > 1 ORDER BY path LIMIT ${INTENT_LIMITS.overlapGroupMax + 1}`,
+        `SELECT s.path, (SELECT json_group_array(json(head)) FROM (
+             SELECT ${HEAD_JSON('w')} AS head FROM workspace_paths p JOIN workspaces w ON w.id = p.workspace_id
+              WHERE p.repo_id = ?1 AND p.kind = 'observed' AND p.path = s.path AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
+              ORDER BY p.workspace_id LIMIT ${INTENT_LIMITS.overlapGroupMembersMax + 1})) AS ws
+           FROM workspace_path_shares s INDEXED BY idx_wps_shared
+          WHERE s.repo_id = ?1 AND s.base_ref = ?2 AND s.members > 1
+          ORDER BY s.path LIMIT ${INTENT_LIMITS.overlapGroupMax + 1}`,
       )
       .bind(cx.repo.id, base),
     db
       .prepare(
         `SELECT b.path AS path, ${HEAD_JSON('wa')} AS wa, ${HEAD_JSON('wb')} AS wb
-           FROM workspaces wa
-           JOIN workspace_paths a ON a.repo_id = wa.repo_id AND a.workspace_id = wa.id AND a.kind = 'observed' AND substr(a.path, -1) = '/'
-           JOIN workspace_paths b ON b.repo_id = wa.repo_id AND b.kind = 'observed'
+           FROM workspaces wa INDEXED BY idx_ws_observed_prefixes
+           CROSS JOIN workspace_paths a ON a.repo_id = wa.repo_id AND a.workspace_id = wa.id AND a.kind = 'observed' AND substr(a.path, -1) = '/'
+           CROSS JOIN workspace_paths b ON b.repo_id = wa.repo_id AND b.kind = 'observed'
                 AND b.path > a.path AND b.path < substr(a.path, 1, length(a.path) - 1) || '0' AND b.workspace_id != wa.id
-           JOIN workspaces wb ON wb.id = b.workspace_id AND wb.repo_id = wa.repo_id AND wb.status = 'active' AND wb.base_ref = ?2
+           CROSS JOIN workspaces wb ON wb.id = b.workspace_id AND wb.repo_id = wa.repo_id AND wb.status = 'active' AND wb.base_ref = ?2
           WHERE wa.repo_id = ?1 AND wa.status = 'active' AND wa.base_ref = ?2 AND wa.observed_prefixes > 0
           ORDER BY b.path, wa.id, wb.id LIMIT ${INTENT_LIMITS.overlapPrefixHitMax + 1}`,
       )
@@ -674,7 +755,10 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
   ]);
 
   const reasons: string[] = [];
-  const groupRows = (groups?.results as Array<{ path: string; ws: string }> | undefined) ?? [];
+  // A count can include rows of a workspace that just left active in the same transaction as its cleanup; such a path is not shared.
+  const groupRows = ((groups?.results as Array<{ path: string; ws: string | null }> | undefined) ?? [])
+    .map((g) => ({ path: g.path, members: g.ws ? (JSON.parse(g.ws) as HeadTuple[]) : [] }))
+    .filter((g) => g.members.length > 1);
   if (groupRows.length > INTENT_LIMITS.overlapGroupMax) {
     reasons.push(`more than ${INTENT_LIMITS.overlapGroupMax} shared paths; pairs beyond them are not reported`);
   }
@@ -683,7 +767,7 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
     reasons.push(`more than ${INTENT_LIMITS.overlapPrefixHitMax} paths below collapsed prefixes; pairs beyond them are not reported`);
   }
   const work = collectPairs(
-    groupRows.slice(0, INTENT_LIMITS.overlapGroupMax).map((g) => ({ path: g.path, members: (JSON.parse(g.ws) as HeadTuple[]).map(headOf) })),
+    groupRows.slice(0, INTENT_LIMITS.overlapGroupMax).map((g) => ({ path: g.path, members: g.members.map(headOf) })),
     prefixRows.slice(0, INTENT_LIMITS.overlapPrefixHitMax).map((h) => ({
       path: h.path,
       a: headOf(JSON.parse(h.wa) as HeadTuple),

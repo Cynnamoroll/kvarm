@@ -220,6 +220,7 @@ function lsRefsResponse(repo: FakeRepo, body: Uint8Array): Response {
     .map((p) => decode(p.data).trim())
     .filter((l) => l.startsWith('ref-prefix '))
     .map((l) => l.slice('ref-prefix '.length));
+  lsRefsPrefixes.push(prefixes);
   const lines = [...repo.refs]
     .filter(([n]) => prefixes.some((p) => n.startsWith(p)))
     .sort(([a], [b]) => (a < b ? -1 : 1))
@@ -228,6 +229,8 @@ function lsRefsResponse(repo: FakeRepo, body: Uint8Array): Response {
 }
 
 export const lsRefsCalls: string[] = [];
+/** The ref-prefix lines of every ls-refs request, in request order. */
+export const lsRefsPrefixes: string[][] = [];
 const originalFetch = globalThis.fetch;
 
 const PACK_TYPES: Record<number, Obj['type']> = { 1: 'commit', 2: 'tree', 3: 'blob' };

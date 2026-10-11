@@ -1,5 +1,6 @@
 import { env, exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { METERED_BINDINGS } from '../src/cost/meter';
 
 describe('worker smoke', () => {
   it('GET /healthz returns 200 ok', async () => {
@@ -16,6 +17,16 @@ describe('worker smoke', () => {
     for (const t of ['users', 'pat', 'repos', 'change_sets', 'check_runs', 'events']) {
       expect(tables).toContain(t);
     }
+  });
+
+  it('carries no unused RealtimeHub Durable Object class or binding', async () => {
+    const worker = (await import('../src/index')) as Record<string, unknown>;
+    expect(worker).not.toHaveProperty('RealtimeHub');
+    expect(METERED_BINDINGS).not.toHaveProperty('REALTIME');
+    expect((env as unknown as Record<string, unknown>).REALTIME).toBeUndefined();
+    expect(Object.keys(METERED_BINDINGS).filter((name) => METERED_BINDINGS[name] === 'do').sort()).toEqual(
+      ['CI_SANDBOX', 'MERGE_LOCK', 'RATE_LIMIT', 'TOKENS'],
+    );
   });
 
   it('serves the API against real D1', async () => {

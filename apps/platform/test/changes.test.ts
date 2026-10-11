@@ -13,7 +13,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import { getRepoById } from '../src/db/repos';
-import { defaultMergeDeps, mergeChange, mergeReadyAutoChanges, recordGuard, type MergeDeps } from '../src/services/changes';
+import { defaultMergeDeps, listChangesSql, mergeChange, mergeReadyAutoChanges, recordGuard, type MergeDeps } from '../src/services/changes';
 import {
   FakeRepo,
   commit,
@@ -1104,6 +1104,70 @@ describe('auto-merge selection', () => {
     const first = await mergeReadyAutoChanges(env, repoId, null, () => {});
     expect(first).toEqual({ merged: [], failed: [], next: 20 });
     expect(await mergeReadyAutoChanges(env, repoId, null, () => {}, { after: first.next! })).toEqual({ merged: [21], failed: [], next: null });
+  });
+});
+
+describe('list state=all over a long history', () => {
+  const STATES = ['open', 'merged', 'closed', 'merged', 'conflicted'] as const;
+
+  async function seedHistory(repo: string, count: number) {
+    await seedRepo(repo);
+    const now = Date.now();
+    for (let start = 0; start < count; start += 50) {
+      await env.DB.batch(
+        Array.from({ length: Math.min(50, count - start) }, (_, j) => {
+          const n = start + j + 1;
+          return env.DB.prepare(
+            `INSERT INTO change_sets (id, repo_id, number, title, base_ref, head_ref, head_sha, state, merge_policy, kind, created_at, updated_at, head_event_at)
+             VALUES (?, ?, ?, ?, 'main', ?, ?, ?, 'review', 'change', ?, ?, ?)`,
+          ).bind(crypto.randomUUID(), repoIds[repo], n, `history ${n}`, `h-${n}`, 'a'.repeat(40), STATES[n % STATES.length], now, now, now);
+        }),
+      );
+    }
+  }
+
+  async function plan(state: string): Promise<string> {
+    const sql = listChangesSql(state, 11);
+    const stmt = env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+    const bound = state === 'all' ? stmt.bind('repo', 1e9) : stmt.bind('repo', 1e9, state);
+    const { results } = await bound.all<{ detail: string }>();
+    return results.map((r) => r.detail).join('\n');
+  }
+
+  // The UNIQUE(repo_id, number) constraint index of change_sets serves the
+  // state=all filter, cursor and ORDER BY; a separate (repo_id, number) index
+  // would only duplicate it.
+  it('the state=all page walks (repo_id, number) newest first: no temp B-tree sort', async () => {
+    const all = await plan('all');
+    expect(all).toMatch(/SEARCH c USING (COVERING )?INDEX \S+ \(repo_id=\? AND number<\?\)/);
+    expect(all).not.toContain('USE TEMP B-TREE');
+    const open = await plan('open');
+    expect(open).toContain('idx_cs_repo_state_number');
+    expect(open).not.toContain('USE TEMP B-TREE');
+  });
+
+  it('rows read by a state=all page do not grow with the repo history', async () => {
+    await seedHistory('hist-20', 20);
+    await seedHistory('hist-200', 200);
+    // Settles the token's last-used stamp so both pages pay the same authority rows.
+    await list('hist-20', '?state=all&limit=1');
+    const small = await list('hist-20', '?state=all&limit=10');
+    const large = await list('hist-200', '?state=all&limit=10');
+    expect(small.status).toBe(200);
+    expect(large.status).toBe(200);
+    expect(small.json.changes.map((c: { number: number }) => c.number)).toEqual([20, 19, 18, 17, 16, 15, 14, 13, 12, 11]);
+    expect(large.json.changes.map((c: { number: number }) => c.number)).toEqual([200, 199, 198, 197, 196, 195, 194, 193, 192, 191]);
+    expect(large.json.nextCursor).toBe('191');
+    const deep = await list('hist-200', '?state=all&limit=10&cursor=101');
+    expect(deep.json.changes[0].number).toBe(100);
+    expect(small.cost.d1).toBe(2);
+    expect(large.cost.d1).toBe(2);
+    expect(large.cost.rr).toBe(small.cost.rr);
+    expect(deep.cost.rr).toBe(small.cost.rr);
+    for (const [repo, cursor] of [['hist-20', Number.MAX_SAFE_INTEGER], ['hist-200', Number.MAX_SAFE_INTEGER], ['hist-200', 101]] as const) {
+      const page = await env.DB.prepare(listChangesSql('all', 11)).bind(repoIds[repo], cursor).all();
+      expect(page.meta.rows_read, `${repo} < ${cursor}`).toBe(11);
+    }
   });
 });
 

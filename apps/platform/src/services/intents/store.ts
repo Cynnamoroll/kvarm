@@ -87,9 +87,13 @@ export function observedWriteStatements(db: D1Database, o: ObservedWrite): D1Pre
           WHERE repo_id = ?1 AND id = ?2 AND status = 'active' AND ${order}`,
       )
       .bind(o.repoId, o.workspaceId, eventAt, o.headSha, o.pathsJson, o.baseSha, o.now, o.truncated, o.prefixes, o.omitted, o.event?.id ?? null),
+    // Only the rows that left the set are deleted and only new ones inserted, so the share counts move by the difference.
     db
-      .prepare(`DELETE FROM workspace_paths WHERE repo_id = ?1 AND workspace_id = ?2 AND kind = 'observed' AND ${guard}`)
-      .bind(o.repoId, o.workspaceId, eventAt, o.headSha),
+      .prepare(
+        `DELETE FROM workspace_paths WHERE repo_id = ?1 AND workspace_id = ?2 AND kind = 'observed'
+            AND path NOT IN (SELECT value FROM json_each(?5)) AND ${guard}`,
+      )
+      .bind(o.repoId, o.workspaceId, eventAt, o.headSha, o.pathsJson),
     db
       .prepare(
         `INSERT OR IGNORE INTO workspace_paths (repo_id, kind, path, workspace_id)
@@ -137,4 +141,9 @@ export function changeSignalCleanup(db: D1Database, repoId: string, changeSetId:
 /** For the repo DELETE batch. */
 export function repoSignalCleanup(db: D1Database, repoId: string): D1PreparedStatement {
   return db.prepare('DELETE FROM workspace_paths WHERE repo_id = ?').bind(repoId);
+}
+
+/** For the repo DELETE batch, after repoSignalCleanup: share counts whose workspace rows were already gone. */
+export function repoShareCleanup(db: D1Database, repoId: string): D1PreparedStatement {
+  return db.prepare('DELETE FROM workspace_path_shares WHERE repo_id = ?').bind(repoId);
 }

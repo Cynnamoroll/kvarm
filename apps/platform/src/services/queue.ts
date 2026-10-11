@@ -94,7 +94,7 @@ import { artifactsMergeSources, overlaySources, prepareMerge, type PreparedMerge
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
 import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
-import { hasCiJobs, queueExactTreeCi } from './ci';
+import { hasCiJobs, queueExactTreeCi, type CiConfigMemo } from './ci';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -766,6 +766,8 @@ interface WindowRow extends EntryRow, ReviewFactsRow {
   c_head: string | null;
   c_title: string;
   c_head_ref: string;
+  /** The prepared commit the CI jobs of the recorded composed tree run on (null when none are queued). */
+  ci_staged: string | null;
 }
 
 export interface TrainRunResult {
@@ -778,6 +780,8 @@ export interface TrainRunResult {
   /** Largest number of entries checking at once. */
   maxChecking: number;
   retryAfterSeconds?: number;
+  /** Metered work of each pass (window read through its release or hand-off), when a cost meter is active. */
+  passCosts?: Array<Partial<CostCounters>>;
 }
 
 interface RunClaim {
@@ -851,10 +855,16 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
            FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
       )
       .bind(repoId),
+    // ci_staged: the earliest CI job of the recorded tree (the staged commit). SQLite takes a bare column from the
+    // MIN() row, which reads the (repo, tree) index range once instead of reading it and then sorting it.
     db
       .prepare(
         `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title, c.head_ref AS c_head_ref,
-                ${reviewFactsColumns('c')}
+                ${reviewFactsColumns('c')},
+                CASE WHEN q.tree_sha IS NOT NULL THEN
+                  (SELECT head_sha FROM (SELECT j.head_sha, MIN(j.created_at) FROM ci_jobs j INDEXED BY idx_ci_jobs_tree
+                    WHERE j.repo_id = q.repo_id AND j.tree_sha = q.tree_sha AND j.change_set_id = q.change_set_id))
+                END AS ci_staged
            FROM merge_queue q JOIN change_sets c ON c.id = q.change_set_id
           WHERE q.id IN (${WINDOW_IDS})
           ORDER BY q.seq`,
@@ -938,6 +948,16 @@ const EXIT_STATES: Partial<Record<string, 'ejected' | 'stale'>> = {
   BASE_KEPT_MOVING: 'stale',
 };
 
+/** States a pass records only after the entry was composed (and, with a CI config, staged) on its recorded base and tree. */
+const PREPARED: ReadonlySet<QueueState> = new Set(['preparing', 'checking', 'ready']);
+
+function stagedCommitMatches(
+  c: { treeHash: string; parents: string[] } | null,
+  pv: { targetSha: string; headSha: string; treeSha: string },
+): boolean {
+  return c !== null && c.treeHash === pv.treeSha && c.parents.length === 2 && c.parents[0] === pv.targetSha && c.parents[1] === pv.headSha;
+}
+
 async function trainPass(
   env: Env,
   ctx: ResolveContext,
@@ -950,6 +970,7 @@ async function trainPass(
   owner: string,
   deps: TrainDeps,
   rejudged: Set<string>,
+  configs: CiConfigMemo,
 ): Promise<PassOutcome> {
   const db = env.DB;
   const now = deps.now();
@@ -1109,47 +1130,57 @@ async function trainPass(
       continue;
     }
     if (p.value.kind === 'merge') {
-      const configured = await hasCiJobs(env, repo.artifacts_name, p.value.headSha);
-      if (!configured.ok) {
-        exit(configured.code ?? 'INVALID_CI_CONFIG', configured.error);
-        continue;
-      }
-      if (configured.value) {
+      const pv = p.value;
+      const stagedIdentity = (sha: string) => sources.readCommit(sha).then((c) => stagedCommitMatches(c, pv));
+      // An earlier pass composed exactly this (target, head, tree) under the same generation and staged it: its
+      // prepared commit, staging ref and queued jobs still stand, and the head's config cannot have changed.
+      const recorded =
+        e.ci_staged !== null &&
+        PREPARED.has(e.state) &&
+        plan.generation === e.generation &&
+        e.head_sha === pv.headSha &&
+        e.base_sha === pv.targetSha &&
+        e.tree_sha === pv.treeSha
+          ? e.ci_staged
+          : null;
+      if (recorded !== null && (await stagedIdentity(recorded))) {
         plan.ciPrepared = true;
-        // Reuse the immutable prepared commit staged by an earlier pass. A
-        // freshly prepared commit can have the same tree and parents but a
-        // different timestamp, while the completed checks name the staged SHA.
-        const checkRef = `refs/heads/forge-ci/${e.id}/${p.value.treeSha}`;
-        const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
-        if (live !== null) {
-          const expected = await env.DB.prepare(
-            'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
-          )
-            .bind(repo.id, e.change_set_id, p.value.treeSha)
-            .first<string>('head_sha');
-          const staged = await sources.readCommit(live);
-          if (
-            live !== expected ||
-            !staged ||
-            staged.treeHash !== p.value.treeSha ||
-            staged.parents.length !== 2 ||
-            staged.parents[0] !== p.value.targetSha ||
-            staged.parents[1] !== p.value.headSha
-          ) {
-            throw new RefStoreUnavailable(`prepared CI ref ${checkRef} has an invalid commit identity`);
-          }
-          p.value.mergeCommit = live;
-        } else {
-          const staged = await deps.pusher(env, repo).updateRef(
-            { ref: checkRef, oldOid: ZERO_OID, newOid: p.value.mergeCommit },
-            p.value.objects,
-          );
-          if (staged.status !== 'ok') throw new RefStoreUnavailable(`prepared CI ref could not be created: ${staged.reason ?? staged.status}`);
-        }
-        const queued = await queueExactTreeCi(env, repo, e.change_set_id, p.value.headSha, p.value.mergeCommit, p.value.treeSha);
-        if (!queued.ok) {
-          exit(queued.code ?? 'CI_QUEUE_FAILED', queued.error);
+        pv.mergeCommit = recorded;
+      } else {
+        const configured = await hasCiJobs(env, repo.artifacts_name, pv.headSha, configs);
+        if (!configured.ok) {
+          exit(configured.code ?? 'INVALID_CI_CONFIG', configured.error);
           continue;
+        }
+        if (configured.value) {
+          plan.ciPrepared = true;
+          // Reuse the immutable prepared commit staged by an earlier pass. A
+          // freshly prepared commit can have the same tree and parents but a
+          // different timestamp, while the completed checks name the staged SHA.
+          const checkRef = `refs/heads/forge-ci/${e.id}/${pv.treeSha}`;
+          const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
+          if (live !== null) {
+            const expected =
+              e.tree_sha === pv.treeSha
+                ? e.ci_staged
+                : await env.DB.prepare(
+                    'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
+                  )
+                    .bind(repo.id, e.change_set_id, pv.treeSha)
+                    .first<string>('head_sha');
+            if (live !== expected || !(await stagedIdentity(live))) {
+              throw new RefStoreUnavailable(`prepared CI ref ${checkRef} has an invalid commit identity`);
+            }
+            pv.mergeCommit = live;
+          } else {
+            const staged = await deps.pusher(env, repo).updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: pv.mergeCommit }, pv.objects);
+            if (staged.status !== 'ok') throw new RefStoreUnavailable(`prepared CI ref could not be created: ${staged.reason ?? staged.status}`);
+          }
+          const queued = await queueExactTreeCi(env, repo, e.change_set_id, pv.headSha, pv.mergeCommit, pv.treeSha, configs);
+          if (!queued.ok) {
+            exit(queued.code ?? 'CI_QUEUE_FAILED', queued.error);
+            continue;
+          }
         }
       }
     }
@@ -1678,8 +1709,17 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
   }
   const waitUntil: Promise<unknown>[] = [];
   const rejudged = new Set<string>();
+  const configs: CiConfigMemo = new Map();
+  let passStart: CostCounters | null = null;
+  const closePass = () => {
+    const cost = costDelta(passStart, meterSnapshot());
+    if (cost) (result.passCosts ??= []).push(cost);
+    passStart = null;
+  };
   try {
     for (let pass = 0; pass < TRAIN_LIMITS.maxPasses; pass++) {
+      closePass();
+      passStart = meterSnapshot();
       result.passes = pass + 1;
       const [repoRes, rulesRes, windowRes, pinsRes] = await env.DB.batch(windowStatements(env.DB, repoId, ref));
       const repo = (repoRes?.results as RepoRow[] | undefined)?.[0];
@@ -1706,6 +1746,7 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
             owner,
             deps,
             rejudged,
+            configs,
           ),
         );
       } catch (err) {
@@ -1748,6 +1789,7 @@ export async function runTrain(env: Env, repoId: string, ref: string, deps: Trai
     await deps.kick(env, repoId, ref, 'continue');
     return result;
   } finally {
+    closePass();
     await Promise.allSettled(waitUntil);
   }
 }

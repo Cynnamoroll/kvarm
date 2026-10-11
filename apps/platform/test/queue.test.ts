@@ -23,7 +23,7 @@ import {
   type TrainDeps,
   type TrainEvent,
 } from '../src/services/queue';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, lsRefsPrefixes, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://forge.test';
@@ -922,6 +922,232 @@ describe('integration train', () => {
     expect(result.explicitAcks).toHaveLength(1);
     expect(firstParents(repo, main)).toHaveLength(1);
     expect((await getChange('consumer', numbers[0]!)).json.state).toBe('merged');
+  });
+});
+
+describe('train CI staging of composed merges', () => {
+  const CI_CONFIG = `${JSON.stringify({ jobs: [{ name: 'test', run: 'npm test', required: true }] })}\n`;
+  const STAGING = 'refs/heads/forge-ci/';
+
+  class CountingWorkflow {
+    created: string[] = [];
+    async create(opts: { id?: string }) {
+      this.created.push(opts.id ?? '');
+      return { id: opts.id ?? crypto.randomUUID() };
+    }
+    async get(id: string) {
+      return { id };
+    }
+  }
+
+  /** Records every SQL text the train runs, standalone or inside a batch. */
+  class SpyStatement {
+    constructor(
+      readonly inner: D1PreparedStatement,
+      readonly sql: string,
+      private readonly log: string[],
+    ) {}
+    bind(...values: unknown[]): SpyStatement {
+      return new SpyStatement(this.inner.bind(...values), this.sql, this.log);
+    }
+    first(col?: string) {
+      this.log.push(`standalone:${this.sql}`);
+      return col === undefined ? this.inner.first() : this.inner.first(col);
+    }
+    all() {
+      this.log.push(`standalone:${this.sql}`);
+      return this.inner.all();
+    }
+    run() {
+      this.log.push(`standalone:${this.sql}`);
+      return this.inner.run();
+    }
+    raw() {
+      this.log.push(`standalone:${this.sql}`);
+      return this.inner.raw();
+    }
+  }
+
+  function spyDb(db: D1Database, log: string[]): D1Database {
+    return new Proxy(db, {
+      get(t, p) {
+        if (p === 'prepare') return (sql: string) => new SpyStatement(t.prepare(sql), sql, log) as unknown as D1PreparedStatement;
+        if (p === 'batch') {
+          return (stmts: D1PreparedStatement[]) => {
+            log.push(`batch:${stmts.map((s) => (s instanceof SpyStatement ? s.sql : '?')).join('\n;\n')}`);
+            return t.batch(stmts.map((s) => (s instanceof SpyStatement ? s.inner : s)));
+          };
+        }
+        const v: unknown = Reflect.get(t, p);
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+  }
+
+  interface RunWork {
+    run: Awaited<ReturnType<typeof runTrain>>;
+    cost: CostCounters;
+    configReads: number;
+    stagingLsRefs: number;
+    standaloneCiJobs: number;
+    ciJobInserts: number;
+    workflowCreates: number;
+    stagedRefWrites: number;
+  }
+
+  /** One train run under a fresh meter, with the per-run work this suite pins. */
+  async function measured(name: string, repo: FakeRepo, deps: TrainDeps, wf: CountingWorkflow): Promise<RunWork> {
+    const log: string[] = [];
+    const meter = new CostMeter();
+    const metered = meter.wrapEnv({ ...env, CI_PIPELINE: wf as unknown as Env['CI_PIPELINE'] } as Env);
+    const db = spyDb(metered.DB, log);
+    const trainEnv = new Proxy(metered, { get: (t, p) => (p === 'DB' ? db : Reflect.get(t, p)) });
+    const calls = repo.calls.length;
+    const lsMark = lsRefsPrefixes.length;
+    const wfMark = wf.created.length;
+    const run = await runWithMeter(meter, () => runTrain(trainEnv, repoIds[name]!, MAIN, deps));
+    const since = repo.calls.slice(calls);
+    return {
+      run,
+      cost: meter.snapshot(),
+      configReads: since.filter((c) => c.startsWith('readFile:') && c.endsWith(':.forge/ci.json')).length,
+      stagingLsRefs: lsRefsPrefixes.slice(lsMark).filter((p) => p.some((x) => x.startsWith(STAGING))).length,
+      standaloneCiJobs: log.filter((l) => l.startsWith('standalone:') && /\bci_jobs\b/.test(l)).length,
+      ciJobInserts: log.filter((l) => /INSERT INTO ci_jobs/.test(l)).length,
+      workflowCreates: wf.created.length - wfMark,
+      stagedRefWrites: since.filter((c) => c.startsWith(`receivePack:${STAGING}`)).length,
+    };
+  }
+
+  const stagedRefs = (repo: FakeRepo) => [...repo.refs].filter(([r]) => r.startsWith(STAGING));
+
+  /** main moves after the change's branch forked, so the train composes (and stages) a real merge commit. */
+  async function ciSetup(name: string, withConfig: boolean) {
+    const repo = await seedRepo(name);
+    const files: Files = { 'README.md': 'readme\n', ...(withConfig ? { '.forge/ci.json': CI_CONFIG } : {}) };
+    const fork = await commit(repo, files);
+    const head = await commit(repo, { ...files, 'f1.txt': 'file 1\n' }, [fork.sha]);
+    repo.refs.set(MAIN, fork.sha);
+    repo.refs.set('refs/heads/b1', head.sha);
+    const created = await createChange(name, 'b1');
+    expect(created.status, JSON.stringify(created.json)).toBe(201);
+    const moved = await commit(repo, { ...files, 'other.txt': 'other\n' }, [fork.sha]);
+    repo.refs.set(MAIN, moved.sha);
+    const n = created.json.number as number;
+    const queued = await enqueue(name, n);
+    expect(queued.status, JSON.stringify(queued.json)).toBe(201);
+    return { repo, n, files, head: head.sha, moved: moved.sha };
+  }
+
+  it('reuses the staged CI commit when the composition identity is unchanged: no config read, staging ls-refs, ci_jobs read or re-queue', async () => {
+    const { repo, n, head, moved } = await ciSetup('ci-stage', true);
+    const wf = new CountingWorkflow();
+    const gate = scriptedGate('pending');
+    const deps = trainDeps({ gate: () => gate.gate });
+
+    const first = await measured('ci-stage', repo, deps, wf);
+    expect(first.run).toMatchObject({ state: 'waiting', passes: 1 });
+    expect(first.stagedRefWrites).toBe(1);
+    expect(first.ciJobInserts).toBe(1);
+    expect(first.workflowCreates).toBe(1);
+    // hasCiJobs and the exact-tree queueing share one read of the head's config.
+    expect(first.configReads).toBe(1);
+    const staged = stagedRefs(repo);
+    expect(staged).toHaveLength(1);
+    const [stagedRef, stagedSha] = staged[0]!;
+    expect(commitOf(repo, stagedSha).parents).toEqual([moved, head]);
+
+    const second = await measured('ci-stage', repo, deps, wf);
+    expect(second.run).toMatchObject({ state: 'waiting', passes: 1 });
+    // The pass's own work (the run claim before it is the run's).
+    expect(second.run.passCosts).toEqual([expect.objectContaining({ d1: second.cost.d1 - 1, sub: second.cost.sub, art: second.cost.art })]);
+    expect(second.configReads).toBe(0);
+    expect(second.stagingLsRefs).toBe(0);
+    expect(second.standaloneCiJobs).toBe(0);
+    expect(second.ciJobInserts).toBe(0);
+    expect(second.workflowCreates).toBe(0);
+    expect(second.stagedRefWrites).toBe(0);
+    // Only the window's ls-refs (target + head branch) remains.
+    expect(second.cost.sub).toBe(1);
+    // Run claim, window batch, run release and the checks backstop: no CI round trip.
+    expect(second.cost.d1).toBeLessThanOrEqual(4);
+    expect(second.cost.d1).toBeLessThan(first.cost.d1);
+    const entry = await env.DB.prepare('SELECT state, tree_sha FROM merge_queue WHERE repo_id = ? AND active = 1')
+      .bind(repoIds['ci-stage'])
+      .first<{ state: string; tree_sha: string }>();
+    expect(entry).toEqual({ state: 'checking', tree_sha: stagedRef.slice(stagedRef.lastIndexOf('/') + 1) });
+
+    // The checks pass: the train publishes exactly the commit the CI jobs ran on, then drops its staging ref.
+    gate.fallback = 'success';
+    const third = await measured('ci-stage', repo, deps, wf);
+    expect(third.run.published).toEqual([n]);
+    expect(third.configReads).toBe(0);
+    expect(third.ciJobInserts).toBe(0);
+    expect(repo.refs.get(MAIN)).toBe(stagedSha);
+    expect(stagedRefs(repo)).toEqual([]);
+    // Every CI job of the published tree ran on that one staged commit.
+    const jobs = await env.DB.prepare('SELECT DISTINCT head_sha FROM ci_jobs WHERE repo_id = ? AND tree_sha = ?')
+      .bind(repoIds['ci-stage'], commitOf(repo, stagedSha).tree)
+      .all();
+    expect(jobs.results).toEqual([{ head_sha: stagedSha }]);
+  });
+
+  it('re-reads the config and re-stages exactly once when the target moved under a staged candidate', async () => {
+    const { repo, files, head, moved } = await ciSetup('ci-restage', true);
+    const wf = new CountingWorkflow();
+    const gate = scriptedGate('pending');
+    const deps = trainDeps({ gate: () => gate.gate });
+    await measured('ci-restage', repo, deps, wf);
+    const [[oldRef]] = stagedRefs(repo) as [[string, string]];
+
+    const movedAgain = await commit(repo, { ...files, 'other.txt': 'other\n', 'more.txt': 'more\n' }, [moved]);
+    repo.refs.set(MAIN, movedAgain.sha);
+    const changed = await measured('ci-restage', repo, deps, wf);
+    expect(changed.run).toMatchObject({ state: 'waiting', passes: 1 });
+    expect(changed.configReads).toBe(1);
+    expect(changed.stagingLsRefs).toBe(1);
+    expect(changed.stagedRefWrites).toBe(1);
+    expect(changed.ciJobInserts).toBe(1);
+    expect(changed.workflowCreates).toBe(1);
+    const fresh = stagedRefs(repo).filter(([r]) => r !== oldRef);
+    expect(fresh).toHaveLength(1);
+    expect(commitOf(repo, fresh[0]![1]).parents).toEqual([movedAgain.sha, head]);
+
+    // The new composition is now the recorded one: the next pass reuses it.
+    const again = await measured('ci-restage', repo, deps, wf);
+    expect(again.configReads).toBe(0);
+    expect(again.stagingLsRefs).toBe(0);
+    expect(again.ciJobInserts).toBe(0);
+  });
+
+  it('never reuses a recorded staged commit whose tree and parents are not the composition: the ref check refuses it', async () => {
+    const { repo, moved } = await ciSetup('ci-mismatch', true);
+    const wf = new CountingWorkflow();
+    const deps = trainDeps({ gate: () => scriptedGate('pending').gate });
+    await measured('ci-mismatch', repo, deps, wf);
+    const [[, stagedSha]] = stagedRefs(repo) as [[string, string]];
+    await env.DB.prepare('UPDATE ci_jobs SET head_sha = ?1 WHERE repo_id = ?2 AND head_sha = ?3').bind(moved, repoIds['ci-mismatch'], stagedSha).run();
+
+    const refused = await measured('ci-mismatch', repo, deps, wf);
+    expect(refused.run.state).toBe('unavailable');
+    expect(refused.configReads).toBe(1);
+    expect(refused.stagingLsRefs).toBe(1);
+    expect(refused.ciJobInserts + refused.workflowCreates + refused.stagedRefWrites).toBe(0);
+    expect(repo.refs.get(MAIN)).toBe(moved);
+  });
+
+  it('a pass without a CI config reads the config once and stages nothing', async () => {
+    const { repo } = await ciSetup('ci-none', false);
+    const wf = new CountingWorkflow();
+    const deps = trainDeps({ gate: () => scriptedGate('pending').gate });
+    const first = await measured('ci-none', repo, deps, wf);
+    const second = await measured('ci-none', repo, deps, wf);
+    for (const w of [first, second]) {
+      expect(w.run).toMatchObject({ state: 'waiting', passes: 1 });
+      expect(w.configReads).toBe(1);
+      expect(w.stagingLsRefs + w.stagedRefWrites + w.ciJobInserts + w.workflowCreates + w.standaloneCiJobs).toBe(0);
+    }
+    expect(stagedRefs(repo)).toEqual([]);
   });
 });
 

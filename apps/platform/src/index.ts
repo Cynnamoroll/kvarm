@@ -26,7 +26,7 @@ import { repoPages } from './routes/repoPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
-export { TokenCache, RateLimiter, RealtimeHub, MergeLock } from './do';
+export { TokenCache, RateLimiter, MergeLock } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
 export { CiRunnerSandbox } from './containers/ciRunnerSandbox';
 

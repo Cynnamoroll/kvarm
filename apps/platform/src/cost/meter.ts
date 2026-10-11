@@ -54,7 +54,6 @@ export const METERED_BINDINGS: Readonly<Record<string, BindingKind>> = {
   EVENTS: 'queue',
   TOKENS: 'do',
   RATE_LIMIT: 'do',
-  REALTIME: 'do',
   MERGE_LOCK: 'do',
   CI_SANDBOX: 'do',
 };

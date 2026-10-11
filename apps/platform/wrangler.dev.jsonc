@@ -58,7 +58,6 @@
     "bindings": [
       { "name": "TOKENS", "class_name": "TokenCache" },
       { "name": "RATE_LIMIT", "class_name": "RateLimiter" },
-      { "name": "REALTIME", "class_name": "RealtimeHub" },
       { "name": "MERGE_LOCK", "class_name": "MergeLock" }
     ]
   },
@@ -66,6 +65,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["TokenCache", "RateLimiter", "RealtimeHub", "MergeLock"]
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": ["RealtimeHub"]
     }
   ],
   "workflows": [

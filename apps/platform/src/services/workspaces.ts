@@ -27,7 +27,7 @@ import { RESOLVE_CONFLICT } from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
 import { normalizeDeclaration, type Declaration } from './intents/paths';
-import { declaredInsertStatement, repoSignalCleanup, workspaceSignalCleanup } from './intents/store';
+import { declaredInsertStatement, repoShareCleanup, repoSignalCleanup, workspaceSignalCleanup } from './intents/store';
 
 export const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
 export const WORKSPACE_STATUSES = ['active', 'merged', 'abandoned'] as const;
@@ -655,6 +655,7 @@ export function agentWorkspaceDenial(actor: Actor, cmd: RefCommand, owners: Map<
 export function workspaceCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
   return [
     repoSignalCleanup(db, repoId),
+    repoShareCleanup(db, repoId),
     db.prepare('DELETE FROM workspace_dependencies WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM workspaces WHERE repo_id = ?').bind(repoId),
   ];
