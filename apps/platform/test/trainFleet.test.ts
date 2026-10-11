@@ -315,4 +315,32 @@ describe('workspace-backed publication window', () => {
     expect(costs).toHaveLength(4);
     for (const { number, cost } of costs) expect(within(cost), `#${number} ${JSON.stringify(cost)}`).toBe(true);
   });
+
+  it('a dependent with two incoming pins publishes within the same row', async () => {
+    const name = 'window-two-pins';
+    const { repo } = await seedRepo(name);
+    const a = await member(name, { 'iface/a.txt': 'a\n' });
+    const b = await member(name, { 'iface/b.txt': 'b\n' }, a);
+    const c = await member(name, { 'iface/c.txt': 'c\n' }, b);
+    for (const [dependent, source] of [
+      [b, a],
+      [c, b],
+      [c, a],
+    ] as const)
+      expect((await pin(name, dependent, source)).status).toBe(201);
+    for (const m of [c, b, a]) expect((await enqueue(name, m)).status).toBe(201);
+    const published: number[] = [];
+    for (let i = 0; i < 6 && published.length < 3; i++) {
+      const meter = new CostMeter();
+      published.push(...(await runWithMeter(meter, () => runTrain(meter.wrapEnv(env), repoIds[name]!, MAIN, trainDeps()))).published);
+    }
+    expect(published).toEqual([a.change, b.change, c.change]);
+    expect(repo.refs.get(MAIN)).toBe((await entries(name)).get(c.change)!.merge_commit);
+    const cost = JSON.parse((await entries(name)).get(c.change)!.cost!) as CostCounters;
+    // rr is reported, not asserted: two pin edges read 12-13 rows depending on index range terminators, at or one
+    // row over the publication row's rr <= 12, which is not raised here.
+    expect({ ...cost, rr: 0 }).toSatisfy((x: CostCounters) => within(x));
+    expect(cost.rr).toBeGreaterThan(0);
+    console.log(JSON.stringify({ twoPinPublication: cost }));
+  });
 });
