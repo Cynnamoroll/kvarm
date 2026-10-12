@@ -13,7 +13,7 @@ import worker from '../src/index';
 import { FakeRepo, blobHash, commit, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
 
 const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts } as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'contents-owner';
 const tok = { owner: '', outsider: '' };

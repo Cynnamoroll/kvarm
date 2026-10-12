@@ -6,7 +6,7 @@
  *
  * Usage (tokens come from env vars by NAME; they are never printed):
  *   node scripts/receive-pack-probe.mjs --repo cynthia/<name> --ref refs/heads/authz-probe \
- *     --workdir /path/to/local/clone --new <sha> --as FORGE_PAT_BOT --owner FORGE_PAT
+ *     --workdir /path/to/local/clone --new <sha> --as KVARM_PAT_BOT --owner KVARM_PAT
  *
  * The local workdir must contain the <new> commit and the current remote <old>
  * commit so `git pack-objects` can build a thin pack of old..new.
@@ -24,7 +24,7 @@ const { values: a } = parseArgs({
     workdir: { type: 'string' },
     new: { type: 'string' },
     as: { type: 'string' },
-    owner: { type: 'string', default: 'FORGE_PAT' },
+    owner: { type: 'string', default: 'KVARM_PAT' },
   },
 });
 
@@ -33,7 +33,7 @@ function fail(msg) {
   process.exit(2);
 }
 
-const base = process.env.FORGE_BASE_URL ?? fail('FORGE_BASE_URL is not set');
+const base = process.env.KVARM_BASE_URL ?? fail('KVARM_BASE_URL is not set');
 for (const k of ['repo', 'ref', 'workdir', 'new', 'as']) if (!a[k]) fail(`--${k} is required`);
 const actorToken = process.env[a.as] ?? fail(`env ${a.as} is not set`);
 const ownerToken = process.env[a.owner] ?? fail(`env ${a.owner} is not set`);

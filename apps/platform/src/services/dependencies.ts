@@ -71,7 +71,7 @@ export const defaultDependencyDeps: DependencyDeps = {
 
 /**
  * Runs one settlement continuation of a landing for one of its two owners:
- * a `forge.dependency-settle` message (`queue`) or the MergeLock alarm
+ * a `kvarm.dependency-settle` message (`queue`) or the MergeLock alarm
  * (`alarm`), under a fresh claim token. One batch reads the repo and the
  * landing's first unsettled page and claims its wake-pending marks (all
  * empty for a replay, another landing's identity or a deleted repo: nothing

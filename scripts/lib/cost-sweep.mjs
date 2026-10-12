@@ -4,7 +4,7 @@
  * library/cost.md is the budget document: every markdown table row in it is
  * one documented path. The sweep parses those rows, matches each one to a
  * catalog entry (a live probe with a normalized budget spec, or a non-live
- * entry with its category and reason), checks the measured x-forge-cost
+ * entry with its category and reason), checks the measured x-kvarm-cost
  * samples and prints one verdict per row.
  */
 

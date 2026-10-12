@@ -7,7 +7,7 @@
  * polls.
  */
 
-export const TRAIN_MESSAGE = 'forge.train';
+export const TRAIN_MESSAGE = 'kvarm.train';
 
 export interface TrainMessage {
   type: typeof TRAIN_MESSAGE;

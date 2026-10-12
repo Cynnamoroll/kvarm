@@ -4,7 +4,7 @@ import { METERED_BINDINGS } from '../src/cost/meter';
 
 describe('worker smoke', () => {
   it('GET /healthz returns 200 ok', async () => {
-    const res = await exports.default.fetch('https://forge.test/healthz');
+    const res = await exports.default.fetch('https://kvarm.test/healthz');
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('ok');
   });
@@ -30,7 +30,7 @@ describe('worker smoke', () => {
   });
 
   it('serves the API against real D1', async () => {
-    const res = await exports.default.fetch('https://forge.test/api/v1/user');
+    const res = await exports.default.fetch('https://kvarm.test/api/v1/user');
     expect(res.status).toBe(401);
   });
 });

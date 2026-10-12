@@ -5,7 +5,7 @@
  * VAL-WORKFLOW-004, VAL-CROSS-010, VAL-ARENA-001..004, the candidates half of
  * VAL-COST-025, VAL-COMPOSE-001..002 and (m5-guard-check) VAL-CAND-005.
  *
- * Every section runs in a fresh public repo owned by FORGE_USER (cynthia),
+ * Every section runs in a fresh public repo owned by KVARM_USER (cynthia),
  * named `m6a-candidates-overlap-<section>-<timestamp>`, seeded and changed
  * with real git pushes through the platform gate, and deleted afterwards
  * (unless --keep):
@@ -26,7 +26,7 @@
  *            path selection from conflicting attempts, incompatible and
  *            partially compatible pairs refused with no ref or record
  *            (VAL-COMPOSE-001..002)
- *   gate     two candidates with change sets, so forge/guard (the real
+ *   gate     two candidates with change sets, so kvarm/guard (the real
  *            checks-gate producer) judges both heads; a required `test` run
  *            reported failing on B and passing on A (POST check-runs, ci
  *            scope) ranks A above B with B's failing check shown (VAL-CAND-005)
@@ -53,9 +53,9 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } },
 });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm6a-candidates-overlap';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -100,20 +100,20 @@ async function http(path, { method = 'GET', json, token = PAT, label } = {}) {
   } catch {
     body = null;
   }
-  const cost = res.headers.get('x-forge-cost');
+  const cost = res.headers.get('x-kvarm-cost');
   if (label) (costs[label] ??= []).push(cost);
   return { status: res.status, text, json: body, cost, c: parseCost(cost) };
 }
 
 const work = mkdtempSync(join(tmpdir(), 'candidates-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, token = PAT) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd,
-    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token },
+    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token },
     encoding: 'utf8',
   });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
@@ -307,7 +307,7 @@ await scenario('cand', async (repo) => {
 
   // VAL-CAND-001 / VAL-CAND-002
   const ab = await http(`${api}/candidates?base=main&workspaces=${A.id},${B.id}`, { label: 'GET candidates (2)' });
-  console.log(`GET candidates?base=main&workspaces=A,B -> ${ab.status} (x-forge-cost ${ab.cost})`);
+  console.log(`GET candidates?base=main&workspaces=A,B -> ${ab.status} (x-kvarm-cost ${ab.cost})`);
   const cands = ab.json?.candidates ?? [];
   check('VAL-CAND-001', 'both candidates present in request order with their pushed heads', ab.status === 200 && eq(cands.map((c) => c.workspace), [A.id, B.id]) && cands[0].headSha === shaA && cands[1].headSha === shaB);
   const matches = await compareMatches(api, 'main', cands);
@@ -326,7 +326,7 @@ await scenario('cand', async (repo) => {
   const q = `${api}/candidates?base=main&workspaces=${A.id},${B.id},${C.id}`;
   const r1 = await http(q, { label: 'GET candidates (3)' });
   const r2 = await http(q, { label: 'GET candidates (3)' });
-  console.log(`GET candidates A,B,C #1 (x-forge-cost ${r1.cost})\n  #2 (x-forge-cost ${r2.cost})`);
+  console.log(`GET candidates A,B,C #1 (x-kvarm-cost ${r1.cost})\n  #2 (x-kvarm-cost ${r2.cost})`);
   console.log(`ranking: ${JSON.stringify(r1.json?.ranking)}\nrankingFactors: ${JSON.stringify(r1.json?.rankingFactors)}\noverlap: ${JSON.stringify(r1.json?.overlap)}`);
   const ranking = r1.json?.ranking ?? [];
   const factorNames = r1.json?.rankingFactors ?? [];
@@ -348,11 +348,11 @@ await scenario('cand', async (repo) => {
     JSON.stringify(rankOf),
   );
   check('VAL-CAND-004', 'two identical calls return byte-identical ranking arrays (and bodies)', eq(r1.json?.ranking, r2.json?.ranking) && r1.text === r2.text);
-  // d1 = 3 since forge/guard made the checks gate read D1 (library/cost.md, warm candidates row).
+  // d1 = 3 since kvarm/guard made the checks gate read D1 (library/cost.md, warm candidates row).
   check('VAL-COST-015', 'second identical candidates call: art=0, do=0, d1 <= 3', r2.c.art === 0 && r2.c.do === 0 && r2.c.d1 <= 3, `#1 ${r1.cost} | #2 ${r2.cost}`);
   const o1 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
   const o2 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
-  console.log(`GET workspaces/overlap #1 (x-forge-cost ${o1.cost}) #2 (x-forge-cost ${o2.cost}) -> ${o2.text}`);
+  console.log(`GET workspaces/overlap #1 (x-kvarm-cost ${o1.cost}) #2 (x-kvarm-cost ${o2.cost}) -> ${o2.text}`);
   check('VAL-COST-015', 'second identical overlap call: art=0, do=0, d1 <= 2', o2.status === 200 && o2.c.art === 0 && o2.c.do === 0 && o2.c.d1 <= 2, `#1 ${o1.cost} | #2 ${o2.cost}`);
 
   // VAL-CAND-006 / VAL-CROSS-010: explicit selection of one winner; nothing automatic.
@@ -446,7 +446,7 @@ await scenario('bounds', async (repo) => {
   check('VAL-COST-025', 'warm 8-candidate call keeps the same d1 as the 4-candidate call, art=0', c8.c.d1 === c12.c.d1 && c8.c.art === 0 && c8.c.do === 0, c8.cost);
   const all12 = ws.map((w) => w.id).join(',');
   const over = await http(`${api}/candidates?base=main&workspaces=${all12}`, { label: 'GET candidates (over cap)' });
-  console.log(`GET candidates (12 > cap) -> ${over.status} ${over.text} (x-forge-cost ${over.cost})`);
+  console.log(`GET candidates (12 > cap) -> ${over.status} ${over.text} (x-kvarm-cost ${over.cost})`);
   check('VAL-WORKFLOW-004', '12 workspaces → 422 TOO_MANY_CANDIDATES naming the cap (8), no comparison work (art=0)', over.status === 422 && over.json?.code === 'TOO_MANY_CANDIDATES' && over.json?.limit === 8 && over.json?.requested === 12 && over.c.art === 0);
   const ovAll = await http(`${api}/workspaces/overlap?base=main`);
   const sharedPairs = (ovAll.json?.pairs ?? []).filter((p) => p.paths.includes('shared/common.ts'));
@@ -499,7 +499,7 @@ await scenario('arena', async (repo) => {
   // VAL-ARENA-001
   const mk = await http(`${api}/arenas`, { method: 'POST', json: { brief: 'Refactor auth module', base: 'main', candidates: 3 }, token: tok, label: 'POST arenas (3)' });
   const arena = mk.json ?? {};
-  console.log(`POST arenas {candidates:3} -> ${mk.status} (x-forge-cost ${mk.cost}) id=${arena.id} state=${arena.state} workspaces=${JSON.stringify(arena.workspaces?.map((w) => ({ id: w.id, ref: w.ref, headSha: w.headSha?.slice(0, 8), arena: w.arena })))}`);
+  console.log(`POST arenas {candidates:3} -> ${mk.status} (x-kvarm-cost ${mk.cost}) id=${arena.id} state=${arena.state} workspaces=${JSON.stringify(arena.workspaces?.map((w) => ({ id: w.id, ref: w.ref, headSha: w.headSha?.slice(0, 8), arena: w.arena })))}`);
   const refs0 = lsRemoteAll(url);
   check(
     'VAL-ARENA-001',
@@ -524,7 +524,7 @@ await scenario('arena', async (repo) => {
   check('VAL-ARENA-001', 'rejected requests created no refs', Object.keys(refsMid).length === Object.keys(refs0).length);
   for (const n of [2, 8]) {
     const r = await http(`${api}/arenas`, { method: 'POST', json: { brief: `bounds ${n}`, base: 'main', candidates: n }, token: tok, label: `POST arenas (${n})` });
-    check('VAL-ARENA-001', `candidates:${n} accepted with ${n} workspaces`, r.status === 201 && r.json?.workspaces?.length === n, `${r.status} (x-forge-cost ${r.cost})`);
+    check('VAL-ARENA-001', `candidates:${n} accepted with ${n} workspaces`, r.status === 201 && r.json?.workspaces?.length === n, `${r.status} (x-kvarm-cost ${r.cost})`);
   }
 
   // VAL-ARENA-002
@@ -535,7 +535,7 @@ await scenario('arena', async (repo) => {
   const q = `${api}/arenas/${arena.id}/candidates`;
   const c1 = await http(q, { label: 'GET arenas/:id/candidates' });
   const c2 = await http(q, { label: 'GET arenas/:id/candidates' });
-  console.log(`GET arenas/:id/candidates #1 (x-forge-cost ${c1.cost}) #2 (x-forge-cost ${c2.cost})\nranking: ${JSON.stringify(c1.json?.ranking)}\nduplication: ${JSON.stringify(c1.json?.duplication)}`);
+  console.log(`GET arenas/:id/candidates #1 (x-kvarm-cost ${c1.cost}) #2 (x-kvarm-cost ${c2.cost})\nranking: ${JSON.stringify(c1.json?.ranking)}\nduplication: ${JSON.stringify(c1.json?.duplication)}`);
   const ids = [W1.id, W2.id, W3.id];
   const ac = c1.json?.candidates ?? [];
   const arenaMatches = await compareMatches(api, 'main', ac);
@@ -586,7 +586,7 @@ await scenario('arena', async (repo) => {
 
   // VAL-ARENA-003
   const sel = await http(`${api}/arenas/${arena.id}/select`, { method: 'POST', json: { workspace: W1.id }, label: 'POST arenas/:id/select' });
-  console.log(`POST arenas/:id/select {workspace:W1} -> ${sel.status} selection=${JSON.stringify(sel.json?.selection)} state=${sel.json?.state} (x-forge-cost ${sel.cost})`);
+  console.log(`POST arenas/:id/select {workspace:W1} -> ${sel.status} selection=${JSON.stringify(sel.json?.selection)} state=${sel.json?.state} (x-kvarm-cost ${sel.cost})`);
   check(
     'VAL-ARENA-003',
     '200 recording {selectedWorkspace, selectedBy, selectedAt}',
@@ -636,7 +636,7 @@ await scenario('compose', async (repo) => {
   // VAL-COMPOSE-001
   const mk = await http(`${api}/candidates/compose`, { method: 'POST', json: { base: 'main', workspaces: [A.id, B.id] }, label: 'POST candidates/compose' });
   const k = mk.json ?? {};
-  console.log(`POST candidates/compose {A,B} -> ${mk.status} (x-forge-cost ${mk.cost}) ${JSON.stringify({ id: k.id, base: k.base, baseSha: k.baseSha, treeSha: k.treeSha, commitSha: k.commitSha, sources: k.sources, ref: k.workspace?.ref, changeSet: k.changeSet, checks: k.checks, conflict: k.conflict })}`);
+  console.log(`POST candidates/compose {A,B} -> ${mk.status} (x-kvarm-cost ${mk.cost}) ${JSON.stringify({ id: k.id, base: k.base, baseSha: k.baseSha, treeSha: k.treeSha, commitSha: k.commitSha, sources: k.sources, ref: k.workspace?.ref, changeSet: k.changeSet, checks: k.checks, conflict: k.conflict })}`);
   check(
     'VAL-COMPOSE-001',
     '201 composed candidate: id, base, tree sha, sources A and B, its own workspace ref and change set',
@@ -648,7 +648,7 @@ await scenario('compose', async (repo) => {
       k.workspace?.ref?.startsWith(`refs/heads/agents/${k.workspace.id}/`) &&
       Number.isInteger(k.changeSet) &&
       k.conflict === null &&
-      k.checks?.required?.some((c) => c.name === 'forge/guard' && c.producer === 'check-runs'),
+      k.checks?.required?.some((c) => c.name === 'kvarm/guard' && c.producer === 'check-runs'),
   );
   const rb = await http(`${api}/compositions/${k.id}`, { label: 'GET compositions/:id' });
   check('VAL-COMPOSE-001', 'GET compositions/:id reads back the same record', rb.status === 200 && rb.text === mk.text, rb.cost);
@@ -696,7 +696,7 @@ await scenario('compose', async (repo) => {
   await pushWork(env, F, { 'shared.txt': SHARED_TXT.replace('line 11\n', 'line 11 by F\n'), 'src/app.ts': 'export const app = "F";\n' }, 'F', tok);
   const before = { list: (await http(`${api}/compositions?limit=100`)).json?.compositions?.length, refs: lsRemoteAll(url) };
   const bad = await http(`${api}/candidates/compose`, { method: 'POST', json: { base: 'main', workspaces: [C.id, D.id] }, label: 'POST candidates/compose (conflict)' });
-  console.log(`compose C+D (same line of src/app.ts) -> ${bad.status} ${bad.text} (x-forge-cost ${bad.cost})`);
+  console.log(`compose C+D (same line of src/app.ts) -> ${bad.status} ${bad.text} (x-kvarm-cost ${bad.cost})`);
   check(
     'VAL-COMPOSE-002',
     '409 COMPOSITION_CONFLICT, textual kind, report names src/app.ts with the conflicting workspaces and hunks',
@@ -744,18 +744,18 @@ await scenario('gate', async (repo) => {
     Object.fromEntries((r.json?.candidates ?? []).map((c) => [c.workspace === A.id ? 'A' : 'B', { state: c.checks?.state, required: c.checks?.required?.map((k) => `${k.name}:${k.state}:${k.producer}`) }]));
   const order = (r) => (r.json?.ranking ?? []).map((e) => (e.workspace === A.id ? 'A' : 'B'));
   const before = await http(q, { label: 'GET candidates (gate)' });
-  console.log(`before reports: ${before.status} checks=${JSON.stringify(view(before))} ranking=${JSON.stringify(order(before))} (x-forge-cost ${before.cost})`);
+  console.log(`before reports: ${before.status} checks=${JSON.stringify(view(before))} ranking=${JSON.stringify(order(before))} (x-kvarm-cost ${before.cost})`);
   check(
     'VAL-CAND-005',
-    'forge/guard is the real producer: both candidates carry forge/guard:success from check-runs before any report',
-    before.status === 200 && ['A', 'B'].every((k) => view(before)[k]?.state === 'success' && eq(view(before)[k].required, ['forge/guard:success:check-runs'])),
+    'kvarm/guard is the real producer: both candidates carry kvarm/guard:success from check-runs before any report',
+    before.status === 200 && ['A', 'B'].every((k) => view(before)[k]?.state === 'success' && eq(view(before)[k].required, ['kvarm/guard:success:check-runs'])),
     JSON.stringify(view(before)),
   );
 
   const failB = await http(`${api}/check-runs`, { method: 'POST', json: { headSha: shaB, name: 'test', conclusion: 'failure' }, label: 'POST check-runs' });
   const passA = await http(`${api}/check-runs`, { method: 'POST', json: { headSha: shaA, name: 'test', conclusion: 'success' }, label: 'POST check-runs' });
-  console.log(`POST check-runs test=failure on B ${shaB.slice(0, 8)} -> ${failB.status} ${JSON.stringify(failB.json?.run && { name: failB.json.run.name, status: failB.json.run.status, required: failB.json.run.required })} (x-forge-cost ${failB.cost})`);
-  console.log(`POST check-runs test=success on A ${shaA.slice(0, 8)} -> ${passA.status} (x-forge-cost ${passA.cost})`);
+  console.log(`POST check-runs test=failure on B ${shaB.slice(0, 8)} -> ${failB.status} ${JSON.stringify(failB.json?.run && { name: failB.json.run.name, status: failB.json.run.status, required: failB.json.run.required })} (x-kvarm-cost ${failB.cost})`);
+  console.log(`POST check-runs test=success on A ${shaA.slice(0, 8)} -> ${passA.status} (x-kvarm-cost ${passA.cost})`);
   check('VAL-CAND-005', 'required test runs recorded on both heads with the ci-scope PAT (201)', failB.status === 201 && passA.status === 201 && failB.json?.run?.required === true);
   const after = await http(q, { label: 'GET candidates (gate)' });
   const ranking = after.json?.ranking ?? [];
@@ -768,13 +768,13 @@ await scenario('gate', async (repo) => {
   );
   check(
     'VAL-CAND-005',
-    "B's checks list forge/guard success from check-runs alongside test failure",
-    eq(view(after).B?.required, ['forge/guard:success:check-runs', 'test:failure:check-runs']) && view(after).A?.state === 'success',
+    "B's checks list kvarm/guard success from check-runs alongside test failure",
+    eq(view(after).B?.required, ['kvarm/guard:success:check-runs', 'test:failure:check-runs']) && view(after).A?.state === 'success',
     JSON.stringify(view(after)),
   );
   const status = await http(`${api}/commits/${shaB}/status`, { label: 'GET commits/:sha/status' });
-  console.log(`GET commits/${shaB.slice(0, 8)}/status -> ${status.status} state=${status.json?.state} checks=${JSON.stringify(status.json?.checks?.map((c) => [c.name, c.status]))} (x-forge-cost ${status.cost})`);
-  check('VAL-CAND-005', "B's commit status rolls up to failure over forge/guard and test", status.status === 200 && status.json?.state === 'failure' && status.json?.total === 2);
+  console.log(`GET commits/${shaB.slice(0, 8)}/status -> ${status.status} state=${status.json?.state} checks=${JSON.stringify(status.json?.checks?.map((c) => [c.name, c.status]))} (x-kvarm-cost ${status.cost})`);
+  check('VAL-CAND-005', "B's commit status rolls up to failure over kvarm/guard and test", status.status === 200 && status.json?.state === 'failure' && status.json?.total === 2);
 });
 
 rmSync(work, { recursive: true, force: true });

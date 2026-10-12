@@ -1,12 +1,12 @@
 // @ts-check
 /**
- * `forge status <owner/repo>`: one read-only view of a repository's live
+ * `kvarm status <owner/repo>`: one read-only view of a repository's live
  * coordination state, composed from registry reads only (list_workspaces,
  * list_dependencies per active workspace, get_train, list_tasks). It sends
  * no write and triggers no queue send, so repeated runs are idempotent.
  */
 
-import { findOperation } from '@forge/ops';
+import { findOperation } from '@kvarm/ops';
 import { CliError } from './checkout.js';
 import { callOperation, reportFailure } from './ops.js';
 
@@ -15,7 +15,7 @@ import { callOperation, reportFailure } from './ops.js';
 /** Active workspaces whose pins are read (one bounded read each, at most 4 in flight). */
 export const STATUS_LIMITS = { workspaces: 100, dependencyReads: 20, inFlight: 4 };
 
-export const STATUS_HELP = `usage: forge status <repo> [--json]
+export const STATUS_HELP = `usage: kvarm status <repo> [--json]
 
 Read-only status of a repository: its active workspaces with their pinned
 dependencies (state active, stale, broken or satisfied), the integration
@@ -28,8 +28,8 @@ arguments:
 
 Reads only: GET workspaces?status=active, GET workspaces/:id/dependencies
 (for up to ${STATUS_LIMITS.dependencyReads} active workspaces), GET train, GET tasks?status=open.
-For the full lists use "forge workspace list", "forge deps list",
-"forge train status" and "forge task list".
+For the full lists use "kvarm workspace list", "kvarm deps list",
+"kvarm train status" and "kvarm task list".
 
 Exit status: 0 success; 1 API or network failure (with --json the error body
 {status, error, code, ...} is printed on stdout); 2 usage error.`;
@@ -74,7 +74,7 @@ async function mapBounded(items, limit, fn) {
 /** A failed read, carried to the single failure report. */
 class ReadFailed extends Error {
   /**
-   * @param {import('@forge/ops').Operation} operation
+   * @param {import('@kvarm/ops').Operation} operation
    * @param {Record<string, unknown>} args
    * @param {import('./ops.js').OperationReply} reply
    */
@@ -101,7 +101,7 @@ export async function runStatus(argv, io) {
       return 0;
     }
     if (a === '--json') json = true;
-    else if (a.startsWith('-')) throw new CliError(`unknown option "${a}" for forge status`, 2);
+    else if (a.startsWith('-')) throw new CliError(`unknown option "${a}" for kvarm status`, 2);
     else positionals.push(a);
   }
   if (positionals.length !== 1) throw new CliError('expected <owner/repo>', 2);
@@ -143,7 +143,7 @@ export async function runStatus(argv, io) {
     io.stdout(json ? JSON.stringify(status) : JSON.stringify(status, null, 2));
     return 0;
   } catch (err) {
-    if (err instanceof ReadFailed) return reportFailure(err.operation, err.args, err.reply, json, io, 'forge status');
+    if (err instanceof ReadFailed) return reportFailure(err.operation, err.args, err.reply, json, io, 'kvarm status');
     throw err;
   }
 }

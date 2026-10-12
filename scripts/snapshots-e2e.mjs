@@ -42,8 +42,8 @@
  *
  * Cleanup DELETEs of every created repo are checked for d1 ≤ 2 too.
  *
- * Env (load apps/platform/.dev.vars.validation): FORGE_PAT (cynthia, owner),
- * FORGE_PAT_OUTSIDER (unrelated principal). Tokens are never printed; git
+ * Env (load apps/platform/.dev.vars.validation): KVARM_PAT (cynthia, owner),
+ * KVARM_PAT_OUTSIDER (unrelated principal). Tokens are never printed; git
  * runs with `-c credential.helper=` and a secret-free GIT_ASKPASS helper and
  * uses the configured git identity.
  *
@@ -61,9 +61,9 @@ import { parseArgs } from 'node:util';
 const { values: args } = parseArgs({
   options: { only: { type: 'string' }, keep: { type: 'boolean', default: false } },
 });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const SECTIONS = new Set((args.only ?? 'core,cost,lazy,private,flip,fixture,large,delete').split(','));
 const PART_SIZE = 8 * 1024 * 1024;
 const READ_BUDGET = 16 * 1024 * 1024;
@@ -82,7 +82,7 @@ function check(label, actual, expected) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const statuses = [];
-const TOKENS = { owner: 'FORGE_PAT', outsider: 'FORGE_PAT_OUTSIDER' };
+const TOKENS = { owner: 'KVARM_PAT', outsider: 'KVARM_PAT_OUTSIDER' };
 async function http(path, { method = 'GET', as = 'owner', json, save } = {}) {
   const headers = {};
   if (as) headers.Authorization = `Bearer ${process.env[TOKENS[as]]}`;
@@ -99,7 +99,7 @@ async function http(path, { method = 'GET', as = 'owner', json, save } = {}) {
   } catch {
     body = null;
   }
-  return { status: res.status, body, bytes: bytes.length, cost: res.headers.get('x-forge-cost'), headers: res.headers };
+  return { status: res.status, body, bytes: bytes.length, cost: res.headers.get('x-kvarm-cost'), headers: res.headers };
 }
 const snapPath = (repo, ref) => `/api/v1/repos/${OWNER}/${repo}/snapshots/${ref}`;
 function costOf(header) {
@@ -113,7 +113,7 @@ writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) prin
 chmodSync(askpass, 0o700);
 
 function git(dir, gitArgs) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', E2E_GIT_TOKEN: process.env.FORGE_PAT };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', E2E_GIT_TOKEN: process.env.KVARM_PAT };
   const r = spawnSync('git', ['-c', 'credential.helper=', '-c', 'core.quotepath=off', ...gitArgs], { cwd: dir, env, encoding: 'utf8', maxBuffer: 64 << 20 });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
 }
@@ -274,8 +274,8 @@ try {
 
     const cold = await http(snapPath(name, 'main'));
     const warm = await http(snapPath(name, 'main'));
-    console.log(`#   metadata cold x-forge-cost: ${cold.cost}`);
-    console.log(`#   metadata warm x-forge-cost: ${warm.cost}`);
+    console.log(`#   metadata cold x-kvarm-cost: ${cold.cost}`);
+    console.log(`#   metadata warm x-kvarm-cost: ${warm.cost}`);
     const w = costOf(warm.cost);
     check('VAL-COST-009 warm metadata 200 with art=0 and d1<=2', `${warm.status} art=${w.art} d1=${w.d1}`, () => warm.status === 200 && w.art === 0 && w.d1 <= 2);
     await downloadAndDiff('VAL-SNAP-004/VAL-COST-010', name, 'main', sha, ready.body?.size, `${BASE}/${OWNER}/${name}.git`);
@@ -388,7 +388,7 @@ try {
   // ---------------------------------------------------------------- flip
   if (SECTIONS.has('flip')) {
     console.log('# flip: VAL-SNAP-006 (stale cached-public regression)');
-    if (!process.env.FORGE_PAT_OUTSIDER) throw new Error('env FORGE_PAT_OUTSIDER is not set');
+    if (!process.env.KVARM_PAT_OUTSIDER) throw new Error('env KVARM_PAT_OUTSIDER is not set');
     const name = `m4-snapshot-builder-flip-${ts}`;
     const dir = await createRepo(name, 'public');
     writeTreeFiles(dir);
@@ -480,7 +480,7 @@ try {
     const emptyName = `m4-snapshot-streaming-delete-empty-${ts}`;
     await createRepo(emptyName, 'public');
     const del0 = await http(`/api/v1/repos/${OWNER}/${emptyName}`, { method: 'DELETE' });
-    console.log(`#   DELETE (no snapshots) x-forge-cost: ${del0.cost}`);
+    console.log(`#   DELETE (no snapshots) x-kvarm-cost: ${del0.cost}`);
     const c0 = costOf(del0.cost);
     check('DELETE repo without snapshots: 200, d1<=2, r2a=0, r2b=0', `${del0.status} d1=${c0.d1} r2a=${c0.r2a} r2b=${c0.r2b}`, () => del0.status === 200 && c0.d1 <= 2 && c0.r2a === 0 && c0.r2b === 0);
     if (del0.status === 200) created.splice(created.indexOf(emptyName), 1);
@@ -507,7 +507,7 @@ try {
     check('two ready tarballs before DELETE', keys.length, 2);
     check('both tarballs exist in R2 before DELETE', keys.map(r2Exists), (v) => v.length === 2 && v.every((x) => x === true));
     const del = await http(`/api/v1/repos/${OWNER}/${name}`, { method: 'DELETE' });
-    console.log(`#   DELETE (two snapshots) x-forge-cost: ${del.cost}`);
+    console.log(`#   DELETE (two snapshots) x-kvarm-cost: ${del.cost}`);
     const c = costOf(del.cost);
     check('DELETE repo with snapshots: 200, d1<=2, r2a=0, r2b=0', `${del.status} d1=${c.d1} r2a=${c.r2a} r2b=${c.r2b}`, () => del.status === 200 && c.d1 <= 2 && c.r2a === 0 && c.r2b === 0);
     if (del.status === 200) created.splice(created.indexOf(name), 1);

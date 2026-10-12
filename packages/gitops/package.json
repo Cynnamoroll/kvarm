@@ -1,5 +1,5 @@
 {
-  "name": "@forge/gitops",
+  "name": "@kvarm/gitops",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",

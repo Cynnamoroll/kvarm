@@ -1,5 +1,5 @@
 /**
- * Agent tasks (`agent_tasks`): work Forge dispatches to agents. Today the
+ * Agent tasks (`agent_tasks`): work Kvarm dispatches to agents. Today the
  * only kind is `resolve-conflict` (services/conflicts.ts), created when a
  * change's conflicts survive the deterministic resolution stage.
  *
@@ -26,12 +26,12 @@
  * the fence and moves the change to the resolution and back to `open`; only
  * then is the change's head branch fast-forwarded to it and the resolution
  * attributed to the claimant. The change then follows its mergePolicy: `auto`
- * records the resolution's forge/guard run and merges at once when mergeable
+ * records the resolution's kvarm/guard run and merges at once when mergeable
  * and checked (otherwise when its checks complete), `review`
  * waits for an explicit merge, `draft` never merges.
  */
 
-import { isAncestor } from '@forge/gitops';
+import { isAncestor } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import { touchRepoPushedStatement, type RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -598,7 +598,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
     let attribution: Partial<AttributionInput> | null = null;
     const rawAttribution = body.value.attribution;
     if (rawAttribution !== undefined && rawAttribution !== null) {
-      const parsed = parseAttributionInput(rawAttribution, { agent: who.value.agent, session: `forge:task/${id}`, promptHash: null });
+      const parsed = parseAttributionInput(rawAttribution, { agent: who.value.agent, session: `kvarm:task/${id}`, promptHash: null });
       if (!parsed.ok) return parsed;
       attribution = parsed.value;
     }
@@ -762,7 +762,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
 
     const claimantAttribution: AttributionInput = {
       agent: attribution?.agent ?? who.value.agent,
-      session: attribution?.session ?? `forge:task/${id}`,
+      session: attribution?.session ?? `kvarm:task/${id}`,
       promptHash: attribution?.promptHash ?? null,
       ...(attribution?.model !== undefined ? { model: attribution.model } : {}),
     };

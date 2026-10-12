@@ -43,7 +43,7 @@ import {
 } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'snap-owner';
 const FULL: Scope[] = ['read', 'write', 'api'];
 
@@ -932,7 +932,7 @@ describe('snapshot API', () => {
     expect(second.cost.d1).toBe(1);
     expect(second.bytes).toEqual(first.bytes);
     expect(second.headers.get('etag')).toBe(`"${c.tree}"`);
-    for (const h of ['content-type', 'content-length', 'content-disposition', 'etag', 'cache-control', 'x-forge-snapshot-sha']) {
+    for (const h of ['content-type', 'content-length', 'content-disposition', 'etag', 'cache-control', 'x-kvarm-snapshot-sha']) {
       expect(second.headers.get(h), h).toBe(first.headers.get(h));
     }
     expect(second.headers.get('cache-control')).toContain('no-store');
@@ -1009,7 +1009,7 @@ describe('snapshot API', () => {
       const denied = await call(snap('dlcache-flip', `${p.sha}/download`), { token });
       expect(denied.status).toBe(404);
       expect(denied.cost).toMatchObject({ r2b: 0, cache: 'none' });
-      expect(denied.headers.get('x-forge-snapshot-sha')).toBeNull();
+      expect(denied.headers.get('x-kvarm-snapshot-sha')).toBeNull();
     }
     expect((await call(snap('dlcache-flip', `${p.sha}/download`), { token: tok.owner })).cost.cache).toBe('hit');
   });

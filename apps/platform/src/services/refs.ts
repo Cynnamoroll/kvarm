@@ -12,7 +12,7 @@
  * read or written: every name and commit resolves from upstream.
  */
 
-import { lsRefsRequest, parseLsRefs, pickRef, refCandidates } from '@forge/gitops';
+import { lsRefsRequest, parseLsRefs, pickRef, refCandidates } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
 import type { LazyRepo } from '../artifacts/repo';
 import { getReadCapableToken } from '../artifacts/tokens';

@@ -41,7 +41,7 @@ const EXP = 'expanded measurement rules';
 const CMP = 'compare and diff';
 const EVT = 'push event consumer';
 const SNAP = 'snapshots (m4-snapshot-builder)';
-const CHK = 'forge checkout';
+const CHK = 'kvarm checkout';
 const GW = 'server-side git writes';
 const ME = 'merge engine';
 const CR = 'change requests';
@@ -169,7 +169,7 @@ export const CATALOG = [
   N('snap-build-retry', SNAP, 'Interrupted batch retried', 'workerd-only', 'needs an injected batch failure; workerd test "retries an interrupted batch…"'),
   N('snap-build-failed', SNAP, 'Failed build', 'workerd-only', 'needs a failing build input or binding fault; workerd snapshot tests'),
 
-  // forge checkout
+  // kvarm checkout
   L('chk-ready', CHK, 'Snapshot ready', 'checkout.ready', byKind({ demand: 'd1=2;sub<=1;art=0;r2a=0;r2b=0', download: 'd1<=2;r2a=0;art=0;r2b<=1' })),
   L('chk-not-ready', CHK, 'Snapshot not ready', 'snap.demand', 'd1=2;sub<=1;art=0'),
   L('chk-no-token', CHK, 'No token', 'snap.meta.anon', 'd1<=2;art=0'),
@@ -315,12 +315,12 @@ export const CATALOG = [
   L('dep-train', DEP, 'GET …/train', 'train.get', 'd1=2;rw=0;q=0'),
   L('dep-enqueue', DEP, 'POST …/enqueue', 'enqueue.branch', 'd1<=2;rr<=8;rw<=4', { exact: true }),
   L('dep-merge', DEP, 'POST …/merge and each train pass', 'pub.stored.any', 'd1<=3'),
-  L('dep-status', DEP, 'forge status <repo>', 'status.reads', 'q=0;rw=0'),
+  L('dep-status', DEP, 'kvarm status <repo>', 'status.reads', 'q=0;rw=0'),
 
   // Integration-train scrutiny repairs
   L('r2-complete', R2, 'POST …/tasks/:id/complete (draft/review), VAL-COST-027', 'task.complete', 'd1<=6;do=0;sub<=5'),
   L('r2-landing', R2, 'Landing settlement', 'pub.stored.any', 'do=2'),
-  N('r2-settle-message', R2, 'forge-events consumer, forge.dependency-settle message', 'workerd-only', 'sent only on the exceptional landing path (more than 1,024 pins, a failed wake effect); needs fault injection or more than 1,024 live workspaces'),
+  N('r2-settle-message', R2, 'forge-events consumer, kvarm.dependency-settle message', 'workerd-only', 'sent only on the exceptional landing path (more than 1,024 pins, a failed wake effect); needs fault injection or more than 1,024 live workspaces'),
   N('r3-alarm', R3, 'MergeLock alarm, settlement intent wakeup', 'workerd-only', 'a settlement intent exists only on the exceptional landing path; covered by workerd mergeLock/dependencies tests'),
 
   // CI runner

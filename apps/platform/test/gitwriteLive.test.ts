@@ -12,7 +12,7 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { buildBlob, buildCommit, buildTree, encode, ZERO_OID, type GitObject } from '@forge/gitops';
+import { buildBlob, buildCommit, buildTree, encode, ZERO_OID, type GitObject } from '@kvarm/gitops';
 import { internalKey, writeCachedJson } from '../src/cache/internal';
 import { artifactsPusher } from '../src/services/gitwrite';
 
@@ -23,7 +23,7 @@ let tick = 0;
 async function commit(parents: string[], text: string): Promise<{ commit: GitObject; objects: GitObject[] }> {
   const blob = await buildBlob(encode(text));
   const tree = await buildTree([{ mode: '100644', name: 'README.md', hash: blob.hash }]);
-  const ident = { name: 'Forge', email: 'forge@forge.invalid', time: Math.floor(Date.now() / 1000) + tick++ };
+  const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: Math.floor(Date.now() / 1000) + tick++ };
   const c = await buildCommit({ tree: tree.hash, parents, author: ident, committer: ident, message: text.trim() });
   return { commit: c, objects: [c, tree, blob] };
 }

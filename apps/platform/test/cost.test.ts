@@ -8,7 +8,7 @@ import { infoRefsCacheKey } from '../src/routes/git';
 import { repoViewGeneration } from '../src/services/pushFreshness';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'cost-owner';
 const FULL: Scope[] = ['read', 'write', 'api'];
 
@@ -63,7 +63,7 @@ beforeAll(async () => {
   await seedRepo('flip', 'public');
 });
 
-describe('x-forge-cost on every surface', () => {
+describe('x-kvarm-cost on every surface', () => {
   it('stamps health, API, git gate, repo pages and fallbacks with a well-formed header', async () => {
     const { token } = await freshToken();
     for (const [path, init] of [
@@ -79,7 +79,7 @@ describe('x-forge-cost on every surface', () => {
       const value = res.headers.get(COST_HEADER);
       expect(parseCostHeader(value), `${path} -> ${value}`).not.toBeNull();
       expect(value).not.toContain(OWNER);
-      expect(value).not.toContain('forge_pat_');
+      expect(value).not.toContain('kvarm_pat_');
       await res.body?.cancel();
     }
   });
@@ -215,11 +215,11 @@ describe('PAT revocation', () => {
 
 describe('failed-auth amplification', () => {
   it('rejects malformed tokens without D1 and caches unknown-token rejections', async () => {
-    const malformed = await call(`/api/v1/repos/${OWNER}/open`, { headers: bearer('forge_pat_short') });
+    const malformed = await call(`/api/v1/repos/${OWNER}/open`, { headers: bearer('kvarm_pat_short') });
     expect(malformed.status).toBe(401);
     expect(await costOf(malformed)).toMatchObject({ d1: 0 });
 
-    const unknown = `forge_pat_${'ab'.repeat(32)}`;
+    const unknown = `kvarm_pat_${'ab'.repeat(32)}`;
     const first = await call(`/api/v1/repos/${OWNER}/open`, { headers: bearer(unknown) });
     expect(first.status).toBe(401);
     expect((await costOf(first)).d1).toBe(1);
@@ -239,7 +239,7 @@ describe('failed-auth amplification', () => {
       name: 'open',
       need: 'read',
       transport: 'api',
-      credential: { kind: 'pat', token: `forge_pat_${'cd'.repeat(32)}` },
+      credential: { kind: 'pat', token: `kvarm_pat_${'cd'.repeat(32)}` },
       clientIp: '203.0.113.9',
     });
     expect(res).toMatchObject({ ok: false, status: 429, code: 'RATE_LIMITED' });

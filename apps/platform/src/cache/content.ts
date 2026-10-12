@@ -17,7 +17,7 @@ const IMMUTABLE_TTL_SECONDS = 31536000;
 
 /** The path travels in the query so dot segments are never URL-normalized. */
 export function contentCacheKey(repoId: string, sha: string, path: string): Request {
-  const url = new URL('https://forge.internal/content/v1/file');
+  const url = new URL('https://kvarm.internal/content/v1/file');
   url.searchParams.set('repo', repoId);
   url.searchParams.set('sha', sha);
   url.searchParams.set('path', path);

@@ -2,11 +2,11 @@ import { spawn } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { OPERATIONS } from '@forge/ops';
+import { OPERATIONS } from '@kvarm/ops';
 import { main } from '../src/main.js';
 
-const BIN = fileURLToPath(new URL('../bin/forge.js', import.meta.url));
-const PAT = `forge_pat_${'ab'.repeat(32)}`;
+const BIN = fileURLToPath(new URL('../bin/kvarm.js', import.meta.url));
+const PAT = `kvarm_pat_${'ab'.repeat(32)}`;
 
 interface Seen {
   method: string;
@@ -48,7 +48,7 @@ beforeAll(async () => {
 
 afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
-async function forge(argv: string[], env: Record<string, string | undefined> = { FORGE_BASE_URL: base, FORGE_PAT: PAT }) {
+async function kvarm(argv: string[], env: Record<string, string | undefined> = { KVARM_BASE_URL: base, KVARM_PAT: PAT }) {
   const out: string[] = [];
   const err: string[] = [];
   const code = await main(argv, { env, stdout: (l) => out.push(l), stderr: (l) => err.push(l) });
@@ -57,9 +57,9 @@ async function forge(argv: string[], env: Record<string, string | undefined> = {
 
 const last = () => seen[seen.length - 1]!;
 
-describe('forge help', () => {
+describe('kvarm help', () => {
   it('lists checkout and every registry command', async () => {
-    const r = await forge(['--help'], {});
+    const r = await kvarm(['--help'], {});
     expect(r.code).toBe(0);
     expect(r.stdout).toMatch(/checkout <owner\/repo> <ref> <dir>/);
     for (const op of OPERATIONS) expect(r.stdout, op.name).toContain(op.command.join(' '));
@@ -67,20 +67,20 @@ describe('forge help', () => {
 
   it('prints usage, arguments and the REST/MCP mapping for every command', async () => {
     for (const op of OPERATIONS) {
-      const r = await forge([...op.command, '--help'], {});
+      const r = await kvarm([...op.command, '--help'], {});
       expect(r.code, op.name).toBe(0);
-      expect(r.stdout, op.name).toContain(`usage: forge ${op.command.join(' ')}`);
+      expect(r.stdout, op.name).toContain(`usage: kvarm ${op.command.join(' ')}`);
       expect(r.stdout, op.name).toContain(op.description);
       expect(r.stdout, op.name).toContain(`MCP tool: ${op.name}`);
       expect(r.stdout, op.name).toContain(`REST: ${op.method} /api/v1${op.path}`);
       for (const p of op.params) expect(r.stdout, `${op.name}.${p.name}`).toContain(p.description);
     }
-    const help = await forge(['help', 'file', 'read'], {});
-    expect(help.stdout).toContain('usage: forge file read <repo> <path> [--ref <string>]');
+    const help = await kvarm(['help', 'file', 'read'], {});
+    expect(help.stdout).toContain('usage: kvarm file read <repo> <path> [--ref <string>]');
   });
 
   it('lists the verbs of a group given alone and exits 2', async () => {
-    const r = await forge(['workspace'], {});
+    const r = await kvarm(['workspace'], {});
     expect(r.code).toBe(2);
     expect(r.stderr).toContain('workspace create');
     expect(r.stderr).toContain('workspace change-set');
@@ -98,10 +98,10 @@ describe('forge help', () => {
   });
 });
 
-describe('forge operations', () => {
+describe('kvarm operations', () => {
   it('maps positionals and flags onto the REST request and prints the JSON reply', async () => {
     reply = { status: 200, body: { ref: 'main', path: 'README.md', encoding: 'utf-8', content: 'hi\n' } };
-    const r = await forge(['file', 'read', 'cynthia/demo', 'README.md', '--ref', 'main', '--json']);
+    const r = await kvarm(['file', 'read', 'cynthia/demo', 'README.md', '--ref', 'main', '--json']);
     expect(r.code, r.stderr).toBe(0);
     expect(last()).toMatchObject({ method: 'GET', url: '/api/v1/repos/cynthia/demo/contents?path=README.md&ref=main', auth: `Bearer ${PAT}` });
     expect(r.stdout.split('\n')).toHaveLength(1);
@@ -110,7 +110,7 @@ describe('forge operations', () => {
 
   it('pretty-prints without --json and accepts --flag=value', async () => {
     reply = { status: 200, body: { files: [] } };
-    const r = await forge(['compare', 'get', 'o/r', 'main', 'feature/x', '--order=risk']);
+    const r = await kvarm(['compare', 'get', 'o/r', 'main', 'feature/x', '--order=risk']);
     expect(r.code).toBe(0);
     expect(last().url).toBe('/api/v1/repos/o/r/compare/main...feature%2Fx?order=risk');
     expect(JSON.parse(r.stdout)).toEqual({ files: [] });
@@ -118,72 +118,72 @@ describe('forge operations', () => {
   });
 
   it('sends body parameters as JSON with kebab-case flags, lists and JSON values', async () => {
-    await forge(['workspace', 'create', 'o/r', '--task', 'fix it', '--agent', 'bot', '--intent', '{"paths":["a.ts"]}']);
+    await kvarm(['workspace', 'create', 'o/r', '--task', 'fix it', '--agent', 'bot', '--intent', '{"paths":["a.ts"]}']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/workspaces', contentType: 'application/json' });
     expect(JSON.parse(last().body)).toEqual({ task: 'fix it', agent: 'bot', intent: { paths: ['a.ts'] } });
-    await forge(['workspace', 'change-set', 'o/r', 'abcd', '--title', 't', '--merge-policy', 'review']);
+    await kvarm(['workspace', 'change-set', 'o/r', 'abcd', '--title', 't', '--merge-policy', 'review']);
     expect(JSON.parse(last().body)).toEqual({ title: 't', mergePolicy: 'review' });
-    await forge(['intent', 'set', 'o/r', 'abcd', '--paths', 'a.ts', '--paths', 'src/', '--ttl-seconds', '120']);
+    await kvarm(['intent', 'set', 'o/r', 'abcd', '--paths', 'a.ts', '--paths', 'src/', '--ttl-seconds', '120']);
     expect(JSON.parse(last().body)).toEqual({ paths: ['a.ts', 'src/'], ttlSeconds: 120 });
-    await forge(['nexus', 'forecast', 'o/r', '--paths', 'a.ts,src/']);
+    await kvarm(['nexus', 'forecast', 'o/r', '--paths', 'a.ts,src/']);
     expect(last().url).toBe('/api/v1/repos/o/r/forecast?paths=a.ts%2Csrc%2F');
   });
 
   it('keeps commas inside decision paths: repeated flags, one literal path each', async () => {
-    await forge(['decision', 'record', 'o/r', '--paths', 'src/a,b.ts', '--paths', 'c.md', '--chosen', 'ws-b', '--rejected', '[]', '--reason', 'r']);
+    await kvarm(['decision', 'record', 'o/r', '--paths', 'src/a,b.ts', '--paths', 'c.md', '--chosen', 'ws-b', '--rejected', '[]', '--reason', 'r']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/decisions' });
     expect(JSON.parse(last().body)).toEqual({ paths: ['src/a,b.ts', 'c.md'], chosen: 'ws-b', rejected: [], reason: 'r' });
-    await forge(['decision', 'context', 'o/r', '--path', 'src/a,b.ts', '--path=c.md']);
+    await kvarm(['decision', 'context', 'o/r', '--path', 'src/a,b.ts', '--path=c.md']);
     expect(last().url).toBe('/api/v1/repos/o/r/context?path=src%2Fa%2Cb.ts&path=c.md');
-    const help = await forge(['decision', 'context', '--help'], {});
+    const help = await kvarm(['decision', 'context', '--help'], {});
     expect(help.stdout).toMatch(/--path <list>.*repeat the flag once per path; commas are part of the path/);
   });
 
   it('maps the repository lifecycle commands onto their REST routes', async () => {
     reply = { status: 200, body: { deleted: true } };
-    const del = await forge(['repo', 'delete', 'o/r', '--json']);
+    const del = await kvarm(['repo', 'delete', 'o/r', '--json']);
     expect(del.code).toBe(0);
     expect(last()).toMatchObject({ method: 'DELETE', url: '/api/v1/repos/o/r', body: '' });
     expect(JSON.parse(del.stdout)).toEqual({ deleted: true });
-    await forge(['repo', 'fork', 'o/r', '--name', 'r-copy']);
+    await kvarm(['repo', 'fork', 'o/r', '--name', 'r-copy']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/forks' });
     expect(JSON.parse(last().body)).toEqual({ name: 'r-copy' });
-    await forge(['repo', 'import', 'https://example.test/src.git', '--name', 'src', '--branch', 'main', '--visibility', 'public']);
+    await kvarm(['repo', 'import', 'https://example.test/src.git', '--name', 'src', '--branch', 'main', '--visibility', 'public']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/import' });
     expect(JSON.parse(last().body)).toEqual({ url: 'https://example.test/src.git', name: 'src', branch: 'main', visibility: 'public' });
-    const missing = await forge(['repo', 'import']);
+    const missing = await kvarm(['repo', 'import']);
     expect(missing.code).toBe(2);
     expect(missing.stderr).toMatch(/url.*required/);
   });
 
   it('sends no body for a POST without body parameters', async () => {
-    await forge(['change', 'merge', 'o/r', '3']);
+    await kvarm(['change', 'merge', 'o/r', '3']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/changes/3/merge', body: '' });
   });
 
   it('maps the dependency and train commands onto their REST routes', async () => {
     const sha = 'c'.repeat(40);
-    await forge(['deps', 'add', 'o/r', 'ab12', '--on-workspace', 'cd34', '--revision', sha]);
+    await kvarm(['deps', 'add', 'o/r', 'ab12', '--on-workspace', 'cd34', '--revision', sha]);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies' });
     expect(JSON.parse(last().body)).toEqual({ onWorkspace: 'cd34', revision: sha });
-    await forge(['deps', 'list', 'o/r', 'ab12']);
+    await kvarm(['deps', 'list', 'o/r', 'ab12']);
     expect(last()).toMatchObject({ method: 'GET', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies' });
-    await forge(['deps', 'repin', 'o/r', 'ab12', 'e1', '--revision', sha, '--on-workspace', 'ef56']);
+    await kvarm(['deps', 'repin', 'o/r', 'ab12', 'e1', '--revision', sha, '--on-workspace', 'ef56']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies/e1/repin' });
     expect(JSON.parse(last().body)).toEqual({ revision: sha, onWorkspace: 'ef56' });
-    await forge(['deps', 'detach', 'o/r', 'ab12', 'e1']);
+    await kvarm(['deps', 'detach', 'o/r', 'ab12', 'e1']);
     expect(last()).toMatchObject({ method: 'DELETE', url: '/api/v1/repos/o/r/workspaces/ab12/dependencies/e1', body: '' });
-    await forge(['train', 'status', 'o/r', '--base', 'main']);
+    await kvarm(['train', 'status', 'o/r', '--base', 'main']);
     expect(last()).toMatchObject({ method: 'GET', url: '/api/v1/repos/o/r/train?base=main' });
   });
 
-  it('works without FORGE_PAT (anonymous public reads)', async () => {
-    await forge(['repo', 'get', 'o/r'], { FORGE_BASE_URL: base });
+  it('works without KVARM_PAT (anonymous public reads)', async () => {
+    await kvarm(['repo', 'get', 'o/r'], { KVARM_BASE_URL: base });
     expect(last().auth).toBeUndefined();
   });
 });
 
-describe('forge status', () => {
+describe('kvarm status', () => {
   it('composes the active workspaces with their pins, the train and the open tasks from reads only', async () => {
     const edge = { id: 'e1', workspaceId: 'ab12', onWorkspace: 'cd34', revision: 'a'.repeat(40), state: 'active' };
     byPath.set('/api/v1/repos/o/r/workspaces', { status: 200, body: { workspaces: [{ id: 'ab12', status: 'active' }, { id: 'cd34', status: 'active' }], nextCursor: null } });
@@ -193,7 +193,7 @@ describe('forge status', () => {
     byPath.set('/api/v1/repos/o/r/tasks', { status: 200, body: { tasks: [], nextCursor: null } });
     try {
       const before = seen.length;
-      const r = await forge(['status', 'o/r', '--json']);
+      const r = await kvarm(['status', 'o/r', '--json']);
       expect(r.code, r.stderr).toBe(0);
       expect(r.stdout.split('\n')).toHaveLength(1);
       const sent = seen.slice(before);
@@ -217,10 +217,10 @@ describe('forge status', () => {
         train: { entries: [{ number: 2, position: 1 }], dependencies: [edge], truncated: false },
         tasks: { tasks: [], nextCursor: null },
       });
-      const again = await forge(['status', 'o/r', '--json']);
+      const again = await kvarm(['status', 'o/r', '--json']);
       expect(again.stdout).toBe(r.stdout);
-      expect((await forge(['status', '--help'], {})).stdout).toMatch(/usage: forge status <repo> \[--json\]/);
-      expect((await forge(['--help'], {})).stdout).toMatch(/\n  status <owner\/repo>/);
+      expect((await kvarm(['status', '--help'], {})).stdout).toMatch(/usage: kvarm status <repo> \[--json\]/);
+      expect((await kvarm(['--help'], {})).stdout).toMatch(/\n  status <owner\/repo>/);
     } finally {
       byPath.clear();
     }
@@ -229,39 +229,39 @@ describe('forge status', () => {
   it('fails with the first failing read, its code and a next step', async () => {
     byPath.set('/api/v1/repos/o/private/workspaces', { status: 404, body: { error: 'not found', code: 'NOT_FOUND' } });
     try {
-      const r = await forge(['status', 'o/private', '--json']);
+      const r = await kvarm(['status', 'o/private', '--json']);
       expect(r.code).toBe(1);
       expect(r.stderr).toContain('NOT_FOUND');
       expect(r.stderr).toContain('o/private does not exist or is private to you');
       expect(JSON.parse(r.stdout)).toMatchObject({ status: 404, code: 'NOT_FOUND' });
       expect(r.stdout + r.stderr).not.toContain(PAT);
-      expect((await forge(['status'])).code).toBe(2);
+      expect((await kvarm(['status'])).code).toBe(2);
     } finally {
       byPath.clear();
     }
   });
 });
 
-describe('forge failures', () => {
+describe('kvarm failures', () => {
   it('exits 1 on an API error with the code, the cause and a next step, and never prints the token', async () => {
     reply = { status: 404, body: { error: 'not found', code: 'NOT_FOUND' } };
-    const r = await forge(['repo', 'get', 'cynthia/private', '--json']);
+    const r = await kvarm(['repo', 'get', 'cynthia/private', '--json']);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('NOT_FOUND');
     expect(r.stderr).toContain('cynthia/private');
     expect(r.stderr).toMatch(/hint: /);
     expect(JSON.parse(r.stdout)).toEqual({ status: 404, error: 'not found', code: 'NOT_FOUND' });
     expect(r.stdout + r.stderr).not.toContain(PAT);
-    expect(r.stdout + r.stderr).not.toMatch(/forge_pat_/);
+    expect(r.stdout + r.stderr).not.toMatch(/kvarm_pat_/);
   });
 
   it('names the token and its scope on 401/403 without printing it', async () => {
     reply = { status: 401, body: { error: 'unauthorized' } };
-    const unauth = await forge(['repo', 'list']);
+    const unauth = await kvarm(['repo', 'list']);
     expect(unauth.code).toBe(1);
-    expect(unauth.stderr).toMatch(/FORGE_PAT/);
+    expect(unauth.stderr).toMatch(/KVARM_PAT/);
     reply = { status: 403, body: { error: 'insufficient token scope', code: 'INSUFFICIENT_SCOPE' } };
-    const scope = await forge(['grant', 'list', 'o/r']);
+    const scope = await kvarm(['grant', 'list', 'o/r']);
     expect(scope.code).toBe(1);
     expect(scope.stderr).toMatch(/api scope/);
     expect(unauth.stderr + scope.stderr).not.toContain(PAT);
@@ -269,7 +269,7 @@ describe('forge failures', () => {
 
   it('shows the current state on a stale-revision conflict', async () => {
     reply = { status: 409, body: { error: 'head moved', code: 'HEAD_MOVED', headSha: 'abc' } };
-    const r = await forge(['change', 'merge', 'o/r', '1']);
+    const r = await kvarm(['change', 'merge', 'o/r', '1']);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('HEAD_MOVED');
     expect(r.stderr).toContain('"headSha":"abc"');
@@ -278,17 +278,17 @@ describe('forge failures', () => {
   it('names the recovery commands for a blocked dependency and the current revision for a stale one', async () => {
     const dep = { id: 'e1', workspaceId: 'ab12', onWorkspace: 'cd34', revision: 'a'.repeat(40), state: 'broken', sourceHead: null };
     reply = { status: 409, body: { error: 'workspace ab12 depends on workspace cd34, which is broken', code: 'DEPENDENCY_BROKEN', dependencies: [dep] } };
-    const broken = await forge(['queue', 'add', 'o/r', '4']);
+    const broken = await kvarm(['queue', 'add', 'o/r', '4']);
     expect(broken.code).toBe(1);
     expect(broken.stderr).toContain('DEPENDENCY_BROKEN');
-    expect(broken.stderr).toContain('forge deps list o/r ab12');
-    expect(broken.stderr).toContain('forge deps repin o/r ab12 e1 --on-workspace <live-workspace> --revision <its-head>');
-    expect(broken.stderr).toContain('forge deps detach o/r ab12 e1');
+    expect(broken.stderr).toContain('kvarm deps list o/r ab12');
+    expect(broken.stderr).toContain('kvarm deps repin o/r ab12 e1 --on-workspace <live-workspace> --revision <its-head>');
+    expect(broken.stderr).toContain('kvarm deps detach o/r ab12 e1');
     const head = 'b'.repeat(40);
     reply = { status: 409, body: { error: 'stale', code: 'DEPENDENCY_STALE', dependencies: [{ ...dep, state: 'stale', sourceHead: head }] } };
-    expect((await forge(['change', 'merge', 'o/r', '4'])).stderr).toContain(`forge deps repin o/r ab12 e1 --revision ${head}`);
+    expect((await kvarm(['change', 'merge', 'o/r', '4'])).stderr).toContain(`kvarm deps repin o/r ab12 e1 --revision ${head}`);
     reply = { status: 422, body: { error: 'not the current revision', code: 'REVISION_NOT_CURRENT', currentRevision: head } };
-    const stale = await forge(['deps', 'repin', 'o/r', 'ab12', 'e1', '--revision', 'f'.repeat(40)]);
+    const stale = await kvarm(['deps', 'repin', 'o/r', 'ab12', 'e1', '--revision', 'f'.repeat(40)]);
     expect(stale.code).toBe(1);
     expect(stale.stderr).toContain(`hint: the source's current revision is ${head}; retry with --revision ${head}`);
     expect(broken.stderr + stale.stderr).not.toContain(PAT);
@@ -305,17 +305,17 @@ describe('forge failures', () => {
       [['repo', 'get', 'o/r', 'extra'], /unexpected argument "extra"/],
     ];
     for (const [argv, msg] of cases) {
-      const r = await forge(argv);
+      const r = await kvarm(argv);
       expect(r.code, argv.join(' ')).toBe(2);
       expect(r.stderr, argv.join(' ')).toMatch(msg);
     }
-    const noBase = await forge(['repo', 'list'], { FORGE_PAT: PAT });
+    const noBase = await kvarm(['repo', 'list'], { KVARM_PAT: PAT });
     expect(noBase.code).toBe(2);
-    expect(noBase.stderr).toMatch(/FORGE_BASE_URL is not set/);
+    expect(noBase.stderr).toMatch(/KVARM_BASE_URL is not set/);
   });
 
   it('exits 1 with the cause when the platform is unreachable', async () => {
-    const r = await forge(['repo', 'list'], { FORGE_BASE_URL: 'http://127.0.0.1:1', FORGE_PAT: PAT });
+    const r = await kvarm(['repo', 'list'], { KVARM_BASE_URL: 'http://127.0.0.1:1', KVARM_PAT: PAT });
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/could not reach http:\/\/127\.0\.0\.1:1/);
     expect(r.stderr).not.toContain(PAT);

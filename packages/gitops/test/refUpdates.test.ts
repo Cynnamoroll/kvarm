@@ -137,7 +137,7 @@ describe('readReceivePackPrefix', () => {
 
 describe('ref names and grant patterns', () => {
   it('validates ref names like git check-ref-format', () => {
-    for (const ok of ['refs/heads/main', 'refs/heads/agents/ws-1/fix_a.b', 'refs/tags/v1.0', 'refs/notes/forge-attribution']) {
+    for (const ok of ['refs/heads/main', 'refs/heads/agents/ws-1/fix_a.b', 'refs/tags/v1.0', 'refs/notes/kvarm-attribution']) {
       expect(isSafeRefName(ok), ok).toBe(true);
     }
     for (const bad of [

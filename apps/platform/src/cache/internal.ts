@@ -1,11 +1,11 @@
 /**
- * Small JSON entries in the Cache API under synthetic `https://forge.internal`
+ * Small JSON entries in the Cache API under synthetic `https://kvarm.internal`
  * keys: PAT metadata and upstream Artifacts tokens. The Cache API
  * is per colo, so deletes are local; callers that need authoritative answers
  * (revocation, private access) must still check D1.
  */
 
-const ORIGIN = 'https://forge.internal';
+const ORIGIN = 'https://kvarm.internal';
 
 export function internalKey(kind: string, ...parts: string[]): Request {
   const path = [kind, ...parts].map((p) => encodeURIComponent(p)).join('/');

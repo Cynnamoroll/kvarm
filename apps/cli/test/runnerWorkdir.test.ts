@@ -4,14 +4,14 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { diffTrees } from '@forge/gitops';
+import { diffTrees } from '@kvarm/gitops';
 import { checkout } from '../src/checkout.js';
 import type { HttpFetch } from '../src/http.js';
 import { runRunner } from '../src/runner.js';
 import { slotPaths } from '../src/workdir.js';
 import { git, tarFromCommit, tempDir } from './helpers';
 
-const root = tempDir('forge-cli-warm-');
+const root = tempDir('kvarm-cli-warm-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 /** Three commits: c1→c2 covers every sync case, c2→c3 leaves most files unchanged. */
@@ -68,7 +68,7 @@ function makeHistory() {
 }
 
 const history = makeHistory();
-const BASE = 'https://forge.test';
+const BASE = 'https://kvarm.test';
 const API = `${BASE}/api/v1/repos/cynthia/demo`;
 const SNAP = `${API}/snapshots/`;
 
@@ -83,7 +83,7 @@ const snapshotFetch = (async (input: string | URL | Request) => {
   if (!url.startsWith(SNAP) || !tar) return Response.json({ error: 'not found' }, { status: 404 });
   if (rest.endsWith('/download')) {
     snapshotDownloads.count++;
-    return new Response(new Uint8Array(tar), { headers: { 'x-forge-snapshot-sha': sha } });
+    return new Response(new Uint8Array(tar), { headers: { 'x-kvarm-snapshot-sha': sha } });
   }
   return Response.json({ sha, state: 'ready', size: tar.length });
 }) as unknown as HttpFetch;
@@ -96,7 +96,7 @@ const realCheckout = (o: any) => {
 
 /** A fresh snapshot checkout of `sha`, the ground truth for the warm workdir. */
 async function freshCheckout(sha: string): Promise<string> {
-  const dir = tempDir('forge-cli-warm-fresh-');
+  const dir = tempDir('kvarm-cli-warm-fresh-');
   await checkout({ baseUrl: BASE, pat: 'p', repo: 'cynthia/demo', ref: sha, dir, fetch: snapshotFetch, stdout: () => {}, stderr: () => {} });
   return dir;
 }
@@ -309,7 +309,7 @@ function dirtyUnchangedJob(seen: string[]): Execute {
   };
 }
 
-describe('forge runner warm workdir', () => {
+describe('kvarm runner warm workdir', () => {
   it('syncs a second job byte-equal to a fresh snapshot checkout with no full-tarball download, while untracked caches survive', async () => {
     const workRoot = join(root, 'warm');
     const outside = join(root, 'outside-warm');

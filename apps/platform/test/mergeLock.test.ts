@@ -150,7 +150,7 @@ describe('MergeLock publication lease', () => {
       expect(await state.storage.get('lease')).toBeUndefined();
       expect(await state.storage.getAlarm()).toBeNull();
     });
-    expect(kicks).toEqual([{ type: 'forge.train', repoId: 'r', ref: 'refs/heads/main', reason: 'lease-expired' }]);
+    expect(kicks).toEqual([{ type: 'kvarm.train', repoId: 'r', ref: 'refs/heads/main', reason: 'lease-expired' }]);
   });
 
   it('an expired lease whose kick keeps failing is kept with capped backoff past any attempt count, and cleared once a kick succeeds', async () => {
@@ -185,7 +185,7 @@ describe('MergeLock publication lease', () => {
       expect(await state.storage.get('lease')).toBeUndefined();
       expect(await state.storage.getAlarm()).toBeNull();
     });
-    expect(kicks).toEqual([{ type: 'forge.train', repoId: 'r', ref: 'refs/heads/main', reason: 'lease-expired' }]);
+    expect(kicks).toEqual([{ type: 'kvarm.train', repoId: 'r', ref: 'refs/heads/main', reason: 'lease-expired' }]);
   });
 
   it('an acquire on an expired lease with a pending kick retry succeeds and supersedes the retry', async () => {

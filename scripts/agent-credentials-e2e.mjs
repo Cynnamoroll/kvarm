@@ -12,7 +12,7 @@
  *  - a 60 s token works before expiry and is rejected right after it;
  *  - a warmed token is rejected on the next REST and git request after revoke.
  *
- * Tokens come from env vars (FORGE_PAT_BOT, FORGE_BASE_URL) and are never
+ * Tokens come from env vars (KVARM_PAT_BOT, KVARM_BASE_URL) and are never
  * printed; agent tokens are shown by prefix only.
  *   set -a; . apps/platform/.dev.vars.validation; set +a
  *   node scripts/agent-credentials-e2e.mjs [--keep] [--skip-expiry]
@@ -29,8 +29,8 @@ const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, 'skip-expiry': { type: 'boolean', default: false } },
 });
 
-const BASE = process.env.FORGE_BASE_URL ?? die('FORGE_BASE_URL is not set');
-const OWNER_PAT = process.env.FORGE_PAT_BOT ?? die('FORGE_PAT_BOT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? die('KVARM_BASE_URL is not set');
+const OWNER_PAT = process.env.KVARM_PAT_BOT ?? die('KVARM_PAT_BOT is not set');
 const ts = Math.floor(Date.now() / 1000);
 const results = [];
 
@@ -60,7 +60,7 @@ async function api(method, path, token, body) {
   } catch {
     json = null;
   }
-  return { status: res.status, json, text, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, json, text, cost: res.headers.get('x-kvarm-cost') };
 }
 
 const auth = (t) => `Basic ${Buffer.from(`x:${t}`).toString('base64')}`;
@@ -152,7 +152,7 @@ async function rawPush(repo, token, commands, packRevs) {
   });
   const body = Buffer.from(await res.arrayBuffer());
   const status = res.status === 200 ? pktLines(body).map((l) => l.toString().trim()) : [];
-  return { http: res.status, status, cost: res.headers.get('x-forge-cost') };
+  return { http: res.status, status, cost: res.headers.get('x-kvarm-cost') };
 }
 
 // ---------------------------------------------------------------------------
@@ -227,13 +227,13 @@ try {
   });
   const agentTok = mintRes.json?.token;
   const { token: _secret, ...meta } = mintRes.json ?? {};
-  check('owner mints scoped token', mintRes.status === 201 && /^forge_agt_[0-9a-f]{64}$/.test(agentTok ?? ''), `metadata ${JSON.stringify(meta)}`);
+  check('owner mints scoped token', mintRes.status === 201 && /^kvarm_agt_[0-9a-f]{64}$/.test(agentTok ?? ''), `metadata ${JSON.stringify(meta)}`);
   const listed = await api('GET', `/agents/${agentId}/tokens`, OWNER_PAT);
   check('token listing shows prefix only', listed.status === 200 && !listed.text.includes(agentTok) && listed.json.tokens[0]?.prefix === meta.prefix, `prefix ${meta.prefix}`);
 
   // --- VAL-AGENT-001: permitted operation ---------------------------------
   const read = await api('GET', `/repos/${mainRepo}`, agentTok);
-  check('agent REST read of granted repo', read.status === 200, `x-forge-cost ${read.cost}`);
+  check('agent REST read of granted repo', read.status === 200, `x-kvarm-cost ${read.cost}`);
   git(['checkout', '-q', '-b', 'ws1-work']);
   const ws1New = commit('agent work on ws1');
   const okPush = git(['push', `${BASE}/${mainRepo}.git`, `HEAD:${WS1}`, `HEAD:${WS1_EXTRA}`], agentTok, { allowFail: true });
@@ -319,7 +319,7 @@ try {
   await api('GET', `/repos/${mainRepo}`, revTok);
   const warm = await api('GET', `/repos/${mainRepo}`, revTok);
   const warmGit = git(['ls-remote', `${BASE}/${mainRepo}.git`], revTok, { allowFail: true });
-  check('revocation token works when warm', warm.status === 200 && warmGit.status === 0, `prefix ${rev.json.prefix}; warm x-forge-cost ${warm.cost}`);
+  check('revocation token works when warm', warm.status === 200 && warmGit.status === 0, `prefix ${rev.json.prefix}; warm x-kvarm-cost ${warm.cost}`);
   const revBefore = await refsOf(mainRepo);
   const del = await api('DELETE', `/agents/${agentId}/tokens/${rev.json.id}`, OWNER_PAT);
   check('owner revokes token', del.status === 200 && del.json?.revoked === true, `revokedAt ${del.json?.token?.revokedAt} status ${del.json?.token?.status}`);

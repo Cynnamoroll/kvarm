@@ -69,9 +69,9 @@ export function tailLogLines(text) {
 }
 
 export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, log = console.log }) {
-  const work = mkdtempSync(join(tmpdir(), 'forge-live-'));
+  const work = mkdtempSync(join(tmpdir(), 'kvarm-live-'));
   const askpass = join(work, 'askpass.sh');
-  writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+  writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
   chmodSync(askpass, 0o700);
   const httpLim = createLimiter(5);
   const gitLim = createLimiter(3);
@@ -111,7 +111,7 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
               parsed = null;
             }
           }
-          const raw = res.headers.get('x-forge-cost') ?? '';
+          const raw = res.headers.get('x-kvarm-cost') ?? '';
           return { status: res.status, json: parsed, text, bytes: binary ? buf : null, headers: res.headers, raw, cost: parseCost(raw), ms };
         } catch (err) {
           return { status: 0, error: String(err?.cause ?? err).slice(0, 200), json: null, text: '', bytes: null, headers: new Headers(), raw: '', cost: {}, ms: Date.now() - t0 };
@@ -141,7 +141,7 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
           new Promise((resolve) => {
             const child = spawn('git', ['-c', 'credential.helper=', ...args], {
               cwd,
-              env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token ?? '', ...env },
+              env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token ?? '', ...env },
             });
             let out = '';
             let err = '';

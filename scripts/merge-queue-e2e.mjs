@@ -6,13 +6,13 @@
  * the ordinary queue behaviors (concurrent changes land in order with linear
  * first-parent history; a conflicting change is ejected and the next proceeds).
  *
- * Every scenario runs in a fresh public repo owned by FORGE_USER, named
+ * Every scenario runs in a fresh public repo owned by KVARM_USER, named
  * `m5-merge-queue-<purpose>-<timestamp>`, seeded with real git pushes and
  * deleted afterwards (unless --keep):
  *   draft   draft enqueue 409 DRAFT, not listed, change open; PATCH review,
  *           enqueue 201, listed, then merged by the train
  *   train   three changes enqueued back to back (one conflicts with the
- *           first): x-forge-cost of enqueue and GET queue?limit=10, the
+ *           first): x-kvarm-cost of enqueue and GET queue?limit=10, the
  *           conflicting one ejected, the others merged in FIFO order, linear
  *           first-parent history on main, queue empty afterwards
  *   stale   enqueue with a stale expected headSha / mergePolicy → 409 and no
@@ -35,9 +35,9 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } } });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm5-merge-queue';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -71,7 +71,7 @@ async function http(path, { method = 'GET', json, token = PAT } = {}) {
   } catch {
     body = null;
   }
-  return { status: res.status, text, json: body, cost: res.headers.get('x-forge-cost'), retryAfter: res.headers.get('retry-after') };
+  return { status: res.status, text, json: body, cost: res.headers.get('x-kvarm-cost'), retryAfter: res.headers.get('retry-after') };
 }
 
 function costOf(label, r) {
@@ -90,9 +90,9 @@ function parseCost(header) {
 
 const work = mkdtempSync(join(tmpdir(), 'merge-queue-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
-const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: PAT };
+const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: PAT };
 
 function git(args, cwd) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], { cwd, env: gitEnv, encoding: 'utf8' });
@@ -269,14 +269,14 @@ await scenario('train', async (repo) => {
   const ec = parseCost(enq.three.cost);
   check(
     'VAL-COST-022',
-    'enqueue x-forge-cost within d1<=2;rr<=8;rw<=4;art=0;do<=1',
+    'enqueue x-kvarm-cost within d1<=2;rr<=8;rw<=4;art=0;do<=1',
     Object.values(enq).every((r) => r.status === 201) && ec.d1 <= 2 && ec.rr <= 8 && ec.rw <= 4 && ec.art === 0 && (ec.do ?? 0) <= 1,
     ['one', 'two', 'three'].map((b) => `${b}: ${costOf(`POST enqueue (${b})`, enq[b])}`).join(' | '),
   );
   const qc = parseCost(q.cost);
   check(
     'VAL-COST-022',
-    'GET queue?limit=10 x-forge-cost within d1<=2;rr<=20;rw=0;art=0;do=0',
+    'GET queue?limit=10 x-kvarm-cost within d1<=2;rr<=20;rw=0;art=0;do=0',
     q.status === 200 && qc.d1 <= 2 && qc.rr <= 20 && qc.rw === 0 && qc.art === 0 && (qc.do ?? 0) === 0,
     `${costOf('GET queue?limit=10', q)}; entries=${JSON.stringify((q.json?.entries ?? []).map((e) => [e.number, e.position, e.state]))} limits=${JSON.stringify(q.json?.limits)}`,
   );
@@ -388,7 +388,7 @@ await scenario('race', async (repo) => {
 });
 
 rmSync(work, { recursive: true, force: true });
-console.log('\n# x-forge-cost');
+console.log('\n# x-kvarm-cost');
 for (const c of costs) console.log(`  ${c.label} (${c.status}): ${c.cost}`);
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

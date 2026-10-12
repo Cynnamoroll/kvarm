@@ -9,13 +9,13 @@
  * Groups (scripts/lib/bench-report.mjs BENCH_GROUPS):
  * - clone vs snapshot: scripts/bench-clone-vs-snapshot.mjs --write (3 runs per variant)
  * - compare cold/warm on the fixture (cold = instance-admin ?nocache=1 bypass)
- * - edge cache hit rates and per-endpoint x-forge-cost medians (>= 5 requests
+ * - edge cache hit rates and per-endpoint x-kvarm-cost medians (>= 5 requests
  *   per endpoint, each checked against its library/cost.md row through
  *   scripts/lib/cost-catalog.mjs)
  * - overlap forecast and composition timings over two overlapping agent workspaces
  * - the committed 100-workspace fleet run (docs/benchmarks/fleet-100.json)
  * - dev-loop turnaround: explicit merge, mergeability cold/warm, push ->
- *   forge/guard recorded, push -> CI job claimable, runner claim -> report
+ *   kvarm/guard recorded, push -> CI job claimable, runner claim -> report
  *   (scripts/runner-warm-bench.mjs) and Container CI cold vs snapshot-warm
  *
  * Every timing is a client Date.now() span around one request or child
@@ -57,14 +57,14 @@ const N = Math.max(5, Number(args.samples) || 10);
 const REUSE = new Set(args.reuse.split(',').filter(Boolean));
 const DOCS = join(ROOT, 'docs/benchmarks');
 const BENCH_JSON = join(DOCS, 'bench.json');
-const BASE = process.env.FORGE_BASE_URL;
-const PAT = process.env.FORGE_PAT;
-const OWNER = process.env.FORGE_USER;
+const BASE = process.env.KVARM_BASE_URL;
+const PAT = process.env.KVARM_PAT;
+const OWNER = process.env.KVARM_USER;
 if (!BASE || !PAT || !OWNER) {
-  console.error('missing FORGE_BASE_URL / FORGE_PAT / FORGE_USER: source apps/platform/.dev.vars.validation first');
+  console.error('missing KVARM_BASE_URL / KVARM_PAT / KVARM_USER: source apps/platform/.dev.vars.validation first');
   process.exit(2);
 }
-const FIXTURE = process.env.FORGE_FIXTURE_REPO ?? `${OWNER}/fixture-1m`;
+const FIXTURE = process.env.KVARM_FIXTURE_REPO ?? `${OWNER}/fixture-1m`;
 const previous = existsSync(BENCH_JSON) ? JSON.parse(readFileSync(BENCH_JSON, 'utf8')) : null;
 for (const g of REUSE) {
   if (!['clone', 'runner', 'container'].includes(g)) {
@@ -190,7 +190,7 @@ await phase('compare on the fixture (cold bypass vs warm cache hit)', async () =
   let files = null;
   for (let i = 0; i < N; i++) {
     const r = await http(`${url}?nocache=1`);
-    expect(r.status === 200 && r.headers.get('x-forge-cache') === 'bypass', `cold compare -> ${r.status} ${r.headers.get('x-forge-cache')}`);
+    expect(r.status === 200 && r.headers.get('x-kvarm-cache') === 'bypass', `cold compare -> ${r.status} ${r.headers.get('x-kvarm-cache')}`);
     cold.push(r.ms);
     coldCost = r.raw;
     files = r.json?.files?.length ?? r.json?.totalFiles ?? files;
@@ -380,12 +380,12 @@ await phase('explicit merge and mergeability (cold vs warm)', async () => {
 });
 
 // ---------------------------------------------------------------------------
-await phase('push -> forge/guard recorded and push -> CI job claimable', async () => {
+await phase('push -> kvarm/guard recorded and push -> CI job claimable', async () => {
   const L = (bench.loopRepo = await createRepo('loopci'));
   const l = local('loopci');
   await l.g(['init', '-q', '-b', 'main']);
   const ci = { jobs: [{ name: 'bench', run: 'true', required: true, timeoutSeconds: 60 }] };
-  const seed = await l.commit({ 'about.txt': 'loop\n', '.forge/ci.json': `${JSON.stringify(ci)}\n` }, 'seed');
+  const seed = await l.commit({ 'about.txt': 'loop\n', '.kvarm/ci.json': `${JSON.stringify(ci)}\n` }, 'seed');
   await l.checkout('loop', seed);
   await l.commit({ 'loop.txt': '0\n' }, 'loop 0');
   await l.checkout('main', seed);
@@ -423,7 +423,7 @@ await phase('push -> forge/guard recorded and push -> CI job claimable', async (
       for (;;) {
         const r = await http(`${R(L)}/changes/${n}/checks`);
         const runs = r.json?.checks ?? [];
-        const g = runs.find((k) => k.name === 'forge/guard' && k.headSha === sha && k.status !== 'queued' && k.status !== 'running');
+        const g = runs.find((k) => k.name === 'kvarm/guard' && k.headSha === sha && k.status !== 'queued' && k.status !== 'running');
         if (g && !guardDone) {
           guardDone = true;
           guardSeen.push(Date.now() - t0);
@@ -436,7 +436,7 @@ await phase('push -> forge/guard recorded and push -> CI job claimable', async (
         }
         if (Date.now() > deadline) {
           if (guardDone) return;
-          throw new Error(`no forge/guard run at ${sha.slice(0, 10)} within 90 s`);
+          throw new Error(`no kvarm/guard run at ${sha.slice(0, 10)} within 90 s`);
         }
         await sleep(250);
       }
@@ -578,8 +578,8 @@ report.loop = [
   loop.merge && { metric: 'explicit merge (`POST …/merge` -> 200)', ...loop.merge },
   loop.mergeCold && { metric: 'mergeability, cold', ...loop.mergeCold },
   loop.mergeWarm && { metric: 'mergeability, warm', ...loop.mergeWarm },
-  loop.guardServer && { metric: 'push -> forge/guard verdict recorded', ...loop.guardServer },
-  loop.guardSeen && { metric: 'push -> forge/guard verdict visible to the client', ...loop.guardSeen },
+  loop.guardServer && { metric: 'push -> kvarm/guard verdict recorded', ...loop.guardServer },
+  loop.guardSeen && { metric: 'push -> kvarm/guard verdict visible to the client', ...loop.guardSeen },
   loop.ciCreated && { metric: 'push -> CI job created (claimable)', ...loop.ciCreated },
   loop.ciClaim && { metric: 'push -> CI job claimed by a polling client', ...loop.ciClaim },
   runnerStats && { metric: 'runner claim -> report, cold install (`--fresh`)', stats: runnerStats.cold, method: runnerMethod('empty workdir, full install from the machine npm cache, checkout by clone fallback') },

@@ -18,7 +18,7 @@ import {
   readPktLines,
   ZERO_OID,
   type FetchLike,
-} from '@forge/gitops';
+} from '@kvarm/gitops';
 import { refGeneration } from '../src/cache/compare';
 import { internalKey, writeCachedJson } from '../src/cache/internal';
 import type { RepoRow } from '../src/db/repos';
@@ -70,7 +70,7 @@ function fakeRemote(reply: () => Response): { fetch: FetchLike; seen: Seen[] } {
 async function sampleCommit() {
   const blob = await buildBlob(encode('hello\n'));
   const tree = await buildTree([{ mode: '100644', name: 'a.txt', hash: blob.hash }]);
-  const ident = { name: 'Forge', email: 'forge@forge.invalid', time: 1_790_000_000 };
+  const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: 1_790_000_000 };
   const commit = await buildCommit({ tree: tree.hash, parents: [], author: ident, committer: ident, message: 'm' });
   return { commit, objects: [commit, tree, blob] };
 }
@@ -111,7 +111,7 @@ describe('artifactsPusher', () => {
   it('allows the platform direct writer to stage a reserved CI ref', async () => {
     const repo = await seedRepo('gw-ci-stage');
     const { commit, objects } = await sampleCommit();
-    const ref = 'refs/heads/forge-ci/run-1';
+    const ref = 'refs/heads/kvarm-ci/run-1';
     const remote = fakeRemote(() => new Response(buildReportStatus([{ ref, ok: true }], 'none')));
 
     const result = await artifactsPusher(baseEnv, repo, { fetch: remote.fetch }).updateRef(

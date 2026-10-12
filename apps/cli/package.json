@@ -1,20 +1,20 @@
 {
-  "name": "@forge/cli",
+  "name": "@kvarm/cli",
   "private": true,
   "version": "0.1.0",
-  "description": "Veyr-9 command-line client: snapshot-first checkout and the shared API operation registry",
+  "description": "Kvarm command-line client: snapshot-first checkout and the shared API operation registry",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "forge": "bin/forge.js"
+    "kvarm": "bin/kvarm.js"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
-    "@forge/gitops": "*"
+    "@kvarm/gitops": "*"
   },
   "dependencies": {
-    "@forge/ops": "*"
+    "@kvarm/ops": "*"
   }
 }

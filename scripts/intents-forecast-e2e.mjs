@@ -4,7 +4,7 @@
  * (nexus-intents-forecast): VAL-INTENT-001..007, VAL-FORECAST-001..005,
  * VAL-OVERLAP-001..004 and the overlap half of VAL-COST-015.
  *
- * Every section runs in a fresh public repo owned by FORGE_USER (cynthia),
+ * Every section runs in a fresh public repo owned by KVARM_USER (cynthia),
  * named `nexus-intents-forecast-<section>-<timestamp>`, seeded and changed
  * with real git pushes through the platform gate, and deleted afterwards
  * (unless --keep):
@@ -41,9 +41,9 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } },
 });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'nexus-intents-forecast';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -86,20 +86,20 @@ async function http(path, { method = 'GET', json, token = PAT, label } = {}) {
   } catch {
     body = null;
   }
-  const cost = res.headers.get('x-forge-cost');
+  const cost = res.headers.get('x-kvarm-cost');
   if (label) (costs[label] ??= []).push(cost);
   return { status: res.status, text, json: body, cost, c: parseCost(cost) };
 }
 
 const work = mkdtempSync(join(tmpdir(), 'intents-forecast-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, token = PAT) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd,
-    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token },
+    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token },
     encoding: 'utf8',
   });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
@@ -227,7 +227,7 @@ await scenario('intent', async (repo) => {
   // VAL-INTENT-001
   const a = await createWs(api, { task: 'intent create', agent: 'nexus-a', intent: { paths: ['src/', 'docs/guide.md'] } });
   const g1 = await http(`${api}/workspaces/${a.id}/intent`, { label: 'GET workspaces/:id/intent' });
-  console.log(`GET intent -> ${g1.status} ${g1.text} (x-forge-cost ${g1.cost})`);
+  console.log(`GET intent -> ${g1.status} ${g1.text} (x-kvarm-cost ${g1.cost})`);
   check(
     'VAL-INTENT-001',
     'creation intent round-trips through GET intent (normalized, sorted) with observed base/head and truncation fields',
@@ -241,7 +241,7 @@ await scenario('intent', async (repo) => {
     `declared=${JSON.stringify(g1.json?.declaredPaths)} baseSha=${g1.json?.baseSha?.slice(0, 8)} headSha=${g1.json?.headSha?.slice(0, 8)}`,
   );
   const up = await http(`${api}/workspaces/${a.id}/intent`, { method: 'POST', json: { paths: ['lib/'] }, label: 'POST workspaces/:id/intent' });
-  console.log(`POST intent {paths:[lib/]} -> ${up.status} (x-forge-cost ${up.cost})`);
+  console.log(`POST intent {paths:[lib/]} -> ${up.status} (x-kvarm-cost ${up.cost})`);
   const g2 = await http(`${api}/workspaces/${a.id}/intent`);
   check('VAL-INTENT-001', 'POST intent replaces the declaration (no merge with the previous one)', up.status === 200 && eq(g2.json?.declaredPaths, ['lib/']), JSON.stringify(g2.json?.declaredPaths));
   for (const bad of [{ paths: ['/etc/passwd'] }, { paths: ['src/../secret'] }, { paths: [] }]) {
@@ -358,7 +358,7 @@ await scenario('forecast', async (repo) => {
   pushTo(dir, url, b1, b.ref);
   await waitObserved(api, b.id, b1);
   const f1 = await http(`${api}/forecast?paths=src/b.ts&base=main`, { label: 'GET forecast' });
-  console.log(`GET forecast?paths=src/b.ts&base=main -> ${f1.status} ${f1.text} (x-forge-cost ${f1.cost})`);
+  console.log(`GET forecast?paths=src/b.ts&base=main -> ${f1.status} ${f1.text} (x-kvarm-cost ${f1.cost})`);
   const ma = f1.json?.matches?.find((m) => m.workspace === a.id);
   const mb = f1.json?.matches?.find((m) => m.workspace === b.id);
   const refs1 = lsRemoteAll(url);
@@ -452,15 +452,15 @@ await scenario('forecast', async (repo) => {
     x,
     {
       'never/touched.txt': 'y\n',
-      '.forge/ci.json': `${JSON.stringify({ jobs: [{ name: 'forecast-fail', run: 'exit 1', required: true }] })}\n`,
+      '.kvarm/ci.json': `${JSON.stringify({ jobs: [{ name: 'forecast-fail', run: 'exit 1', required: true }] })}\n`,
     },
     'touch never again',
   );
   await pushRetry(dir, url, [`${y}:refs/heads/feat-y`]);
   const ch2 = await http(`${api}/changes`, { method: 'POST', json: { title: 'touch never again', base: 'main', head: 'feat-y', mergePolicy: 'auto' } });
-  const runner = spawnSync(process.execPath, ['apps/cli/bin/forge.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once'], {
+  const runner = spawnSync(process.execPath, ['apps/cli/bin/kvarm.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, FORGE_BASE_URL: BASE, FORGE_PAT: PAT },
+    env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
     encoding: 'utf8',
     timeout: 120_000,
   });
@@ -484,7 +484,7 @@ await scenario('paging', async (repo) => {
   for (let i = 0; i < 10; i++) {
     const r = await http(`${api}/forecast?paths=lib/x.ts&limit=3${cursor ? `&cursor=${cursor}` : ''}`, { label: 'GET forecast' });
     pages.push(r.json);
-    console.log(`page ${i}: ${r.json?.matches?.map((m) => m.workspace).join(',')} truncated=${r.json?.truncated} nextCursor=${r.json?.nextCursor} (x-forge-cost ${r.cost})`);
+    console.log(`page ${i}: ${r.json?.matches?.map((m) => m.workspace).join(',')} truncated=${r.json?.truncated} nextCursor=${r.json?.nextCursor} (x-kvarm-cost ${r.cost})`);
     cursor = r.json?.nextCursor;
     if (!cursor) break;
   }
@@ -577,7 +577,7 @@ await scenario('overlap', async (repo) => {
   console.log(`git ls-remote: D ${D.ref} = ${refs[D.ref]} (main ${refs['refs/heads/main']})`);
   const o1 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
   const o2 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
-  console.log(`GET workspaces/overlap?base=main -> ${o1.status} ${o1.text}\n  x-forge-cost #1 ${o1.cost}\n  x-forge-cost #2 ${o2.cost}`);
+  console.log(`GET workspaces/overlap?base=main -> ${o1.status} ${o1.text}\n  x-kvarm-cost #1 ${o1.cost}\n  x-kvarm-cost #2 ${o2.cost}`);
   const pairs = o1.json?.pairs ?? [];
   const ab = pairs.find((p) => eq([...p.workspaces].sort(), [A.id, B.id].sort()));
   const inAny = (id) => pairs.some((p) => p.workspaces.includes(id));

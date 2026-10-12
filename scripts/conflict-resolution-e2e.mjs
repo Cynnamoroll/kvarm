@@ -3,7 +3,7 @@
  * Live driver for automatic conflict resolution (m5-conflict-resolution):
  * VAL-CONFLICT-001..006 and the resolve-conflict task listing (GET tasks).
  *
- * Every scenario runs in a fresh public repo owned by FORGE_USER, named
+ * Every scenario runs in a fresh public repo owned by KVARM_USER, named
  * `m5-conflict-resolution-<purpose>-<timestamp>`, seeded with real git
  * pushes from one branch point holding `lines.txt` (20 numbered lines), and
  * deleted afterwards (unless --keep):
@@ -34,9 +34,9 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } } });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm5-conflict-resolution';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -70,7 +70,7 @@ async function http(path, { method = 'GET', json, token = PAT } = {}) {
   } catch {
     body = null;
   }
-  return { status: res.status, text, json: body, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, json: body, cost: res.headers.get('x-kvarm-cost') };
 }
 
 function costOf(label, r) {
@@ -80,9 +80,9 @@ function costOf(label, r) {
 
 const work = mkdtempSync(join(tmpdir(), 'conflict-resolution-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
-const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: PAT };
+const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: PAT };
 
 function git(args, cwd) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], { cwd, env: gitEnv, encoding: 'utf8' });
@@ -278,15 +278,15 @@ await scenario('policy', async (repo) => {
     autoState = (await http(`${api}/changes/${auto.json?.number}`)).json;
   }
   const clone = cloneMain(repo);
-  // Green checks: forge/guard (the checks-gate producer since m5-guard-check) passed on both heads.
+  // Green checks: kvarm/guard (the checks-gate producer since m5-guard-check) passed on both heads.
   const guardOf = async (n) => (await http(`${api}/changes/${n}/checks`)).json?.checks?.map((c) => `${c.name}:${c.status}`);
   const draftChecks = await guardOf(draft.json?.number);
   const autoChecks = await guardOf(auto.json?.number);
   console.log(`checks: draft ${JSON.stringify(draftChecks)} (gate ${dm.json?.mergeability?.checks?.state}); auto ${JSON.stringify(autoChecks)}`);
   check(
     'VAL-CONFLICT-005',
-    'both changes have green required checks (forge/guard success; draft gate state success)',
-    JSON.stringify(draftChecks) === '["forge/guard:success"]' && JSON.stringify(autoChecks) === '["forge/guard:success"]' && dm.json?.mergeability?.checks?.state === 'success',
+    'both changes have green required checks (kvarm/guard success; draft gate state success)',
+    JSON.stringify(draftChecks) === '["kvarm/guard:success"]' && JSON.stringify(autoChecks) === '["kvarm/guard:success"]' && dm.json?.mergeability?.checks?.state === 'success',
   );
   check(
     'VAL-CONFLICT-005',
@@ -381,7 +381,7 @@ await scenario('conflict', async (repo) => {
 });
 
 rmSync(work, { recursive: true, force: true });
-console.log('\n# x-forge-cost');
+console.log('\n# x-kvarm-cost');
 for (const c of costs) console.log(`  ${c.label} (${c.status}): ${c.cost}`);
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

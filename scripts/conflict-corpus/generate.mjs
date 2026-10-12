@@ -6,7 +6,7 @@
  * compares merge3 against these results.
  *
  * Usage: node scripts/conflict-corpus/generate.mjs [--out <dir>] [--json]
- *   --out   corpus directory (default: <tmpdir>/forge-conflict-corpus);
+ *   --out   corpus directory (default: <tmpdir>/kvarm-conflict-corpus);
  *           rebuilt on every run, and only ever removed when it carries the
  *           corpus marker file
  *   --json  print the full result list as JSON instead of a summary
@@ -21,7 +21,7 @@ import { parseArgs } from 'node:util';
 import { allCases, buildCorpus } from './corpus.mjs';
 
 const { values: args } = parseArgs({
-  options: { out: { type: 'string', default: join(tmpdir(), 'forge-conflict-corpus') }, json: { type: 'boolean', default: false } },
+  options: { out: { type: 'string', default: join(tmpdir(), 'kvarm-conflict-corpus') }, json: { type: 'boolean', default: false } },
 });
 
 const results = buildCorpus(args.out, allCases());

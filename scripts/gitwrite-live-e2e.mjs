@@ -2,7 +2,7 @@
 /**
  * Live driver for the server-side git write path (m5-gitops-write-path).
  *
- * 1. As cynthia (FORGE_PAT) creates a fresh private repo
+ * 1. As cynthia (KVARM_PAT) creates a fresh private repo
  *    `m5-gitops-write-path-live-<timestamp>` (empty).
  * 2. Reads its Artifacts remote and issues a short-lived repo-scoped WRITE
  *    token with `wrangler artifacts repos issue-token` (captured in memory,
@@ -35,9 +35,9 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: args } = parseArgs({ options: { keep: { type: 'boolean', default: false } } });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PLATFORM = join(ROOT, 'apps/platform');
 const REPO = `m5-gitops-write-path-live-${Date.now()}`;
@@ -51,14 +51,14 @@ function check(label, ok, detail = '') {
 }
 
 async function http(path, { method = 'GET', json } = {}) {
-  const init = { method, headers: { Authorization: `Bearer ${process.env.FORGE_PAT}` } };
+  const init = { method, headers: { Authorization: `Bearer ${process.env.KVARM_PAT}` } };
   if (json !== undefined) {
     init.headers['content-type'] = 'application/json';
     init.body = JSON.stringify(json);
   }
   const res = await fetch(`${BASE}${path}`, init);
   const text = await res.text();
-  return { status: res.status, text, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, cost: res.headers.get('x-kvarm-cost') };
 }
 
 /** Runs wrangler from apps/platform and returns parsed --json output (never printed). */
@@ -82,11 +82,11 @@ function pick(obj, keys) {
 
 const work = mkdtempSync(join(tmpdir(), 'gitwrite-live-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(gitArgs, cwd = work) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: process.env.FORGE_PAT };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: process.env.KVARM_PAT };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...gitArgs], { cwd, env, encoding: 'utf8' });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
 }

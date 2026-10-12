@@ -2,11 +2,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, posix, win32 } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { tarEnd, tarEntry } from '@forge/gitops';
+import { tarEnd, tarEntry } from '@kvarm/gitops';
 import { TarError, archiveTarget, extractTar, parsePax } from '../src/untar.js';
 import { chunked, diffTrees, gitCheckout, makeRepo, tarFromCommit, tempDir } from './helpers';
 
-const root = tempDir('forge-cli-untar-');
+const root = tempDir('kvarm-cli-untar-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const repo = makeRepo(root);
 
@@ -66,7 +66,7 @@ describe('extractTar', () => {
     await expect(extractTar(chunked(archive(file('../escape.txt', 'x'))), dest)).rejects.toBeInstanceOf(TarError);
     expect(existsSync(join(root, 'x-evil', 'escape.txt'))).toBe(false);
     await expect(extractTar(chunked(archive(file('ok/../../escape2.txt', 'x'))), dest)).rejects.toThrow(/unsafe archive path/);
-    await expect(extractTar(chunked(archive(file('/tmp/forge-abs.txt', 'x'))), dest)).rejects.toThrow(/absolute|unsafe/);
+    await expect(extractTar(chunked(archive(file('/tmp/kvarm-abs.txt', 'x'))), dest)).rejects.toThrow(/absolute|unsafe/);
   });
 
   it('keeps literal backslash and drive-like names as POSIX filenames inside the destination', async () => {

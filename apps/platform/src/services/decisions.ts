@@ -160,7 +160,7 @@ export async function recordDecision(cx: DecisionContext, input: unknown): Promi
     chosen_candidate: d.chosen,
     rejected_candidates: JSON.stringify(d.rejected),
     reason: d.reason,
-    actor: cx.actor?.user.login ?? 'forge',
+    actor: cx.actor?.user.login ?? 'kvarm',
     agent_id: cx.actor?.agent?.agentId ?? null,
     agent_name: cx.actor?.agent?.agentName ?? null,
     at: Date.now(),

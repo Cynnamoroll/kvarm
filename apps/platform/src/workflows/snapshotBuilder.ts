@@ -34,7 +34,7 @@
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { decode, encode, gitModeToTar, tarEnd, tarHeader, tarPadding, type TarEntry } from '@forge/gitops';
+import { decode, encode, gitModeToTar, tarEnd, tarHeader, tarPadding, type TarEntry } from '@kvarm/gitops';
 import { withRepo } from '../artifacts/repo';
 import { CostMeter, runWithMeter } from '../cost/meter';
 

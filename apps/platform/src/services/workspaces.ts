@@ -16,7 +16,7 @@
  * agent's own or a person's workspace the token's ref patterns grant.
  */
 
-import { isSafeRefName, isZeroOid, type RefCommand } from '@forge/gitops';
+import { isSafeRefName, isZeroOid, type RefCommand } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';

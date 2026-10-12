@@ -1,12 +1,12 @@
 import { env as cfEnv, exports } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { pktLine, readPktLines, sha256Hex, ZERO_OID } from '@forge/gitops';
+import { pktLine, readPktLines, sha256Hex, ZERO_OID } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { gateReceivePack } from '../src/services/receivePackGate';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const ORG = 'agt-org';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const A = 'a'.repeat(40);
@@ -237,7 +237,7 @@ describe('agent principals', () => {
 
 describe('agent tokens', () => {
   it('returns the secret once and stores only its hash', async () => {
-    expect(writeTok.token).toMatch(/^forge_agt_[0-9a-f]{64}$/);
+    expect(writeTok.token).toMatch(/^kvarm_agt_[0-9a-f]{64}$/);
     expect(writeTok.prefix).toBe(writeTok.token.slice(0, 18));
     expect(writeTok).toMatchObject({ repo: `${logins.owner}/work`, role: 'write', refs: [WS1], status: 'active' });
     const row = await env.DB.prepare('SELECT hash FROM agent_tokens WHERE id = ?').bind(writeTok.id).first<{ hash: string }>();

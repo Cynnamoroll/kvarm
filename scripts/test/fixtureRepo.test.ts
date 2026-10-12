@@ -120,7 +120,7 @@ describe('scripts/risk-fixture.mjs against a fake worker', () => {
     const { port } = server.address() as AddressInfo;
     try {
       const child = spawn(process.execPath, [fileURLToPath(new URL('../risk-fixture.mjs', import.meta.url)), `--repo=${repoArg}`], {
-        env: { ...process.env, FORGE_BASE_URL: `http://127.0.0.1:${port}`, FORGE_PAT: 'not-a-real-token' },
+        env: { ...process.env, KVARM_BASE_URL: `http://127.0.0.1:${port}`, KVARM_PAT: 'not-a-real-token' },
       });
       let out = '';
       child.stdout.on('data', (d) => (out += d));

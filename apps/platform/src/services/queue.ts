@@ -31,7 +31,7 @@
  * polling the lease.
  */
 
-import { ZERO_OID, type GitObject } from '@forge/gitops';
+import { ZERO_OID, type GitObject } from '@kvarm/gitops';
 import type { AgentGrant } from '../auth/agentTokens';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { CostSpan, currentMeter, withCostSpan, type CostCounters } from '../cost/meter';
@@ -933,8 +933,8 @@ interface PassOutcome {
 
 function enqueuerAuthor(e: EntryRow): { name: string; email: string } | undefined {
   const agent = parseJson<{ agentId: string; agentName: string }>(e.agent_meta);
-  if (agent) return { name: agent.agentName, email: `${agent.agentId}@agents.forge.invalid` };
-  if (e.enqueuer_login) return { name: e.enqueuer_login, email: `${e.enqueuer_login}@users.forge.invalid` };
+  if (agent) return { name: agent.agentName, email: `${agent.agentId}@agents.kvarm.invalid` };
+  if (e.enqueuer_login) return { name: e.enqueuer_login, email: `${e.enqueuer_login}@users.kvarm.invalid` };
   return undefined;
 }
 
@@ -1157,7 +1157,7 @@ async function trainPass(
           // Reuse the immutable prepared commit staged by an earlier pass. A
           // freshly prepared commit can have the same tree and parents but a
           // different timestamp, while the completed checks name the staged SHA.
-          const checkRef = `refs/heads/forge-ci/${e.id}/${pv.treeSha}`;
+          const checkRef = `refs/heads/kvarm-ci/${e.id}/${pv.treeSha}`;
           const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
           if (live !== null) {
             const expected =
@@ -1672,7 +1672,7 @@ async function publishCandidate(
   deps.observe?.({ type: 'publish', number: e.change_number, status: 'recorded', mergeCommit: pv.mergeCommit, previous: pv.targetSha, ...(cost ? { cost: recordCost! } : {}) });
   console.log(JSON.stringify({ trainPublished: { repo: repo.id, ref, number: e.change_number, kind: pv.kind, mergeCommit: pv.mergeCommit, leaseGeneration: acq.generation, cost: costDelta(start, spanSnapshot(span)) } }));
   if (pv.kind === 'merge') {
-    // A Forge merge commit carries the enqueuing principal; a fast-forward publishes the author's commit untouched.
+    // A Kvarm merge commit carries the enqueuing principal; a fast-forward publishes the author's commit untouched.
     const input = parseJson<AttributionInput>(e.attribution);
     await attributeMerge({ env, repo, actor: who.actor, waitUntil: ctx.waitUntil }, ctx.artifacts as LazyRepo, deps.pusher(env, repo), {
       changeNumber: e.change_number,
@@ -1680,7 +1680,7 @@ async function publishCandidate(
       input,
     });
     if (plan.ciPrepared) {
-      const checkRef = `refs/heads/forge-ci/${e.id}/${pv.treeSha}`;
+      const checkRef = `refs/heads/kvarm-ci/${e.id}/${pv.treeSha}`;
       ctx.waitUntil(
         deps
           .pusher(env, repo)

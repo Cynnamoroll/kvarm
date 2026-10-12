@@ -1,7 +1,7 @@
 /**
  * Git-notes attribution and decision records (services/attribution.ts,
  * services/decisions.ts) through the Worker's routes over the in-memory
- * Artifacts fake: notes land on refs/notes/forge-attribution through the fake
+ * Artifacts fake: notes land on refs/notes/kvarm-attribution through the fake
  * receive-pack exactly like the Artifacts remote, so the notes tree is the
  * one git reads after fetching that ref.
  */
@@ -9,14 +9,14 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { FORGE_NOTES_REF, decode, findNote, parseTree } from '@forge/gitops';
+import { KVARM_NOTES_REF, decode, findNote, parseTree } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'at-owner';
 const HASH = 'a'.repeat(64);
@@ -108,7 +108,7 @@ const context = (repo: string, q: string, token: string | undefined = tok.owner)
 
 /** The note git would show for `sha` after fetching the notes ref. */
 async function gitNote(repo: FakeRepo, sha: string): Promise<string | null> {
-  const tip = repo.refs.get(FORGE_NOTES_REF);
+  const tip = repo.refs.get(KVARM_NOTES_REF);
   if (!tip) return null;
   const c = decode(repo.objects.get(tip)!.content);
   const tree = /^tree ([0-9a-f]{40})$/m.exec(c)![1]!;
@@ -145,8 +145,8 @@ describe('commit attribution notes', () => {
     expect(new Date(r.json.at).toISOString()).toBe(r.json.at);
 
     // The notes ref was created with a zero old OID; the note is the JSON record.
-    const tip = repo.refs.get(FORGE_NOTES_REF)!;
-    expect(repo.calls).toContain(`receivePack:${FORGE_NOTES_REF}:${'0'.repeat(40)}->${tip}`);
+    const tip = repo.refs.get(KVARM_NOTES_REF)!;
+    expect(repo.calls).toContain(`receivePack:${KVARM_NOTES_REF}:${'0'.repeat(40)}->${tip}`);
     const note = await gitNote(repo, main.sha);
     expect(JSON.parse(note!)).toEqual(r.json);
     expect(note!.endsWith('\n')).toBe(true);
@@ -161,7 +161,7 @@ describe('commit attribution notes', () => {
     expect(r2.status).toBe(201);
     expect(Object.keys(r2.json)).toEqual(['agent', 'session', 'promptHash', 'actor', 'at']);
     // The second note commit sits on the first; both notes stay readable.
-    const tip2 = repo.refs.get(FORGE_NOTES_REF)!;
+    const tip2 = repo.refs.get(KVARM_NOTES_REF)!;
     expect(decode(repo.objects.get(tip2)!.content)).toContain(`parent ${tip}\n`);
     expect(JSON.parse((await gitNote(repo, main.sha))!)).toEqual(r.json);
     expect((await getAttr('set', second.sha)).json).toEqual(r2.json);
@@ -174,7 +174,7 @@ describe('commit attribution notes', () => {
     const r = await setAttr('replace', main.sha, { agent: 'a2', session: 's2', promptHash: HASH });
     expect(r.status).toBe(200);
     expect((await getAttr('replace', main.sha)).json).toEqual(r.json);
-    const tip = repo.refs.get(FORGE_NOTES_REF)!;
+    const tip = repo.refs.get(KVARM_NOTES_REF)!;
     const tree = /^tree ([0-9a-f]{40})$/m.exec(decode(repo.objects.get(tip)!.content))![1]!;
     expect(parseTree(repo.objects.get(tree)!.content).map((e) => e.name)).toEqual([main.sha]);
   });
@@ -231,7 +231,7 @@ describe('commit attribution notes', () => {
     // Another writer lands a note between this writer's read and its send.
     let raced = false;
     repo.hook = async (c) => {
-      if (raced || !c.startsWith(`receivePack:${FORGE_NOTES_REF}`)) return;
+      if (raced || !c.startsWith(`receivePack:${KVARM_NOTES_REF}`)) return;
       raced = true;
       repo.hook = null;
       expect((await setAttr('race', other.sha, { agent: 'second', session: 's', promptHash: HASH })).status).toBe(201);
@@ -253,11 +253,11 @@ describe('commit attribution notes', () => {
     expect(row).not.toBeNull();
     expect(row!.processed_at).not.toBeNull();
     const payload = JSON.parse(row!.payload);
-    expect(payload).toMatchObject({ repoId: repoIds.ledger, commit: main.sha, source: 'api', notesCommit: repo.refs.get(FORGE_NOTES_REF) });
+    expect(payload).toMatchObject({ repoId: repoIds.ledger, commit: main.sha, source: 'api', notesCommit: repo.refs.get(KVARM_NOTES_REF) });
     expect(payload.attribution).toMatchObject({ agent: 'ledger-agent', actor: OWNER });
   });
 
-  it('writes the merging actor attribution on Forge-created merge commits', async () => {
+  it('writes the merging actor attribution on Kvarm-created merge commits', async () => {
     const repo = await seedRepo('merge', 'public');
     const root = await commit(repo, { 'README.md': 'readme\n' });
     const main = await commit(repo, { 'README.md': 'readme\n', 'a.txt': 'A\n' }, [root.sha]);
@@ -283,7 +283,7 @@ describe('commit attribution notes', () => {
     const m2 = await call('POST', repoPath('merge', '/changes/2/merge'), tok.owner);
     expect(m2.status).toBe(200);
     const a2 = await getAttr('merge', m2.json.mergeCommit);
-    expect(a2.json).toMatchObject({ agent: OWNER, session: 'forge:merge/change-2', promptHash: null, actor: OWNER });
+    expect(a2.json).toMatchObject({ agent: OWNER, session: 'kvarm:merge/change-2', promptHash: null, actor: OWNER });
 
     // A bad attribution object is refused before anything merges.
     const f3 = await commit(repo, { 'README.md': 'readme\n', 'z.txt': 'Z\n' }, [root.sha]);
@@ -321,7 +321,7 @@ describe('commit attribution notes', () => {
     expect(set.status).toBe(201);
     expect(set.json).toMatchObject({ agent: 'claude-code-9', actor: OWNER });
 
-    // Fast-forward: the head commit is not Forge's, so its note is untouched.
+    // Fast-forward: the head commit is not Kvarm's, so its note is untouched.
     const ff = await commit(repo, { 'README.md': 'ff\n' }, [merged.json.mergeCommit]);
     repo.refs.set('refs/heads/ff', ff.sha);
     expect((await call('POST', repoPath('agentmerge', '/changes'), tok.owner, { title: 'ff', base: 'main', head: 'ff' })).status).toBe(201);

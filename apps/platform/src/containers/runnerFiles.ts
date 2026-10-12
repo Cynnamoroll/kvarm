@@ -6,8 +6,8 @@
 
 import { RUNNER_MODULES } from './runnerSource';
 
-export const RUNNER_DIR = '/opt/forge-runner';
-export const WORK_ROOT = '/var/lib/forge-runner';
+export const RUNNER_DIR = '/opt/kvarm-runner';
+export const WORK_ROOT = '/var/lib/kvarm-runner';
 
 /**
  * One job, then exit: 0 when a claimed job was reported, 3 when none was
@@ -18,11 +18,11 @@ const RUN_ENTRY = `import { runRunner } from './runner.js';
 
 const env = process.env;
 const result = await runRunner({
-  baseUrl: env.FORGE_BASE_URL,
-  pat: env.FORGE_PAT,
-  repo: env.FORGE_REPO,
-  runnerId: env.FORGE_RUNNER_ID,
-  workRoot: env.FORGE_WORK_ROOT,
+  baseUrl: env.KVARM_BASE_URL,
+  pat: env.KVARM_PAT,
+  repo: env.KVARM_REPO,
+  runnerId: env.KVARM_RUNNER_ID,
+  workRoot: env.KVARM_WORK_ROOT,
   once: true,
   stdout: (line) => process.stdout.write(line + '\\n'),
   stderr: (line) => process.stderr.write(line + '\\n'),
@@ -64,11 +64,11 @@ export interface RunnerExecInput {
  */
 export function runnerExecEnv(input: RunnerExecInput): Record<string, string> {
   return {
-    FORGE_BASE_URL: input.baseUrl,
-    FORGE_PAT: input.token,
-    FORGE_REPO: input.repo,
-    FORGE_RUNNER_ID: input.runnerId,
-    FORGE_WORK_ROOT: input.workRoot ?? WORK_ROOT,
+    KVARM_BASE_URL: input.baseUrl,
+    KVARM_PAT: input.token,
+    KVARM_REPO: input.repo,
+    KVARM_RUNNER_ID: input.runnerId,
+    KVARM_WORK_ROOT: input.workRoot ?? WORK_ROOT,
     HOME: '/root',
   };
 }

@@ -12,7 +12,7 @@ import {
   readReceivePackPrefix,
   type CommandLimits,
   type RefCommand,
-} from '@forge/gitops';
+} from '@kvarm/gitops';
 
 /**
  * Returns null when the command is allowed, otherwise the `ng` reason. It

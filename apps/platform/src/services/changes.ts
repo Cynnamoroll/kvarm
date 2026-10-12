@@ -16,7 +16,7 @@
  * the gate has no producers).
  */
 
-import { ZERO_OID, type MergeResolution } from '@forge/gitops';
+import { ZERO_OID, type MergeResolution } from '@kvarm/gitops';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import type { RepoRow } from '../db/repos';
@@ -814,7 +814,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
     if (row.head_sha) {
       const queued = await queueChangeCi(cx.env, cx.repo, row.id, row.head_sha, row.head_sha === headSha ? headTree : undefined);
       // A newer head may have raced the create after the observed head's
-      // config was validated. queueChangeCi records forge/ci-config failure
+      // config was validated. queueChangeCi records kvarm/ci-config failure
       // on that persisted head, so return the created, blocked change rather
       // than an error that suggests no change exists.
       if (!queued.ok && row.head_sha === headSha) return queued;
@@ -1171,7 +1171,7 @@ async function performMerge(
         const configured = await hasCiJobs(cx.env, cx.repo.artifacts_name, prepared.value.headSha);
         if (!configured.ok) return configured;
         if (configured.value) {
-          const checkRef = `refs/heads/forge-ci/${row.id}/${prepared.value.treeSha}`;
+          const checkRef = `refs/heads/kvarm-ci/${row.id}/${prepared.value.treeSha}`;
           ciCheckRef = checkRef;
           const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
           if (live) {
@@ -1287,7 +1287,7 @@ async function performMerge(
         },
       );
       if (pv.kind === 'merge') {
-        // The merge commit is Forge's own, so it carries the merging principal; a fast-forward publishes the author's commit untouched.
+        // The merge commit is Kvarm's own, so it carries the merging principal; a fast-forward publishes the author's commit untouched.
         await attributeMerge(cx, artifacts, pusher, { changeNumber: row.number, mergeCommit: pv.mergeCommit, input: attribution });
       }
       if (!update?.meta.changes) {
@@ -1334,7 +1334,7 @@ export function agentMergeDenial(actor: Actor | null, base: string, what: MergeP
 
 export function mergeAuthor(actor: Actor | null): { name: string; email: string } | undefined {
   if (!actor) return undefined;
-  if (actor.agent) return { name: actor.agent.agentName, email: `${actor.agent.agentId}@agents.forge.invalid` };
+  if (actor.agent) return { name: actor.agent.agentName, email: `${actor.agent.agentId}@agents.kvarm.invalid` };
   return { name: actor.user.name ?? actor.user.login, email: actor.user.email };
 }
 

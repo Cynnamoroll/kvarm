@@ -9,11 +9,11 @@
  *   node scripts/perf-platform-live.mjs [--workspaces 100] [--only nexus,snapshot,changes,train] [--keep] [--out <dir>]
  *
  * Sections:
- *   nexus     100 workspaces (created with FORGE_PAT, agent label per member), pushed in
+ *   nexus     100 workspaces (created with KVARM_PAT, agent label per member), pushed in
  *             batches of refspecs; once the Nexus index observed every head: every overlap
  *             page (base=main, limit 50) and the forecast probes (popular exact path,
  *             popular path paged at limit 5, the fleet/ prefix range), three samples each,
- *             with their x-forge-cost rr against the pre-fix baseline (overlap 1061/page,
+ *             with their x-kvarm-cost rr against the pre-fix baseline (overlap 1061/page,
  *             forecast 150) and the cost.md rows.
  *   snapshot  main's snapshot downloaded twice by commit: the first fills the repo-scoped
  *             cache (r2b=1), the second is a hit (r2b=0, same bytes, same etag = tree).
@@ -57,11 +57,11 @@ const { values: opts } = parseArgs({
 });
 const N = Number(opts.workspaces);
 const ONLY = new Set(opts.only.split(','));
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT;
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT;
 if (!PAT) {
-  console.error('perf-platform-live: FORGE_PAT is not set (set -a; . apps/platform/.dev.vars.validation; set +a)');
+  console.error('perf-platform-live: KVARM_PAT is not set (set -a; . apps/platform/.dev.vars.validation; set +a)');
   process.exit(2);
 }
 if (!Number.isInteger(N) || N < 16) {
@@ -76,7 +76,7 @@ const work = mkdtempSync(join(tmpdir(), 'perf-platform-live-'));
 const outDir = opts.out ?? join(work, 'report');
 mkdirSync(outDir, { recursive: true });
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -124,7 +124,7 @@ async function http(path, { method = 'GET', json, token = PAT, binary = false } 
           body = null;
         }
       }
-      return { status: res.status, json: body, bytes: binary ? buf : null, headers: res.headers, cost: res.headers.get('x-forge-cost') ?? '' };
+      return { status: res.status, json: body, bytes: binary ? buf : null, headers: res.headers, cost: res.headers.get('x-kvarm-cost') ?? '' };
     });
     out.ms = Date.now() - t0;
     if (out.status === 0 || out.ms > 30_000) {
@@ -154,7 +154,7 @@ async function git(args, { cwd = work, network = false, input, env = {}, token =
         new Promise((resolve) => {
           const child = spawn('git', ['-c', 'credential.helper=', ...args], {
             cwd,
-            env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token, ...env },
+            env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token, ...env },
           });
           let out = '';
           let err = '';

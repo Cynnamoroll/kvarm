@@ -1,6 +1,6 @@
 /**
  * Container CI runner showcase (Cloudflare Containers, public beta): one
- * Durable Object per repository that runs one `forge runner --once` job in a
+ * Durable Object per repository that runs one `kvarm runner --once` job in a
  * Container through the native `ctx.container` API, with the
  * `durable_object` scheduling policy and the Cloudflare-managed
  * `cloudflare/debian-trixie` image. CI check jobs only; the user-owned CLI
@@ -13,7 +13,7 @@
  *   and go straight to claim, run and report.
  *
  * Both modes run the same claim -> snapshot checkout -> run -> report REST
- * loop as `forge runner` against the deployed worker, so their check runs
+ * loop as `kvarm runner` against the deployed worker, so their check runs
  * record identically. The caller's token reaches the container only through
  * the runner exec's environment and is never written to its filesystem,
  * which a snapshot would capture. The container is destroyed after every run.
@@ -30,7 +30,7 @@ const TOOLCHAIN = ['npm', 'install', '--global', '--no-audit', '--no-fund', '--l
 const RUN_TIMEOUT_SECONDS = 600;
 const INACTIVITY_MS = 15 * 60 * 1000;
 const SNAPSHOT_KEY = 'workspace-snapshot';
-const SNAPSHOT_NAME = 'forge-ci-workspace';
+const SNAPSHOT_NAME = 'kvarm-ci-workspace';
 const OUTPUT_TAIL = 4_000;
 
 export type ContainerRunMode = 'cold' | 'warm';

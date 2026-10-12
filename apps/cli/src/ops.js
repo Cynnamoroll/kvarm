@@ -1,16 +1,16 @@
 // @ts-check
 /**
- * CLI adapter over the shared operation registry (@forge/ops): every registry
- * entry is a `forge <group> <verb>` command that sends the entry's REST
+ * CLI adapter over the shared operation registry (@kvarm/ops): every registry
+ * entry is a `kvarm <group> <verb>` command that sends the entry's REST
  * request and prints the JSON reply. The MCP server exposes the same entries
  * as tools.
  */
 
-import { OPERATIONS, OperationInputError, buildRequest, requestTarget } from '@forge/ops';
+import { OPERATIONS, OperationInputError, buildRequest, requestTarget } from '@kvarm/ops';
 import { CliError } from './checkout.js';
 
-/** @typedef {import('@forge/ops').Operation} Operation */
-/** @typedef {import('@forge/ops').Param} Param */
+/** @typedef {import('@kvarm/ops').Operation} Operation */
+/** @typedef {import('@kvarm/ops').Param} Param */
 
 /**
  * @typedef {object} OpsIo
@@ -31,7 +31,7 @@ function placeholder(p) {
 
 /** @param {Operation} op */
 export function commandUsage(op) {
-  const parts = [`forge ${op.command.join(' ')}`];
+  const parts = [`kvarm ${op.command.join(' ')}`];
   for (const p of op.params) {
     if (p.positional) parts.push(p.required ? `<${p.name}>` : `[<${p.name}>]`);
   }
@@ -69,7 +69,7 @@ export function commandHelp(op) {
   ].join('\n');
 }
 
-/** One line per registry command, for `forge --help`. */
+/** One line per registry command, for `kvarm --help`. */
 export function operationsOverview() {
   const width = Math.max(...OPERATIONS.map((op) => op.command.join(' ').length)) + 2;
   return OPERATIONS.map((op) => `  ${op.command.join(' ').padEnd(width)} ${op.description.split(/(?<=\.)\s/)[0]}`).join('\n');
@@ -138,7 +138,7 @@ export function parseOperationArgs(op, argv) {
       const eq = a.indexOf('=');
       const name = a.slice(2, eq === -1 ? undefined : eq);
       const p = flags.get(name);
-      if (!p) throw usage(`unknown option "--${name}" for forge ${op.command.join(' ')}`);
+      if (!p) throw usage(`unknown option "--${name}" for kvarm ${op.command.join(' ')}`);
       if (p.type === 'boolean' && eq === -1) {
         args[p.name] = true;
         continue;
@@ -172,13 +172,13 @@ function dependencyRecovery(code, body, args) {
   const dep = /** @type {Record<string, unknown> | undefined} */ (body.dependencies[0]);
   if (!dep || typeof dep.id !== 'string' || typeof dep.workspaceId !== 'string') return null;
   const at = `${repo} ${dep.workspaceId} ${dep.id}`;
-  const list = `inspect with "forge deps list ${repo} ${dep.workspaceId}"`;
-  const detach = `"forge deps detach ${at}"`;
+  const list = `inspect with "kvarm deps list ${repo} ${dep.workspaceId}"`;
+  const detach = `"kvarm deps detach ${at}"`;
   if (code === 'DEPENDENCY_PENDING') return `${list}; land workspace ${dep.onWorkspace}'s change first, or ${detach}`;
   const repin =
     code === 'DEPENDENCY_STALE' && typeof dep.sourceHead === 'string'
-      ? `forge deps repin ${at} --revision ${dep.sourceHead}`
-      : `forge deps repin ${at} --on-workspace <live-workspace> --revision <its-head>`;
+      ? `kvarm deps repin ${at} --revision ${dep.sourceHead}`
+      : `kvarm deps repin ${at} --on-workspace <live-workspace> --revision <its-head>`;
   return `${list}, then recover explicitly: "${repin}" or ${detach}`;
 }
 
@@ -191,14 +191,14 @@ function dependencyRecovery(code, body, args) {
  */
 function hint(op, status, body, args, retryAfter) {
   const code = typeof body.code === 'string' ? body.code : '';
-  const cmd = `forge ${op.command.join(' ')}`;
+  const cmd = `kvarm ${op.command.join(' ')}`;
   const recovery = dependencyRecovery(code, body, args);
   if (recovery) return recovery;
-  if (status === 401) return 'set FORGE_PAT to a valid personal access token with the api scope (or an unexpired agent token)';
+  if (status === 401) return 'set KVARM_PAT to a valid personal access token with the api scope (or an unexpired agent token)';
   if (status === 403 && code === 'INSUFFICIENT_SCOPE') return 'the token lacks the api scope or role this needs; use a token minted with the api scope';
   if (status === 403) return `your account or token lacks the role this needs${args.repo ? ` on ${args.repo}` : ''}; ask an admin for a grant`;
   if (status === 404 && code === 'NOT_FOUND' && args.repo) {
-    return `${args.repo} does not exist or is private to you; check owner/name and that FORGE_PAT can read it`;
+    return `${args.repo} does not exist or is private to you; check owner/name and that KVARM_PAT can read it`;
   }
   if (status === 404) return `check the identifiers you passed to ${cmd}`;
   if (status === 409) return 'the current state conflicts with this request; read the current state (details above) and retry';
@@ -256,12 +256,12 @@ export async function callOperation(op, args, io) {
     if (err instanceof OperationInputError) throw new CliError(err.message, 2);
     throw err;
   }
-  const baseUrl = io.env.FORGE_BASE_URL;
-  if (!baseUrl) throw new CliError('FORGE_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
-  if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`FORGE_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
+  const baseUrl = io.env.KVARM_BASE_URL;
+  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
+  if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`KVARM_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
   /** @type {Record<string, string>} */
   const headers = { accept: 'application/json' };
-  if (io.env.FORGE_PAT) headers.authorization = `Bearer ${io.env.FORGE_PAT}`;
+  if (io.env.KVARM_PAT) headers.authorization = `Bearer ${io.env.KVARM_PAT}`;
   if (built.body !== undefined) headers['content-type'] = 'application/json';
   const url = new URL(requestTarget(built), baseUrl);
   const doFetch = io.apiFetch ?? globalThis.fetch;
@@ -297,7 +297,7 @@ export async function callOperation(op, args, io) {
  * @param {OpsIo} io
  * @param {string} [label] the command shown in the message (default: the operation's)
  */
-export function reportFailure(op, args, res, json, io, label = `forge ${op.command.join(' ')}`) {
+export function reportFailure(op, args, res, json, io, label = `kvarm ${op.command.join(' ')}`) {
   const { data, text } = res;
   /** @type {Record<string, unknown>} */
   const body = data && typeof data === 'object' && !Array.isArray(data) ? /** @type {Record<string, unknown>} */ (data) : { error: text.slice(0, 200) };

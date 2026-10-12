@@ -11,9 +11,9 @@
  * passed the authoritative repo lookup (authorizeRoute) before reaching here.
  */
 
-import { diffTrees, type TreeChange, type TreeEntry, type TreeReader } from '@forge/gitops';
-import { diffStat, diffToHunks, isBinaryContent, type Hunk } from '@forge/diffcore';
-import { GENERATED_MARKER_WINDOW, hasGeneratedMarker, isWhitespaceOnlyChange, needsContent } from '@forge/review';
+import { diffTrees, type TreeChange, type TreeEntry, type TreeReader } from '@kvarm/gitops';
+import { diffStat, diffToHunks, isBinaryContent, type Hunk } from '@kvarm/diffcore';
+import { GENERATED_MARKER_WINDOW, hasGeneratedMarker, isWhitespaceOnlyChange, needsContent } from '@kvarm/review';
 import type { RepoRow } from '../db/repos';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { markCache } from '../cost/meter';

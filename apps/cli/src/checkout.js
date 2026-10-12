@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * `forge checkout <owner/repo> <ref> <dir>`: snapshot first, git clone second.
+ * `kvarm checkout <owner/repo> <ref> <dir>`: snapshot first, git clone second.
  *
  * 1. Ask for the snapshot. With a PAT this is the explicit demand
  *    (`POST …/snapshots/:ref`), which starts a lazy build for a ref that has
@@ -34,7 +34,7 @@ export class CliError extends Error {
 
 /**
  * @typedef {object} CheckoutOptions
- * @property {string} baseUrl platform origin, e.g. https://forge-platform.example.workers.dev
+ * @property {string} baseUrl platform origin, e.g. https://kvarm.example.workers.dev
  * @property {string} [pat] personal access or agent token
  * @property {string} repo `owner/name`
  * @property {string} ref branch, tag or commit SHA
@@ -138,7 +138,7 @@ async function downloadSnapshot(o, path, meta, dir) {
     const body = await jsonBody(res);
     throw new Error(`download returned ${res.status}${body?.code ? ` ${body.code}` : ''}`);
   }
-  const servedSha = res.headers.get('x-forge-snapshot-sha');
+  const servedSha = res.headers.get('x-kvarm-snapshot-sha');
   if (servedSha && servedSha !== meta.sha) {
     discard(res.body);
     throw new Error(`download served ${servedSha}, expected ${meta.sha}`);
@@ -184,7 +184,7 @@ function describeNotReady(meta, demanded) {
   const state = meta?.state ?? 'unknown';
   const sha = typeof meta?.sha === 'string' ? ` for ${meta.sha.slice(0, 12)}` : '';
   if (state === 'building') return `snapshot building${sha}${demanded ? (meta.started ? ' (build started)' : ' (build in progress)') : ''}`;
-  if (state === 'absent') return `snapshot absent${sha}${demanded ? '' : ' (set FORGE_PAT to request a build)'}`;
+  if (state === 'absent') return `snapshot absent${sha}${demanded ? '' : ' (set KVARM_PAT to request a build)'}`;
   if (state === 'failed') return `snapshot failed${sha}`;
   return `snapshot state ${state}${sha}`;
 }
@@ -214,7 +214,7 @@ export async function checkout(options) {
       o.stdout(`sha: ${meta.body.sha}`);
       o.stdout(`files: ${got.files}`);
       o.stdout(`bytes: ${got.bytes}`);
-      o.stderr(`note: ${o.dir} holds the tree only (no .git); see "forge help checkout" before committing or pushing`);
+      o.stderr(`note: ${o.dir} holds the tree only (no .git); see "kvarm help checkout" before committing or pushing`);
       return { source: 'snapshot', sha: meta.body.sha, bytes: got.bytes, files: got.files };
     } catch (err) {
       reason = `snapshot download failed: ${err instanceof Error ? err.message : String(err)}`;

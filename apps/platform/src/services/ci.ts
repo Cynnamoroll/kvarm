@@ -1,5 +1,5 @@
 /**
- * User-owned CI pipelines. `.forge/ci.json` is read at the immutable head,
+ * User-owned CI pipelines. `.kvarm/ci.json` is read at the immutable head,
  * each valid job becomes one queued check run and one generation-fenced
  * runner job, and claim/report use one D1 batch apiece.
  */
@@ -9,7 +9,7 @@ import type { ServiceResult } from '../repos/service';
 import { withLazyRepo } from '../artifacts/repo';
 import { CHECK_RUN_COLUMNS, checkRunView, type CheckRunRow, type CheckRunView } from './checks';
 
-export const CI_CONFIG_PATH = '.forge/ci.json';
+export const CI_CONFIG_PATH = '.kvarm/ci.json';
 export const CI_LEASE_SECONDS = 120;
 export const CI_LIMITS = {
   jobs: 16,
@@ -61,8 +61,8 @@ function parseConfig(text: string): ServiceResult<CiConfig> {
   for (const item of list) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) return fail(422, 'each CI job must be an object', 'INVALID_CI_JOB');
     const j = item as Record<string, unknown>;
-    if (typeof j.name !== 'string' || j.name.trim().length === 0 || j.name.trim().length > CI_LIMITS.name || j.name.toLowerCase().startsWith('forge/')) {
-      return fail(422, `CI job names must be 1-${CI_LIMITS.name} characters and may not start with forge/`, 'INVALID_CI_JOB_NAME');
+    if (typeof j.name !== 'string' || j.name.trim().length === 0 || j.name.trim().length > CI_LIMITS.name || j.name.toLowerCase().startsWith('kvarm/')) {
+      return fail(422, `CI job names must be 1-${CI_LIMITS.name} characters and may not start with kvarm/`, 'INVALID_CI_JOB_NAME');
     }
     const name = j.name.trim();
     if (names.has(name)) return fail(422, `duplicate CI job name: ${name}`, 'DUPLICATE_CI_JOB');
@@ -133,8 +133,8 @@ async function queueJobs(
       const now = Date.now();
       await env.DB.prepare(
         `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, tree_sha, name, status, conclusion, summary, attempt, required, quarantined, started_at, finished_at, created_at)
-         SELECT ?1, ?2, ?3, ?4, ?5, 'forge/ci-config', 'failure', 'failure', ?6, 1, 1, 0, ?7, ?7, ?7
-          WHERE NOT EXISTS (SELECT 1 FROM check_runs WHERE change_set_id = ?3 AND head_sha = ?4 AND name = 'forge/ci-config')`,
+         SELECT ?1, ?2, ?3, ?4, ?5, 'kvarm/ci-config', 'failure', 'failure', ?6, 1, 1, 0, ?7, ?7, ?7
+          WHERE NOT EXISTS (SELECT 1 FROM check_runs WHERE change_set_id = ?3 AND head_sha = ?4 AND name = 'kvarm/ci-config')`,
       )
         .bind(crypto.randomUUID(), repo.id, changeId, headSha, tree, JSON.stringify({ code: config.code, error: config.error }), now)
         .run();

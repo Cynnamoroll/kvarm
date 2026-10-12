@@ -4,7 +4,7 @@
  * `prepareMerge` plans a merge of `headSha` into a target branch at
  * `targetSha` and builds what publication needs: a fast-forward (the ref
  * moves to the head; mergeCommit = head) or a two-parent merge commit
- * [target, head] over gitops `merge3`'s tree, committed by Forge. It only
+ * [target, head] over gitops `merge3`'s tree, committed by Kvarm. It only
  * reads, so it runs outside any publication lease. `publishMerge` asks the
  * checks-gate about the exact tree being published, prepares the push
  * (write credential and pack), lets the caller revalidate (`beforeSend`),
@@ -39,14 +39,14 @@ import {
   type MergeReader,
   type MergeResolution,
   type TreeEntry,
-} from '@forge/gitops';
-import { isLockfilePath } from '@forge/review';
+} from '@kvarm/gitops';
+import { isLockfilePath } from '@kvarm/review';
 import type { ChecksGate, ChecksRepo, ChecksSubject, RequiredChecks } from './checksGate';
 import type { GitPusher } from './gitwrite';
 import { EMPTY_TREE, RefStoreUnavailable, readCommitInfo, type ResolveContext } from './refs';
 
-/** Committer of every merge commit Forge writes; the author is the merging principal. */
-export const FORGE_COMMITTER = { name: 'Forge', email: 'forge@forge.invalid' } as const;
+/** Committer of every merge commit Kvarm writes; the author is the merging principal. */
+export const KVARM_COMMITTER = { name: 'Kvarm', email: 'kvarm@kvarm.invalid' } as const;
 
 /**
  * Per-merge work budgets. Every commit, tree and blob read is one Artifacts
@@ -157,7 +157,7 @@ export interface PrepareInput {
   targetSha: string;
   headSha: string;
   message: string;
-  /** Defaults to the Forge committer. */
+  /** Defaults to the Kvarm committer. */
   author?: { name: string; email: string };
   /** Commit time in Unix seconds (default: now). */
   now?: number;
@@ -364,7 +364,7 @@ export async function prepareMerge(sources: MergeSources, input: PrepareInput): 
     return { ok: true, value: { kind: 'fast-forward', ...common, mergeCommit: input.headSha, objects: [] } };
   }
   const time = input.now ?? Math.floor(Date.now() / 1000);
-  const committer: GitIdent = { ...FORGE_COMMITTER, time };
+  const committer: GitIdent = { ...KVARM_COMMITTER, time };
   const author: GitIdent = input.author ? { name: input.author.name, email: input.author.email, time } : committer;
   const commit = await buildCommit({ tree: p.treeSha, parents: [input.targetSha, input.headSha], author, committer, message: input.message });
   return { ok: true, value: { kind: 'merge', ...common, mergeCommit: commit.hash, objects: [commit, ...p.objects] } };

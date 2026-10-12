@@ -8,7 +8,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { decode } from '@forge/gitops';
+import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
@@ -25,7 +25,7 @@ import {
 } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'cr-owner';
 
@@ -468,10 +468,10 @@ describe('detail: rating, mergeability, checks', () => {
       targetSha: main.sha,
       headSha: feature.sha,
       treeSha: feature.tree,
-      checks: { state: 'success', required: [{ name: 'forge/guard', state: 'success', producer: 'check-runs' }] },
+      checks: { state: 'success', required: [{ name: 'kvarm/guard', state: 'success', producer: 'check-runs' }] },
     });
-    // Creation records the forge/guard run of the head, the only check on a repo without CI.
-    expect(d.json.checks).toMatchObject([{ name: 'forge/guard', headSha: feature.sha, treeSha: feature.tree, status: 'success', required: true }]);
+    // Creation records the kvarm/guard run of the head, the only check on a repo without CI.
+    expect(d.json.checks).toMatchObject([{ name: 'kvarm/guard', headSha: feature.sha, treeSha: feature.tree, status: 'success', required: true }]);
 
     const c = await seedRepo('conflicted');
     await conflicting(c);

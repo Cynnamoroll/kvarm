@@ -24,7 +24,7 @@
  * can sit below all of them.
  */
 
-import { isAncestor, type CommitReader } from '@forge/gitops';
+import { isAncestor, type CommitReader } from '@kvarm/gitops';
 
 export const DEPENDENCY_LIMITS = {
   /** Workspaces in the longest chain through any edge (the dependent included). */
@@ -387,7 +387,7 @@ export function headWorkspacePins(rows: readonly HeadWorkspacePinRow[] | undefin
 //     marks whose effect failed; a mark another owner holds is left alone
 //     until that claim expires;
 //   - pins or marks left past the budget, or effects that failed, are handed
-//     to two independent owners (handOffSettlement): a `forge.dependency-settle`
+//     to two independent owners (handOffSettlement): a `kvarm.dependency-settle`
 //     message on the forge-events queue and a settlement intent in the
 //     MergeLock of the landing's repo + target ref, whose alarm runs the same
 //     settlement until nothing fenced to the landing remains.
@@ -646,7 +646,7 @@ export const SETTLE_LIMITS = {
  * and write it causes is fenced by that identity, so a replay finds nothing
  * pending and a message for another landing matches nothing.
  */
-export const SETTLE_MESSAGE = 'forge.dependency-settle';
+export const SETTLE_MESSAGE = 'kvarm.dependency-settle';
 
 export interface SettleMessage extends LandingIdentity {
   type: typeof SETTLE_MESSAGE;

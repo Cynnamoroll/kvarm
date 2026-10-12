@@ -21,7 +21,7 @@ export function lsRefsRequest(prefixes: string[]): Uint8Array {
   const unique = [...new Set(prefixes)];
   return concat(
     pktLine('command=ls-refs\n'),
-    pktLine('agent=forge\n'),
+    pktLine('agent=kvarm\n'),
     DELIM_PKT,
     pktLine('peel\n'),
     pktLine('symrefs\n'),

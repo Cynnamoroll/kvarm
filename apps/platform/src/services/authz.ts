@@ -14,7 +14,7 @@ import type { RepoRow } from '../db/repos';
 import type { UserRow } from '../db/users';
 import type { PATInfo, Scope } from '../auth/pat';
 import type { AgentGrant } from '../auth/agentTokens';
-import { refMatchesAny } from '@forge/gitops';
+import { refMatchesAny } from '@kvarm/gitops';
 
 export type RepoRole = 'none' | 'read' | 'write' | 'admin';
 /** `ci`: REST routes for CI reporters (check runs), which need the `ci` scope instead of `api`. */

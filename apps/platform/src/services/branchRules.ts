@@ -18,7 +18,7 @@
  * appends an `events` audit row in the same batch.
  */
 
-import { isSafeRefName, isValidRefPattern, refMatchesPattern } from '@forge/gitops';
+import { isSafeRefName, isValidRefPattern, refMatchesPattern } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
@@ -32,7 +32,8 @@ export const PROTECTED_REF_REASON = 'protected branch: direct pushes are not all
 export const RESERVED_REF_REASON = 'platform-reserved branch: direct pushes are not allowed';
 export const INVALID_REF_REASON = 'invalid ref name';
 
-const RESERVED_BRANCH_NAMESPACES = ['refs/heads/forge-ci', 'refs/heads/agents'] as const;
+// The retired CI staging prefix stays closed to human pushes after the Kvarm cutover.
+const RESERVED_BRANCH_NAMESPACES = ['refs/heads/kvarm-ci', 'refs/heads/forge-ci', 'refs/heads/agents'] as const;
 
 export interface BranchRule {
   id: string;

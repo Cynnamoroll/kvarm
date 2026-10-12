@@ -34,7 +34,7 @@ const tags = (c: RiskChange, content?: RiskContent) => classifyFile(c, content).
 describe('classifyFile tags', () => {
   it('tags CI configuration paths', () => {
     for (const p of [
-      '.forge/ci.json',
+      '.kvarm/ci.json',
       '.github/workflows/test.yml',
       '.gitlab-ci.yml',
       '.circleci/config.yml',
@@ -229,7 +229,7 @@ describe('classifyFile scores', () => {
   });
 
   it('ranks risky signals above mechanical and prose changes', () => {
-    const ci = classifyFile(change('.forge/ci.json')).score;
+    const ci = classifyFile(change('.kvarm/ci.json')).score;
     const testDel = classifyFile(change('test/app.test.ts', { status: 'removed', newHash: null, newMode: null, additions: 0, deletions: 12 })).score;
     const semantic = classifyFile(change('src/billing.ts')).score;
     const rename = classifyFile(change('y.md', { status: 'renamed', oldPath: 'x.md', newHash: H1, additions: 0, deletions: 0 })).score;
@@ -263,7 +263,7 @@ describe('needsContent', () => {
 
 describe('rateChange', () => {
   const risky = [
-    { change: change('.forge/ci.json'), content: {} },
+    { change: change('.kvarm/ci.json'), content: {} },
     { change: change('test/app.test.ts', { status: 'removed', newHash: null, newMode: null, additions: 0, deletions: 12 }), content: {} },
     { change: change('package-lock.json', { additions: 30, deletions: 2 }), content: {} },
     {
@@ -285,7 +285,7 @@ describe('rateChange', () => {
     expect(Number.isInteger(r.score)).toBe(true);
     expect(r.score).toBeGreaterThanOrEqual(60);
     expect(r.reasons.length).toBeGreaterThan(0);
-    expect(r.reasons.join('\n')).toMatch(/\.forge\/ci\.json/);
+    expect(r.reasons.join('\n')).toMatch(/\.kvarm\/ci\.json/);
     expect(r.reasons.join('\n')).toMatch(/test\/app\.test\.ts/);
     expect(r.reasons.join('\n')).toMatch(/left-pad/);
   });

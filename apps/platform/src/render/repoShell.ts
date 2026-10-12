@@ -1,9 +1,9 @@
 /** Repo page chrome: header, tabs, branch selector, breadcrumbs, clone box. */
 
-import { escapeHtml, html, raw } from '@forge/ui';
+import { escapeHtml, html, raw } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
 import { layout } from '../web/render';
-import type { GitRef } from '@forge/gitops';
+import type { GitRef } from '@kvarm/gitops';
 
 const COPY_JS = `document.addEventListener('click',e=>{const b=e.target.closest('[data-copy]');if(!b)return;navigator.clipboard.writeText(b.dataset.copy).then(()=>{const o=b.textContent;b.textContent='copied';setTimeout(()=>b.textContent=o,1200)})});`;
 

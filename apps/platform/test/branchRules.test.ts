@@ -1,6 +1,6 @@
 import { env as cfEnv, exports } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { pktLine, readPktLines, ZERO_OID } from '@forge/gitops';
+import { pktLine, readPktLines, ZERO_OID } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import {
@@ -14,7 +14,7 @@ import {
 } from '../src/services/branchRules';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -204,7 +204,7 @@ describe('branch rule evaluation', () => {
   });
 
   it('reserves platform branch namespaces from human pushes without branch rules', () => {
-    for (const ref of ['refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+    for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
       expect(directHumanPushDenial([], ref)).toBe(RESERVED_REF_REASON);
     }
     expect(directHumanPushDenial([], 'refs/heads/feature/x')).toBeNull();
@@ -384,7 +384,7 @@ describe('protected direct pushes', () => {
       `${A} ${ZERO_OID}`,
     ];
     for (const who of ['owner', 'writer', 'admin'] as const) {
-      for (const ref of ['refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+      for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
         for (const command of commands) {
           const res = await push(pat[who], PLAIN, pushBody([`${command} ${ref}`]));
           expect(res.status, `${who} ${command} ${ref}`).toBe(200);
@@ -395,10 +395,12 @@ describe('protected direct pushes', () => {
   });
 
   it('rejects reserved refs locally without extra upstream work', async () => {
-    const res = await push(pat.owner, PLAIN, pushBody([`${ZERO_OID} ${B} refs/heads/forge-ci/x`]));
-    const cost = parseCostHeader(res.headers.get(COST_HEADER));
-    await res.body?.cancel();
-    expect(cost).toMatchObject({ d1: 1, art: 0, do: 0, sub: 0 });
+    for (const ref of ['refs/heads/kvarm-ci/x', 'refs/heads/forge-ci/x']) {
+      const res = await push(pat.owner, PLAIN, pushBody([`${ZERO_OID} ${B} ${ref}`]));
+      const cost = parseCostHeader(res.headers.get(COST_HEADER));
+      await res.body?.cancel();
+      expect(cost, ref).toMatchObject({ d1: 1, art: 0, do: 0, sub: 0 });
+    }
   });
 
   it('still requires write access before any rule is consulted', async () => {

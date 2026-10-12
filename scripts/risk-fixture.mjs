@@ -6,7 +6,7 @@
  *
  *   main       base: every file present
  *   risky      one commit, 10 changed paths, one trigger per risk tag:
- *              .forge/ci.json (ci-config), deleted test/app.test.ts
+ *              .kvarm/ci.json (ci-config), deleted test/app.test.ts
  *              (test-deletion), package-lock.json (lockfile), package.json
  *              adds left-pad (new-dependency), x.md -> y.md and whitespace-only
  *              ws.txt (mechanical), src/billing.ts (semantic),
@@ -24,7 +24,7 @@
  * push and only a repo created by this run is ever deleted (failure
  * included, see scripts/lib/fixture-repo.mjs).
  *
- * As cynthia (FORGE_PAT, instance admin). Tokens are read from env var
+ * As cynthia (KVARM_PAT, instance admin). Tokens are read from env var
  * NAMES only and never printed; git runs with `-c credential.helper=` and a
  * secret-free GIT_ASKPASS helper.
  *
@@ -42,11 +42,11 @@ import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
 const arg = (k) => process.argv.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
 const KEEP = process.argv.includes('--keep');
 const VERIFY = !process.argv.includes('--no-verify');
-if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
+if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const OWNER = 'cynthia';
 const RUN = String(Date.now());
 const REPO = arg('repo') ?? `m3-risk-engine-fixture-${RUN}`;
@@ -69,7 +69,7 @@ function costOf(header) {
 }
 
 async function http(path, { method = 'GET', json, auth = true } = {}) {
-  const headers = auth ? { Authorization: `Bearer ${process.env.FORGE_PAT}` } : {};
+  const headers = auth ? { Authorization: `Bearer ${process.env.KVARM_PAT}` } : {};
   if (json !== undefined) headers['content-type'] = 'application/json';
   const started = performance.now();
   const init = { method, headers };
@@ -82,16 +82,16 @@ async function http(path, { method = 'GET', json, auth = true } = {}) {
   } catch {
     // non-JSON
   }
-  const header = res.headers.get('x-forge-cost');
-  return { status: res.status, text, body, header, cost: costOf(header), cache: res.headers.get('x-forge-cache'), ms: Math.round(performance.now() - started) };
+  const header = res.headers.get('x-kvarm-cost');
+  return { status: res.status, text, body, header, cost: costOf(header), cache: res.headers.get('x-kvarm-cache'), ms: Math.round(performance.now() - started) };
 }
 
 const api = (rest) => `/api/v1/repos/${OWNER}/${REPO}/${rest}`;
-const show = (r) => `${r.status} ${r.ms}ms x-forge-cache=${r.cache} ${r.header}`;
+const show = (r) => `${r.status} ${r.ms}ms x-kvarm-cache=${r.cache} ${r.header}`;
 
 const work = mkdtempSync(join(tmpdir(), 'risk-fixture-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, auth = false) {
@@ -100,7 +100,7 @@ function git(args, cwd, auth = false) {
     ...process.env,
     GIT_ASKPASS: askpass,
     GIT_TERMINAL_PROMPT: '0',
-    FORGE_E2E_TOKEN: auth ? process.env.FORGE_PAT : '',
+    KVARM_E2E_TOKEN: auth ? process.env.KVARM_PAT : '',
     GIT_AUTHOR_DATE: date,
     GIT_COMMITTER_DATE: date,
   };
@@ -133,7 +133,7 @@ function commitAll(dir, message) {
 
 const pkg = (deps) => `${JSON.stringify({ name: 'risk-fixture', version: '1.0.0', dependencies: deps }, null, 2)}\n`;
 const BASE_FILES = {
-  '.forge/ci.json': '{"jobs":[{"name":"test","run":"npm test"}]}\n',
+  '.kvarm/ci.json': '{"jobs":[{"name":"test","run":"npm test"}]}\n',
   'test/app.test.ts': "import { it } from 'vitest';\nimport { total } from '../src/billing';\n\nit('adds', () => {\n  if (total(1, 2) !== 3) throw new Error('bad');\n});\n",
   'package-lock.json': `${JSON.stringify({ name: 'risk-fixture', lockfileVersion: 3, packages: { '': { name: 'risk-fixture' } } }, null, 2)}\n`,
   'package.json': pkg({ hono: '^4.6.0' }),
@@ -147,7 +147,7 @@ const BASE_FILES = {
 };
 const PY_EXTRAS = '[project]\nname = "risk-fixture"\ndependencies = [\n  "requests[socks]>=2",\n  "httpx>=0.27",\n]\n';
 const RISKY_CHANGES = {
-  '.forge/ci.json': '{"jobs":[{"name":"test","run":"npm test || true"}]}\n',
+  '.kvarm/ci.json': '{"jobs":[{"name":"test","run":"npm test || true"}]}\n',
   'package-lock.json': `${JSON.stringify(
     { name: 'risk-fixture', lockfileVersion: 3, packages: { '': { name: 'risk-fixture' }, 'node_modules/left-pad': { version: '1.3.0' } } },
     null,
@@ -161,7 +161,7 @@ const RISKY_CHANGES = {
   'big.ts': `${Array.from({ length: 5000 }, (_, i) => `export const v${i} = ${i};`).join('\n')}\n`,
 };
 const EXPECTED_TAGS = {
-  '.forge/ci.json': 'ci-config',
+  '.kvarm/ci.json': 'ci-config',
   'test/app.test.ts': 'test-deletion',
   'package-lock.json': 'lockfile',
   'package.json': 'new-dependency',

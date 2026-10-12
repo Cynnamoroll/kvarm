@@ -120,7 +120,7 @@ function tarResponse(
       'content-disposition': `attachment; filename="${repo.name}-${sha.slice(0, 12)}.tar"`,
       etag: `"${tree}"`,
       'cache-control': 'no-store',
-      'x-forge-snapshot-sha': sha,
+      'x-kvarm-snapshot-sha': sha,
     },
   });
   for (const cookie of c.get('refreshCookies') ?? []) res.headers.append('Set-Cookie', cookie);

@@ -1,5 +1,5 @@
 {
-  "name": "@forge/platform",
+  "name": "@kvarm/platform",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -12,11 +12,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@forge/diffcore": "*",
-    "@forge/gitops": "*",
-    "@forge/ops": "*",
-    "@forge/review": "*",
-    "@forge/ui": "*",
+    "@kvarm/diffcore": "*",
+    "@kvarm/gitops": "*",
+    "@kvarm/ops": "*",
+    "@kvarm/review": "*",
+    "@kvarm/ui": "*",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@workos/authkit-session": "^0.7.1",
     "hono": "^4.6.0",

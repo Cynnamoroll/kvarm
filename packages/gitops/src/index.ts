@@ -1,5 +1,5 @@
 /**
- * @forge/gitops — pure git plumbing that runs on any runtime with WebCrypto
+ * @kvarm/gitops — pure git plumbing that runs on any runtime with WebCrypto
  * and CompressionStream (Workers, Node 18+, Bun, Deno).
  *
  * Everything here is for speaking the git smart HTTP protocol and

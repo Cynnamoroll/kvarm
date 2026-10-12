@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'n
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitModeToTar, tarEnd, tarEntry } from '@forge/gitops';
+import { gitModeToTar, tarEnd, tarEntry } from '@kvarm/gitops';
 
 export function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -72,7 +72,7 @@ export function makeRepo(root: string): { work: string; bare: string; main: stri
 /**
  * Builds a snapshot tarball for `sha` the way the platform's builder does:
  * git tree order, directories with a trailing slash, ustar/pax headers from
- * `@forge/gitops`.
+ * `@kvarm/gitops`.
  */
 export function tarFromCommit(repo: string, sha: string): Uint8Array {
   const listing = gitBytes(repo, ['ls-tree', '-r', '-t', '-z', '--full-tree', sha]).toString('utf8');

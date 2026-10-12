@@ -57,7 +57,7 @@ export interface ChecksGate {
 
 export type ChecksProducerFactory = (env: Env) => ChecksProducer;
 
-/** Registered producers (services/checks.ts registers the check-run producer behind forge/guard). */
+/** Registered producers (services/checks.ts registers the check-run producer behind kvarm/guard). */
 export const CHECKS_PRODUCERS: ChecksProducerFactory[] = [];
 
 export function rollupState(checks: readonly { state: CheckState }[]): CheckState {

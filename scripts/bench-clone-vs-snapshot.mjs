@@ -6,7 +6,7 @@
  *
  * - `clone`     git clone --no-checkout <url> + git checkout <ref> (full history, every branch)
  * - `shallow`   git clone --depth=1 --single-branch --branch <ref> (strongest git baseline)
- * - `snapshot`  forge checkout <owner/repo> <ref> <dir> (must print `source: snapshot`)
+ * - `snapshot`  kvarm checkout <owner/repo> <ref> <dir> (must print `source: snapshot`)
  *
  * Variants alternate within each run so drift affects all three alike. Wall
  * time is measured around the child process (process start included). Bytes:
@@ -21,7 +21,7 @@
  * - small    a fresh public repo m4-cli-checkout-bench-<ts> with 5 commits
  *            and ~60 source-like files on main, deleted afterwards unless --keep.
  *
- * Env (load apps/platform/.dev.vars.validation): FORGE_PAT (cynthia). Tokens
+ * Env (load apps/platform/.dev.vars.validation): KVARM_PAT (cynthia). Tokens
  * are never printed; git runs with `-c credential.helper=` and a
  * secret-free GIT_ASKPASS helper, using the configured git identity.
  *
@@ -49,12 +49,12 @@ const { values: args } = parseArgs({
     render: { type: 'boolean', default: false },
   },
 });
-const BASE = (process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev').replace(/\/+$/, '');
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
+const BASE = (process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev').replace(/\/+$/, '');
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
 const RUNS = Math.max(3, Number(args.runs) || 3);
 const ONLY = new Set(args.only.split(','));
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const FORGE_BIN = join(ROOT, 'apps', 'cli', 'bin', 'forge.js');
+const KVARM_BIN = join(ROOT, 'apps', 'cli', 'bin', 'kvarm.js');
 const FIXTURE = { repo: 'fixture-1m', ref: 'bench-head', sha: '08333c79998f410b9c40a84cc430ce9762c29ae8' };
 const PREFIX = 'm4-cli-checkout';
 const READY_BOUND_MS = 15 * 60_000;
@@ -67,7 +67,7 @@ const work = mkdtempSync(join(tmpdir(), 'bench-clone-vs-snapshot-'));
 const askpass = join(work, 'askpass.sh');
 writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) printenv BENCH_GIT_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
-const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', BENCH_GIT_TOKEN: process.env.FORGE_PAT };
+const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', BENCH_GIT_TOKEN: process.env.KVARM_PAT };
 
 function run(cmd, cmdArgs, { cwd, env = gitEnv } = {}) {
   const t0 = process.hrtime.bigint();
@@ -78,7 +78,7 @@ function run(cmd, cmdArgs, { cwd, env = gitEnv } = {}) {
 const git = (cwd, gitArgs) => run('git', ['-c', 'credential.helper=', ...gitArgs], { cwd });
 
 async function http(path, { method = 'GET', json } = {}) {
-  const headers = { Authorization: `Bearer ${process.env.FORGE_PAT}` };
+  const headers = { Authorization: `Bearer ${process.env.KVARM_PAT}` };
   if (json !== undefined) headers['content-type'] = 'application/json';
   const init = { method, headers };
   if (json !== undefined) init.body = JSON.stringify(json);
@@ -128,7 +128,7 @@ async function ensureReady(repo, ref) {
 function gzipSize(repo, sha) {
   return new Promise((resolve, reject) => {
     const url = `${BASE}/api/v1/repos/${OWNER}/${repo}/snapshots/${sha}/download`;
-    const req = request(url, { headers: { authorization: `Bearer ${process.env.FORGE_PAT}` } }, (res) => {
+    const req = request(url, { headers: { authorization: `Bearer ${process.env.KVARM_PAT}` } }, (res) => {
       if (res.statusCode !== 200) return reject(new Error(`download ${res.statusCode}`));
       let n = 0;
       const gz = createGzip({ level: 6 });
@@ -158,10 +158,10 @@ const VARIANTS = {
     return { ms: a.ms, sha, transferBytes: packBytes(dir) };
   },
   snapshot(t, dir) {
-    const env = { PATH: process.env.PATH, HOME: process.env.HOME, FORGE_BASE_URL: BASE, FORGE_PAT: process.env.FORGE_PAT };
-    const r = run(process.execPath, [FORGE_BIN, 'checkout', `${OWNER}/${t.repo}`, t.ref, dir], { env });
+    const env = { PATH: process.env.PATH, HOME: process.env.HOME, KVARM_BASE_URL: BASE, KVARM_PAT: process.env.KVARM_PAT };
+    const r = run(process.execPath, [KVARM_BIN, 'checkout', `${OWNER}/${t.repo}`, t.ref, dir], { env });
     const first = r.out.split('\n')[0];
-    if (r.code !== 0 || first !== 'source: snapshot') throw new Error(`forge checkout did not use the snapshot (exit ${r.code}, ${first}): ${r.err}`);
+    if (r.code !== 0 || first !== 'source: snapshot') throw new Error(`kvarm checkout did not use the snapshot (exit ${r.code}, ${first}): ${r.err}`);
     const field = (k) => r.out.split('\n').find((l) => l.startsWith(`${k}: `))?.slice(k.length + 2);
     return { ms: r.ms, sha: field('sha'), transferBytes: Number(field('bytes')) };
   },
@@ -254,7 +254,7 @@ function markdown(record) {
     '# Clone vs snapshot checkout',
     '',
     'Wall time to materialize a ref into an empty directory, from git (`git clone`)',
-    'or from a Veyr-9 tree snapshot (`forge checkout`, `apps/cli`). Generated by',
+    'or from a Kvarm tree snapshot (`kvarm checkout`, `apps/cli`). Generated by',
     '`scripts/bench-clone-vs-snapshot.mjs --write`; raw numbers are in',
     '[`clone-vs-snapshot.json`](clone-vs-snapshot.json).',
     '',
@@ -262,7 +262,7 @@ function markdown(record) {
     '',
     '## Results (median wall time)',
     '',
-    '| target | files | tree bytes | `git clone` + checkout | `git clone --depth=1` | `forge checkout` (snapshot) | speedup vs clone | speedup vs shallow |',
+    '| target | files | tree bytes | `git clone` + checkout | `git clone --depth=1` | `kvarm checkout` (snapshot) | speedup vs clone | speedup vs shallow |',
     '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
   ];
   for (const t of record.targets) {
@@ -300,7 +300,7 @@ function markdown(record) {
     '  TypeScript-like files on `main`, created by the script and deleted afterwards.',
     '- **Variants.** `clone` = `git clone --no-checkout <url>` then `git checkout <ref>` (what the',
     '  CLI fallback does: full history, every branch). `shallow` = `git clone --depth=1',
-    '  --single-branch --branch <ref>`. `snapshot` = `node apps/cli/bin/forge.js checkout',
+    '  --single-branch --branch <ref>`. `snapshot` = `node apps/cli/bin/kvarm.js checkout',
     '  <owner/repo> <ref> <dir>`, which demands the snapshot (`POST …/snapshots/<ref>`, already',
     '  ready), downloads the tarball by commit SHA and extracts it; the run fails unless it prints',
     '  `source: snapshot`.',
@@ -335,7 +335,7 @@ if (args.render) {
   rmSync(work, { recursive: true, force: true });
   process.exit(0);
 }
-if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
+if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 
 const targets = [];
 try {

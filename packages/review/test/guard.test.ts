@@ -3,7 +3,7 @@ import { GUARD_LIMITS, addedLines, guard, guardWants, typosquatOf, type GuardCha
 
 // Fake credentials, assembled so no literal token sits in the source.
 const AWS_KEY = 'AKIA' + 'IOSFODNN7EXAMPLE';
-const FORGE_PAT = 'forge_pat_' + '0123456789abcdef'.repeat(4);
+const KVARM_PAT = 'kvarm_pat_' + '0123456789abcdef'.repeat(4);
 const GITHUB_TOKEN = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8';
 const STRIPE_KEY = 'sk_live_' + '4eC39HqLyjWDarjtT1zdp7dc';
 const SLACK_TOKEN = 'xoxb-' + '123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx';
@@ -27,16 +27,16 @@ function rules(result: ReturnType<typeof guard>): string[] {
 }
 
 describe('guard: secrets', () => {
-  it('flags the planted AWS key and forge PAT with path, line, rule and message, never the value', () => {
-    const r = added('secrets.txt', `# config\naws_key=${AWS_KEY}\nforge_token=${FORGE_PAT}\n`);
+  it('flags the planted AWS key and kvarm PAT with path, line, rule and message, never the value', () => {
+    const r = added('secrets.txt', `# config\naws_key=${AWS_KEY}\nkvarm_token=${KVARM_PAT}\n`);
     expect(r.conclusion).toBe('failure');
     expect(r.findings).toEqual([
       expect.objectContaining({ rule: 'secret/aws-access-key', path: 'secrets.txt', line: 2, severity: 'failure', message: expect.any(String) }),
-      expect.objectContaining({ rule: 'secret/forge-token', path: 'secrets.txt', line: 3, severity: 'failure', message: expect.any(String) }),
+      expect.objectContaining({ rule: 'secret/kvarm-token', path: 'secrets.txt', line: 3, severity: 'failure', message: expect.any(String) }),
     ]);
     const json = JSON.stringify(r);
     expect(json).not.toContain(AWS_KEY);
-    expect(json).not.toContain(FORGE_PAT);
+    expect(json).not.toContain(KVARM_PAT);
     expect(json).not.toContain('0123456789abcdef');
   });
 
@@ -46,7 +46,7 @@ describe('guard: secrets', () => {
     ['secret/slack-token', `slack = "${SLACK_TOKEN}"`, SLACK_TOKEN],
     ['secret/private-key', PRIVATE_KEY_HEADER, 'PRIVATE KEY-----'],
     ['secret/high-entropy', `const apiKey = "${HIGH_ENTROPY}";`, HIGH_ENTROPY],
-    ['secret/forge-token', `AGENT=${'forge_agt_' + 'f'.repeat(64)}`, 'f'.repeat(64)],
+    ['secret/kvarm-token', `AGENT=${'kvarm_agt_' + 'f'.repeat(64)}`, 'f'.repeat(64)],
   ])('%s is detected and redacted', (rule, line, value) => {
     const r = added('src/config.ts', `export {};\n${line}\n`);
     expect(r.conclusion).toBe('failure');
@@ -64,7 +64,7 @@ describe('guard: secrets', () => {
   it('ignores placeholders and low-entropy assignments', () => {
     const text = [
       'password = "changeme"',
-      'token: ${{ secrets.FORGE_TOKEN }}',
+      'token: ${{ secrets.KVARM_TOKEN }}',
       'const apiKey = process.env.API_KEY;',
       'secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxx"',
       'api_key = "<your-api-key-goes-here-123>"',
@@ -73,8 +73,8 @@ describe('guard: secrets', () => {
   });
 
   it('reports one finding per line even when several rules match it', () => {
-    const r = added('a.env', `FORGE_SECRET_TOKEN=${FORGE_PAT}\n`);
-    expect(rules(r)).toEqual(['secret/forge-token']);
+    const r = added('a.env', `KVARM_SECRET_TOKEN=${KVARM_PAT}\n`);
+    expect(rules(r)).toEqual(['secret/kvarm-token']);
   });
 });
 
@@ -82,9 +82,9 @@ describe('guard: CI gaming', () => {
   const ci = JSON.stringify({ jobs: [{ name: 'test', run: 'npm test' }] }, null, 2) + '\n';
 
   it('flags `|| true` added to a ci.json job (and nothing else)', () => {
-    const r = modified('.forge/ci.json', ci, ci.replace('npm test', 'npm test || true'));
+    const r = modified('.kvarm/ci.json', ci, ci.replace('npm test', 'npm test || true'));
     expect(r.conclusion).toBe('failure');
-    expect(r.findings).toEqual([expect.objectContaining({ rule: 'ci-gaming/or-true', path: '.forge/ci.json', line: 5, severity: 'failure' })]);
+    expect(r.findings).toEqual([expect.objectContaining({ rule: 'ci-gaming/or-true', path: '.kvarm/ci.json', line: 5, severity: 'failure' })]);
   });
 
   it('flags continue-on-error and exit 0 added to a workflow', () => {

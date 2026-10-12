@@ -47,7 +47,7 @@ async function buildGraph(n: number, parentsOf: (i: number) => number[]): Promis
   const parents = new Map<string, string[]>();
   for (let i = 0; i < n; i++) {
     const ps = [...new Set(parentsOf(i))].map((p) => commits[p]!.hash);
-    const ident = { name: 'Forge', email: 'forge@forge.invalid', time: 1_790_000_000 + i };
+    const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: 1_790_000_000 + i };
     const c = await buildCommit({ tree: tree.hash, parents: ps, author: ident, committer: ident, message: `c${i}` });
     commits.push(c);
     parents.set(c.hash, ps);

@@ -88,8 +88,8 @@ export interface RefUpdateResult {
   error?: string;
 }
 
-const AGENT = 'agent=forge-gitops';
-const USER_AGENT = 'git/forge-gitops';
+const AGENT = 'agent=kvarm-gitops';
+const USER_AGENT = 'git/kvarm-gitops';
 const DEFAULT_MAX_ADVERTISEMENT_BYTES = 4 * 1024 * 1024;
 const OID_RE = /^[0-9a-f]{40}$/;
 

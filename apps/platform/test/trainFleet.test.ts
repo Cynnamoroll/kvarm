@@ -20,7 +20,7 @@ import { TRAIN_LIMITS, backoffSeconds, defaultTrainDeps, runTrain, type TrainDep
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'fleet-owner';
 const MAIN = 'refs/heads/main';
@@ -96,7 +96,7 @@ async function call(method: string, path: string, token: string, body?: unknown)
   } catch {
     // non-JSON body
   }
-  return { status: res.status, json, cost: parseCostHeader(res.headers.get('x-forge-cost')) };
+  return { status: res.status, json, cost: parseCostHeader(res.headers.get('x-kvarm-cost')) };
 }
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
@@ -168,7 +168,7 @@ function trainDeps(over: Partial<TrainDeps> = {}): TrainDeps & { events: TrainEv
   return {
     ...defaultTrainDeps,
     kick: async (_env, repoId, ref, reason, delaySeconds) => {
-      sent.push({ body: { type: 'forge.train', repoId, ref, reason }, ...(delaySeconds ? { delaySeconds } : {}) });
+      sent.push({ body: { type: 'kvarm.train', repoId, ref, reason }, ...(delaySeconds ? { delaySeconds } : {}) });
     },
     observe: (e) => events.push(e),
     events,

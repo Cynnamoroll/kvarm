@@ -3,7 +3,7 @@
  * Live validation driver for confirmed-push freshness at the git gate
  * (VAL-EVENT-002, and the info/refs half that VAL-EVENT-003 reads).
  *
- * As cynthia (FORGE_PAT) it creates a public repo, pushes a seed commit and
+ * As cynthia (KVARM_PAT) it creates a public repo, pushes a seed commit and
  * warms the anonymous tree page and info/refs (v0 and Git-Protocol v2) until
  * they are edge-cache hits. Then, for each round, it commits a README with a
  * unique REFRESH token plus a MARK file, runs `git push`, and immediately
@@ -34,9 +34,9 @@ import { parseArgs } from 'node:util';
 const { values: args } = parseArgs({
   options: { rounds: { type: 'string', default: '3' }, keep: { type: 'boolean', default: false } },
 });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const ROUNDS = Number(args.rounds);
 const BOUND_MS = 2000;
 const POLL_LIMIT_MS = 15000;
@@ -66,13 +66,13 @@ function costOf(header) {
 
 async function http(path, { method = 'GET', headers = {}, body, auth } = {}) {
   const h = { ...headers };
-  if (auth === 'bearer') h.Authorization = `Bearer ${process.env.FORGE_PAT}`;
-  if (auth === 'basic') h.Authorization = `Basic ${Buffer.from(`x:${process.env.FORGE_PAT}`).toString('base64')}`;
+  if (auth === 'bearer') h.Authorization = `Bearer ${process.env.KVARM_PAT}`;
+  if (auth === 'basic') h.Authorization = `Basic ${Buffer.from(`x:${process.env.KVARM_PAT}`).toString('base64')}`;
   const init = { method, headers: h, redirect: 'manual' };
   if (body !== undefined) init.body = body;
   const res = await fetch(`${BASE}${path}`, init);
   const buf = Buffer.from(await res.arrayBuffer());
-  const header = res.headers.get('x-forge-cost');
+  const header = res.headers.get('x-kvarm-cost');
   return { status: res.status, buf, text: buf.toString('latin1'), header, cost: costOf(header) };
 }
 
@@ -87,13 +87,13 @@ const api = (method, path, json) =>
 
 const work = mkdtempSync(join(tmpdir(), 'push-freshness-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 const dir = join(work, 'repo');
 mkdirSync(dir);
 
 function git(gitArgs, { input, binary = false } = {}) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: process.env.FORGE_PAT };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: process.env.KVARM_PAT };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...gitArgs], {
     cwd: dir,
     env,

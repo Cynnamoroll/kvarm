@@ -3,7 +3,7 @@
  * Live validation driver for the queue push dispatcher (VAL-EVENT-001, 003,
  * 004 live half, 005).
  *
- * As cynthia (FORGE_PAT) it creates a public repo, pushes a seed commit and
+ * As cynthia (KVARM_PAT) it creates a public repo, pushes a seed commit and
  * waits for its Artifacts push event to be processed (GET .../events). Then:
  *
  * - VAL-EVENT-001/003: pushes commit A, polls GET /api/v1/repos/:o/:r until
@@ -46,9 +46,9 @@ import { parseArgs } from 'node:util';
 const { values: args } = parseArgs({
   options: { tail: { type: 'boolean', default: false }, keep: { type: 'boolean', default: false } },
 });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const PLATFORM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'platform');
 const PUSHED_AT_BOUND_MS = 10000;
 const REFS_BOUND_MS = 2000;
@@ -72,13 +72,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const statuses = [];
 async function http(path, { method = 'GET', headers = {}, body, auth } = {}) {
   const h = { ...headers };
-  if (auth) h.Authorization = `Bearer ${process.env.FORGE_PAT}`;
+  if (auth) h.Authorization = `Bearer ${process.env.KVARM_PAT}`;
   const init = { method, headers: h, redirect: 'manual' };
   if (body !== undefined) init.body = body;
   const res = await fetch(`${BASE}${path}`, init);
   const text = await res.text();
   statuses.push(res.status);
-  return { status: res.status, text, header: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, header: res.headers.get('x-kvarm-cost') };
 }
 const api = (method, path, json) =>
   http(`/api/v1${path}`, {
@@ -93,7 +93,7 @@ const askpass = join(work, 'askpass.sh');
 writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
-function git(dir, gitArgs, token = process.env.FORGE_PAT) {
+function git(dir, gitArgs, token = process.env.KVARM_PAT) {
   const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', E2E_GIT_TOKEN: token };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...gitArgs], { cwd: dir, env, encoding: 'utf8' });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };

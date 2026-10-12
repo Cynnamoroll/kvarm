@@ -5,7 +5,7 @@ import { checkout } from '../src/checkout.js';
 import type { HttpFetch } from '../src/http.js';
 import { diffTrees, gitCheckout, makeRepo, tarFromCommit, tempDir } from './helpers';
 
-const root = tempDir('forge-cli-checkout-');
+const root = tempDir('kvarm-cli-checkout-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const repo = makeRepo(root);
 const tarMain = tarFromCommit(repo.bare, repo.main);
@@ -14,7 +14,7 @@ gitCheckout(repo.bare, repo.main, expectedMain);
 const expectedFeature = join(root, 'expected-feature');
 gitCheckout(repo.bare, repo.feature, expectedFeature);
 
-const BASE = 'https://forge.test';
+const BASE = 'https://kvarm.test';
 const SNAP = `${BASE}/api/v1/repos/cynthia/demo/snapshots`;
 
 type Call = { method: string; url: string; auth: string | null };
@@ -32,7 +32,7 @@ function fakeFetch(snapshots: Record<string, { status: number; body: unknown }>,
       const d = downloads[rest.slice(0, -'/download'.length)];
       if (!d) return Response.json({ error: 'snapshot not found', code: 'NOT_FOUND' }, { status: 404 });
       if (d instanceof Uint8Array) {
-        return new Response(new Uint8Array(d), { status: 200, headers: { 'content-type': 'application/x-tar', 'x-forge-snapshot-sha': rest.slice(0, -'/download'.length) } });
+        return new Response(new Uint8Array(d), { status: 200, headers: { 'content-type': 'application/x-tar', 'x-kvarm-snapshot-sha': rest.slice(0, -'/download'.length) } });
       }
       return Response.json(d.body, { status: d.status });
     }
@@ -62,11 +62,11 @@ function run(fetchImpl: HttpFetch, opts: { ref: string; dir: string; pat?: strin
 
 const ready = (sha: string, size: number) => ({ status: 200, body: { ref: 'main', sha, tree: 't', state: 'ready', size, files: 9, started: false } });
 
-describe('forge checkout', () => {
+describe('kvarm checkout', () => {
   it('demands the snapshot, downloads it by sha and extracts a tree equal to git checkout', async () => {
     const f = fakeFetch({ main: ready(repo.main, tarMain.length) }, { [repo.main]: tarMain });
     const dir = join(root, 'snap-main');
-    const r = run(f.impl, { ref: 'main', dir, pat: 'forge_pat_test' });
+    const r = run(f.impl, { ref: 'main', dir, pat: 'kvarm_pat_test' });
     await expect(r.promise).resolves.toMatchObject({ source: 'snapshot', sha: repo.main, bytes: tarMain.length });
     expect(r.stdout[0]).toBe('source: snapshot');
     expect(r.stdout).toContain(`sha: ${repo.main}`);
@@ -76,13 +76,13 @@ describe('forge checkout', () => {
       ['POST', '/main'],
       ['GET', `/${repo.main}/download`],
     ]);
-    expect(f.calls.every((c) => c.auth === 'Bearer forge_pat_test')).toBe(true);
+    expect(f.calls.every((c) => c.auth === 'Bearer kvarm_pat_test')).toBe(true);
   });
 
   it('falls back to git clone while the demanded snapshot is building, at the demanded ref', async () => {
     const f = fakeFetch({ feature: { status: 202, body: { ref: 'feature', sha: repo.feature, state: 'building', started: true } } }, {});
     const dir = join(root, 'clone-feature');
-    const r = run(f.impl, { ref: 'feature', dir, pat: 'forge_pat_test' });
+    const r = run(f.impl, { ref: 'feature', dir, pat: 'kvarm_pat_test' });
     await expect(r.promise).resolves.toMatchObject({ source: 'clone', sha: repo.feature });
     expect(r.stdout[0]).toBe('source: clone');
     expect(r.stderr.join('\n')).toMatch(/snapshot building for [0-9a-f]{12} \(build started\); falling back to git clone/);
@@ -95,7 +95,7 @@ describe('forge checkout', () => {
     const tarFeature = tarFromCommit(repo.bare, repo.feature);
     const f = fakeFetch({ feature: ready(repo.feature, tarFeature.length) }, { [repo.feature]: tarFeature });
     const dir = join(root, 'snap-feature');
-    const r = run(f.impl, { ref: 'feature', dir, pat: 'forge_pat_test' });
+    const r = run(f.impl, { ref: 'feature', dir, pat: 'kvarm_pat_test' });
     await expect(r.promise).resolves.toMatchObject({ source: 'snapshot', sha: repo.feature });
     expect(diffTrees(dir, expectedFeature)).toEqual({ code: 0, out: '' });
   });
@@ -106,7 +106,7 @@ describe('forge checkout', () => {
     const r = run(f.impl, { ref: 'main', dir });
     await expect(r.promise).resolves.toMatchObject({ source: 'clone', sha: repo.main });
     expect(f.calls.map((c) => [c.method, c.auth])).toEqual([['GET', null]]);
-    expect(r.stderr.join('\n')).toMatch(/set FORGE_PAT to request a build/);
+    expect(r.stderr.join('\n')).toMatch(/set KVARM_PAT to request a build/);
     expect(diffTrees(dir, expectedMain)).toEqual({ code: 0, out: '' });
   });
 

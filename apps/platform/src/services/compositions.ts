@@ -16,7 +16,7 @@
  * conflict, and the change's merge is refused by the same gate.
  */
 
-import { buildCommit, composeTrees, mergeBase, type ComposePiece, type GitIdent } from '@forge/gitops';
+import { buildCommit, composeTrees, mergeBase, type ComposePiece, type GitIdent } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import { touchRepoPushedStatement } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -26,7 +26,7 @@ import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './check
 import { reconcileObserved } from './intents/forecast';
 import { observedSeedFailedStatement } from './intents/store';
 import { normalizePath } from './intents/paths';
-import { FORGE_COMMITTER, MERGE_BUDGETS, artifactsMergeSources } from './merge';
+import { KVARM_COMMITTER, MERGE_BUDGETS, artifactsMergeSources } from './merge';
 import { RefStoreUnavailable, lsRefs, readCommitInfo, type ResolveContext } from './refs';
 import {
   WORKSPACE_ID_RE,
@@ -369,10 +369,10 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     const { baseSha, baseTree, treeSha, objects, recorded } = composed.value;
 
     const time = Math.floor(Date.now() / 1000);
-    const committer: GitIdent = { ...FORGE_COMMITTER, time };
+    const committer: GitIdent = { ...KVARM_COMMITTER, time };
     const who = mergeAuthor(cx.actor);
     const author: GitIdent = who ? { ...who, time } : committer;
-    const lines = recorded.map((s) => `Forge-Composed-From: ${s.workspace} ${s.headSha}${s.paths ? ` ${s.paths.join(' ')}` : ''}`);
+    const lines = recorded.map((s) => `Kvarm-Composed-From: ${s.workspace} ${s.headSha}${s.paths ? ` ${s.paths.join(' ')}` : ''}`);
     const commit = await buildCommit({ tree: treeSha, parents: [baseSha], author, committer, message: `${task}\n\n${lines.join('\n')}\n` });
 
     const gate = cx.gate ?? deps.gate(cx.env);

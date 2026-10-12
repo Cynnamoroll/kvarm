@@ -4,7 +4,7 @@
  * after a push must publish the pushed head or refuse 409 HEAD_MOVED naming
  * it, never the change's previous (recorded) head.
  *
- * One fresh public repo owned by FORGE_USER, named
+ * One fresh public repo owned by KVARM_USER, named
  * `merge-live-head-confirmation-pushmerge-<timestamp>`, deleted afterwards
  * (unless --keep). Three review changes on their own branches:
  *   force   force-push the head to a rewrite, POST merge at once
@@ -30,9 +30,9 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false } } });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const PREFIX = 'merge-live-head-confirmation';
 const REPO = `${PREFIX}-pushmerge-${Math.floor(Date.now() / 1000)}`;
 const results = [];
@@ -64,14 +64,14 @@ async function http(path, { method = 'GET', json } = {}) {
   } catch {
     body = null;
   }
-  return { status: res.status, text, json: body, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, json: body, cost: res.headers.get('x-kvarm-cost') };
 }
 
 const work = mkdtempSync(join(tmpdir(), 'merge-live-head-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
-const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: PAT };
+const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: PAT };
 const dir = join(work, 'repo');
 const gitUrl = `${BASE}/${OWNER}/${REPO}.git`;
 const api = `/api/v1/repos/${OWNER}/${REPO}`;
@@ -135,9 +135,9 @@ async function mergeNow(number) {
 }
 
 function report(label, { final, moved }) {
-  if (moved.length) console.log(`${label}: 409 HEAD_MOVED ×${moved.length}, first ${moved[0].text} (x-forge-cost ${moved[0].cost})`);
+  if (moved.length) console.log(`${label}: 409 HEAD_MOVED ×${moved.length}, first ${moved[0].text} (x-kvarm-cost ${moved[0].cost})`);
   else console.log(`${label}: no HEAD_MOVED (the push event had already recorded the head)`);
-  console.log(`${label}: final ${final.status} mergeCommit=${short(final.json?.mergeCommit)} headSha=${short(final.json?.headSha)} (x-forge-cost ${final.cost})`);
+  console.log(`${label}: final ${final.status} mergeCommit=${short(final.json?.mergeCommit)} headSha=${short(final.json?.headSha)} (x-kvarm-cost ${final.cost})`);
 }
 
 const r = await withFixtureRepo({ owner: OWNER, repo: REPO, prefix: PREFIX, http, keep: opts.keep, visibility: 'public', log: console.log }, async () => {
@@ -176,7 +176,7 @@ const r = await withFixtureRepo({ owner: OWNER, repo: REPO, prefix: PREFIX, http
   const next3 = commitOn(au.head, 'auto.txt', 'auto v2\n', 'auto v2');
   await push(`${next3}:refs/heads/auto`);
   const p = await http(`${api}/changes/${au.number}`, { method: 'PATCH', json: { mergePolicy: 'auto' } });
-  console.log(`PATCH #${au.number} mergePolicy auto right after push ${short(au.head)} -> ${short(next3)}: ${p.status} state=${p.json?.state} headSha=${short(p.json?.headSha)} mergeCommit=${short(p.json?.mergeCommit)} (x-forge-cost ${p.cost})`);
+  console.log(`PATCH #${au.number} mergePolicy auto right after push ${short(au.head)} -> ${short(next3)}: ${p.status} state=${p.json?.state} headSha=${short(p.json?.headSha)} mergeCommit=${short(p.json?.mergeCommit)} (x-kvarm-cost ${p.cost})`);
   check('auto: PATCH never merges the previous head', p.status === 200 && !(p.json?.state === 'merged' && p.json?.headSha !== next3));
   let c = p.json;
   for (let i = 0; i < 40 && c?.state !== 'merged'; i++) {

@@ -18,7 +18,7 @@ import { defaultTrainDeps, runTrain, type TrainDeps } from '../src/services/queu
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'rv-owner';
 const MAIN = 'refs/heads/main';

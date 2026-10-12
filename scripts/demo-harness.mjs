@@ -20,7 +20,7 @@
  * Principals: alice and bob (authors), carol and dave (reviewers) are agent
  * principals created with create_agent and repo-scoped expiring write tokens
  * (refs/heads/agents/*) minted with create_agent_token; "human" is the owner
- * of FORGE_PAT. The agents' tokens cannot update main, so the human lands
+ * of KVARM_PAT. The agents' tokens cannot update main, so the human lands
  * changes (enqueue_change, merge_change) and resolves the escalation. Repo
  * creation and deletion are the only REST calls (bootstrap); every workflow
  * step is an MCP tool call or a git push. Agents and their tokens are revoked
@@ -32,8 +32,8 @@
  * that showcase.
  *
  * Environment (tokens are read by name and never printed):
- *   FORGE_BASE_URL  platform origin
- *   FORGE_PAT       api-scope PAT of the human principal (ci scope too for --container)
+ *   KVARM_BASE_URL  platform origin
+ *   KVARM_PAT       api-scope PAT of the human principal (ci scope too for --container)
  *   set -a; . apps/platform/.dev.vars.validation; set +a
  *
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
@@ -56,10 +56,10 @@ const { values: opts } = parseArgs({
     'container-only': { type: 'boolean', default: false },
   },
 });
-const BASE = (process.env.FORGE_BASE_URL ?? '').replace(/\/+$/, '');
-const PAT = process.env.FORGE_PAT ?? '';
+const BASE = (process.env.KVARM_BASE_URL ?? '').replace(/\/+$/, '');
+const PAT = process.env.KVARM_PAT ?? '';
 if (!BASE || !PAT) {
-  console.error('demo-harness: FORGE_BASE_URL and FORGE_PAT must be set (set -a; . apps/platform/.dev.vars.validation; set +a)');
+  console.error('demo-harness: KVARM_BASE_URL and KVARM_PAT must be set (set -a; . apps/platform/.dev.vars.validation; set +a)');
   process.exit(2);
 }
 
@@ -86,7 +86,7 @@ async function rest(path, { method = 'GET', json } = {}) {
   try {
     body = JSON.parse(text);
   } catch {}
-  return { status: res.status, json: body, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, json: body, cost: res.headers.get('x-kvarm-cost') };
 }
 
 /** One MCP client per principal; the Bearer token lives only in the transport headers. */

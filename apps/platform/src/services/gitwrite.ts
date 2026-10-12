@@ -22,7 +22,7 @@ import {
   type PackInput,
   type RefCommand,
   type RefUpdateResult,
-} from '@forge/gitops';
+} from '@kvarm/gitops';
 import { getGitToken } from '../artifacts/tokens';
 import type { RepoRow } from '../db/repos';
 import { recordConfirmedPush } from './pushFreshness';

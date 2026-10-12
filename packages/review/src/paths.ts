@@ -21,7 +21,7 @@ function extension(path: string): string {
 // ci-config
 // ---------------------------------------------------------------------------
 
-const CI_DIRS = ['.github/', '.forge/', '.circleci/', '.buildkite/', '.gitlab/', '.azure-pipelines/', '.husky/'];
+const CI_DIRS = ['.github/', '.kvarm/', '.circleci/', '.buildkite/', '.gitlab/', '.azure-pipelines/', '.husky/'];
 const CI_FILES = new Set([
   '.gitlab-ci.yml',
   '.travis.yml',

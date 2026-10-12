@@ -15,7 +15,7 @@
  * D1 update that missed the bound.
  */
 
-import { confirmedRefs, ReportStatusReader } from '@forge/gitops';
+import { confirmedRefs, ReportStatusReader } from '@kvarm/gitops';
 import { bumpRefGeneration, refGeneration } from '../cache/compare';
 import { touchRepoPushed, type RepoRow } from '../db/repos';
 

@@ -16,7 +16,7 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { escapeHtml, formatBytes, html, raw, timeAgo } from '@forge/ui';
+import { escapeHtml, formatBytes, html, raw, timeAgo } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
 import { clientIp, requestCredential, type ApiActor } from './api';
 import { layout } from '../web/render';
@@ -204,7 +204,7 @@ async function renderTreeView(
     const entry = sorted.find((e) => e.name.toLowerCase() === candidate.toLowerCase());
     if (!entry) continue;
     const cache = caches.default;
-    const mdKey = new Request(`https://forge.internal/md/${entry.hash}`, { method: 'GET' });
+    const mdKey = new Request(`https://kvarm.internal/md/${entry.hash}`, { method: 'GET' });
     let rendered = await cache.match(mdKey);
     if (!rendered) {
       const blob = await readFileAt(

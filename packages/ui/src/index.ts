@@ -1,5 +1,5 @@
 /**
- * @forge/ui — zero-runtime HTML construction for streaming SSR.
+ * @kvarm/ui — zero-runtime HTML construction for streaming SSR.
  *
  * The `html` tagged template escapes interpolations by default; wrap values in
  * `raw()` to emit trusted markup. Everything is plain strings, so responses

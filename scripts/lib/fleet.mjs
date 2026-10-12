@@ -177,7 +177,7 @@ export function projectCampaign(plan, opts = {}) {
   const gitOps = items.reduce((s, i) => s + i.git, 0);
   const background = [
     { label: 'push events (fleet pushes, seed, resolutions, one per publication on main)', count: N + 1 + R + B + R },
-    { label: 'forge/guard runs (one per change at creation, one per resolved head)', count: B + R },
+    { label: 'kvarm/guard runs (one per change at creation, one per resolved head)', count: B + R },
     { label: 'Nexus observed-index reconciliations', count: N + R },
     { label: 'train kicks (enqueues, publications, pin settlement)', count: B + R + B + 2 },
     { label: 'train publications (MergeLock acquire + release each)', count: B },
@@ -558,7 +558,7 @@ export function renderBenchmarkMarkdown(r) {
     '',
     `Harness requests: projected ${r.requests.projected}, observed ${r.requests.observed} (ceiling ${r.limits.ceiling}).`,
     '',
-    `| Endpoint class | Requests | Summed x-forge-cost counters |`,
+    `| Endpoint class | Requests | Summed x-kvarm-cost counters |`,
     `|---|---|---|`,
     ...Object.entries(r.counters).map(([k, v]) => `| \`${k}\` | ${v.count} | ${fmtCounters(v.sum)} |`),
     '',
@@ -568,7 +568,7 @@ export function renderBenchmarkMarkdown(r) {
     '',
     ...checksSection(r.checks),
     ...(r.notes?.length ? ['## Notes', '', ...r.notes.map((n) => `- ${n}`), ''] : []),
-    'Work counters (`x-forge-cost` classes and the stored per-publication counters) are application telemetry, not a Cloudflare bill. They come from one measured run of this workload and are not a service-level objective.',
+    'Work counters (`x-kvarm-cost` classes and the stored per-publication counters) are application telemetry, not a Cloudflare bill. They come from one measured run of this workload and are not a service-level objective.',
     '',
   ];
   return lines.join('\n');

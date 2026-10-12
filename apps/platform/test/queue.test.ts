@@ -9,7 +9,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { decode } from '@forge/gitops';
+import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
@@ -26,7 +26,7 @@ import {
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, lsRefsPrefixes, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'mq-owner';
 const MAIN = 'refs/heads/main';
@@ -184,7 +184,7 @@ function trainDeps(over: Partial<TrainDeps> = {}): TrainDeps & { events: TrainEv
   return {
     ...defaultTrainDeps,
     kick: async (_env, repoId, ref, reason, delaySeconds) => {
-      sent.push({ body: { type: 'forge.train', repoId, ref, reason }, ...(delaySeconds ? { delaySeconds } : {}) });
+      sent.push({ body: { type: 'kvarm.train', repoId, ref, reason }, ...(delaySeconds ? { delaySeconds } : {}) });
     },
     observe: (e) => events.push(e),
     events,
@@ -228,7 +228,7 @@ describe('enqueue, dequeue and the queue read', () => {
     const e1 = await enqueue('order', one);
     expect(e1.status, JSON.stringify(e1.json)).toBe(201);
     expect(e1.json.entry).toMatchObject({ number: one, state: 'queued', target: 'main', position: null });
-    expect(sent.map((m) => m.body)).toEqual([expect.objectContaining({ type: 'forge.train', repoId: repoIds.order, ref: MAIN, reason: 'enqueue' })]);
+    expect(sent.map((m) => m.body)).toEqual([expect.objectContaining({ type: 'kvarm.train', repoId: repoIds.order, ref: MAIN, reason: 'enqueue' })]);
     expect((await enqueue('order', two)).status).toBe(201);
 
     const q = await queueOf('order', '?limit=10');
@@ -460,7 +460,7 @@ describe('integration train', () => {
     ]);
   });
 
-  it('with the real gate, a change whose forge/guard failed is ejected and the clean ones behind it publish (VAL-QUEUE-005)', async () => {
+  it('with the real gate, a change whose kvarm/guard failed is ejected and the clean ones behind it publish (VAL-QUEUE-005)', async () => {
     const repo = await seedRepo('guard-eject');
     const main = await commit(repo, { 'README.md': 'readme\n' });
     repo.refs.set(MAIN, main.sha);
@@ -496,7 +496,7 @@ describe('integration train', () => {
   it('does not let a passing guard from another change mask a queued failure on the same head', async () => {
     const repo = await seedRepo('guard-same-head');
     const main = await commit(repo, { 'README.md': 'readme\n' });
-    const shared = await commit(repo, { 'README.md': 'readme\n', 'secret.txt': `token=${'forge_pat_' + 'a'.repeat(64)}\n` }, [main.sha]);
+    const shared = await commit(repo, { 'README.md': 'readme\n', 'secret.txt': `token=${'kvarm_pat_' + 'a'.repeat(64)}\n` }, [main.sha]);
     repo.refs.set(MAIN, main.sha);
     repo.refs.set('refs/heads/b1', shared.sha);
     repo.refs.set('refs/heads/b2', shared.sha);
@@ -913,7 +913,7 @@ describe('integration train', () => {
   it('the queue consumer runs the train for a kick message', async () => {
     const { repo, main, numbers } = await setup('consumer', 1);
     await enqueue('consumer', numbers[0]!);
-    const kick = sent.find((m) => m.body.type === 'forge.train')!;
+    const kick = sent.find((m) => m.body.type === 'kvarm.train')!;
     const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body: kick.body }]);
     const ctx = createExecutionContext();
     await worker.queue!(batch, env, ctx);
@@ -927,7 +927,7 @@ describe('integration train', () => {
 
 describe('train CI staging of composed merges', () => {
   const CI_CONFIG = `${JSON.stringify({ jobs: [{ name: 'test', run: 'npm test', required: true }] })}\n`;
-  const STAGING = 'refs/heads/forge-ci/';
+  const STAGING = 'refs/heads/kvarm-ci/';
 
   class CountingWorkflow {
     created: string[] = [];
@@ -1010,7 +1010,7 @@ describe('train CI staging of composed merges', () => {
     return {
       run,
       cost: meter.snapshot(),
-      configReads: since.filter((c) => c.startsWith('readFile:') && c.endsWith(':.forge/ci.json')).length,
+      configReads: since.filter((c) => c.startsWith('readFile:') && c.endsWith(':.kvarm/ci.json')).length,
       stagingLsRefs: lsRefsPrefixes.slice(lsMark).filter((p) => p.some((x) => x.startsWith(STAGING))).length,
       standaloneCiJobs: log.filter((l) => l.startsWith('standalone:') && /\bci_jobs\b/.test(l)).length,
       ciJobInserts: log.filter((l) => /INSERT INTO ci_jobs/.test(l)).length,
@@ -1024,7 +1024,7 @@ describe('train CI staging of composed merges', () => {
   /** main moves after the change's branch forked, so the train composes (and stages) a real merge commit. */
   async function ciSetup(name: string, withConfig: boolean) {
     const repo = await seedRepo(name);
-    const files: Files = { 'README.md': 'readme\n', ...(withConfig ? { '.forge/ci.json': CI_CONFIG } : {}) };
+    const files: Files = { 'README.md': 'readme\n', ...(withConfig ? { '.kvarm/ci.json': CI_CONFIG } : {}) };
     const fork = await commit(repo, files);
     const head = await commit(repo, { ...files, 'f1.txt': 'file 1\n' }, [fork.sha]);
     repo.refs.set(MAIN, fork.sha);

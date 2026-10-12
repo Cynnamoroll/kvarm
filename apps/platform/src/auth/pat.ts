@@ -5,7 +5,7 @@
  * SHA-256-hashed; the plaintext is shown exactly once at mint time.
  */
 
-import { sha256Hex } from '@forge/gitops';
+import { sha256Hex } from '@kvarm/gitops';
 import { toUserRow, type UserRow } from '../db/users';
 import { deleteCached, internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import type { AgentGrant } from './agentTokens';
@@ -15,7 +15,7 @@ export type Scope = 'read' | 'write' | 'api' | 'ci';
 export const SCOPES: readonly Scope[] = ['read', 'write', 'api', 'ci'];
 
 /** Well-formed tokens only; anything else is rejected without touching D1. */
-export const PAT_PATTERN = /^forge_pat_[0-9a-f]{64}$/;
+export const PAT_PATTERN = /^kvarm_pat_[0-9a-f]{64}$/;
 
 /** Reusable verification metadata lifetime in the Cache API. */
 export const PAT_CACHE_TTL_SECONDS = 60;
@@ -70,7 +70,7 @@ export async function mintPAT(
   name: string,
   scopes: Scope[],
 ): Promise<{ id: string; token: string; prefix: string }> {
-  const token = `forge_pat_${randomHex(32)}`;
+  const token = `kvarm_pat_${randomHex(32)}`;
   const hash = await sha256Hex(token);
   const id = crypto.randomUUID();
   const prefix = token.slice(0, 18);

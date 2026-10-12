@@ -10,7 +10,7 @@
 
 import { buildBlob, buildCommit, buildTree, type GitIdent, type GitObject, type TreeEntry } from './index';
 
-export const FORGE_NOTES_REF = 'refs/notes/forge-attribution';
+export const KVARM_NOTES_REF = 'refs/notes/kvarm-attribution';
 
 export class NotesTreeError extends Error {
   constructor(readonly tree: string) {
@@ -128,7 +128,7 @@ export async function buildNotesCommit(input: NotesCommitInput): Promise<NotesCo
     parents: parent ? [parent.commit] : [],
     author,
     committer: author,
-    message: input.message ?? 'Notes added by Forge\n',
+    message: input.message ?? 'Notes added by Kvarm\n',
   });
   objects.push(commit);
   return { commit: commit.hash, tree: rootTree.hash, objects, replaced };

@@ -5,7 +5,7 @@ import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/met
 import { authorizeGitRequest } from '../src/routes/git';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const ORG = 'acme-labs';
 const FULL: Scope[] = ['read', 'write', 'api'];
 

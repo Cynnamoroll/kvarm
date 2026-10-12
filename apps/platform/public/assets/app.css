@@ -1,4 +1,4 @@
-/* Forge stylesheet — one hand-written, zero-runtime CSS file.
+/* Kvarm stylesheet — one hand-written, zero-runtime CSS file.
    Served as a static asset with immutable far-future caching; critical
    styles for first paint are inlined into the HTML shell (web/render.ts). */
 

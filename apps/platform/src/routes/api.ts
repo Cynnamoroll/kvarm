@@ -1,6 +1,6 @@
 /**
  * REST API v1. Authenticated via session cookie (browser) or
- * `Authorization: Bearer forge_pat_...` with the `api` scope (agents/CLIs).
+ * `Authorization: Bearer kvarm_pat_...` with the `api` scope (agents/CLIs).
  * Repo lifecycle goes through src/repos/service.ts.
  */
 

@@ -31,7 +31,7 @@ const LIMITS = (limit) => `export interface Limits {\n  steady: number;\n  burst
 
 /**
  * `onResult` receives each completed run's Durable Object timings, harness wall
- * time and x-forge-cost, plus the snapshot reset's cost, after cleanup.
+ * time and x-kvarm-cost, plus the snapshot reset's cost, after cleanup.
  * @param {{ base: string, pat: string, ts: number, keep?: boolean, log?: (line: string) => void, onResult?: (r: { runs: Record<string, { totalMs: number, wall: number, readyMs: number, phases: object, cost: string | null }>, resetCost: string | null }) => void }} o
  * @returns {Promise<boolean>}
  */
@@ -56,7 +56,7 @@ export async function runContainerShowcase(o) {
     try {
       body = JSON.parse(text);
     } catch {}
-    return { status: res.status, json: body, cost: res.headers.get('x-forge-cost') };
+    return { status: res.status, json: body, cost: res.headers.get('x-kvarm-cost') };
   }
   function git(args) {
     const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
@@ -104,7 +104,7 @@ export async function runContainerShowcase(o) {
     if (r.status !== 200) throw new Error(`container run (${mode}) -> ${r.status} ${r.json?.code ?? ''} ${r.json?.error ?? ''}`.trim());
     const rep = r.json;
     const from = 'image' in rep.startedFrom ? `image ${rep.startedFrom.image}` : `snapshot ${rep.startedFrom.snapshot}`;
-    log(`  human  ${'POST container-runs'.padEnd(19)} -> ${mode}: ${rep.instance} from ${from}; runner exit ${rep.runner.exitCode} (${fmt(wall)} wall, x-forge-cost ${r.cost})`);
+    log(`  human  ${'POST container-runs'.padEnd(19)} -> ${mode}: ${rep.instance} from ${from}; runner exit ${rep.runner.exitCode} (${fmt(wall)} wall, x-kvarm-cost ${r.cost})`);
     for (const line of rep.runner.stdout.split('\n').filter(Boolean)) log(`           container | ${line}`);
     if (rep.runner.exitCode !== 0) {
       for (const line of rep.runner.stderr.split('\n').filter(Boolean).slice(-10)) log(`           container ! ${line}`);
@@ -129,7 +129,7 @@ export async function runContainerShowcase(o) {
 
     mkdirSync(dir);
     git(['init', '-q', '-b', 'main']);
-    const base = commit({ '.forge/ci.json': CI_CONFIG, 'tsconfig.json': TSCONFIG, 'src/limits.ts': LIMITS(5) }, 'Seed a typed config with a typecheck job');
+    const base = commit({ '.kvarm/ci.json': CI_CONFIG, 'tsconfig.json': TSCONFIG, 'src/limits.ts': LIMITS(5) }, 'Seed a typed config with a typecheck job');
     git(['checkout', '-q', '-b', 'feature']);
     const head1 = commit({ 'src/limits.ts': LIMITS(10) }, 'Raise the steady limit to 10');
     git(['push', '-q', url, 'main', 'feature']);

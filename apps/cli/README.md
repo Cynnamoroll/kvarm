@@ -1,48 +1,48 @@
-# forge CLI
+# kvarm CLI
 
-`apps/cli` is the Veyr-9 command-line client. It needs Node 20 or later. Its
-only runtime dependency is the workspace package `@forge/ops`, the operation
+`apps/cli` is the Kvarm command-line client. It needs Node 20 or later. Its
+only runtime dependency is the workspace package `@kvarm/ops`, the operation
 registry it shares with the MCP server.
 
 ```bash
-npm install                      # from the repo root; links the `forge` bin
-export FORGE_BASE_URL=https://forge-platform.cynnamoroll.workers.dev
-export FORGE_PAT=...             # personal access or agent token
-npx forge checkout cynthia/demo main ./demo
-# or: node apps/cli/bin/forge.js checkout cynthia/demo main ./demo
+npm install                      # from the repo root; links the `kvarm` bin
+export KVARM_BASE_URL=https://forge-platform.cynnamoroll.workers.dev
+export KVARM_PAT=...             # personal access or agent token
+npx kvarm checkout cynthia/demo main ./demo
+# or: node apps/cli/bin/kvarm.js checkout cynthia/demo main ./demo
 ```
 
 ## Configuration
 
 | variable | meaning |
 | --- | --- |
-| `FORGE_BASE_URL` | Platform origin (required). |
-| `FORGE_PAT` | Token for private repositories, writes and snapshot demands. A PAT needs the `api` scope for the REST API (API commands and the snapshot API), `ci` for the runner, and `read` for git access. |
+| `KVARM_BASE_URL` | Platform origin (required). |
+| `KVARM_PAT` | Token for private repositories, writes and snapshot demands. A PAT needs the `api` scope for the REST API (API commands and the snapshot API), `ci` for the runner, and `read` for git access. |
 
 The token goes to the REST API as `Authorization: Bearer` and to git as a
-basic-auth header scoped to `FORGE_BASE_URL`. It is passed through
+basic-auth header scoped to `KVARM_BASE_URL`. It is passed through
 `GIT_CONFIG_*` environment variables, never on the command line. Git runs with
 credential helpers disabled and terminal prompts off, so no credential store
 is read or written.
 
-## API commands (`forge <group> <verb>`)
+## API commands (`kvarm <group> <verb>`)
 
 Every entry of the shared operation registry (`packages/ops/src/index.js`) is
 a CLI command, a REST endpoint and an MCP tool at the same time. The MCP
 server at `POST /mcp` lists the same entries as tools, so the CLI, REST and
-MCP surfaces cannot drift apart. `forge --help` lists every command;
-`forge help <group> <verb>` (or `<group> <verb> --help`) shows its usage,
-arguments, REST endpoint and MCP tool name; `forge <group>` alone lists the
+MCP surfaces cannot drift apart. `kvarm --help` lists every command;
+`kvarm help <group> <verb>` (or `<group> <verb> --help`) shows its usage,
+arguments, REST endpoint and MCP tool name; `kvarm <group>` alone lists the
 group's verbs.
 
 ```bash
-forge repo list --json
-forge file read cynthia/demo README.md --ref main
-forge tree get cynthia/demo src --ref main
-forge compare get cynthia/demo main feature/x --order=risk
-forge workspace create cynthia/demo --task "fix parser" --intent '{"paths":["src/parse.ts"]}'
-forge workspace change-set cynthia/demo <workspace-id> --title "Fix parser" --merge-policy review
-forge change merge cynthia/demo 3
+kvarm repo list --json
+kvarm file read cynthia/demo README.md --ref main
+kvarm tree get cynthia/demo src --ref main
+kvarm compare get cynthia/demo main feature/x --order=risk
+kvarm workspace create cynthia/demo --task "fix parser" --intent '{"paths":["src/parse.ts"]}'
+kvarm workspace change-set cynthia/demo <workspace-id> --title "Fix parser" --merge-policy review
+kvarm change merge cynthia/demo 3
 ```
 
 Positional arguments come in the order shown by the usage line; the other
@@ -50,7 +50,7 @@ parameters are kebab-case flags (`--merge-policy review` or
 `--merge-policy=review`). List flags repeat or take commas
 (`--paths a.ts --paths src/` or `--paths a.ts,src/`); JSON flags take a JSON
 value. The reply is printed as indented JSON, or as one line with `--json`.
-Commands send `Authorization: Bearer $FORGE_PAT` when it is set and run
+Commands send `Authorization: Bearer $KVARM_PAT` when it is set and run
 anonymously otherwise (public reads). The token is never printed.
 
 Exit status: 0 on success; 1 on an API or network failure, with
@@ -60,12 +60,12 @@ conflict) and a `hint:` line on stderr (with `--json` the error body
 `{status, error, code, ...}` is also printed on stdout); 2 on a usage error
 that names the argument.
 
-## `forge checkout <owner/repo> <ref> <dir>`
+## `kvarm checkout <owner/repo> <ref> <dir>`
 
 Materializes a branch, tag or full commit SHA into `<dir>`, which must be
 missing or empty.
 
-1. With `FORGE_PAT`, checkout sends the explicit snapshot demand
+1. With `KVARM_PAT`, checkout sends the explicit snapshot demand
    `POST /api/v1/repos/<owner>/<repo>/snapshots/<ref>`. Default-branch
    snapshots build eagerly on push. Other branches and workspace refs build
    lazily, so this demand is what starts their build. Without a token,
@@ -104,8 +104,8 @@ first:
 ```bash
 cd <dir>
 git init -q
-git remote add origin "$FORGE_BASE_URL/<owner>/<repo>.git"
-git fetch -q origin <sha>          # the sha printed by forge checkout
+git remote add origin "$KVARM_BASE_URL/<owner>/<repo>.git"
+git fetch -q origin <sha>          # the sha printed by kvarm checkout
 git reset -q <sha>                 # HEAD and index at <sha>; working files untouched
 git switch -q -c <new-branch>
 # edit, commit, then: git push origin <new-branch>
@@ -116,9 +116,9 @@ the commit tree. `scripts/cli-checkout-e2e.mjs` checks this recipe live,
 including the final push. When an agent needs history from the start, a clone
 is the better choice.
 
-## `forge runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]`
+## `kvarm runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]`
 
-Starts a user-owned CI runner. It claims a queued `.forge/ci.json` job with a
+Starts a user-owned CI runner. It claims a queued `.kvarm/ci.json` job with a
 120-second generation-fenced lease, materializes the job's exact immutable
 commit through snapshot checkout (clone fallback), runs the configured command
 in a shell with its timeout, heartbeats while it runs, and reports a bounded
@@ -128,7 +128,7 @@ explicitly starts this process.
 
 Jobs run in a persistent working directory per repository
 (`<workdir>/<owner>/<repo>/slot-<n>/work`; default root
-`$XDG_CACHE_HOME/forge/runner`, else `~/.cache/forge/runner`). A runner
+`$XDG_CACHE_HOME/kvarm/runner`, else `~/.cache/kvarm/runner`). A runner
 process locks its slot (`slot-<n>.lock`, owner pid and host) for its whole
 lifetime; a concurrent runner for the same repository takes the next free
 slot, and a lock whose process has died is reclaimed. The first job in a slot
@@ -157,7 +157,7 @@ throughput of `node:https` and curl.
 
 `apps/cli/test` runs in the root vitest `packages` project
 (`npx vitest run --project packages apps/cli`). The tests extract archives
-built with `@forge/gitops`'s tar writer and with `git archive`, and compare
+built with `@kvarm/gitops`'s tar writer and with `git archive`, and compare
 the result against real `git checkout` trees. They also cover path-traversal
-and symlink-escape archives, every fallback path, and the `forge` bin against
+and symlink-escape archives, every fallback path, and the `kvarm` bin against
 a local server: a fake snapshot API plus `git http-backend` for the clone.

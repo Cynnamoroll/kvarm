@@ -1,5 +1,5 @@
 /**
- * The change guard (`forge/guard`): pure rules over a change's files and
+ * The change guard (`kvarm/guard`): pure rules over a change's files and
  * the text the caller could read for them. Three families:
  *
  *   secret/*      known credential formats and high-entropy assignments on added lines
@@ -18,7 +18,7 @@ import { isCiConfigPath, isLockfilePath, isTestPath, manifestKind, type Manifest
 export type GuardConclusion = 'success' | 'failure' | 'neutral';
 export type GuardSeverity = 'failure' | 'neutral';
 
-/** The tree-diff statuses (`@forge/gitops` TreeChangeStatus). */
+/** The tree-diff statuses (`@kvarm/gitops` TreeChangeStatus). */
 export type GuardChangeStatus = 'added' | 'removed' | 'modified' | 'renamed' | 'typechange';
 
 export interface GuardChange {
@@ -97,7 +97,7 @@ interface SecretRule {
 
 const SECRET_RULES: SecretRule[] = [
   { rule: 'secret/private-key', re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/, what: 'a private key' },
-  { rule: 'secret/forge-token', re: /\bforge_(?:pat|agt)_[0-9a-f]{64}\b/, what: 'a Forge access token' },
+  { rule: 'secret/kvarm-token', re: /\bkvarm_(?:pat|agt)_[0-9a-f]{64}\b/, what: 'a Kvarm access token' },
   { rule: 'secret/aws-access-key', re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}\b/, what: 'an AWS access key ID' },
   {
     rule: 'secret/aws-secret-key',

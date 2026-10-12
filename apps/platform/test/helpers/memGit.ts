@@ -3,7 +3,7 @@
  * and blobs built with the gitops builders, so hashes match git's.
  */
 
-import { buildBlob, buildCommit, buildTree, decode, encode, parseTree, type GitObject, type TreeEntry } from '@forge/gitops';
+import { buildBlob, buildCommit, buildTree, decode, encode, parseTree, type GitObject, type TreeEntry } from '@kvarm/gitops';
 import type { MergeSources } from '../../src/services/merge';
 
 export class MemGit implements MergeSources {

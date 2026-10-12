@@ -20,7 +20,7 @@
  * edit pair, four same-line variants that genuinely conflict), the rest add
  * only their own marker file. Each member is its own agent principal with
  * its own write token for refs/heads/agents/*; it creates its workspace and
- * pushes it. Change sets and enqueues use FORGE_PAT (review policy: the
+ * pushes it. Change sets and enqueues use KVARM_PAT (review policy: the
  * enqueue approves the head). The first <= 5 conflicted changes are
  * resolved through the resolve-conflict task flow by their own agent; the
  * rest are listed as incomplete with their reason.
@@ -79,7 +79,7 @@ import {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PREFIX = 'scale-staged-campaign';
-const NOTES_REF = 'refs/notes/forge-attribution';
+const NOTES_REF = 'refs/notes/kvarm-attribution';
 const MONETARY_CHECK = 'campaign report has no monetary amount or pricing derivation';
 const BUDGETS = BUDGET_ROWS;
 
@@ -180,11 +180,11 @@ if (opts['preflight-only']) process.exit(0);
 
 // ---------------------------------------------------------------- environment
 
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT;
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT;
 if (!PAT) {
-  console.error('fleet-driver: FORGE_PAT is not set (set -a; . apps/platform/.dev.vars.validation; set +a)');
+  console.error('fleet-driver: KVARM_PAT is not set (set -a; . apps/platform/.dev.vars.validation; set +a)');
   process.exit(2);
 }
 if (spawnSync('wrangler', ['--version'], { encoding: 'utf8' }).status !== 0) {
@@ -203,7 +203,7 @@ const work = mkdtempSync(join(tmpdir(), 'fleet-driver-'));
 const outDir = opts.out ?? join(work, 'report');
 mkdirSync(outDir, { recursive: true });
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 // ---------------------------------------------------------------- runtime state
@@ -270,7 +270,7 @@ async function api(path, { method = 'GET', json, token = PAT, handle429 = false,
       }
       throw new CampaignAbort(`network failure on ${method} ${endpointClass(method, path)} at ${stage}: ${String(err).slice(0, 200)}`);
     }
-    const cost = res.headers.get('x-forge-cost');
+    const cost = res.headers.get('x-kvarm-cost');
     const cls = endpointClass(method, path);
     const agg = counters.get(cls) ?? { count: 0, costs: [], statuses: {} };
     agg.count++;
@@ -308,7 +308,7 @@ async function git(args, { cwd = work, token = PAT, network = false, input, env 
         new Promise((resolve) => {
           const child = spawn('git', ['-c', 'credential.helper=', ...args], {
             cwd,
-            env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token, ...env },
+            env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token, ...env },
           });
           let out = '';
           let err = '';
@@ -807,18 +807,18 @@ async function main() {
     sg.json?.status === 'active' && sg.json?.headSha === sentinel.commit && lsEnd.get(sentinel.ref) === sentinel.commit,
     `status ${sg.json?.status}, GET head ${sg.json?.headSha}, ls-remote ${lsEnd.get(sentinel.ref)}, recorded ${sentinel.commit}`,
   );
-  // The platform's own attribution notes ref: one note per Forge merge commit and per accepted resolution commit.
+  // The platform's own attribution notes ref: one note per Kvarm merge commit and per accepted resolution commit.
   const notesSha = lsEnd.get(NOTES_REF) ?? null;
   let notesList = null;
   if (notesSha) {
     await mustGit(['fetch', '-q', 'origin', `+${NOTES_REF}:${NOTES_REF}`], { cwd: cloneDir, network: true });
-    notesList = await mustGit(['notes', '--ref=forge-attribution', 'list'], { cwd: cloneDir });
+    notesList = await mustGit(['notes', '--ref=kvarm-attribution', 'list'], { cwd: cloneDir });
   }
   const expectedNotes = [...acceptedPubs.filter((p) => p.mergeCommit !== p.headSha).map((p) => p.mergeCommit), ...claimWorkspaces.map((c) => c.resolution)];
   const notes = verifyNotes({ notesList, expected: expectedNotes });
   check(
     'VAL-SCALE-004c',
-    `${NOTES_REF} notes exactly the ${expectedNotes.length} Forge merge commits and resolution commits, once each`,
+    `${NOTES_REF} notes exactly the ${expectedNotes.length} Kvarm merge commits and resolution commits, once each`,
     notes.ok,
     `${notes.noted} noted at ${notesSha ?? 'absent'}; missing ${notes.missing.slice(0, 3).join(', ') || 'none'}; unexpected ${notes.unexpected.slice(0, 3).join(', ') || 'none'}`,
   );
@@ -1088,7 +1088,7 @@ report.fleet.overlapPairs = report.verifyPre?.overlapPairs ?? null;
 log('\n## projected vs observed harness requests');
 for (const [s, v] of Object.entries(report.requests.byStage)) log(`  ${s.padEnd(13)} projected ${String(v.projected).padStart(5)}  observed ${String(v.observed).padStart(5)}`);
 log(`  total         projected ${String(projection.total).padStart(5)}  observed ${String(ledger.total).padStart(5)}  (ceiling ${limits.ceiling}; peak HTTP ${httpLim.peak}/${limits.httpInFlight}, peak git children ${gitLim.peak}/${limits.gitChildren}; retries ${JSON.stringify(retries)}; out-of-band read-only D1 queries ${d1Reads})`);
-log('\n## x-forge-cost by endpoint class (summed)');
+log('\n## x-kvarm-cost by endpoint class (summed)');
 for (const [k, v] of Object.entries(report.counters)) log(`  ${k}: ${v.count} × ${JSON.stringify(v.statuses)}  ${fmt(v.sum)}`);
 log('\n## server-side background work (separate from the harness ceiling)');
 for (const [k, v] of Object.entries(report.background)) log(`  ${k}: ${typeof v === 'object' ? fmt(v) : v}`);

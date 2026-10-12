@@ -6,10 +6,10 @@
  *
  *   cold    10 sequential `GET compare/bench-base...bench-head?nocache=1` with
  *           the admin PAT, timed with `curl -w %{time_total} --max-time 30`;
- *           pass when all are 200 + `x-forge-cache: bypass` and p50 < 500 ms.
+ *           pass when all are 200 + `x-kvarm-cache: bypass` and p50 < 500 ms.
  *           The bypass reads no compare cache entry (body, risk, ref, commit
  *           or line counts), so every run is a full cold computation
- *   spot    the same URL anonymously and as FORGE_PAT_BOT: served normally,
+ *   spot    the same URL anonymously and as KVARM_PAT_BOT: served normally,
  *           never `bypass`
  *   order   files are path-ascending and `?order=path` is identical
  *   wide    `compare/wide-base...wide-head`: complete (totalsComplete true),
@@ -43,13 +43,13 @@ import { fileURLToPath } from 'node:url';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
 const REPO = arg('repo', 'fixture-1m');
 const RUNS = Number(arg('runs', '10'));
 const JSON_OUT = arg('json', null);
 const SKIP_EDGE = process.argv.includes('--skip-edge');
-const P = { admin: 'FORGE_PAT', bot: 'FORGE_PAT_BOT' };
+const P = { admin: 'KVARM_PAT', bot: 'KVARM_PAT_BOT' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set (load apps/platform/.dev.vars.validation)`);
 const root = fileURLToPath(new URL('..', import.meta.url));
 const expected = JSON.parse(readFileSync(resolve(root, arg('expected', 'docs/benchmarks/fixture-1m.json')), 'utf8'));
@@ -110,8 +110,8 @@ function get(path, who = null, { label = path, inSweep = true } = {}) {
     bytes: Number(size),
     timedOut: r.status === 28,
     curlExit: r.status,
-    cache: headers['x-forge-cache'] ?? null,
-    cost: headers['x-forge-cost'] ?? null,
+    cache: headers['x-kvarm-cache'] ?? null,
+    cost: headers['x-kvarm-cost'] ?? null,
     timing: headers['server-timing'] ?? null,
     text,
     body,
@@ -148,7 +148,7 @@ function coldGate() {
   };
   const first = runs[0]?.body ?? {};
   summary.cold.body = { files: first.files?.length, truncated: first.truncated, totalsComplete: first.totalsComplete, statsOmitted: first.statsOmitted, treeReads: first.treeReads, blobReads: first.blobReads };
-  check(`VAL-DIFF-022 ${RUNS} cold compares all 200 + x-forge-cache: bypass`, runs.every((r) => r.status === 200 && r.cache === 'bypass'));
+  check(`VAL-DIFF-022 ${RUNS} cold compares all 200 + x-kvarm-cache: bypass`, runs.every((r) => r.status === 200 && r.cache === 'bypass'));
   check(`VAL-DIFF-022 cold p50 ${(p50 * 1000).toFixed(0)} ms < 500 ms (min ${(Math.min(...times) * 1000).toFixed(0)}, max ${(Math.max(...times) * 1000).toFixed(0)})`, p50 < 0.5);
   check(
     `cold body lists every bench file: files=${first.files?.length} (expected ${expected.bench.files}) truncated=${first.truncated} totalsComplete=${first.totalsComplete} statsOmitted=${first.statsOmitted}`,
@@ -235,13 +235,13 @@ writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv
 chmodSync(askpass, 0o700);
 
 function git(args, cwd) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', GATE_GIT_TOKEN: process.env.FORGE_PAT };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', GATE_GIT_TOKEN: process.env.KVARM_PAT };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], { cwd, env, encoding: 'utf8' });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
 }
 
 async function rest(path, { method = 'GET', json } = {}) {
-  const init = { method, headers: { Authorization: `Bearer ${process.env.FORGE_PAT}` } };
+  const init = { method, headers: { Authorization: `Bearer ${process.env.KVARM_PAT}` } };
   if (json) {
     init.headers['content-type'] = 'application/json';
     init.body = JSON.stringify(json);

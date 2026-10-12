@@ -20,7 +20,7 @@ import { resolveRepoAccess } from '../src/services/access';
 import { repoViewGeneration } from '../src/services/pushFreshness';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'sv-owner';
 const OUTSIDER = 'sv-outsider';
 const FULL: Scope[] = ['read', 'write', 'api'];
@@ -291,7 +291,7 @@ describe('rejected Bearer on a page falls back to anonymous on the same authorit
 
   function unknownPat(): string {
     const hex = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
-    return `forge_pat_${hex}`;
+    return `kvarm_pat_${hex}`;
   }
 
   /** Retained edge bodies for a page and a raw file, as a colo would hold them. */

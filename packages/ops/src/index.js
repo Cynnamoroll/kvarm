@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * The one operation registry shared by the `forge` CLI (apps/cli) and the MCP
+ * The one operation registry shared by the `kvarm` CLI (apps/cli) and the MCP
  * server (apps/platform/src/mcp). Each entry maps one MCP tool and one CLI
  * command onto exactly one REST route under /api/v1, so both adapters reach
  * the same route handler, the same authority lookup and the same services.
@@ -31,7 +31,7 @@
  *
  * @typedef {object} Operation
  * @property {string} name MCP tool name
- * @property {readonly [string, string]} command CLI command words (`forge <group> <verb>`)
+ * @property {readonly [string, string]} command CLI command words (`kvarm <group> <verb>`)
  * @property {string} family
  * @property {string} description
  * @property {HttpMethod} method
@@ -670,7 +670,7 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, body('requiredReviews', 'integer', 'Required approving reviews (0-10)', { required: true, positional: true })],
   }),
 
-  // --- tasks: work Forge dispatches to agents --------------------------------
+  // --- tasks: work Kvarm dispatches to agents --------------------------------
   define({
     name: 'list_tasks',
     command: ['task', 'list'],
@@ -1094,7 +1094,7 @@ export const OPERATIONS = Object.freeze([
     command: ['attribution', 'set'],
     family: 'attribution',
     description:
-      'Attach the attribution note {agent, session, promptHash, model?, actor, at} to a commit on refs/notes/forge-attribution (replaces an earlier note).',
+      'Attach the attribution note {agent, session, promptHash, model?, actor, at} to a commit on refs/notes/kvarm-attribution (replaces an earlier note).',
     method: 'POST',
     path: '/repos/{repo}/commits/{sha}/attribution',
     params: [

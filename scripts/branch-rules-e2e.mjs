@@ -2,15 +2,15 @@
 /**
  * Live driver for opt-in branch rules (VAL-PROTECT-001).
  *
- * As the non-admin human `forge-bot` (FORGE_PAT_BOT) it creates a private repo,
- * grants `forge-org-maint` (FORGE_PAT_MAINT) write, seeds `main` and `scratch`,
+ * As the non-admin human `forge-bot` (KVARM_PAT_BOT) it creates a private repo,
+ * grants `forge-org-maint` (KVARM_PAT_MAINT) write, seeds `main` and `scratch`,
  * protects `main` with a required check and one separate approval, then checks:
  *  - rule management is repo-admin only (collaborator 403) and the effective
  *    policy is readable;
  *  - ordinary workflows on unprotected refs still succeed (git CLI fast-forward,
  *    new branch, force update), with owner readback;
  *  - direct pushes to the protected ref are denied for the owner, the write
- *    collaborator and the global instance admin (cynthia, FORGE_PAT, no grant):
+ *    collaborator and the global instance admin (cynthia, KVARM_PAT, no grant):
  *    git CLI fast-forward and force push, plus raw receive-pack commands with
  *    the exact expected old OID (fast-forward, non-fast-forward, delete, mixed
  *    push), each with parsed report-status and unchanged owner readback;
@@ -30,10 +30,10 @@ import { parseArgs } from 'node:util';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false } } });
 
-const BASE = process.env.FORGE_BASE_URL ?? die('FORGE_BASE_URL is not set');
-const OWNER_PAT = process.env.FORGE_PAT_BOT ?? die('FORGE_PAT_BOT is not set');
-const COLLAB_PAT = process.env.FORGE_PAT_MAINT ?? die('FORGE_PAT_MAINT is not set');
-const ADMIN_PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? die('KVARM_BASE_URL is not set');
+const OWNER_PAT = process.env.KVARM_PAT_BOT ?? die('KVARM_PAT_BOT is not set');
+const COLLAB_PAT = process.env.KVARM_PAT_MAINT ?? die('KVARM_PAT_MAINT is not set');
+const ADMIN_PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const ts = Math.floor(Date.now() / 1000);
 const results = [];
 const Z = '0'.repeat(40);
@@ -64,7 +64,7 @@ async function api(method, path, token, body) {
   } catch {
     json = null;
   }
-  return { status: res.status, json, text, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, json, text, cost: res.headers.get('x-kvarm-cost') };
 }
 
 const auth = (t) => `Basic ${Buffer.from(`x:${t}`).toString('base64')}`;
@@ -154,7 +154,7 @@ async function rawPush(repo, token, commands, packRevs) {
   });
   const body = Buffer.from(await res.arrayBuffer());
   const status = res.status === 200 ? pktLines(body).map((l) => l.toString().trim()) : [];
-  return { http: res.status, status, cost: res.headers.get('x-forge-cost') };
+  return { http: res.status, status, cost: res.headers.get('x-kvarm-cost') };
 }
 
 async function pushWithRetry(args, token) {
@@ -172,7 +172,7 @@ const ownerLogin = (await api('GET', '/user', OWNER_PAT)).json?.user?.login ?? d
 const collab = await api('GET', '/user', COLLAB_PAT);
 const collabLogin = collab.json?.user?.login ?? die('collaborator PAT rejected');
 const admin = await api('GET', '/user', ADMIN_PAT);
-if (admin.json?.user?.isAdmin !== true) die('FORGE_PAT is not the instance admin');
+if (admin.json?.user?.isAdmin !== true) die('KVARM_PAT is not the instance admin');
 const adminLogin = admin.json.user.login;
 const name = `access-branch-rules-e2e-${ts}`;
 const repo = `${ownerLogin}/${name}`;

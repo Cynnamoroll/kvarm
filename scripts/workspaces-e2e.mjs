@@ -3,7 +3,7 @@
  * Live driver for agent workspaces (m6a-workspaces): VAL-WS-001..010 and
  * VAL-COST-016, plus the agent-token binding to workspace ownership.
  *
- * Every scenario runs in a fresh public repo owned by FORGE_USER (cynthia),
+ * Every scenario runs in a fresh public repo owned by KVARM_USER (cynthia),
  * named `m6a-workspaces-<purpose>-<timestamp>`, seeded with real git pushes
  * through the platform gate, and deleted afterwards (unless --keep):
  *   lifecycle  create (ref exists at the base head before any push), git push
@@ -33,9 +33,9 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } },
 });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm6a-workspaces';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -68,18 +68,18 @@ async function http(path, { method = 'GET', json, token = PAT } = {}) {
   } catch {
     body = null;
   }
-  return { status: res.status, text, json: body, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, json: body, cost: res.headers.get('x-kvarm-cost') };
 }
 
 const work = mkdtempSync(join(tmpdir(), 'workspaces-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, token = PAT) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd,
-    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token },
+    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token },
     encoding: 'utf8',
   });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
@@ -166,7 +166,7 @@ await scenario('lifecycle', async (repo) => {
   // VAL-WS-001
   const made = await http(`${api}/workspaces`, { method: 'POST', json: { task: 'fix-login', agent: 'claude-code-1' } });
   const ws = made.json ?? {};
-  console.log(`POST workspaces -> ${made.status} ${made.text} (x-forge-cost ${made.cost})`);
+  console.log(`POST workspaces -> ${made.status} ${made.text} (x-kvarm-cost ${made.cost})`);
   check(
     'VAL-WS-001',
     'create returns 201 with id, ref under refs/heads/agents/<id>/ and a pushUrl',
@@ -174,7 +174,7 @@ await scenario('lifecycle', async (repo) => {
     `id=${ws.id} ref=${ws.ref} pushUrl=${ws.pushUrl}`,
   );
   const got = await http(`${api}/workspaces/${ws.id}`);
-  console.log(`GET workspaces/${ws.id} -> ${got.status} ${got.text} (x-forge-cost ${got.cost})`);
+  console.log(`GET workspaces/${ws.id} -> ${got.status} ${got.text} (x-kvarm-cost ${got.cost})`);
   check(
     'VAL-WS-001',
     'GET workspaces/:id returns the same record, status active',
@@ -203,7 +203,7 @@ await scenario('lifecycle', async (repo) => {
     'VAL-WS-003',
     'git push to the workspace ref accepted; workspace headSha and ls-remote follow',
     push1.code === 0 && afterPush.json?.headSha === first && after[ws.ref] === first,
-    `pushed=${first} headSha=${afterPush.json?.headSha} ls-remote=${after[ws.ref]} (x-forge-cost ${afterPush.cost})`,
+    `pushed=${first} headSha=${afterPush.json?.headSha} ls-remote=${after[ws.ref]} (x-kvarm-cost ${afterPush.cost})`,
   );
 
   // VAL-WS-006
@@ -221,7 +221,7 @@ await scenario('lifecycle', async (repo) => {
 
   // VAL-WS-007
   const cs = await http(`${api}/workspaces/${ws.id}/change-set`, { method: 'POST', json: { title: 'fix login' } });
-  console.log(`POST change-set -> ${cs.status} (x-forge-cost ${cs.cost}) ${JSON.stringify({ number: cs.json?.number, base: cs.json?.base, head: cs.json?.head, headSha: cs.json?.headSha, state: cs.json?.state, mergePolicy: cs.json?.mergePolicy })}`);
+  console.log(`POST change-set -> ${cs.status} (x-kvarm-cost ${cs.cost}) ${JSON.stringify({ number: cs.json?.number, base: cs.json?.base, head: cs.json?.head, headSha: cs.json?.headSha, state: cs.json?.state, mergePolicy: cs.json?.mergePolicy })}`);
   const n = cs.json?.number;
   const change = await http(`${api}/changes/${n}`);
   const branch = ws.ref.slice('refs/heads/'.length);
@@ -259,7 +259,7 @@ await scenario('lifecycle', async (repo) => {
 
   // VAL-WS-010
   const merged = await http(`${api}/changes/${n}/merge`, { method: 'POST' });
-  console.log(`POST changes/${n}/merge -> ${merged.status} state=${merged.json?.state} mergeCommit=${merged.json?.mergeCommit} (x-forge-cost ${merged.cost})`);
+  console.log(`POST changes/${n}/merge -> ${merged.status} state=${merged.json?.state} mergeCommit=${merged.json?.mergeCommit} (x-kvarm-cost ${merged.cost})`);
   const wsAfter = await http(`${api}/workspaces/${ws.id}`);
   mustGit(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main'], dir);
   const log2 = mustGit(['log', 'origin/main', '-2', '--format=%H %s'], dir);
@@ -305,7 +305,7 @@ await scenario('list', async (repo) => {
 
   // VAL-WS-009
   const ab = await http(`${api}/workspaces/${drop.id}/abandon`, { method: 'POST' });
-  console.log(`POST workspaces/${drop.id}/abandon -> ${ab.status} ${ab.text} (x-forge-cost ${ab.cost})`);
+  console.log(`POST workspaces/${drop.id}/abandon -> ${ab.status} ${ab.text} (x-kvarm-cost ${ab.cost})`);
   const dropGot = await http(`${api}/workspaces/${drop.id}`);
   const refs = lsRemoteAll(url);
   console.log(`git ls-remote | agents: ${JSON.stringify(Object.keys(refs).filter((r) => r.startsWith('refs/heads/agents/')))}`);
@@ -333,12 +333,12 @@ await scenario('list', async (repo) => {
 
   // VAL-COST-016
   const listRes = await fetch(`${BASE}${api}/workspaces`, { headers: { Authorization: `Bearer ${PAT}` } });
-  const header = listRes.headers.get('x-forge-cost') ?? '';
+  const header = listRes.headers.get('x-kvarm-cost') ?? '';
   const listed = (await listRes.json()).workspaces ?? [];
   const d1 = Number(/(?:^|;)d1=(\d+)/.exec(header)?.[1] ?? NaN);
   const doCalls = Number(/(?:^|;)do=(\d+)/.exec(header)?.[1] ?? NaN);
   const states = [...new Set(listed.map((w) => w.status))].sort();
-  console.log(`GET workspaces x-forge-cost: ${header}; count=${listed.length}; states=${states.join(',')}`);
+  console.log(`GET workspaces x-kvarm-cost: ${header}; count=${listed.length}; states=${states.join(',')}`);
   check('VAL-COST-016', 'list reports d1 <= 2 and do=0 over >= 3 workspaces in mixed states', d1 <= 2 && doCalls === 0 && listed.length >= 3 && states.length === 3, header);
 });
 

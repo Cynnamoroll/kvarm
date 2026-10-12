@@ -117,7 +117,7 @@ let tick = 0;
 async function commit(parents: string[], file: string): Promise<{ commit: GitObject; objects: GitObject[] }> {
   const blob = await buildBlob(encode(file));
   const tree = await buildTree([{ mode: '100644', name: 'file.txt', hash: blob.hash }]);
-  const ident = { name: 'Forge', email: 'forge@forge.invalid', time: 1_790_000_000 + tick++ };
+  const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: 1_790_000_000 + tick++ };
   const c = await buildCommit({ tree: tree.hash, parents, author: ident, committer: ident, message: file });
   return { commit: c, objects: [c, tree, blob] };
 }
@@ -242,7 +242,7 @@ describe('receive-pack request framing', () => {
     expect(h.get('content-type')).toBe('application/x-git-receive-pack-request');
     expect(h.get('accept')).toBe('application/x-git-receive-pack-result');
     const pkts = readPktLines(req.body.subarray(0, req.body.length - EMPTY_PACK.length));
-    expect(new TextDecoder().decode(pkts[0]!.data)).toBe(`${ZERO_OID} ${oid} refs/heads/x\0report-status side-band-64k agent=forge-gitops\n`);
+    expect(new TextDecoder().decode(pkts[0]!.data)).toBe(`${ZERO_OID} ${oid} refs/heads/x\0report-status side-band-64k agent=kvarm-gitops\n`);
     expect(pkts[1]!.flush).toBe(true);
     expect(req.body.subarray(req.body.length - EMPTY_PACK.length)).toEqual(EMPTY_PACK);
   });
@@ -250,7 +250,7 @@ describe('receive-pack request framing', () => {
   it('sends no pack for delete-only pushes', async () => {
     const oid = 'b'.repeat(40);
     const req = await capture({ commands: [{ ref: 'refs/heads/x', oldOid: oid, newOid: ZERO_OID }], sideband: false });
-    expect(req.body).toEqual(concat(pktLine(`${oid} ${ZERO_OID} refs/heads/x\0report-status agent=forge-gitops\n`), encode('0000')));
+    expect(req.body).toEqual(concat(pktLine(`${oid} ${ZERO_OID} refs/heads/x\0report-status agent=kvarm-gitops\n`), encode('0000')));
   });
 
   it('refuses malformed commands before any request', async () => {

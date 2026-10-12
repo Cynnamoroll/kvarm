@@ -14,7 +14,7 @@ import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import worker from '../src/index';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'cr-owner';
 const REPO = 'container-runs';
 const R = `/api/v1/repos/${OWNER}/${REPO}/ci/container-runs`;

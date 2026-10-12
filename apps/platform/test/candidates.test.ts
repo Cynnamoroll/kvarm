@@ -8,7 +8,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines } from '@forge/gitops';
+import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { getRepoById } from '../src/db/repos';
@@ -19,7 +19,7 @@ import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api', 'ci'];
 const OWNER = 'cand-owner';
 
@@ -165,7 +165,7 @@ async function based(repo: FakeRepo, files: Files = BASE) {
   return main;
 }
 
-const PLANTED = `token=${'forge_pat_' + 'b'.repeat(64)}\n`;
+const PLANTED = `token=${'kvarm_pat_' + 'b'.repeat(64)}\n`;
 
 /** `dev` = main + a planted secret: a branch a workspace may start from while its change opens against main. */
 async function secretBranch(repo: FakeRepo, mainSha: string) {
@@ -213,8 +213,8 @@ describe('candidates', () => {
       expect(summary.vsBase.files.map((f: any) => [f.path, f.status])).toEqual(cmp.json.files.map((f: any) => [f.path, f.status]));
       expect(summary.vsBase.totals).toEqual(cmp.json.totals);
       expect(summary.vsBase.rating).toEqual(cmp.json.rating);
-      // No change judged these heads, so the always-required forge/guard is pending.
-      expect(summary).toMatchObject({ ref: ws.ref, baseMatches: true, checks: { state: 'pending', required: [{ name: 'forge/guard', state: 'pending', producer: 'check-runs' }] } });
+      // No change judged these heads, so the always-required kvarm/guard is pending.
+      expect(summary).toMatchObject({ ref: ws.ref, baseMatches: true, checks: { state: 'pending', required: [{ name: 'kvarm/guard', state: 'pending', producer: 'check-runs' }] } });
     }
 
     const ab = r.json.pairwise.find((p: any) => p.workspaces[0] === a.id && p.workspaces[1] === b.id);
@@ -298,7 +298,7 @@ describe('candidates', () => {
   it('ranks same-head changes by their own guards instead of another change guard', async () => {
     const repo = await seedRepo('ck-same-head');
     const main = await based(repo);
-    const shared = await commit(repo, { ...BASE, 'secret.txt': `token=${'forge_pat_' + 'a'.repeat(64)}\n` }, [main.sha]);
+    const shared = await commit(repo, { ...BASE, 'secret.txt': `token=${'kvarm_pat_' + 'a'.repeat(64)}\n` }, [main.sha]);
     repo.refs.set('refs/heads/clean-base', shared.sha);
     const a = (await createWs('ck-same-head', 'a')).json;
     const b = (await call('POST', `${R('ck-same-head')}/workspaces`, tok.owner, { task: 'b', agent: 'agent', base: 'clean-base' })).json;
@@ -337,16 +337,16 @@ describe('candidates', () => {
     expect([changeX.status, changeX.json.base]).toEqual([201, 'main']);
     expect((await call('POST', `${R(name)}/workspaces/${f.id}/change-set`, tok.owner, { title: 'f' })).status).toBe(201);
     const run = (await call('GET', `${R(name)}/changes/${changeX.json.number}/checks`, tok.owner)).json.checks[0];
-    expect(run).toMatchObject({ name: 'forge/guard', status: 'failure', summary: { baseTree: main.tree } });
+    expect(run).toMatchObject({ name: 'kvarm/guard', status: 'failure', summary: { baseTree: main.tree } });
 
     const r = await cands(name, [x.id, f.id, p.id]);
     expect(r.status).toBe(200);
     const sx = r.json.candidates.find((c: any) => c.workspace === x.id);
-    expect(sx).toMatchObject({ workspaceBase: 'dev', checks: { state: 'failure', required: [{ name: 'forge/guard', state: 'failure' }] } });
+    expect(sx).toMatchObject({ workspaceBase: 'dev', checks: { state: 'failure', required: [{ name: 'kvarm/guard', state: 'failure' }] } });
     const ranking = r.json.ranking as any[];
     expect(ranking[0]).toMatchObject({ workspace: p.id, factors: { checks: 'pending', failingChecks: [] } });
     expect(ranking.slice(1).map((e) => e.workspace).sort()).toEqual([x.id, f.id].sort());
-    for (const e of ranking.slice(1)) expect(e.factors).toMatchObject({ checks: 'failure', failingChecks: ['forge/guard'] });
+    for (const e of ranking.slice(1)) expect(e.factors).toMatchObject({ checks: 'failure', failingChecks: ['kvarm/guard'] });
 
     const merge = await call('POST', `${R(name)}/changes/${changeX.json.number}/merge`, tok.owner);
     expect([merge.status, merge.json.code]).toEqual([409, 'REQUIRED_CHECKS_FAILED']);
@@ -369,7 +369,7 @@ describe('candidates', () => {
     await deliver(name, 'refs/heads/main', main.sha, dev.sha);
     const r = await cands(name, [x.id]);
     expect(r.status).toBe(200);
-    expect(r.json.candidates[0].checks).toMatchObject({ state: 'pending', required: [{ name: 'forge/guard', state: 'pending' }] });
+    expect(r.json.candidates[0].checks).toMatchObject({ state: 'pending', required: [{ name: 'kvarm/guard', state: 'pending' }] });
     expect(r.json.ranking[0].factors).toMatchObject({ checks: 'pending', failingChecks: [] });
   });
 
@@ -552,7 +552,7 @@ describe('arenas', () => {
     const changeX = await call('POST', `${R(name)}/workspaces/${x.id}/change-set`, tok.owner, { title: 'x' });
     expect([changeX.status, changeX.json.base]).toEqual([201, 'main']);
     const run = (await call('GET', `${R(name)}/changes/${changeX.json.number}/checks`, tok.owner)).json.checks[0];
-    expect(run).toMatchObject({ name: 'forge/guard', status: 'failure', summary: { baseTree: main.tree } });
+    expect(run).toMatchObject({ name: 'kvarm/guard', status: 'failure', summary: { baseTree: main.tree } });
 
     const r = await call('GET', `${R(name)}/arenas/${arena.id}/candidates`, tok.owner);
     expect(r.status).toBe(200);
@@ -563,7 +563,7 @@ describe('arenas', () => {
     ]);
     expect(r.json.ranking.map((e: any) => [e.workspace, e.factors.checks, e.factors.failingChecks])).toEqual([
       [y.id, 'pending', []],
-      [x.id, 'failure', ['forge/guard']],
+      [x.id, 'failure', ['kvarm/guard']],
     ]);
     expect((await call('GET', `${R(name)}/arenas/${arena.id}/candidates`, tok.owner)).cost).toMatchObject({ d1: 4, art: 0, do: 0 });
   });
@@ -592,7 +592,7 @@ describe('composition', () => {
       baseSha: main.sha,
       treeSha: expectedTree,
       conflict: null,
-      checks: { state: 'success', required: [{ name: 'forge/guard', state: 'success', producer: 'check-runs' }] },
+      checks: { state: 'success', required: [{ name: 'kvarm/guard', state: 'success', producer: 'check-runs' }] },
       sources: [
         { workspace: a.id, mergeBase: main.sha, paths: null },
         { workspace: b.id, mergeBase: main.sha, paths: null },
@@ -696,7 +696,7 @@ describe('composition', () => {
 
   it('records a runner failure on the exact composed tree as a semantic conflict and blocks merge (VAL-COMPOSE-003)', async () => {
     const ci = `${JSON.stringify({ jobs: [{ name: 'semantic', run: 'test ! -f a.txt -o ! -f b.txt', required: true }] })}\n`;
-    const base = { ...BASE, '.forge/ci.json': ci };
+    const base = { ...BASE, '.kvarm/ci.json': ci };
     const repo = await seedRepo('compose-ci');
     const main = await based(repo, base);
     const a = (await createWs('compose-ci', 'a')).json;

@@ -15,7 +15,7 @@
  * Tasks are retired (`obsolete`) once the change is no longer conflicted:
  * the conflict cleared, or the change closed or merged. A task an agent
  * completed (services/tasks.ts) stays `completed`. Each new task records a
- * `forge.task.created` event for external agent runners.
+ * `kvarm.task.created` event for external agent runners.
  */
 
 import type { MergeConflict, MergeStatus } from './merge';
@@ -131,10 +131,10 @@ export function markConflictedStatements(db: D1Database, changeId: string, recor
   ];
 }
 
-export const TASK_CREATED_EVENT = 'forge.task.created';
+export const TASK_CREATED_EVENT = 'kvarm.task.created';
 
 /**
- * The outbound `forge.task.created` event (a CloudEvents 1.0 envelope in the
+ * The outbound `kvarm.task.created` event (a CloudEvents 1.0 envelope in the
  * events ledger, `processed_at` NULL until a delivery picks it up) for the
  * task the following upsert creates. It must run before that upsert: it is
  * written only while the change has no live task of the kind yet, so a

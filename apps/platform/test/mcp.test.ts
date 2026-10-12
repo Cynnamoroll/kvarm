@@ -9,7 +9,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { OPERATIONS } from '@forge/ops';
+import { OPERATIONS } from '@kvarm/ops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
@@ -29,7 +29,7 @@ const env = {
   ARTIFACTS: fakeArtifacts,
   SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
 } as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'mcp-owner';
 const tok = { owner: '', outsider: '', gitOnly: '' };
@@ -190,7 +190,7 @@ afterAll(() => restoreFetch());
 
 describe('POST /mcp authentication', () => {
   it('rejects a request without a token, with a malformed token and with an unknown token with HTTP 401', async () => {
-    for (const token of [undefined, 'not-a-token', `forge_pat_${'0'.repeat(64)}`]) {
+    for (const token of [undefined, 'not-a-token', `kvarm_pat_${'0'.repeat(64)}`]) {
       const r = await mcp(rpc('initialize', INIT), token);
       expect(r.status, String(token)).toBe(401);
       expect(r.json).toEqual({ error: 'unauthorized', code: 'UNAUTHENTICATED' });
@@ -199,7 +199,7 @@ describe('POST /mcp authentication', () => {
   });
 
   it('rejects a tool call with an unknown token with HTTP 401 and no data, cold and cached', async () => {
-    const unknown = `forge_pat_${'1'.repeat(64)}`;
+    const unknown = `kvarm_pat_${'1'.repeat(64)}`;
     for (let i = 0; i < 2; i++) {
       const r = await mcp(rpc('tools/call', { name: 'get_repo', arguments: { repo: `${OWNER}/main-repo` } }), unknown);
       expect(r.status).toBe(401);
@@ -262,7 +262,7 @@ describe('MCP handshake and registry', () => {
   it('initializes with a PAT and reports the server name, version and tools capability', async () => {
     const r = await mcp(rpc('initialize', INIT), tok.owner);
     expect(r.status).toBe(200);
-    expect(r.json.result.serverInfo).toEqual({ name: 'veyr-9', version: expect.any(String) });
+    expect(r.json.result.serverInfo).toEqual({ name: 'Kvarm', version: expect.any(String) });
     expect(r.json.result.capabilities.tools).toBeDefined();
     expect(r.json.result.protocolVersion).toBe('2025-06-18');
     expect(r.headers.get('mcp-session-id')).toBeNull();

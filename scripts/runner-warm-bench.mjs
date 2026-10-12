@@ -1,10 +1,10 @@
 /**
- * Live warm-workdir check and claim->report benchmark for `forge runner`.
+ * Live warm-workdir check and claim->report benchmark for `kvarm runner`.
  *
  * Creates a scratch repository holding a small TypeScript + vitest project
  * whose CI job installs its dependencies (`npm install`) and then type-checks
  * and tests. Each sample pushes a new head (one file modified, one added, one
- * deleted) and runs `forge runner --once` against it, alternating a cold job
+ * deleted) and runs `kvarm runner --once` against it, alternating a cold job
  * (`--fresh`: empty workdir, full install) with a warm job (the next commit
  * synced into the same workdir, node_modules reused). After every job the
  * workdir's tracked state is compared with `git archive` of that commit, and
@@ -32,23 +32,23 @@ import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({ options: { samples: { type: 'string', default: '5' }, keep: { type: 'boolean', default: false }, 'isolated-npm-cache': { type: 'boolean', default: false }, 'snapshot-ready': { type: 'boolean', default: false } } });
 const SAMPLES = Number(values.samples);
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const PAT = process.env.FORGE_PAT;
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-if (!PAT) throw new Error('FORGE_PAT is required');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const PAT = process.env.KVARM_PAT;
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+if (!PAT) throw new Error('KVARM_PAT is required');
 if (!Number.isInteger(SAMPLES) || SAMPLES < 1) throw new Error('--samples must be a positive integer');
 const repo = `ci-runner-warm-workdir-bench-${Math.floor(Date.now() / 1000)}`;
 const R = `/api/v1/repos/${OWNER}/${repo}`;
-const root = mkdtempSync(join(tmpdir(), 'forge-warm-bench-'));
+const root = mkdtempSync(join(tmpdir(), 'kvarm-warm-bench-'));
 const work = join(root, 'work');
 const workRoot = join(root, 'runner');
 const slotWork = (n) => join(workRoot, OWNER, repo, `slot-${n}`, 'work');
 const askpass = join(root, 'askpass.sh');
-const CLI = new URL('../apps/cli/bin/forge.js', import.meta.url).pathname;
+const CLI = new URL('../apps/cli/bin/kvarm.js', import.meta.url).pathname;
 const SKIP = new Set(['node_modules', '.cache', '.git']);
 const results = [];
 
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -70,7 +70,7 @@ async function api(path, { method = 'GET', body } = {}) {
   return { status: res.status, json, text };
 }
 function run(cmd, args, cwd = work) {
-  const r = spawnSync(cmd, args, { cwd, env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: PAT }, encoding: 'buffer', maxBuffer: 256 << 20 });
+  const r = spawnSync(cmd, args, { cwd, env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: PAT }, encoding: 'buffer', maxBuffer: 256 << 20 });
   if (r.status !== 0) throw new Error(`${cmd} ${args.join(' ')}: ${r.stderr.toString()}`);
   return r.stdout;
 }
@@ -100,7 +100,7 @@ function runner(extra = []) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const child = spawn(process.execPath, [CLI, 'runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', workRoot, ...extra], {
-      env: { ...process.env, FORGE_BASE_URL: BASE, FORGE_PAT: PAT },
+      env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -164,7 +164,7 @@ try {
   const made = await api('/api/v1/repos', { method: 'POST', body: { name: repo, visibility: 'public' } });
   if (made.status !== 201) throw new Error(`repo create ${made.status}: ${made.text}`);
   created = true;
-  mkdirSync(join(work, '.forge'), { recursive: true });
+  mkdirSync(join(work, '.kvarm'), { recursive: true });
   mkdirSync(join(work, 'src'), { recursive: true });
   mkdirSync(join(work, 'notes'), { recursive: true });
   git(['init', '-q', '-b', 'main']);
@@ -177,7 +177,7 @@ try {
   writeFileSync(join(work, 'src', 'value.ts'), 'export const value = 0;\n');
   writeFileSync(join(work, 'src', 'value.test.ts'), "import { expect, test } from 'vitest';\nimport { value } from './value.js';\ntest('value', () => expect(typeof value).toBe('number'));\n");
   writeFileSync(join(work, 'notes', 'n-0.md'), 'note 0\n');
-  writeFileSync(join(work, '.forge', 'ci.json'), `${JSON.stringify({ jobs: [{ name: 'build', run: `npm install --no-audit --no-fund --prefer-offline${values['isolated-npm-cache'] ? ' --cache .cache/npm' : ''} && npm test`, required: true, timeoutSeconds: 600 }] })}\n`);
+  writeFileSync(join(work, '.kvarm', 'ci.json'), `${JSON.stringify({ jobs: [{ name: 'build', run: `npm install --no-audit --no-fund --prefer-offline${values['isolated-npm-cache'] ? ' --cache .cache/npm' : ''} && npm test`, required: true, timeoutSeconds: 600 }] })}\n`);
   run('npm', ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline']);
   git(['add', '-A']);
   git(['commit', '-q', '-m', 'fixture']);
@@ -217,7 +217,7 @@ try {
     (cold ? samples.cold : samples.warm).push(r.claimToReportMs);
   }
 
-  writeFileSync(join(work, '.forge', 'ci.json'), `${JSON.stringify({ jobs: [{ name: 'a', run: 'sleep 4', required: true }, { name: 'b', run: 'sleep 4', required: true }] })}\n`);
+  writeFileSync(join(work, '.kvarm', 'ci.json'), `${JSON.stringify({ jobs: [{ name: 'a', run: 'sleep 4', required: true }, { name: 'b', run: 'sleep 4', required: true }] })}\n`);
   git(['commit', '-q', '-am', 'two jobs']);
   head = git(['rev-parse', 'HEAD']);
   git(['push', '-q', url, 'feature']);

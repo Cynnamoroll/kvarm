@@ -44,7 +44,7 @@ One driver process; ≤ 3 git children and ≤ 5 in-flight HTTP requests; campai
 
 Harness requests: projected 3314, observed 1261 (ceiling 10000).
 
-| Endpoint class | Requests | Summed x-forge-cost counters |
+| Endpoint class | Requests | Summed x-kvarm-cost counters |
 |---|---|---|
 | `DELETE /agents/:id` | 100 | d1=200;rr=1099;rw=400;art=0;do=0;r2a=0;r2b=0;q=0;sub=0 |
 | `DELETE /repos/:o/:r` | 1 | d1=2;rr=1536;rw=716;art=1;do=0;r2a=0;r2b=0;q=0;sub=0 |
@@ -89,4 +89,4 @@ All 34 checks passed.
 - Pinned dependent w003 enqueue counters `d1=2;rr=16;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes).
 - Pinned dependent w002 enqueue counters `d1=2;rr=15;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes).
 
-Work counters (`x-forge-cost` classes and the stored per-publication counters) are application telemetry, not a Cloudflare bill. They come from one measured run of this workload and are not a service-level objective.
+Work counters (`x-kvarm-cost` classes and the stored per-publication counters) are application telemetry, not a Cloudflare bill. They come from one measured run of this workload and are not a service-level objective.

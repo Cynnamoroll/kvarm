@@ -5,7 +5,7 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { escapeHtml, html, raw, timeAgo } from '@forge/ui';
+import { escapeHtml, html, raw, timeAgo } from '@kvarm/ui';
 import { listReposForOwner } from '../db/repos';
 import { findOrCreateUser, type UserRow } from '../db/users';
 import { getSessionInfo, type SessionInfo } from '../auth/workos';
@@ -71,7 +71,7 @@ web.get('/', async (c) => {
   if (!ctx.user) {
     body = html`
       <div class="card">
-        <h1>${c.env.SITE_NAME || 'Forge'}</h1>
+        <h1>${c.env.SITE_NAME || 'Kvarm'}</h1>
         <p class="muted">A git platform for the agentic era, on Cloudflare Artifacts.</p>
         <p><a class="btn primary" href="/auth/sign-in">Sign in to get started</a></p>
       </div>

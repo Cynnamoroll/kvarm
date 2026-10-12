@@ -225,9 +225,9 @@ describe('CostMeter binding proxies', () => {
   });
 
   it('leaves unmetered bindings untouched and reuses metered proxies', () => {
-    const vars = { SITE_NAME: 'Forge', DB: env.DB };
+    const vars = { SITE_NAME: 'Kvarm', DB: env.DB };
     const { e } = metered(vars);
-    expect(e.SITE_NAME).toBe('Forge');
+    expect(e.SITE_NAME).toBe('Kvarm');
     expect(e.DB).toBe(e.DB);
     expect(e.DB).not.toBe(env.DB);
   });
@@ -280,7 +280,7 @@ describe('request scope', () => {
   });
 });
 
-describe('x-forge-cost header', () => {
+describe('x-kvarm-cost header', () => {
   it('serializes every counter in the pinned grammar', () => {
     const m = new CostMeter();
     m.d1 = 2;
@@ -313,7 +313,7 @@ describe('x-forge-cost header', () => {
 
   it('stamps responses whose headers are immutable', () => {
     const m = new CostMeter();
-    const immutable = Response.redirect('https://forge.test/x', 302);
+    const immutable = Response.redirect('https://kvarm.test/x', 302);
     const out = withCostHeader(immutable, m);
     expect(out.status).toBe(302);
     expect(out.headers.get(COST_HEADER)).toBe(m.header());

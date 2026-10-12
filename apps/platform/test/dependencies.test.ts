@@ -8,7 +8,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { decode } from '@forge/gitops';
+import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
 import { INTENT_PREFIX, mergeLockAlarm, type MergeLock, type SettleIntent } from '../src/do/mergeLock';
@@ -19,7 +19,7 @@ import { TRAIN_LIMITS, defaultTrainDeps, fairOrder, runTrain, type TrainDeps, ty
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'dep-owner';
 const MAIN = 'refs/heads/main';
@@ -322,7 +322,7 @@ function trainDeps(over: Partial<TrainDeps> = {}): TrainDeps & { events: TrainEv
   return {
     ...defaultTrainDeps,
     kick: async (_env, repoId, ref, reason, delaySeconds) => {
-      sent.push({ body: { type: 'forge.train', repoId, ref, reason }, ...(delaySeconds ? { delaySeconds } : {}) });
+      sent.push({ body: { type: 'kvarm.train', repoId, ref, reason }, ...(delaySeconds ? { delaySeconds } : {}) });
     },
     observe: (e) => events.push(e),
     events,
@@ -831,8 +831,8 @@ describe('lifecycle', () => {
       expect(landed.cost.do).toBe(0);
       expect(await intentsOf('settle-many')).toEqual([]);
       for (const d of pinned) expect((await listDeps('settle-many', d.id)).json.dependencies, d.id).toEqual([expect.objectContaining({ state: 'satisfied' })]);
-      expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-landed' }));
-      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+      expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-landed' }));
+      expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
       expect(await wakeMarks('settle-many')).toBe(0);
       expect(repo.refs.get(a.ref)).toBe(r2);
     } finally {
@@ -874,7 +874,7 @@ describe('lifecycle', () => {
         for (const d of dependents) out.push((await listDeps(name, d.id)).json.dependencies[0].state === 'satisfied');
         return out;
       };
-      const continuations = () => sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+      const continuations = () => sent.filter((m) => m.body?.type === 'kvarm.dependency-settle').map((m) => m.body);
       const pushRows = async () =>
         (await env.DB.prepare('SELECT COUNT(*) AS n FROM push_events WHERE repo_id = ?').bind(repoIds[name]).first<{ n: number }>())!.n;
 
@@ -885,7 +885,7 @@ describe('lifecycle', () => {
       expect(await satisfied()).toEqual([true, true, true, true, false, false, false, false, false]);
       // Two independent owners of the rest: the queue continuation (fast path) and the MergeLock intent (one DO call).
       expect(continuations()).toEqual([
-        { type: 'forge.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN },
+        { type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN },
       ]);
       const first = continuations()[0];
       expect(landed.cost.do).toBe(1);
@@ -900,14 +900,14 @@ describe('lifecycle', () => {
       await deliver({ ...first, mergeCommit: 'f'.repeat(40) });
       await deliver({ ...first, mergedAt: first.mergedAt - 1 });
       await deliver({ ...first, changeSetId: crypto.randomUUID() });
-      await deliver({ type: 'forge.dependency-settle', repoId: repoIds[name] });
+      await deliver({ type: 'kvarm.dependency-settle', repoId: repoIds[name] });
       expect(sent).toEqual([]);
       expect((await satisfied()).filter(Boolean)).toHaveLength(4);
 
       // The first continuation settles the next two pages, wakes the queued dependent's partition and schedules one more.
       await deliver(first);
       expect(await satisfied()).toEqual([true, true, true, true, true, true, true, true, false]);
-      expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-settled' }));
+      expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-settled' }));
       expect(continuations()).toEqual([first]);
       expect((await getChange(name, autoN)).json.state).toBe('open');
 
@@ -969,7 +969,7 @@ describe('lifecycle', () => {
       const meter = new CostMeter();
       const run = await runWithMeter(meter, () => runTrain(meter.wrapEnv(env), repoIds[name]!, MAIN, deps));
       expect(run.published).toEqual([a.change]);
-      const continuation = sent.map((m) => m.body).filter((b) => b?.type === 'forge.dependency-settle');
+      const continuation = sent.map((m) => m.body).filter((b) => b?.type === 'kvarm.dependency-settle');
       const mergeCommit = (await getChange(name, a.change!)).json.mergeCommit as string;
       expect(continuation).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit, ref: MAIN })]);
       // The intent is written after the recorded publication cost: that stays acquire + release.
@@ -979,8 +979,8 @@ describe('lifecycle', () => {
       expect((JSON.parse(entry!.cost) as CostCounters).do).toBe(2);
       expect(meter.snapshot().do).toBe(3);
       expect(await intentsOf(name)).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit, ref: MAIN })]);
-      for (let i = 0; i < 4 && sent.some((m) => m.body?.type === 'forge.dependency-settle'); i++) {
-        const next = sent.find((m) => m.body?.type === 'forge.dependency-settle')!.body;
+      for (let i = 0; i < 4 && sent.some((m) => m.body?.type === 'kvarm.dependency-settle'); i++) {
+        const next = sent.find((m) => m.body?.type === 'kvarm.dependency-settle')!.body;
         sent.length = 0;
         await deliver(next);
       }
@@ -1043,13 +1043,13 @@ describe('lifecycle', () => {
       SETTLE_LIMITS.maxPages = 2;
 
       // Injected failure: every continuation send rejects, at the landing and after it.
-      failSends.match = (b) => b?.type === 'forge.dependency-settle';
+      failSends.match = (b) => b?.type === 'kvarm.dependency-settle';
       sent.length = 0;
       const landed = await merge(name, a.change!);
       expect(landed.status, JSON.stringify(landed.json)).toBe(200);
       const mergeCommit = landed.json.merge.mergeCommit as string;
       expect(landed.cost.do).toBe(1);
-      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+      expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
       expect(await states(name, dependents)).toEqual([...Array(4).fill('satisfied'), ...Array(5).fill('stale')]);
 
       // The durable owner exists: the intent names the exact landing and the alarm is armed for it.
@@ -1074,7 +1074,7 @@ describe('lifecycle', () => {
         expect((await listDeps(name, d.id)).json.dependencies[0]).toMatchObject({ state: 'satisfied', satisfiedBy: mergeCommit });
       }
       // The queued dependent's partition is kicked once and the open auto dependent resumed and merged.
-      expect(sent.map((m) => m.body)).toEqual([{ type: 'forge.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
+      expect(sent.map((m) => m.body)).toEqual([{ type: 'kvarm.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
       expect((await getChange(name, autoN)).json.state).toBe('merged');
       expect(isAncestorOf(repo, dependents[8]!.head, repo.refs.get(MAIN)!)).toBe(true);
       expect(await wakeMarks(name)).toBe(0);
@@ -1126,11 +1126,11 @@ describe('lifecycle', () => {
       sent.length = 0;
       expect((await merge(name, a.change!)).status).toBe(200);
       expect(await states(name, dependents)).toEqual(['satisfied', 'satisfied', 'stale', 'stale']);
-      const first = sent.find((m) => m.body?.type === 'forge.dependency-settle')!.body;
+      const first = sent.find((m) => m.body?.type === 'kvarm.dependency-settle')!.body;
 
       // Injected failures after the segment's edge writes commit: the kick send rejects, and the real resume adapter's
       // merge of the auto dependent meets an unavailable ref store (503 STORAGE_UNAVAILABLE: operational, not a refusal).
-      failSends.match = (b) => b?.type === 'forge.train';
+      failSends.match = (b) => b?.type === 'kvarm.train';
       let lsRefsFailures = 0;
       repo.hook = async (call) => {
         if (call === 'lsRefs') {
@@ -1154,9 +1154,9 @@ describe('lifecycle', () => {
       failSends.match = null;
       sent.length = 0;
       await deliver(first);
-      const kicks = sent.filter((m) => m.body?.type === 'forge.train' && m.body.reason === 'dependency-settled');
-      expect(kicks.map((m) => m.body)).toEqual([{ type: 'forge.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
-      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+      const kicks = sent.filter((m) => m.body?.type === 'kvarm.train' && m.body.reason === 'dependency-settled');
+      expect(kicks.map((m) => m.body)).toEqual([{ type: 'kvarm.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
+      expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
       expect((await getChange(name, autoN)).json.state).toBe('merged');
       expect(isAncestorOf(repo, dependents[3]!.head, repo.refs.get(MAIN)!)).toBe(true);
       expect(await wakeMarks(name)).toBe(0);
@@ -1195,7 +1195,7 @@ describe('lifecycle', () => {
     expect(landed.cost.do).toBe(0);
     expect(await wakeMarks(name)).toBe(0);
     expect(await intentsOf(name)).toEqual([]);
-    expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+    expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
     expect((await getChange(name, dn)).json.state).toBe('open');
 
     // Landing the second source wakes it again through its own mark, and it merges.
@@ -1229,14 +1229,14 @@ describe('lifecycle', () => {
       expect(await states(name, dependents)).toEqual(['satisfied', 'satisfied']);
       expect(await wakeMarks(name)).toBe(2);
       // Both owners exist before the error propagated; nothing was woken yet.
-      const handed = sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+      const handed = sent.filter((m) => m.body?.type === 'kvarm.dependency-settle').map((m) => m.body);
       expect(handed).toEqual([expect.objectContaining({ repoId: repoIds[name], ref: MAIN })]);
       expect(await intentsOf(name)).toHaveLength(1);
-      expect(sent.filter((m) => m.body?.type === 'forge.train')).toEqual([]);
+      expect(sent.filter((m) => m.body?.type === 'kvarm.train')).toEqual([]);
 
       sent.length = 0;
       await deliver(handed[0]);
-      expect(sent.map((m) => m.body)).toEqual([{ type: 'forge.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
+      expect(sent.map((m) => m.body)).toEqual([{ type: 'kvarm.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
       expect((await getChange(name, autoN)).json.state).toBe('merged');
       expect(await wakeMarks(name)).toBe(0);
       // The second owner and a replay find nothing left: no kick, the intent is cleaned by its first wakeup.
@@ -1261,20 +1261,20 @@ describe('lifecycle', () => {
     const { a, dependents, changeFor } = await pinnedSource(name, 1);
     const queuedN = await changeFor(dependents[0]!, 'review');
     expect((await enqueue(name, queuedN)).status).toBe(201);
-    failSends.match = (b) => b?.type === 'forge.train';
+    failSends.match = (b) => b?.type === 'kvarm.train';
     sent.length = 0;
     const landed = await merge(name, a.change!);
     expect(landed.status).toBe(200);
     failSends.match = null;
     expect(await wakeMarks(name)).toBe(1);
-    const handed = sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+    const handed = sent.filter((m) => m.body?.type === 'kvarm.dependency-settle').map((m) => m.body);
     expect(handed).toHaveLength(1);
     expect(await intentsOf(name)).toHaveLength(1);
     sent.length = 0;
     return handed[0];
   }
 
-  const kicksSent = () => sent.filter((m) => m.body?.type === 'forge.train');
+  const kicksSent = () => sent.filter((m) => m.body?.type === 'kvarm.train');
 
   it('a kick whose mark deletion failed is not sent again by a retry while its claim is live', async () => {
     const name = 'settle-confirm-fail';
@@ -1319,7 +1319,7 @@ describe('lifecycle', () => {
     let nested: Promise<boolean> | null = null;
     onSend.fn = async (body) => {
       // While the continuation's kick is being sent, its claim is live: the alarm must not act on the same mark.
-      if (body?.type === 'forge.train' && !nested) {
+      if (body?.type === 'kvarm.train' && !nested) {
         nested = fireOwner(name);
         await nested;
       }
@@ -1349,7 +1349,7 @@ describe('lifecycle', () => {
       await push(name, a.ref, { 'README.md': 'readme\n', 'a.txt': 'a v2\n' }, [a.head]);
       DEPENDENCY_LIMITS.readMax = 1;
       SETTLE_LIMITS.maxPages = 1;
-      failSends.match = (b) => b?.type === 'forge.dependency-settle';
+      failSends.match = (b) => b?.type === 'kvarm.dependency-settle';
       expect((await merge(name, a.change!)).status).toBe(200);
       expect(await states(name, dependents)).toEqual(['satisfied', ...Array(4).fill('stale')]);
 
@@ -1401,7 +1401,7 @@ describe('lifecycle', () => {
     return { repo, a, older: ws, auto, autoN };
   }
 
-  const settleSends = () => sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+  const settleSends = () => sent.filter((m) => m.body?.type === 'kvarm.dependency-settle').map((m) => m.body);
 
   it('the wake accounting reports every mark of the landing that the bounded claim did not return', async () => {
     const saved = { readMax: DEPENDENCY_LIMITS.readMax, maxPages: SETTLE_LIMITS.maxPages };
@@ -1457,7 +1457,7 @@ describe('lifecycle', () => {
       expect(await wakeMarks(name)).toBe(1);
       // The displaced mark is still the landing's work: both owners exist.
       const handed = settleSends();
-      expect(handed).toEqual([{ type: 'forge.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN }]);
+      expect(handed).toEqual([{ type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN }]);
       expect(await intentsOf(name)).toEqual([expect.objectContaining({ mergeCommit, ref: MAIN })]);
 
       // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried, not acknowledged.
@@ -1584,20 +1584,20 @@ describe('lifecycle', () => {
     const queuedN = await changeFor(dependents[0]!, 'review');
     expect((await enqueue(name, queuedN)).status).toBe(201);
     // The pin is on the landed head: the merged-record batch satisfies it and records its wake mark.
-    failSends.match = (b) => b?.type === 'forge.train';
+    failSends.match = (b) => b?.type === 'kvarm.train';
     sent.length = 0;
     const landed = await merge(name, a.change!);
     expect(landed.status).toBe(200);
     expect(await states(name, dependents)).toEqual(['satisfied']);
     expect(await wakeMarks(name)).toBe(1);
-    const handed = sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body);
+    const handed = sent.filter((m) => m.body?.type === 'kvarm.dependency-settle').map((m) => m.body);
     expect(handed).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit: landed.json.merge.mergeCommit, ref: MAIN })]);
     expect(await intentsOf(name)).toHaveLength(1);
 
     failSends.match = null;
     sent.length = 0;
     await deliver(handed[0]);
-    expect(sent.map((m) => m.body)).toEqual([{ type: 'forge.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
+    expect(sent.map((m) => m.body)).toEqual([{ type: 'kvarm.train', repoId: repoIds[name], ref: MAIN, reason: 'dependency-settled' }]);
     expect(await wakeMarks(name)).toBe(0);
     sent.length = 0;
     expect(await fireOwner(name)).toBe(true);
@@ -1629,7 +1629,7 @@ describe('lifecycle', () => {
       const landed = await merge(name, a.change!);
       expect(landed.status).toBe(200);
       expect(writes).toBe(SETTLE_INTENT.writeAttempts);
-      expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle').map((m) => m.body)).toEqual([
+      expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle').map((m) => m.body)).toEqual([
         expect.objectContaining({ repoId: repoIds[name], mergeCommit: landed.json.merge.mergeCommit, ref: MAIN }),
       ]);
     } finally {
@@ -1648,7 +1648,7 @@ describe('lifecycle', () => {
     sent.length = 0;
     await deliver(body);
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM push_events WHERE repo_id = ?').bind(repoIds[name]).first<{ n: number }>())!.n).toBe(pushesBefore + 1);
-    expect(sent.filter((m) => m.body?.type === 'forge.dependency-settle')).toEqual([]);
+    expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
   });
 
   it('an auto dependent that is not queued resumes when its source lands or its pin is detached', async () => {
@@ -1738,7 +1738,7 @@ describe('integration train', () => {
     const guardBases = async () =>
       (
         await env.DB.prepare(
-          `SELECT json_extract(summary, '$.baseTree') AS base FROM check_runs WHERE repo_id = ?1 AND head_sha = ?2 AND name = 'forge/guard' ORDER BY created_at`,
+          `SELECT json_extract(summary, '$.baseTree') AS base FROM check_runs WHERE repo_id = ?1 AND head_sha = ?2 AND name = 'kvarm/guard' ORDER BY created_at`,
         )
           .bind(repoIds['train-stacked'], bHead)
           .all<{ base: string }>()
@@ -1750,7 +1750,7 @@ describe('integration train', () => {
     expect(first.published).toEqual([a.change]);
     // The source landed: B's merge base is now A's head, so its creation-time guard (judged against main's old tree) no longer answers.
     expect(await guardBases()).toEqual([commitOf(repo, main).tree, commitOf(repo, a.head).tree]);
-    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'guard-recorded' }));
+    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'guard-recorded' }));
 
     const second = await runTrain(env, repoIds['train-stacked']!, MAIN, trainDeps());
     expect(second.published).toEqual([b]);
@@ -1790,7 +1790,7 @@ describe('integration train', () => {
 
     sent.length = 0;
     expect((await detach('train-broken', b.id, edge.id)).status).toBe(200);
-    expect(sent.map((m) => m.body)).toEqual([expect.objectContaining({ type: 'forge.train', ref: MAIN })]);
+    expect(sent.map((m) => m.body)).toEqual([expect.objectContaining({ type: 'kvarm.train', ref: MAIN })]);
     const after = await runTrain(env, repoIds['train-broken']!, MAIN, trainDeps());
     expect(after.published).toEqual([b.change]);
     expect(repo.refs.get(b.ref)).toBe(b.head);
@@ -1805,7 +1805,7 @@ describe('integration train', () => {
     expect((await runTrain(env, repoIds['train-kick']!, MAIN, trainDeps())).published).toEqual([]);
     sent.length = 0;
     expect((await merge('train-kick', a.change!)).status).toBe(200);
-    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-landed' }));
+    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-landed' }));
     expect((await runTrain(env, repoIds['train-kick']!, MAIN, trainDeps())).published).toEqual([b.change]);
   });
 
@@ -2020,7 +2020,7 @@ describe('integration train', () => {
     const merged = (await getChange(name, n)).json;
     expect(merged).toMatchObject({ state: 'merged', mergeCommit: repo.refs.get(MAIN) });
     expect(await wakeMarks(name)).toBe(0);
-    expect(sent.filter((m) => m.body?.reason === 'dependency-landed' || m.body?.type === 'forge.dependency-settle')).toEqual([]);
+    expect(sent.filter((m) => m.body?.reason === 'dependency-landed' || m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
     const recorded = deps.events.find((e): e is Extract<TrainEvent, { type: 'publish' }> => e.type === 'publish' && e.status === 'recorded');
     expect(recorded?.cost).toMatchObject({ do: 2, sub: 2 });
     expect(recorded!.cost!.d1).toBeLessThanOrEqual(3);
@@ -2062,7 +2062,7 @@ describe('integration train', () => {
     );
     expect((await listDeps(name, b.id)).json.dependencies).toEqual([expect.objectContaining({ id: edge.id, state: 'satisfied', satisfiedBy: mergeCommit })]);
     expect((await listDeps(name, c.id)).json.dependencies).toEqual([expect.objectContaining({ id: older.id, state: 'satisfied', satisfiedBy: mergeCommit })]);
-    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'forge.train', ref: MAIN, reason: 'dependency-landed' }));
+    expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-landed' }));
     expect(await wakeMarks(name)).toBe(0);
     if (!first.published.includes(b.change!)) expect((await runTrain(env, repoIds[name]!, MAIN, trainDeps())).published).toEqual([b.change]);
   });

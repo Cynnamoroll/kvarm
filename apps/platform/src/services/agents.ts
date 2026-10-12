@@ -18,7 +18,7 @@
  * guard, plus a read that explains a write that changed nothing.
  */
 
-import { isValidRefPattern } from '@forge/gitops';
+import { isValidRefPattern } from '@kvarm/gitops';
 import { newAgentToken, parseRefList, type AgentRole } from '../auth/agentTokens';
 import { patHash } from '../auth/pat';
 import type { ServiceResult } from '../repos/service';

@@ -20,7 +20,7 @@ import {
   type PackInput,
   type RefCommand,
   type RefUpdateResult,
-} from '@forge/gitops';
+} from '@kvarm/gitops';
 import { internalKey, writeCachedJson } from '../src/cache/internal';
 import { withLazyRepo, type LazyRepo } from '../src/artifacts/repo';
 import type { RepoRow } from '../src/db/repos';
@@ -28,7 +28,7 @@ import { memoGate } from '../src/services/changes';
 import { checksGate, type ChecksProducer, type RequiredCheck } from '../src/services/checksGate';
 import { artifactsPusher, type GitPusher } from '../src/services/gitwrite';
 import {
-  FORGE_COMMITTER,
+  KVARM_COMMITTER,
   artifactsMergeSources,
   computeMergeability,
   prepareMerge,
@@ -309,7 +309,7 @@ describe('prepareMerge + publishMerge', () => {
     expect(hooked).toEqual([{ repo: REPO, ref: 'refs/heads/main', kind: 'fast-forward', mergeCommit: head, targetSha: base, headSha: head }]);
   });
 
-  it('three-way merge publishes a two-parent commit by the Forge committer with the objects it needs', async () => {
+  it('three-way merge publishes a two-parent commit by the Kvarm committer with the objects it needs', async () => {
     const store = new Store();
     const { head, main, mergedTree } = await divergent(store);
     const pusher = new FakePusher(store);
@@ -325,7 +325,7 @@ describe('prepareMerge + publishMerge', () => {
     expect(text).toBe(
       `tree ${mergedTree}\nparent ${main}\nparent ${head}\n` +
         `author Cynthia <cynthia@example.test> 1790100000 +0000\n` +
-        `committer ${FORGE_COMMITTER.name} <${FORGE_COMMITTER.email}> 1790100000 +0000\n\nMerge change 2: feature\n`,
+        `committer ${KVARM_COMMITTER.name} <${KVARM_COMMITTER.email}> 1790100000 +0000\n\nMerge change 2: feature\n`,
     );
 
     const r = await publishMerge({ pusher, gate: checksGate([]) }, target, prepared.value);

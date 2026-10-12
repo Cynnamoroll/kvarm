@@ -9,7 +9,7 @@
  *
  * Each row of the budget document is matched to one entry of
  * scripts/lib/cost-catalog.mjs. Live entries are checked against the
- * x-forge-cost samples (or stored/logged counters) this run records under
+ * x-kvarm-cost samples (or stored/logged counters) this run records under
  * their probe tag; non-live entries print their category and reason. The run
  * prints one verdict per row, the sweep row count against the document's
  * table row count, and exits 1 on any violation, missing sample, unmatched or
@@ -35,7 +35,7 @@ import { runContainerShowcase } from './lib/container-runner-demo.mjs';
 
 const { values: args } = parseArgs({
   options: {
-    'cost-md': { type: 'string', default: process.env.FORGE_COST_MD ?? '' },
+    'cost-md': { type: 'string', default: process.env.KVARM_COST_MD ?? '' },
     'coverage-only': { type: 'boolean', default: false },
     out: { type: 'string', default: '' },
     keep: { type: 'boolean', default: false },
@@ -67,24 +67,24 @@ if (args['coverage-only']) {
   process.exit(coverageOk ? 0 : 1);
 }
 
-const BASE = process.env.FORGE_BASE_URL;
-const PAT = process.env.FORGE_PAT;
-const OWNER = process.env.FORGE_USER;
+const BASE = process.env.KVARM_BASE_URL;
+const PAT = process.env.KVARM_PAT;
+const OWNER = process.env.KVARM_USER;
 const TOKENS = {
-  bot: process.env.FORGE_PAT_BOT,
-  noApi: process.env.FORGE_PAT_NO_API,
-  maint: process.env.FORGE_PAT_MAINT,
-  member: process.env.FORGE_PAT_MEMBER,
-  outsider: process.env.FORGE_PAT_OUTSIDER,
+  bot: process.env.KVARM_PAT_BOT,
+  noApi: process.env.KVARM_PAT_NO_API,
+  maint: process.env.KVARM_PAT_MAINT,
+  member: process.env.KVARM_PAT_MEMBER,
+  outsider: process.env.KVARM_PAT_OUTSIDER,
 };
-for (const [k, v] of Object.entries({ FORGE_BASE_URL: BASE, FORGE_PAT: PAT, FORGE_USER: OWNER, ...Object.fromEntries(Object.entries(TOKENS).map(([k, v]) => [`token ${k}`, v])) })) {
+for (const [k, v] of Object.entries({ KVARM_BASE_URL: BASE, KVARM_PAT: PAT, KVARM_USER: OWNER, ...Object.fromEntries(Object.entries(TOKENS).map(([k, v]) => [`token ${k}`, v])) })) {
   if (!v) {
     console.error(`missing ${k}: source apps/platform/.dev.vars.validation first`);
     process.exit(2);
   }
 }
 const LOGINS = { bot: 'forge-bot', maint: 'forge-org-maint', member: 'forge-org-member' };
-const FIXTURE = process.env.FORGE_FIXTURE_REPO ?? `${OWNER}/fixture-1m`;
+const FIXTURE = process.env.KVARM_FIXTURE_REPO ?? `${OWNER}/fixture-1m`;
 
 const live = createLive({ base: BASE, pat: PAT, log: (l) => console.log(l) });
 const { http, git } = live;
@@ -94,7 +94,7 @@ const R = (name, owner = OWNER) => `/api/v1/repos/${owner}/${name}`;
 const gitUrl = (name, owner = OWNER) => `${BASE}/${owner}/${name}.git`;
 const basic = (token) => `Basic ${Buffer.from(`x:${token}`).toString('base64')}`;
 const ZERO = '0'.repeat(40);
-const badPat = () => `forge_pat_${randomBytes(32).toString('hex')}`;
+const badPat = () => `kvarm_pat_${randomBytes(32).toString('hex')}`;
 
 const samples = new Map();
 function rec(tags, res, extra = {}, costOverride) {
@@ -442,8 +442,8 @@ await phase('compare, content reads, snapshots, checkout', async () => {
   rec('checkout.ready', await http(`${R(A)}/snapshots/main`, { method: 'POST', headers: { accept: 'application/json' } }), { kind: 'demand' });
   rec('checkout.ready', await http(`${R(A)}/snapshots/${sha}/download`, { binary: true }), { kind: 'download' });
   const out = join(live.work, 'checkout');
-  const co = spawnSync(process.execPath, [join(ROOT, 'apps/cli/bin/forge.js'), 'checkout', `${OWNER}/${A}`, 'main', out], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME, FORGE_BASE_URL: BASE, FORGE_PAT: PAT } });
-  say(`  forge checkout -> exit ${co.status}; ${(co.stdout.match(/source: \w+/) ?? ['source: ?'])[0]}`);
+  const co = spawnSync(process.execPath, [join(ROOT, 'apps/cli/bin/kvarm.js'), 'checkout', `${OWNER}/${A}`, 'main', out], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME, KVARM_BASE_URL: BASE, KVARM_PAT: PAT } });
+  say(`  kvarm checkout -> exit ${co.status}; ${(co.stdout.match(/source: \w+/) ?? ['source: ?'])[0]}`);
   rec('snap.demand.noApi', await http(`${R(A)}/snapshots/main`, { method: 'POST', token: TOKENS.noApi }));
 
   rec(['snap.demand'], await http(`${R(A)}/snapshots/feature`, { method: 'POST' }));
@@ -575,8 +575,8 @@ await phase('change requests, conflicts, tasks', async () => {
   const r5 = await resolve(t5, heads.cr, 'review', 'task.complete');
   rec('changes.detail.transition', await http(ch(`/${n5}`)));
   await until(
-    `forge/guard at the resolution of #${n5}`,
-    async () => (await http(ch(`/${n5}/checks`))).json?.checks?.some((k) => k.name === 'forge/guard' && k.headSha === r5.sha && k.status !== 'queued' && k.status !== 'running'),
+    `kvarm/guard at the resolution of #${n5}`,
+    async () => (await http(ch(`/${n5}/checks`))).json?.checks?.some((k) => k.name === 'kvarm/guard' && k.headSha === r5.sha && k.status !== 'queued' && k.status !== 'running'),
     90_000,
     1000,
   );
@@ -710,7 +710,7 @@ await phase('merge queue, train, reviews, dependencies, CI', async () => {
   };
   await fork('qb1', { 'q1.txt': '1\n' });
   await fork('qdraft', { 'qd.txt': 'd\n' });
-  await fork('qci', { 'qc.txt': 'c\n', '.forge/ci.json': `${JSON.stringify({ jobs: [{ name: 'test', run: 'true', required: true, timeoutSeconds: 60 }] })}\n` });
+  await fork('qci', { 'qc.txt': 'c\n', '.kvarm/ci.json': `${JSON.stringify({ jobs: [{ name: 'test', run: 'true', required: true, timeoutSeconds: 60 }] })}\n` });
   await fork('r1', { 'r1.txt': '1\n' });
   await fork('r2', { 'r2.txt': '2\n' });
   await lq.branch('main', q0);

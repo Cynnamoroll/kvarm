@@ -44,7 +44,7 @@ token cache is still used (a credential, not compare data).
 
 | check | result |
 | --- | --- |
-| 10 cold `compare/bench-base...bench-head?nocache=1` (admin PAT) | all 200 + `x-forge-cache: bypass`; **p50 494 ms** (min 406, max 1,490) |
+| 10 cold `compare/bench-base...bench-head?nocache=1` (admin PAT) | all 200 + `x-kvarm-cache: bypass`; **p50 494 ms** (min 406, max 1,490) |
 | cold body | 502 files, `truncated: false`, `totalsComplete: true`, `statsOmitted: true`, 109 KB |
 | cold cost | `art=56` = 54 tree reads + 2 (ls-refs and the head log; commits are no longer served from cache), `d1=1` |
 | anonymous / bot `?nocache=1` | served normally, never `bypass` (anonymous `miss`, bot `hit`) |

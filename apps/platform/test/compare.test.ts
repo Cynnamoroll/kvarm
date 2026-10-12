@@ -19,7 +19,7 @@ import {
   pktLine,
   readPktLines,
   type TreeEntry,
-} from '@forge/gitops';
+} from '@kvarm/gitops';
 import { getGitToken, purgeGitTokens } from '../src/artifacts/tokens';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { bumpRefGeneration, compareKeys, refGeneration } from '../src/cache/compare';
@@ -28,7 +28,7 @@ import { COMPARE_BUDGETS } from '../src/services/compare';
 import worker from '../src/index';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
@@ -227,7 +227,7 @@ async function call(path: string, token?: string): Promise<Reply> {
   } catch {
     // non-JSON (e.g. the generic not-found fallback)
   }
-  return { status: res.status, text, json, cost: cost!, cache: res.headers.get('x-forge-cache'), timing: res.headers.get('server-timing') };
+  return { status: res.status, text, json, cost: cost!, cache: res.headers.get('x-kvarm-cache'), timing: res.headers.get('server-timing') };
 }
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}/${rest}`;
@@ -1156,7 +1156,7 @@ describe('commit diff', () => {
 describe('risk-ranked compare', () => {
   const pkg = (deps: Record<string, string>) => `${JSON.stringify({ name: 'risk', version: '1.0.0', dependencies: deps }, null, 2)}\n`;
   const base: Files = {
-    '.forge/ci.json': '{"jobs":[{"name":"test","run":"npm test"}]}\n',
+    '.kvarm/ci.json': '{"jobs":[{"name":"test","run":"npm test"}]}\n',
     'test/app.test.ts': "import { it } from 'vitest';\nit('adds', () => {});\nit('subtracts', () => {});\n",
     'package-lock.json': '{"lockfileVersion":3,"packages":{"":{"name":"risk"}}}\n',
     'package.json': pkg({ hono: '^4.6.0' }),
@@ -1168,7 +1168,7 @@ describe('risk-ranked compare', () => {
     'README.md': '# Risk fixture\n\nThis repository exercises risk tags.\n',
   };
   const expected: Record<string, string> = {
-    '.forge/ci.json': 'ci-config',
+    '.kvarm/ci.json': 'ci-config',
     'test/app.test.ts': 'test-deletion',
     'package-lock.json': 'lockfile',
     'package.json': 'new-dependency',
@@ -1188,7 +1188,7 @@ describe('risk-ranked compare', () => {
       repo,
       {
         ...kept,
-        '.forge/ci.json': '{"jobs":[{"name":"test","run":"npm test || true"}]}\n',
+        '.kvarm/ci.json': '{"jobs":[{"name":"test","run":"npm test || true"}]}\n',
         'package-lock.json': '{"lockfileVersion":3,"packages":{"":{"name":"risk"},"node_modules/left-pad":{"version":"1.3.0"}}}\n',
         'package.json': pkg({ hono: '^4.6.0', 'left-pad': '1.3.0' }),
         'y.md': moved!,
@@ -1247,7 +1247,7 @@ describe('risk-ranked compare', () => {
     expect(rating.level).toBe('high');
     expect(Number.isInteger(rating.score) && rating.score <= 100).toBe(true);
     expect(rating.reasons.length).toBeGreaterThan(0);
-    expect(rating.reasons.join('\n')).toMatch(/\.forge\/ci\.json/);
+    expect(rating.reasons.join('\n')).toMatch(/\.kvarm\/ci\.json/);
     expect(rating.reasons.join('\n')).toMatch(/test\/app\.test\.ts/);
 
     const docs = await call(api('risk', 'compare/main...docs-only'), tok.owner);
@@ -1285,8 +1285,8 @@ describe('risk-ranked compare', () => {
 
 describe('pre-repair risk cache entries', () => {
   // Literal keys of the namespaces that held pre-repair risk output.
-  const legacyRisk = (b: string, h: string) => new Request(`https://forge.internal/risk/v1/${b}/${h}`);
-  const legacyBody = (b: string, h: string) => new Request(`https://forge.internal/treediff/v3/${b}/${h}`);
+  const legacyRisk = (b: string, h: string) => new Request(`https://kvarm.internal/risk/v1/${b}/${h}`);
+  const legacyBody = (b: string, h: string) => new Request(`https://kvarm.internal/treediff/v3/${b}/${h}`);
   const put = (k: Request, body: unknown) =>
     caches.default.put(k, new Response(JSON.stringify(body), { headers: { 'cache-control': 'max-age=3600, immutable' } }));
 

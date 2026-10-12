@@ -1,9 +1,9 @@
 /**
- * Commit attribution as git notes on refs/notes/forge-attribution.
+ * Commit attribution as git notes on refs/notes/kvarm-attribution.
  *
  * A note is the JSON record `{agent, session, promptHash, model?, actor, at}`
- * followed by a newline, so `git fetch <remote> refs/notes/forge-attribution:…`
- * plus `git notes --ref=forge-attribution show <sha>` reads exactly what the
+ * followed by a newline, so `git fetch <remote> refs/notes/kvarm-attribution:…`
+ * plus `git notes --ref=kvarm-attribution show <sha>` reads exactly what the
  * REST and MCP readers return. Writes build one notes commit on the current
  * notes tip and push it with that tip as the expected old value; a writer that
  * loses the race re-reads the tip and rebuilds, so concurrent writers never
@@ -13,13 +13,13 @@
  * checks access.
  */
 
-import { FORGE_NOTES_REF, NotesTreeError, ZERO_OID, buildNotesCommit, encode, findNote } from '@forge/gitops';
+import { KVARM_NOTES_REF, NotesTreeError, ZERO_OID, buildNotesCommit, encode, findNote } from '@kvarm/gitops';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
 import { artifactsPusher, type GitPusher } from './gitwrite';
-import { FORGE_COMMITTER, artifactsMergeSources } from './merge';
+import { KVARM_COMMITTER, artifactsMergeSources } from './merge';
 import { RefStoreUnavailable, isFullSha, lsRefs, readCommitInfo, type ResolveContext } from './refs';
 
 export const ATTRIBUTION_LIMITS = {
@@ -105,7 +105,7 @@ export function parseAttributionInput(input: unknown, defaults?: AttributionInpu
 
 /** The human the record names: an agent token's minting user, else the caller. */
 export function actorLogin(actor: Actor | null): string {
-  return actor?.user.login ?? 'forge';
+  return actor?.user.login ?? 'kvarm';
 }
 
 function makeRecord(input: AttributionInput, actor: string, at = new Date()): AttributionRecord {
@@ -139,7 +139,7 @@ export async function writeAttributionNote(
   const reader = artifactsMergeSources(ctx);
   const content = encode(`${JSON.stringify(record)}\n`);
   for (let attempt = 0; attempt < ATTRIBUTION_LIMITS.attempts; attempt++) {
-    const tip = (await lsRefs(ctx, [FORGE_NOTES_REF])).get(FORGE_NOTES_REF) ?? null;
+    const tip = (await lsRefs(ctx, [KVARM_NOTES_REF])).get(KVARM_NOTES_REF) ?? null;
     let parent: { commit: string; tree: string } | null = null;
     if (tip) {
       const info = await readCommitInfo(ctx, tip);
@@ -153,14 +153,14 @@ export async function writeAttributionNote(
         parent,
         target: sha,
         content,
-        author: { ...FORGE_COMMITTER, time: Math.floor(Date.now() / 1000) },
+        author: { ...KVARM_COMMITTER, time: Math.floor(Date.now() / 1000) },
         message: `Attribution for ${sha}\n`,
       });
     } catch (err) {
       if (err instanceof NotesTreeError) throw new RefStoreUnavailable(err.message);
       throw err;
     }
-    const r = await pusher.updateRef({ ref: FORGE_NOTES_REF, oldOid: tip ?? ZERO_OID, newOid: built.commit }, built.objects);
+    const r = await pusher.updateRef({ ref: KVARM_NOTES_REF, oldOid: tip ?? ZERO_OID, newOid: built.commit }, built.objects);
     if (r.status === 'stale') continue;
     if (r.status !== 'ok') {
       throw new RefStoreUnavailable(`notes update ${r.status}: ${r.reason ?? r.error ?? `HTTP ${r.httpStatus}`}`);
@@ -168,7 +168,7 @@ export async function writeAttributionNote(
     await recordLedger(cx.env, { repoId: cx.repo.id, commit: sha, notesCommit: built.commit, source, replaced: built.replaced !== null, attribution: record });
     return { record, replaced: built.replaced !== null, notesCommit: built.commit };
   }
-  throw new RefStoreUnavailable(`${FORGE_NOTES_REF} kept moving; retry`);
+  throw new RefStoreUnavailable(`${KVARM_NOTES_REF} kept moving; retry`);
 }
 
 /** Appends to the events ledger; a ledger failure is logged, the note already landed. */
@@ -229,7 +229,7 @@ export function getAttribution(cx: AttributionContext, sha: string): Promise<Ser
   return guarded(() =>
     withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx(cx, artifacts);
-      const tip = (await lsRefs(ctx, [FORGE_NOTES_REF])).get(FORGE_NOTES_REF) ?? null;
+      const tip = (await lsRefs(ctx, [KVARM_NOTES_REF])).get(KVARM_NOTES_REF) ?? null;
       if (!tip) return none;
       const info = await readCommitInfo(ctx, tip);
       if (!info) throw new RefStoreUnavailable(`notes commit ${tip} is not readable`);
@@ -268,13 +268,13 @@ export interface MergeAttributionInput {
 /** The defaults a merge fills in for fields its request omitted. */
 export function mergeAttributionDefaults(actor: Actor | null, changeNumber: number): AttributionInput {
   return {
-    agent: actor?.agent?.agentName ?? actor?.user.login ?? 'forge',
-    session: `forge:merge/change-${changeNumber}`,
+    agent: actor?.agent?.agentName ?? actor?.user.login ?? 'kvarm',
+    session: `kvarm:merge/change-${changeNumber}`,
     promptHash: null,
   };
 }
 
-/** Notes a Forge-created merge commit with the merging principal; failures are logged. */
+/** Notes a Kvarm-created merge commit with the merging principal; failures are logged. */
 export async function attributeMerge(cx: AttributionContext, artifacts: LazyRepo, pusher: GitPusher, m: MergeAttributionInput): Promise<void> {
   const input = m.input ?? mergeAttributionDefaults(cx.actor, m.changeNumber);
   try {
@@ -285,7 +285,7 @@ export async function attributeMerge(cx: AttributionContext, artifacts: LazyRepo
 }
 
 /**
- * Notes a commit Forge accepted on a principal's behalf (a completed task's
+ * Notes a commit Kvarm accepted on a principal's behalf (a completed task's
  * resolution) unless it already carries a note and the caller gave no
  * fields of its own; failures are logged. Returns whether a note was written.
  */

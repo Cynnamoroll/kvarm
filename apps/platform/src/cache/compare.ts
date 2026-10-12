@@ -15,7 +15,7 @@
  * read here; nothing in this module checks access.
  */
 
-const ORIGIN = 'https://forge.internal';
+const ORIGIN = 'https://kvarm.internal';
 const IMMUTABLE_TTL_SECONDS = 31536000;
 /** Ref names move; the generation bump on push and this TTL bound staleness. */
 export const REF_TTL_SECONDS = 30;

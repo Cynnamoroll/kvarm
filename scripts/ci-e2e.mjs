@@ -18,19 +18,19 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({ options: { keep: { type: 'boolean', default: false }, 'skip-lease': { type: 'boolean', default: false } } });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const PAT = process.env.FORGE_PAT;
-const NO_CI = process.env.FORGE_PAT_NO_CI;
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-if (!PAT || !NO_CI) throw new Error('FORGE_PAT and FORGE_PAT_NO_CI are required');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const PAT = process.env.KVARM_PAT;
+const NO_CI = process.env.KVARM_PAT_NO_CI;
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+if (!PAT || !NO_CI) throw new Error('KVARM_PAT and KVARM_PAT_NO_CI are required');
 const repo = `m5-ci-pipeline-runner-core-${Math.floor(Date.now() / 1000)}`;
 const R = `/api/v1/repos/${OWNER}/${repo}`;
-const root = mkdtempSync(join(tmpdir(), 'forge-ci-e2e-'));
+const root = mkdtempSync(join(tmpdir(), 'kvarm-ci-e2e-'));
 const work = join(root, 'work');
 const askpass = join(root, 'askpass.sh');
 const results = [];
 
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -58,12 +58,12 @@ async function api(path, { method = 'GET', body, token = PAT } = {}) {
   try {
     json = JSON.parse(text);
   } catch {}
-  return { status: res.status, json, text, rawCost: res.headers.get('x-forge-cost'), cost: cost(res.headers.get('x-forge-cost')) };
+  return { status: res.status, json, text, rawCost: res.headers.get('x-kvarm-cost'), cost: cost(res.headers.get('x-kvarm-cost')) };
 }
 function git(args, token = PAT) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd: work,
-    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token },
+    env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token },
     encoding: 'utf8',
   });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
@@ -80,9 +80,9 @@ async function waitChecks(number, predicate, ms = 60_000) {
   throw new Error(`checks timeout: ${JSON.stringify(last?.json)}`);
 }
 function runCli() {
-  const r = spawnSync(process.execPath, ['apps/cli/bin/forge.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', join(root, 'runner')], {
+  const r = spawnSync(process.execPath, ['apps/cli/bin/kvarm.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', join(root, 'runner')], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, FORGE_BASE_URL: BASE, FORGE_PAT: PAT },
+    env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
     encoding: 'utf8',
     timeout: 120_000,
   });
@@ -116,9 +116,9 @@ try {
   created = true;
   mkdirSync(work);
   git(['init', '-q', '-b', 'main']);
-  mkdirSync(join(work, '.forge'), { recursive: true });
+  mkdirSync(join(work, '.kvarm'), { recursive: true });
   writeFileSync(
-    join(work, '.forge', 'ci.json'),
+    join(work, '.kvarm', 'ci.json'),
     `${JSON.stringify({ jobs: [{ name: 'build', run: 'cat ci-marker.txt', required: true }, { name: 'optional', run: 'exit 1', required: false }] })}\n`,
   );
   writeFileSync(join(work, 'README.md'), 'base\n');
@@ -136,7 +136,7 @@ try {
   const change = await api(`${R}/changes`, { method: 'POST', body: { title: 'CI change', base: 'main', head: 'feature', mergePolicy: 'review' } });
   if (change.status !== 201) throw new Error(`change create ${change.status}: ${change.text}`);
   const queued = await waitChecks(1, (xs) => xs.some((x) => x.name === 'build' && x.status === 'queued') && xs.some((x) => x.name === 'optional'));
-  check('VAL-CI-001', 'ci.json queued build and optional checks at exact head', queued.every((x) => x.name === 'forge/guard' || x.headSha === head1), head1);
+  check('VAL-CI-001', 'ci.json queued build and optional checks at exact head', queued.every((x) => x.name === 'kvarm/guard' || x.headSha === head1), head1);
 
   const denied = await api(`${R}/ci/jobs/claim`, { method: 'POST', token: NO_CI, body: { runnerId: 'no-ci' } });
   check('VAL-CI-007', 'NO_CI PAT is rejected', denied.status === 403 && denied.json?.code === 'INSUFFICIENT_SCOPE', `${denied.status} ${denied.json?.code}`);
@@ -166,14 +166,14 @@ try {
   const wb = await api(`${R}/workspaces`, { method: 'POST', body: { task: 'semantic b', agent: 'ci-e2e' }, token: tok });
   if (wa.status !== 201 || wb.status !== 201) throw new Error(`workspace create failed: ${wa.status}/${wb.status}`);
   git(['checkout', '-q', '--detach', composedBase]);
-  writeFileSync(join(work, '.forge', 'ci.json'), semanticConfig);
+  writeFileSync(join(work, '.kvarm', 'ci.json'), semanticConfig);
   writeFileSync(join(work, 'a.txt'), 'a\n');
   git(['add', '-A']);
   git(['commit', '-q', '-m', 'semantic a']);
   const aSha = git(['rev-parse', 'HEAD']);
   git(['push', '-q', url, `HEAD:${wa.json.ref}`], tok);
   git(['checkout', '-q', '--detach', composedBase]);
-  writeFileSync(join(work, '.forge', 'ci.json'), semanticConfig);
+  writeFileSync(join(work, '.kvarm', 'ci.json'), semanticConfig);
   writeFileSync(join(work, 'b.txt'), 'b\n');
   git(['add', '-A']);
   git(['commit', '-q', '-m', 'semantic b']);
@@ -211,7 +211,7 @@ try {
 
   git(['checkout', '-q', 'main']);
   git(['checkout', '-q', '-b', 'lease']);
-  writeFileSync(join(work, '.forge', 'ci.json'), `${JSON.stringify({ jobs: [{ name: 'lease', run: 'echo lease', required: true }] })}\n`);
+  writeFileSync(join(work, '.kvarm', 'ci.json'), `${JSON.stringify({ jobs: [{ name: 'lease', run: 'echo lease', required: true }] })}\n`);
   writeFileSync(join(work, 'lease.txt'), 'lease\n');
   git(['add', '-A']);
   git(['commit', '-q', '-m', 'lease']);

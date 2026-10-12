@@ -3,8 +3,8 @@
  * and one transport per request, JSON responses (no SSE stream, no sessions,
  * no elicitation).
  *
- * Tools are the shared operation registry (@forge/ops), the same list the
- * `forge` CLI exposes. A tool call is dispatched in-process to the REST route
+ * Tools are the shared operation registry (@kvarm/ops), the same list the
+ * `kvarm` CLI exposes. A tool call is dispatched in-process to the REST route
  * the registry names, with the caller's Bearer token, so permission checks,
  * error codes and work counters are those of the REST call. A non-2xx REST
  * reply becomes an `isError` result carrying `{status, error, code}`; the
@@ -19,11 +19,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
-import { OPERATIONS, OperationInputError, buildRequest, requestTarget } from '@forge/ops';
+import { OPERATIONS, OperationInputError, buildRequest, requestTarget } from '@kvarm/ops';
 import { patHash, readPatCache, scopesAllow, type PATInfo } from '../auth/pat';
 import { observePrincipals, resolvePAT, tokenKind } from '../services/access';
 
-export const MCP_SERVER_INFO = { name: 'veyr-9', version: '0.1.0' } as const;
+export const MCP_SERVER_INFO = { name: 'Kvarm', version: '0.1.0' } as const;
 
 /** Largest JSON-RPC request body accepted. */
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -144,7 +144,7 @@ function buildServer(cx: CallContext): McpServer {
     capabilities: { tools: {} },
     jsonSchemaValidator: NO_SCHEMA_VALIDATOR,
     instructions:
-      'Veyr-9 forge tools. Each tool maps onto one REST endpoint under /api/v1 with the same permissions, ' +
+      'Kvarm tools. Each tool maps onto one REST endpoint under /api/v1 with the same permissions, ' +
       'errors and cost. Failures come back as isError results with {status, error, code}.',
   });
   const all = inputShapes();
@@ -172,7 +172,7 @@ const JSON_HEADERS = { 'content-type': 'application/json' };
 function unauthorized(): Response {
   return new Response(JSON.stringify({ error: 'unauthorized', code: 'UNAUTHENTICATED' }), {
     status: 401,
-    headers: { ...JSON_HEADERS, 'www-authenticate': 'Bearer realm="forge"' },
+    headers: { ...JSON_HEADERS, 'www-authenticate': 'Bearer realm="kvarm"' },
   });
 }
 

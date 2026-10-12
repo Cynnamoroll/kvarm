@@ -38,7 +38,7 @@ export const GIT_PATH_RE =
 function unauthorized(): Response {
   return new Response(null, {
     status: 401,
-    headers: { 'WWW-Authenticate': 'Basic realm="forge", charset="UTF-8"' },
+    headers: { 'WWW-Authenticate': 'Basic realm="kvarm", charset="UTF-8"' },
   });
 }
 
@@ -112,8 +112,8 @@ export function infoRefsCacheKey(
 ): Request {
   const keyUrl = new URL(`${artifactsRemote}/info/refs`);
   keyUrl.search = search;
-  keyUrl.searchParams.set('forge-git-protocol', gitProtocol ?? '');
-  keyUrl.searchParams.set('forge-gen', generation);
+  keyUrl.searchParams.set('kvarm-git-protocol', gitProtocol ?? '');
+  keyUrl.searchParams.set('kvarm-gen', generation);
   return new Request(keyUrl.toString(), { method: 'GET' });
 }
 

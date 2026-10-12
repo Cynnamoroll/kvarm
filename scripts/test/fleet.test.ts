@@ -192,7 +192,7 @@ describe('retryAfterMs', () => {
 });
 
 describe('cost parsing and budgets', () => {
-  it('parses x-forge-cost and checks a documented budget row', () => {
+  it('parses x-kvarm-cost and checks a documented budget row', () => {
     const c = parseCost('d1=3;rr=9;rw=3;art=2;do=2;sub=2;cache=none');
     expect(c).toMatchObject({ d1: 3, rr: 9, rw: 3, art: 2, do: 2, sub: 2 });
     expect(withinBudget(c, 'd1<=3;rr<=12;rw<=8;art<=4;do=2').ok).toBe(true);

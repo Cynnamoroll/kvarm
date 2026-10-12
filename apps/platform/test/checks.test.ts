@@ -1,5 +1,5 @@
 /**
- * Check runs (services/checks.ts): the forge/guard run recorded on change
+ * Check runs (services/checks.ts): the kvarm/guard run recorded on change
  * creation and head refresh, its findings and redaction, the commit status
  * rollup, reported runs through the ci transport, and the check-runs
  * producer as the checks gate of merges. Runs through the Worker's routes
@@ -16,7 +16,7 @@ import { CHECK_LIMITS, GUARD_BUDGETS, checkRunsProducer } from '../src/services/
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'ck-owner';
 const MAIN = 'refs/heads/main';
 const FEATURE = 'refs/heads/feature';
@@ -45,7 +45,7 @@ const repoIds: Record<string, string> = {};
 
 // Fake credentials, assembled so no literal token sits in the source.
 const AWS_KEY = 'AKIA' + 'IOSFODNN7EXAMPLE';
-const FORGE_PAT = 'forge_pat_' + 'fedcba9876543210'.repeat(4);
+const KVARM_PAT = 'kvarm_pat_' + 'fedcba9876543210'.repeat(4);
 
 async function seedUser(login: string): Promise<string> {
   const id = crypto.randomUUID();
@@ -150,18 +150,18 @@ beforeAll(async () => {
 
 afterAll(() => restoreFetch());
 
-describe('forge/guard on creation and head refresh', () => {
+describe('kvarm/guard on creation and head refresh', () => {
   it('records one guard run at creation and a new one when the head moves; the status shows only the guard (VAL-GUARD-001/006)', async () => {
     const repo = await seedRepo('refresh');
     const { feature } = await fixture(repo, BASE, { 'README.md': '# App\n\nMore words.\n' });
     const created = await create('refresh');
     expect(created.status).toBe(201);
-    expect(created.json.checks).toMatchObject([{ name: 'forge/guard', headSha: feature.sha, status: 'success', conclusion: 'success' }]);
+    expect(created.json.checks).toMatchObject([{ name: 'kvarm/guard', headSha: feature.sha, status: 'success', conclusion: 'success' }]);
 
     const first = await checksOf('refresh');
     expect(first.json.checks).toHaveLength(1);
     expect(first.json.checks[0]).toMatchObject({
-      name: 'forge/guard',
+      name: 'kvarm/guard',
       headSha: feature.sha,
       treeSha: feature.tree,
       status: 'success',
@@ -179,13 +179,13 @@ describe('forge/guard on creation and head refresh', () => {
     await deliver(push);
     const second = await checksOf('refresh');
     expect(second.json.checks.map((c: any) => [c.name, c.headSha, c.status])).toEqual([
-      ['forge/guard', next.sha, 'success'],
-      ['forge/guard', feature.sha, 'success'],
+      ['kvarm/guard', next.sha, 'success'],
+      ['kvarm/guard', feature.sha, 'success'],
     ]);
 
     const status = await call('GET', `${R('refresh')}/commits/${next.sha}/status`, tok.owner);
     expect(status.status).toBe(200);
-    expect(status.json).toMatchObject({ sha: next.sha, state: 'success', total: 1, checks: [{ name: 'forge/guard', headSha: next.sha }] });
+    expect(status.json).toMatchObject({ sha: next.sha, state: 'success', total: 1, checks: [{ name: 'kvarm/guard', headSha: next.sha }] });
     expect(status.cost.d1).toBe(2);
     const none = await call('GET', `${R('refresh')}/commits/${'0'.repeat(40)}/status`, tok.owner);
     expect(none.json).toMatchObject({ state: 'none', total: 0, checks: [] });
@@ -197,31 +197,31 @@ describe('forge/guard on creation and head refresh', () => {
 describe('guard findings', () => {
   it('fails a planted secret with path, line and rule, redacted everywhere, and blocks the merge (VAL-GUARD-002/007)', async () => {
     const repo = await seedRepo('secret');
-    const { main } = await fixture(repo, BASE, { 'secrets.txt': `aws_key=${AWS_KEY}\nforge_token=${FORGE_PAT}\n` });
+    const { main } = await fixture(repo, BASE, { 'secrets.txt': `aws_key=${AWS_KEY}\nkvarm_token=${KVARM_PAT}\n` });
     const created = await create('secret');
     expect(created.status).toBe(201);
     const checks = await checksOf('secret');
     const run = checks.json.checks[0];
-    expect(run).toMatchObject({ name: 'forge/guard', status: 'failure', conclusion: 'failure' });
+    expect(run).toMatchObject({ name: 'kvarm/guard', status: 'failure', conclusion: 'failure' });
     expect(run.summary.findings).toEqual([
       expect.objectContaining({ path: 'secrets.txt', line: 1, rule: 'secret/aws-access-key', message: expect.any(String) }),
-      expect.objectContaining({ path: 'secrets.txt', line: 2, rule: 'secret/forge-token', message: expect.any(String) }),
+      expect.objectContaining({ path: 'secrets.txt', line: 2, rule: 'secret/kvarm-token', message: expect.any(String) }),
     ]);
 
     const detail = await call('GET', `${R('secret')}/changes/1`, tok.owner);
-    expect(detail.json.mergeability.checks).toMatchObject({ state: 'failure', required: [{ name: 'forge/guard', state: 'failure' }] });
+    expect(detail.json.mergeability.checks).toMatchObject({ state: 'failure', required: [{ name: 'kvarm/guard', state: 'failure' }] });
     const status = await call('GET', `${R('secret')}/commits/${run.headSha}/status`, tok.owner);
     expect(status.json.state).toBe('failure');
     for (const text of [created.text, checks.text, detail.text, status.text]) {
       expect(text).not.toContain(AWS_KEY);
-      expect(text).not.toContain(FORGE_PAT);
+      expect(text).not.toContain(KVARM_PAT);
     }
     const stored = await env.DB.prepare('SELECT summary FROM check_runs WHERE repo_id = ?').bind(repoIds.secret).all<{ summary: string }>();
     for (const r of stored.results ?? []) expect(r.summary).not.toContain(AWS_KEY);
 
     const merge = await call('POST', `${R('secret')}/changes/1/merge`, tok.owner);
     expect([merge.status, merge.json.code]).toEqual([409, 'REQUIRED_CHECKS_FAILED']);
-    expect(merge.json.error).toContain('forge/guard');
+    expect(merge.json.error).toContain('kvarm/guard');
     expect(repo.refs.get(MAIN)).toBe(main.sha);
     expect((await call('GET', `${R('secret')}/changes/1`, tok.owner)).json.state).toBe('open');
   });
@@ -229,11 +229,11 @@ describe('guard findings', () => {
   it('fails CI gaming, a deleted test and flags a typosquatted dependency (VAL-GUARD-003/004/005)', async () => {
     const ci = (run: string) => JSON.stringify({ jobs: [{ name: 'test', run }] }, null, 2) + '\n';
     const gaming = await seedRepo('gaming');
-    await fixture(gaming, { ...BASE, '.forge/ci.json': ci('npm test') }, { '.forge/ci.json': ci('npm test || true') });
+    await fixture(gaming, { ...BASE, '.kvarm/ci.json': ci('npm test') }, { '.kvarm/ci.json': ci('npm test || true') });
     await create('gaming');
-    const g = (await checksOf('gaming')).json.checks.find((r: any) => r.name === 'forge/guard');
+    const g = (await checksOf('gaming')).json.checks.find((r: any) => r.name === 'kvarm/guard');
     expect(g.status).toBe('failure');
-    expect(g.summary.findings).toEqual([expect.objectContaining({ path: '.forge/ci.json', rule: 'ci-gaming/or-true', line: 5 })]);
+    expect(g.summary.findings).toEqual([expect.objectContaining({ path: '.kvarm/ci.json', rule: 'ci-gaming/or-true', line: 5 })]);
 
     const deleted = await seedRepo('deleted');
     await fixture(deleted, { ...BASE, 'tests/app.test.js': "test('x', () => {});\n" }, { 'tests/app.test.js': null });
@@ -274,7 +274,7 @@ describe('the guard as the checks gate', () => {
         await env.DB.prepare(
           `SELECT c.id AS change_id, k.id AS run_id, k.summary
              FROM change_sets c JOIN check_runs k ON k.change_set_id = c.id
-            WHERE c.repo_id = ? AND k.name = 'forge/guard'
+            WHERE c.repo_id = ? AND k.name = 'kvarm/guard'
             ORDER BY c.number`,
         )
           .bind(repoIds['guard-identity'])
@@ -299,7 +299,7 @@ describe('the guard as the checks gate', () => {
         env.DB.prepare(
           `INSERT INTO check_runs
              (id, repo_id, change_set_id, head_sha, tree_sha, name, status, conclusion, summary, attempt, required, quarantined, created_at)
-           VALUES (?, ?, ?, ?, ?, 'forge/guard', 'success', 'success', ?, 1, 1, 0, ?)`,
+           VALUES (?, ?, ?, ?, ?, 'kvarm/guard', 'success', 'success', ?, 1, 1, 0, ?)`,
         ).bind(crypto.randomUUID(), repoIds['guard-identity'], changeId, feature.sha, feature.tree, rows[0]!.summary, 200 + number),
       );
     }
@@ -327,10 +327,10 @@ describe('the guard as the checks gate', () => {
         { changeId: rows[0]!.change_id, headSha: feature.sha, guardBaseTree: 'f'.repeat(40) },
       ),
     ]);
-    expect(first.find((c) => c.name === 'forge/guard')?.state).toBe('failure');
-    expect(second.find((c) => c.name === 'forge/guard')?.state).toBe('success');
-    expect(staleBase.find((c) => c.name === 'forge/guard')).toMatchObject({ state: 'pending' });
-    expect(first).toContainEqual({ name: 'forge/checks-window', state: 'pending' });
+    expect(first.find((c) => c.name === 'kvarm/guard')?.state).toBe('failure');
+    expect(second.find((c) => c.name === 'kvarm/guard')?.state).toBe('success');
+    expect(staleBase.find((c) => c.name === 'kvarm/guard')).toMatchObject({ state: 'pending' });
+    expect(first).toContainEqual({ name: 'kvarm/checks-window', state: 'pending' });
   });
 
   it('marks a full exact-tree result window pending without penalizing an under-full tree', async () => {
@@ -340,7 +340,7 @@ describe('the guard as the checks gate', () => {
     const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
       .bind(repoIds['checks-window'])
       .first<{ id: string }>();
-    const guard = await env.DB.prepare(`SELECT summary FROM check_runs WHERE change_set_id = ? AND name = 'forge/guard'`)
+    const guard = await env.DB.prepare(`SELECT summary FROM check_runs WHERE change_set_id = ? AND name = 'kvarm/guard'`)
       .bind(change!.id)
       .first<{ summary: string }>();
     const baseTree = (JSON.parse(guard!.summary) as { baseTree: string }).baseTree;
@@ -368,8 +368,8 @@ describe('the guard as the checks gate', () => {
       gate.requiredChecksFor({ id: repoIds['checks-window']! }, fullTree, null, subject),
       gate.requiredChecksFor({ id: repoIds['checks-window']! }, shortTree, null, subject),
     ]);
-    expect(full).toContainEqual({ name: 'forge/checks-window', state: 'pending' });
-    expect(short).not.toContainEqual(expect.objectContaining({ name: 'forge/checks-window' }));
+    expect(full).toContainEqual({ name: 'kvarm/checks-window', state: 'pending' });
+    expect(short).not.toContainEqual(expect.objectContaining({ name: 'kvarm/checks-window' }));
   });
 
   it('an auto change with a failing guard stays open; the clean head pushed over it merges on its own (VAL-MERGE-006)', async () => {
@@ -387,14 +387,14 @@ describe('the guard as the checks gate', () => {
 });
 
 describe('reported check runs', () => {
-  it('needs the ci scope, reserves forge/ names, and validates the body', async () => {
+  it('needs the ci scope, reserves kvarm/ names, and validates the body', async () => {
     const repo = await seedRepo('report-auth');
     const { feature } = await fixture(repo, BASE, { 'notes.txt': 'n\n' });
     const body = { headSha: feature.sha, name: 'test', conclusion: 'success' };
     expect((await report('report-auth', body, tok.noCi)).json.code).toBe('INSUFFICIENT_SCOPE');
     expect((await report('report-auth', body, tok.reader)).status).toBe(404);
     expect((await report('report-auth', body, '')).status).toBe(401);
-    expect((await report('report-auth', { ...body, name: 'forge/guard' })).json.code).toBe('RESERVED_CHECK_NAME');
+    expect((await report('report-auth', { ...body, name: 'kvarm/guard' })).json.code).toBe('RESERVED_CHECK_NAME');
     expect((await report('report-auth', { ...body, headSha: 'abc' })).json.code).toBe('INVALID_SHA');
     expect((await report('report-auth', { ...body, conclusion: 'meh' })).json.code).toBe('INVALID_CONCLUSION');
     expect((await report('report-auth', { ...body, headSha: 'f'.repeat(40) })).json.code).toBe('COMMIT_NOT_FOUND');
@@ -468,8 +468,8 @@ describe('CI pipeline runner', () => {
     ]);
     const { feature } = await fixture(
       repo,
-      { ...BASE, '.forge/ci.json': config },
-      { '.forge/ci.json': config, 'ci-marker.txt': 'marker-at-head\n' },
+      { ...BASE, '.kvarm/ci.json': config },
+      { '.kvarm/ci.json': config, 'ci-marker.txt': 'marker-at-head\n' },
     );
     const snapshotWorkflow = env.SNAPSHOT_BUILDER as unknown as FakeWorkflow;
     const snapshotCalls = snapshotWorkflow.created.length;
@@ -480,7 +480,7 @@ describe('CI pipeline runner', () => {
     expect(queued.json.checks.map((r: any) => [r.name, r.status, r.required, r.attempt, r.headSha, r.treeSha])).toEqual([
       ['optional', 'queued', false, 1, feature.sha, feature.tree],
       ['build', 'queued', true, 1, feature.sha, feature.tree],
-      ['forge/guard', 'success', true, 1, feature.sha, feature.tree],
+      ['kvarm/guard', 'success', true, 1, feature.sha, feature.tree],
     ]);
 
     const claimPath = `${R('ci-runner')}/ci/jobs/claim`;
@@ -508,7 +508,7 @@ describe('CI pipeline runner', () => {
       startedAt: expect.any(String),
     });
 
-    const guardId = queued.json.checks.find((r: any) => r.name === 'forge/guard').id;
+    const guardId = queued.json.checks.find((r: any) => r.name === 'kvarm/guard').id;
     const buildId = queued.json.checks.find((r: any) => r.name === 'build').id;
     expect((await call('PATCH', `${R('ci-runner')}/check-runs/${guardId}`, tok.ci, { conclusion: 'failure' })).json.code).toBe('RESERVED_CHECK_RUN');
     expect((await call('PATCH', `${R('ci-runner')}/check-runs/${buildId}`, tok.ci, { conclusion: 'failure' })).json.code).toBe('RESERVED_CHECK_RUN');
@@ -565,7 +565,7 @@ describe('CI pipeline runner', () => {
   it('counts report summaries in UTF-8 bytes and reclaims the same job after an oversized report expires', async () => {
     const repo = await seedRepo('ci-summary-bytes');
     const config = ci([{ name: 'test', run: 'echo ok', required: true }]);
-    await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'one.txt': 'one\n' });
+    await fixture(repo, { ...BASE, '.kvarm/ci.json': config }, { '.kvarm/ci.json': config, 'one.txt': 'one\n' });
     await create('ci-summary-bytes');
     const claimPath = `${R('ci-summary-bytes')}/ci/jobs/claim`;
     const first = await call('POST', claimPath, tok.ci, { runnerId: 'runner-a' });
@@ -599,9 +599,9 @@ describe('CI pipeline runner', () => {
   it('queues a fresh job set after the change head moves (VAL-CI-002)', async () => {
     const repo = await seedRepo('ci-refresh');
     const config = ci([{ name: 'test', run: 'echo ok', required: true }]);
-    const { feature } = await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'one.txt': 'one\n' });
+    const { feature } = await fixture(repo, { ...BASE, '.kvarm/ci.json': config }, { '.kvarm/ci.json': config, 'one.txt': 'one\n' });
     await create('ci-refresh');
-    const next = await commit(repo, { ...BASE, '.forge/ci.json': config, 'two.txt': 'two\n' }, [feature.sha]);
+    const next = await commit(repo, { ...BASE, '.kvarm/ci.json': config, 'two.txt': 'two\n' }, [feature.sha]);
     repo.refs.set(FEATURE, next.sha);
     await deliver(pushBody('ci-refresh', FEATURE, feature.sha, next.sha, Date.now() + 1_000));
     const checks = await checksOf('ci-refresh');
@@ -614,7 +614,7 @@ describe('CI pipeline runner', () => {
   it('queues and requires CI on the exact merge tree when the base advanced (VAL-MERGE-003/007)', async () => {
     const repo = await seedRepo('ci-merge-tree');
     const config = ci([{ name: 'merge-test', run: 'test -f base-moved.txt', required: true }]);
-    const { main, feature } = await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'feature.txt': 'feature\n' });
+    const { main, feature } = await fixture(repo, { ...BASE, '.kvarm/ci.json': config }, { '.kvarm/ci.json': config, 'feature.txt': 'feature\n' });
     await create('ci-merge-tree');
     const headClaim = await call('POST', `${R('ci-merge-tree')}/ci/jobs/claim`, tok.ci, { runnerId: 'head' });
     await call('POST', `${R('ci-merge-tree')}/ci/jobs/${headClaim.json.job.id}/report`, tok.ci, {
@@ -622,7 +622,7 @@ describe('CI pipeline runner', () => {
       generation: headClaim.json.job.generation,
       conclusion: 'success',
     });
-    const movedBase = await commit(repo, { ...BASE, '.forge/ci.json': config, 'base-moved.txt': 'base\n' }, [main.sha]);
+    const movedBase = await commit(repo, { ...BASE, '.kvarm/ci.json': config, 'base-moved.txt': 'base\n' }, [main.sha]);
     repo.refs.set(MAIN, movedBase.sha);
 
     const pending = await call('POST', `${R('ci-merge-tree')}/changes/1/merge`, tok.owner);
@@ -642,9 +642,20 @@ describe('CI pipeline runner', () => {
 
   it('rejects an invalid CI config before persisting a change', async () => {
     const repo = await seedRepo('ci-invalid-create');
-    await fixture(repo, { ...BASE, '.forge/ci.json': '{bad' }, { 'feature.txt': 'feature\n' });
+    await fixture(repo, { ...BASE, '.kvarm/ci.json': '{bad' }, { 'feature.txt': 'feature\n' });
     const refused = await create('ci-invalid-create');
     expect([refused.status, refused.json.code]).toEqual([422, 'INVALID_CI_CONFIG']);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_sets WHERE repo_id = ?').bind(repoIds['ci-invalid-create']).first('n')).toBe(0);
+  });
+
+  it('ignores the same manifest at the retired .forge/ci.json path', async () => {
+    const repo = await seedRepo('ci-retired-path');
+    const config = ci([{ name: 'test', run: 'echo ok', required: true }]);
+    const { feature } = await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'one.txt': 'one\n' });
+    expect((await create('ci-retired-path')).status).toBe(201);
+    const checks = await checksOf('ci-retired-path');
+    expect(checks.json.checks.map((r: any) => [r.name, r.headSha])).toEqual([['kvarm/guard', feature.sha]]);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM ci_jobs WHERE repo_id = ?').bind(repoIds['ci-retired-path']).first('n')).toBe(0);
+    expect((await call('POST', `${R('ci-retired-path')}/ci/jobs/claim`, tok.ci, { runnerId: 'retired' })).status).toBe(204);
   });
 });

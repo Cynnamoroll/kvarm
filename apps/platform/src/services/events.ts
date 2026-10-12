@@ -21,7 +21,7 @@
  * transition reuses the existing snapshot instead of rebuilding it.
  */
 
-import { sha256Hex, ZERO_OID } from '@forge/gitops';
+import { sha256Hex, ZERO_OID } from '@kvarm/gitops';
 import { bumpRefGeneration } from '../cache/compare';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import type { ServiceResult } from '../repos/service';

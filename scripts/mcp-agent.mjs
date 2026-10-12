@@ -1,32 +1,32 @@
 #!/usr/bin/env node
 /**
- * MCP client for the Veyr-9 platform (`POST $FORGE_BASE_URL/mcp`), built on
+ * MCP client for the Kvarm platform (`POST $KVARM_BASE_URL/mcp`), built on
  * the official SDK client (`client/index.js` + `client/streamableHttp.js`).
  *
  *   node scripts/mcp-agent.mjs info
  *       connect (initialize), print server name/version and capabilities,
  *       then listTools: count, names and a description/input-schema check
  *   node scripts/mcp-agent.mjs call <tool> ['<json args>']
- *       one tools/call; prints the /mcp HTTP status, x-forge-cost, isError
+ *       one tools/call; prints the /mcp HTTP status, x-kvarm-cost, isError
  *       and the result JSON
  *   node scripts/mcp-agent.mjs e2e [--keep] [--api-doc <library/api.md>]
  *         [--only auth,registry,parity,visibility,cost,two-agent,dependencies,arena,attribution,dispatch]
  *       live checks for the MCP surface (VAL-MCP-001..010, VAL-COST-017,
  *       VAL-CROSS-012, VAL-ATTR-001..006, VAL-DECISION-001..003, the repo
  *       lifecycle tools fork_repo/delete_repo/import_repo in parity,
- *       comma-containing decision paths across REST, MCP and the forge CLI
+ *       comma-containing decision paths across REST, MCP and the kvarm CLI
  *       in attribution, and the conflict-dispatch flow in dispatch:
  *       VAL-DISPATCH-001..007, VAL-WORKFLOW-001..003, VAL-CROSS-004/009). Each
  *       scenario runs in a fresh repo owned by
- *       FORGE_USER, named `mcp-agent-<purpose>-<timestamp>`, seeded by real
+ *       KVARM_USER, named `mcp-agent-<purpose>-<timestamp>`, seeded by real
  *       git pushes and deleted afterwards (unless --keep).
  *
  * Environment (tokens are read by NAME and never printed):
- *   FORGE_BASE_URL  platform origin
- *   FORGE_PAT       api-scope PAT of FORGE_USER (default cynthia)
- *   FORGE_PAT_BOT   api-scope PAT of an unrelated user (e2e visibility and attribution)
+ *   KVARM_BASE_URL  platform origin
+ *   KVARM_PAT       api-scope PAT of KVARM_USER (default cynthia)
+ *   KVARM_PAT_BOT   api-scope PAT of an unrelated user (e2e visibility and attribution)
  *   MCP_TOKEN_ENV   name of the env var holding the token for info/call
- *                   (default FORGE_PAT)
+ *                   (default KVARM_PAT)
  *   set -a; . apps/platform/.dev.vars.validation; set +a
  *
  * The e2e visibility scenario also flips visibility by a direct remote D1
@@ -36,7 +36,7 @@
  * secret-free GIT_ASKPASS helper. Exit 0 only when every check held.
  *
  * The attribution scenario mints (and afterwards revokes) a short-lived agent
- * token for FORGE_USER to drive one merge as an agent session.
+ * token for KVARM_USER to drive one merge as an agent session.
  *
  * The two-agent scenario (VAL-CROSS-001) lands the winner with
  * enqueue_change and polls get_change until the integration train merged
@@ -59,7 +59,7 @@
  * resolve-conflict tasks through MCP after pushing a resolution (origin/main
  * merged into the change head) to the claimed workspace with git. The auto
  * change runs the dead-agent path: an MCP claim with a 10 s lease that lapses,
- * a reclaim and completion through the forge CLI, and the stale holder's
+ * a reclaim and completion through the kvarm CLI, and the stale holder's
  * completion refused.
  */
 
@@ -73,10 +73,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
 const PLATFORM_DIR = fileURLToPath(new URL('../apps/platform/', import.meta.url));
-const CLI_BIN = fileURLToPath(new URL('../apps/cli/bin/forge.js', import.meta.url));
+const CLI_BIN = fileURLToPath(new URL('../apps/cli/bin/kvarm.js', import.meta.url));
 const eq = isDeepStrictEqual;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -91,7 +91,7 @@ function die(msg, code = 2) {
 
 /**
  * Connects with `token` as the Bearer credential. `exchanges` records the
- * status and x-forge-cost of every /mcp HTTP response (one per request).
+ * status and x-kvarm-cost of every /mcp HTTP response (one per request).
  */
 async function connect(token, name = 'mcp-agent') {
   const exchanges = [];
@@ -99,7 +99,7 @@ async function connect(token, name = 'mcp-agent') {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
     fetch: async (url, init) => {
       const res = await fetch(url, init);
-      exchanges.push({ method: init?.method ?? 'GET', status: res.status, cost: res.headers.get('x-forge-cost') });
+      exchanges.push({ method: init?.method ?? 'GET', status: res.status, cost: res.headers.get('x-kvarm-cost') });
       return res;
     },
   });
@@ -133,7 +133,7 @@ function parseCost(h) {
 }
 
 function tokenFromEnv() {
-  const name = process.env.MCP_TOKEN_ENV ?? 'FORGE_PAT';
+  const name = process.env.MCP_TOKEN_ENV ?? 'KVARM_PAT';
   return process.env[name] || die(`${name} is not set`);
 }
 
@@ -145,7 +145,7 @@ async function runInfo() {
   const conn = await connect(tokenFromEnv());
   const server = conn.client.getServerVersion();
   console.log(`connected: server ${server?.name} ${server?.version}; capabilities ${JSON.stringify(conn.client.getServerCapabilities())}`);
-  console.log(`initialize -> HTTP ${conn.exchanges[0]?.status} x-forge-cost ${conn.exchanges[0]?.cost}`);
+  console.log(`initialize -> HTTP ${conn.exchanges[0]?.status} x-kvarm-cost ${conn.exchanges[0]?.cost}`);
   const { tools } = await conn.client.listTools();
   console.log(`listTools: ${tools.length} tools`);
   let ok = true;
@@ -173,7 +173,7 @@ async function runCall(tool, rawArgs) {
   const conn = await connect(tokenFromEnv());
   const r = await call(conn, tool, args);
   await conn.close();
-  console.log(`tools/call ${tool} -> HTTP ${r.status} x-forge-cost ${r.cost} isError=${r.isError}`);
+  console.log(`tools/call ${tool} -> HTTP ${r.status} x-kvarm-cost ${r.cost} isError=${r.isError}`);
   console.log(r.data !== null ? JSON.stringify(r.data, null, 2) : r.text);
   return r.isError ? 1 : 0;
 }
@@ -184,8 +184,8 @@ async function runCall(tool, rawArgs) {
 
 async function runE2e(argv) {
   const { values: opts } = parseArgs({ args: argv, options: { keep: { type: 'boolean', default: false }, only: { type: 'string' }, 'api-doc': { type: 'string' } } });
-  const PAT = process.env.FORGE_PAT || die('FORGE_PAT is not set');
-  const BOT = process.env.FORGE_PAT_BOT || '';
+  const PAT = process.env.KVARM_PAT || die('KVARM_PAT is not set');
+  const BOT = process.env.KVARM_PAT_BOT || '';
   const TS = Math.floor(Date.now() / 1000);
   const PREFIX = 'mcp-agent';
   const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -211,18 +211,18 @@ async function runE2e(argv) {
     } catch {
       body = null;
     }
-    return { status: res.status, text, json: body, cost: res.headers.get('x-forge-cost') };
+    return { status: res.status, text, json: body, cost: res.headers.get('x-kvarm-cost') };
   }
 
   const work = mkdtempSync(join(tmpdir(), 'mcp-agent-'));
   const askpass = join(work, 'askpass.sh');
-  writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+  writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
   chmodSync(askpass, 0o700);
 
   function git(args, cwd, token = PAT) {
     const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
       cwd,
-      env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: token },
+      env: { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token },
       encoding: 'utf8',
     });
     return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
@@ -252,9 +252,9 @@ async function runE2e(argv) {
     }
     throw new Error(`push ${refspec} kept failing`);
   }
-  /** One `forge ... --json` CLI run as FORGE_USER (FORGE_PAT from the environment). */
-  function forge(args) {
-    const r = spawnSync(process.execPath, [CLI_BIN, ...args, '--json'], { env: { ...process.env, FORGE_BASE_URL: BASE }, encoding: 'utf8' });
+  /** One `kvarm ... --json` CLI run as KVARM_USER (KVARM_PAT from the environment). */
+  function kvarm(args) {
+    const r = spawnSync(process.execPath, [CLI_BIN, ...args, '--json'], { env: { ...process.env, KVARM_BASE_URL: BASE }, encoding: 'utf8' });
     let data = null;
     try {
       data = JSON.parse(r.stdout);
@@ -313,17 +313,17 @@ async function runE2e(argv) {
   if (!only || only.has('auth')) {
     console.log('\n# auth');
     const caps = owner.client.getServerCapabilities();
-    console.log(`connect -> server ${server?.name} ${server?.version}; capabilities ${JSON.stringify(caps)}; initialize HTTP ${owner.exchanges[0]?.status} x-forge-cost ${owner.exchanges[0]?.cost}`);
+    console.log(`connect -> server ${server?.name} ${server?.version}; capabilities ${JSON.stringify(caps)}; initialize HTTP ${owner.exchanges[0]?.status} x-kvarm-cost ${owner.exchanges[0]?.cost}`);
     const { tools } = await owner.client.listTools();
     check('VAL-MCP-001', 'initialize with a PAT succeeds (server info + tools capability) and listTools works', Boolean(server?.name && server?.version && caps?.tools) && tools.length > 0, `${tools.length} tools`);
     const init = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'curl', version: '0' } } });
     for (const [label, headers] of [
       ['no Authorization', {}],
-      ['invalid Bearer token', { Authorization: `Bearer forge_pat_${'0'.repeat(64)}` }],
+      ['invalid Bearer token', { Authorization: `Bearer kvarm_pat_${'0'.repeat(64)}` }],
     ]) {
       const res = await fetch(`${BASE}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers }, body: init });
       const text = await res.text();
-      console.log(`POST /mcp initialize (${label}) -> ${res.status} ${text} www-authenticate=${res.headers.get('www-authenticate')} x-forge-cost ${res.headers.get('x-forge-cost')}`);
+      console.log(`POST /mcp initialize (${label}) -> ${res.status} ${text} www-authenticate=${res.headers.get('www-authenticate')} x-kvarm-cost ${res.headers.get('x-kvarm-cost')}`);
       check('VAL-MCP-002', `${label} → HTTP 401`, res.status === 401);
     }
   }
@@ -332,7 +332,7 @@ async function runE2e(argv) {
   if (!only || only.has('registry')) {
     console.log('\n# registry');
     const { tools } = await owner.client.listTools();
-    const { OPERATIONS } = await import('@forge/ops');
+    const { OPERATIONS } = await import('@kvarm/ops');
     const names = tools.map((t) => t.name);
     console.log(`listTools names (${names.length}): ${names.join(', ')}`);
     check('registry', 'tools/list equals the shared operation registry', eq([...names].sort(), OPERATIONS.map((o) => o.name).sort()));
@@ -349,7 +349,7 @@ async function runE2e(argv) {
     const schemaless = tools.filter((t) => !(typeof t.description === 'string' && t.description.trim() && t.inputSchema?.type === 'object' && t.inputSchema.properties)).map((t) => t.name);
     check('VAL-MCP-003', 'every tool carries a description and an input schema', schemaless.length === 0, schemaless.join(',') || `${tools.length} tools checked`);
     if (opts['api-doc']) {
-      const documented = [...readFileSync(opts['api-doc'], 'utf8').matchAll(/^\| [a-z-]+ \| `([a-z_]+)` \| `forge [a-z-]+ [a-z-]+` \|/gm)].map((m) => m[1]);
+      const documented = [...readFileSync(opts['api-doc'], 'utf8').matchAll(/^\| [a-z-]+ \| `([a-z_]+)` \| `kvarm [a-z-]+ [a-z-]+` \|/gm)].map((m) => m[1]);
       const missing = documented.filter((n) => !names.includes(n));
       const undocumented = names.filter((n) => !documented.includes(n));
       console.log(`registry of record ${opts['api-doc']}: ${documented.length} entries; documented but not listed: ${missing.join(',') || 'none'}; listed but undocumented: ${undocumented.join(',') || 'none'}`);
@@ -368,7 +368,7 @@ async function runE2e(argv) {
     const rl = await http('/api/v1/repos');
     const mNames = (ml.data?.repos ?? []).map((r) => `${r.owner}/${r.name}`).sort();
     const rNames = (rl.json?.repos ?? []).map((r) => `${r.owner}/${r.name}`).sort();
-    console.log(`list_repos -> ${mNames.length} repos (x-forge-cost ${ml.cost}); REST GET /repos -> ${rNames.length} repos (x-forge-cost ${rl.cost}); only-mcp=${JSON.stringify(mNames.filter((n) => !rNames.includes(n)))} only-rest=${JSON.stringify(rNames.filter((n) => !mNames.includes(n)))}`);
+    console.log(`list_repos -> ${mNames.length} repos (x-kvarm-cost ${ml.cost}); REST GET /repos -> ${rNames.length} repos (x-kvarm-cost ${rl.cost}); only-mcp=${JSON.stringify(mNames.filter((n) => !rNames.includes(n)))} only-rest=${JSON.stringify(rNames.filter((n) => !mNames.includes(n)))}`);
     check('VAL-MCP-004', 'list_repos owner/name set equals REST GET /repos', !ml.isError && rl.status === 200 && eq(mNames, rNames) && mNames.includes(env.repo));
 
     // VAL-MCP-005
@@ -388,13 +388,13 @@ async function runE2e(argv) {
       const t = await call(owner, 'get_tree', { repo: env.repo, ref: 'main', ...(path ? { path } : {}) });
       const mine = (t.data?.entries ?? []).map((e) => ({ name: e.name, type: e.type, mode: e.mode, hash: e.hash }));
       const truth = lsTree(spec);
-      console.log(`get_tree ${path ?? '/'} -> ${JSON.stringify(mine)} (x-forge-cost ${t.cost})\ngit ls-tree ${spec} -> ${JSON.stringify(truth)}`);
+      console.log(`get_tree ${path ?? '/'} -> ${JSON.stringify(mine)} (x-kvarm-cost ${t.cost})\ngit ls-tree ${spec} -> ${JSON.stringify(truth)}`);
       check('VAL-MCP-005', `get_tree ${path ?? '<root>'} names/types/modes/hashes equal git ls-tree ${spec}`, !t.isError && eq(mine, truth) && t.data?.sha === main);
     }
     for (const path of ['src/lib/util.ts', 'docs/guide.md']) {
       const f = await call(owner, 'read_file', { repo: env.repo, path, ref: 'main' });
       const truth = mustGit(['show', `main:${path}`], dir) + '\n';
-      console.log(`read_file ${path} -> encoding=${f.data?.encoding} size=${f.data?.size} (x-forge-cost ${f.cost}); git show bytes=${Buffer.byteLength(truth)}`);
+      console.log(`read_file ${path} -> encoding=${f.data?.encoding} size=${f.data?.size} (x-kvarm-cost ${f.cost}); git show bytes=${Buffer.byteLength(truth)}`);
       check('VAL-MCP-005', `read_file ${path} equals git show main:${path} byte for byte`, !f.isError && f.data?.encoding === 'utf-8' && f.data?.content === truth && f.data?.size === Buffer.byteLength(truth));
     }
 
@@ -404,24 +404,24 @@ async function runE2e(argv) {
     const mc = await call(owner, 'compare', { repo: env.repo, base: 'main', head: 'feature' });
     const rc = await http(`${api}/compare/main...feature`);
     const key = (files) => (files ?? []).map((f) => `${f.status}:${f.path}`).sort();
-    console.log(`compare (mcp) files=${JSON.stringify(key(mc.data?.files))} totals=${JSON.stringify(mc.data?.totals)} rating=${JSON.stringify(mc.data?.rating ?? mc.data?.risk?.rating)} (x-forge-cost ${mc.cost})\ncompare (REST) files=${JSON.stringify(key(rc.json?.files))} totals=${JSON.stringify(rc.json?.totals)} (x-forge-cost ${rc.cost})`);
+    console.log(`compare (mcp) files=${JSON.stringify(key(mc.data?.files))} totals=${JSON.stringify(mc.data?.totals)} rating=${JSON.stringify(mc.data?.rating ?? mc.data?.risk?.rating)} (x-kvarm-cost ${mc.cost})\ncompare (REST) files=${JSON.stringify(key(rc.json?.files))} totals=${JSON.stringify(rc.json?.totals)} (x-kvarm-cost ${rc.cost})`);
     check('VAL-MCP-006', 'compare equals REST compare (files, statuses, totals, rating; full body)', !mc.isError && rc.status === 200 && eq(key(mc.data?.files), key(rc.json?.files)) && eq(mc.data?.totals, rc.json?.totals) && eq(mc.data, rc.json));
     const md = await call(owner, 'get_file_diff', { repo: env.repo, base: 'main', head: 'feature', path: 'src/app.ts' });
     const rd = await http(`${api}/compare/main...feature/file?path=src%2Fapp.ts`);
-    console.log(`get_file_diff hunks=${JSON.stringify(md.data?.hunks)} (x-forge-cost ${md.cost}); REST file diff -> ${rd.status}`);
+    console.log(`get_file_diff hunks=${JSON.stringify(md.data?.hunks)} (x-kvarm-cost ${md.cost}); REST file diff -> ${rd.status}`);
     check('VAL-MCP-006', 'get_file_diff hunks equal the REST per-file diff', !md.isError && rd.status === 200 && Array.isArray(md.data?.hunks) && eq(md.data, rd.json));
 
     // VAL-MCP-007 / VAL-MCP-008
     const cw = await call(owner, 'create_workspace', { repo: env.repo, task: 'mcp parity', agent: 'mcp-agent-1' });
     const ws = cw.data ?? {};
-    console.log(`create_workspace -> ${cw.text} (x-forge-cost ${cw.cost})`);
+    console.log(`create_workspace -> ${cw.text} (x-kvarm-cost ${cw.cost})`);
     const listed = await http(`${api}/workspaces`);
     const restWs = listed.json?.workspaces?.find((w) => w.id === ws.id);
     check('VAL-MCP-007', 'create_workspace returns id/ref/pushUrl shaped like REST and REST lists the same record', !cw.isError && ws.ref?.startsWith(`refs/heads/agents/${ws.id}/`) && ws.pushUrl === env.url && eq(restWs, ws), JSON.stringify(restWs));
     const sha = commitOn(dir, main, { 'src/feature.ts': 'export const feature = 1;\n' }, 'workspace work');
     await pushRetry(dir, env.url, `${sha}:${ws.ref}`);
     const cs = await call(owner, 'create_change_set', { repo: env.repo, workspace: ws.id, title: 'MCP change set', mergePolicy: 'review' });
-    console.log(`create_change_set -> ${cs.text} (x-forge-cost ${cs.cost})`);
+    console.log(`create_change_set -> ${cs.text} (x-kvarm-cost ${cs.cost})`);
     const restCs = await http(`${api}/changes/${cs.data?.number}`);
     const csKeys = ['number', 'title', 'state', 'mergePolicy', 'kind', 'base', 'head', 'baseSha', 'headSha', 'author', 'createdAt', 'workspace'];
     const differing = Object.keys({ ...cs.data, ...restCs.json }).filter((k) => !eq(cs.data?.[k], restCs.json?.[k]));
@@ -434,7 +434,7 @@ async function runE2e(argv) {
     const gc = await call(owner, 'get_change', { repo: env.repo, number: cs.data?.number });
     check('VAL-MCP-007', 'get_change equals REST GET changes/:n', !gc.isError && eq(gc.data, restCs.json));
     const mg = await call(owner, 'merge_change', { repo: env.repo, number: cs.data?.number });
-    console.log(`merge_change -> state=${mg.data?.state} mergeCommit=${mg.data?.mergeCommit} (x-forge-cost ${mg.cost})`);
+    console.log(`merge_change -> state=${mg.data?.state} mergeCommit=${mg.data?.mergeCommit} (x-kvarm-cost ${mg.cost})`);
     const after = await http(`${api}/changes/${cs.data?.number}`);
     mustGit(['fetch', '-q', env.url, '+refs/heads/main:refs/remotes/origin/main'], dir);
     const log = mustGit(['log', 'origin/main', '-1', '--format=%H %P'], dir);
@@ -472,7 +472,7 @@ async function runE2e(argv) {
     const refs = git(['ls-remote', env.url], dir).out;
     const composedRef = comp.data?.workspace?.ref;
     const advertised = refs.split('\n').find((l) => l.endsWith(`\t${composedRef}`))?.split('\t')[0];
-    console.log(`compose_candidates -> commitSha=${comp.data?.commitSha} workspace.headSha=${comp.data?.workspace?.headSha} baseSha=${comp.data?.workspace?.baseSha} advertised=${advertised} (x-forge-cost ${comp.cost})`);
+    console.log(`compose_candidates -> commitSha=${comp.data?.commitSha} workspace.headSha=${comp.data?.workspace?.headSha} baseSha=${comp.data?.workspace?.baseSha} advertised=${advertised} (x-kvarm-cost ${comp.cost})`);
     check('compose', 'compose_candidates workspace.headSha is the composed commit (not the base)', !comp.isError && comp.data?.workspace?.headSha === comp.data?.commitSha && advertised === comp.data?.commitSha && comp.data?.commitSha !== main2);
     const compRead = await call(owner, 'get_composition', { repo: env.repo, id: comp.data?.id });
     check('compose', 'get_composition readback keeps the composed head', compRead.data?.workspace?.headSha === comp.data?.commitSha);
@@ -488,7 +488,7 @@ async function runE2e(argv) {
         if (i > 0) await sleep(2000);
         fkTree = await call(owner, 'get_tree', { repo: `${OWNER}/${forkName}`, ref: 'main' });
       }
-      console.log(`fork_repo -> ${fk.text} (x-forge-cost ${fk.cost}); REST GET fork -> ${fkRest.status} visibility=${fkRest.json?.repo?.visibility}; fork main=${fkTree?.data?.sha} parent main=${parentTree.data?.sha}`);
+      console.log(`fork_repo -> ${fk.text} (x-kvarm-cost ${fk.cost}); REST GET fork -> ${fkRest.status} visibility=${fkRest.json?.repo?.visibility}; fork main=${fkTree?.data?.sha} parent main=${parentTree.data?.sha}`);
       check('lifecycle', 'fork_repo creates a private fork with the parent main that REST reads back', !fk.isError && fk.data?.repo?.name === forkName && fkRest.status === 200 && fkRest.json?.repo?.visibility === 'private' && fkTree?.data?.sha === parentTree.data?.sha);
       if (BOT) {
         const bot = await connect(BOT, 'mcp-agent-bot');
@@ -503,7 +503,7 @@ async function runE2e(argv) {
       }
       const del = await call(owner, 'delete_repo', { repo: `${OWNER}/${forkName}` });
       const gone = await http(`/api/v1/repos/${OWNER}/${forkName}`);
-      console.log(`delete_repo -> ${del.text} (x-forge-cost ${del.cost}); REST GET -> ${gone.status}`);
+      console.log(`delete_repo -> ${del.text} (x-kvarm-cost ${del.cost}); REST GET -> ${gone.status}`);
       check('lifecycle', 'delete_repo deletes the fork (REST readback 404)', !del.isError && del.data?.deleted === true && gone.status === 404);
     } finally {
       await http(`/api/v1/repos/${OWNER}/${forkName}`, { method: 'DELETE' });
@@ -520,7 +520,7 @@ async function runE2e(argv) {
     const env = await seeded(repo);
     const priv = await http('/api/v1/repos', { method: 'POST', json: { name: `${repo}-private`, visibility: 'private' } });
     if (!BOT) {
-      check('VAL-MCP-010', 'FORGE_PAT_BOT is set', false);
+      check('VAL-MCP-010', 'KVARM_PAT_BOT is set', false);
       return;
     }
     const bot = await connect(BOT, 'mcp-agent-bot');
@@ -609,7 +609,7 @@ async function runE2e(argv) {
     const r = await http(rest);
     const mc = parseCost(m.cost);
     const rc = parseCost(r.cost);
-    console.log(`warm MCP read_file /mcp x-forge-cost: ${m.cost}\nwarm REST GET contents x-forge-cost: ${r.cost}`);
+    console.log(`warm MCP read_file /mcp x-kvarm-cost: ${m.cost}\nwarm REST GET contents x-kvarm-cost: ${r.cost}`);
     check('VAL-COST-017', 'warm MCP read_file work counters (d1, art, r2b) equal the warm REST file read', !m.isError && r.status === 200 && ['d1', 'art', 'r2b'].every((k) => Number.isInteger(mc[k]) && mc[k] === rc[k]), JSON.stringify({ mcp: mc, rest: rc }));
     const sha = mustGit(['rev-parse', 'HEAD'], env.dir);
     await call(owner, 'read_file', { ...args, ref: sha });
@@ -646,7 +646,7 @@ async function runE2e(argv) {
       // The caller lands the winner through the queue: with review policy the enqueue approves the current head.
       const eq1 = await call(owner, 'enqueue_change', { repo: env.repo, number: c1.number, headSha: s1, attribution: { agent: 'agent-one', session: `two-agent-${TS}` } });
       const q1 = await call(owner, 'get_queue', { repo: env.repo });
-      console.log(`enqueue_change #${c1.number} -> isError=${eq1.isError} ${eq1.text.slice(0, 300)} (x-forge-cost ${eq1.cost})\nget_queue -> ${q1.text.slice(0, 300)} (x-forge-cost ${q1.cost})`);
+      console.log(`enqueue_change #${c1.number} -> isError=${eq1.isError} ${eq1.text.slice(0, 300)} (x-kvarm-cost ${eq1.cost})\nget_queue -> ${q1.text.slice(0, 300)} (x-kvarm-cost ${q1.cost})`);
       const listed = (q1.data?.entries ?? []).some((e) => e.number === c1.number);
       const early = !listed && (await call(owner, 'get_change', { repo: env.repo, number: c1.number })).data?.state === 'merged';
       check('VAL-CROSS-001', 'enqueue_change through MCP queues the winner; get_queue lists it (or the train already merged it)', !eq1.isError && eq1.data?.entry?.number === c1.number && (listed || early));
@@ -690,7 +690,7 @@ async function runE2e(argv) {
       const ra = commitOn(env.dir, env.main, { 'src/greet.ts': 'export interface Greeter {\n  greet(name: string): string;\n}\n' }, 'greeter interface');
       await pushRetry(env.dir, env.url, `${ra}:${wa.ref}`);
       // The consumer builds on the interface commit.
-      const rb = commitOn(env.dir, ra, { 'src/app.ts': "import type { Greeter } from './greet';\nexport const app = (g: Greeter) => g.greet('forge');\n" }, 'greeter consumer');
+      const rb = commitOn(env.dir, ra, { 'src/app.ts': "import type { Greeter } from './greet';\nexport const app = (g: Greeter) => g.greet('kvarm');\n" }, 'greeter consumer');
       await pushRetry(env.dir, env.url, `${rb}:${wb.ref}`);
 
       // The forecast shows A's declared and observed match on src/greet.ts once its push is reconciled.
@@ -703,7 +703,7 @@ async function runE2e(argv) {
         await sleep(2000);
       }
       const fcRest = await http(`${env.api}/forecast?paths=src/greet.ts&exclude=${wb.id}`);
-      console.log(`forecast (MCP) -> A ${wa.id} matchKinds=${JSON.stringify(mine?.matchKinds)} revision=${mine?.observedHeadSha} (x-forge-cost ${fc?.cost}); REST forecast -> ${fcRest.status} (x-forge-cost ${fcRest.cost})`);
+      console.log(`forecast (MCP) -> A ${wa.id} matchKinds=${JSON.stringify(mine?.matchKinds)} revision=${mine?.observedHeadSha} (x-kvarm-cost ${fc?.cost}); REST forecast -> ${fcRest.status} (x-kvarm-cost ${fcRest.cost})`);
       check('VAL-CROSS-007', "the forecast shows A's declared and observed match on the interface path", !fc.isError && mine?.matchKinds?.includes('declared') && mine.matchKinds.includes('observed') && mine.observedHeadSha === ra);
       check('VAL-CLI-004', 'forecast: MCP state = REST state', fcRest.status === 200 && eq(fc.data?.matches, fcRest.json?.matches));
 
@@ -722,7 +722,7 @@ async function runE2e(argv) {
 
       const edge = await call(consumer, 'add_dependency', { repo: env.repo, workspace: wb.id, onWorkspace: wa.id, revision: ra });
       const edgeRest = await http(`${env.api}/workspaces/${wb.id}/dependencies`);
-      console.log(`add_dependency B→A@${ra} -> ${edge.text} (x-forge-cost ${edge.cost})`);
+      console.log(`add_dependency B→A@${ra} -> ${edge.text} (x-kvarm-cost ${edge.cost})`);
       check('VAL-CROSS-007', 'B pins A at its current revision R through MCP; REST lists exactly that edge', !edge.isError && edge.data?.state === 'active' && edge.data?.revision === ra && eq(edgeRest.json?.dependencies, [edge.data]));
 
       const ca = (await call(iface, 'create_change_set', { repo: env.repo, workspace: wa.id, title: 'greeter interface', mergePolicy: 'review' })).data;
@@ -732,7 +732,7 @@ async function runE2e(argv) {
       const tm = await call(owner, 'get_train', { repo: env.repo });
       const tr = await http(`${env.api}/train`);
       const waiting = tm.data?.entries?.find((e) => e.number === cb.number);
-      console.log(`enqueue_change B #${cb?.number} -> isError=${qb.isError} ${qb.data?.entry?.state}; get_train -> B state=${waiting?.state} waiting=${JSON.stringify(waiting?.waiting)} (x-forge-cost ${tm.cost}); REST GET train -> ${tr.status} (x-forge-cost ${tr.cost})`);
+      console.log(`enqueue_change B #${cb?.number} -> isError=${qb.isError} ${qb.data?.entry?.state}; get_train -> B state=${waiting?.state} waiting=${JSON.stringify(waiting?.waiting)} (x-kvarm-cost ${tm.cost}); REST GET train -> ${tr.status} (x-kvarm-cost ${tr.cost})`);
       check('VAL-CROSS-007', 'B enqueued first waits in the train with a machine-readable reason naming its pin', !qb.isError && waiting?.state === 'queued' && waiting.waiting?.code === 'DEPENDENCY_PENDING' && eq(waiting.waiting.dependencies, [edge.data?.id]));
       // A train pass between the two reads may bump these.
       const volatile = (t) => (t?.entries ?? []).map(({ updatedAt: _u, attempts: _a, generation: _g, ...e }) => e);
@@ -771,7 +771,7 @@ async function runE2e(argv) {
     const env = await seeded(repo);
     const made = await call(owner, 'create_arena', { repo: env.repo, brief: 'Refactor util', candidates: 3, base: 'main' });
     const arena = made.data ?? {};
-    console.log(`create_arena -> id=${arena.id} state=${arena.state} workspaces=${arena.workspaces?.map((w) => w.id).join(',')} (x-forge-cost ${made.cost})`);
+    console.log(`create_arena -> id=${arena.id} state=${arena.state} workspaces=${arena.workspaces?.map((w) => w.id).join(',')} (x-kvarm-cost ${made.cost})`);
     const restArena = await http(`${env.api}/arenas/${arena.id}`);
     check('VAL-CROSS-012', 'arena of 3 created through MCP equals the REST readback', !made.isError && arena.workspaces?.length === 3 && eq(restArena.json, arena));
     const bodies = [
@@ -793,7 +793,7 @@ async function runE2e(argv) {
     }
     const mr = await call(owner, 'rank_arena', { repo: env.repo, id: arena.id });
     const rr = await http(`${env.api}/arenas/${arena.id}/candidates`);
-    console.log(`rank_arena (mcp) ranking=${JSON.stringify(mr.data?.ranking?.map((e) => [e.rank, e.workspace]))} (x-forge-cost ${mr.cost})\nREST ranking=${JSON.stringify(rr.json?.ranking?.map((e) => [e.rank, e.workspace]))} (x-forge-cost ${rr.cost})`);
+    console.log(`rank_arena (mcp) ranking=${JSON.stringify(mr.data?.ranking?.map((e) => [e.rank, e.workspace]))} (x-kvarm-cost ${mr.cost})\nREST ranking=${JSON.stringify(rr.json?.ranking?.map((e) => [e.rank, e.workspace]))} (x-kvarm-cost ${rr.cost})`);
     check('VAL-CROSS-012', 'MCP rank_arena data equals REST GET arenas/:id/candidates', !mr.isError && rr.status === 200 && eq(mr.data, rr.json) && mr.data?.ranking?.length === 3);
     const winner = mr.data.ranking[0].workspace;
     const losers = arena.workspaces.map((w) => w.id).filter((id) => id !== winner);
@@ -819,10 +819,10 @@ async function runE2e(argv) {
     const env = await seeded(repo);
     const { api, dir, main } = env;
     const HASH = 'c'.repeat(64);
-    const notesRef = 'refs/notes/forge-attribution';
+    const notesRef = 'refs/notes/kvarm-attribution';
     const showNote = (cwd, sha) => {
       const fetched = git(['fetch', '-q', env.url, `+${notesRef}:${notesRef}`], cwd);
-      const shown = git(['notes', '--ref=forge-attribution', 'show', sha], cwd);
+      const shown = git(['notes', '--ref=kvarm-attribution', 'show', sha], cwd);
       let parsed = null;
       try {
         parsed = JSON.parse(shown.out);
@@ -836,12 +836,12 @@ async function runE2e(argv) {
     // VAL-ATTR-001 / 002
     const body = { agent: 'claude-code-1', session: 'sess-abc', promptHash: HASH, model: 'claude-sonnet-4' };
     const set = await http(`${api}/commits/${main}/attribution`, { method: 'POST', json: body });
-    console.log(`POST commits/${main}/attribution -> ${set.status} ${set.text} (x-forge-cost ${set.cost})`);
+    console.log(`POST commits/${main}/attribution -> ${set.status} ${set.text} (x-kvarm-cost ${set.cost})`);
     const note = showNote(dir, main);
-    console.log(`git fetch ${notesRef} -> exit ${note.fetched}; git notes --ref=forge-attribution show ${main} -> exit ${note.code}: ${note.out}`);
+    console.log(`git fetch ${notesRef} -> exit ${note.fetched}; git notes --ref=kvarm-attribution show ${main} -> exit ${note.code}: ${note.out}`);
     check('VAL-ATTR-001', 'POST stores a JSON note with agent/session/promptHash/model/actor/at on the notes ref', [200, 201].includes(set.status) && note.json !== null && eq(note.json, { ...body, actor: OWNER, at: note.json.at }) && isIso(note.json.at));
     const got = await http(`${api}/commits/${main}/attribution`);
-    console.log(`GET commits/${main}/attribution -> ${got.status} ${got.text} (x-forge-cost ${got.cost})`);
+    console.log(`GET commits/${main}/attribution -> ${got.status} ${got.text} (x-kvarm-cost ${got.cost})`);
     check('VAL-ATTR-002', 'GET returns the stored record exactly', got.status === 200 && eq(got.json, set.json) && eq(got.json, note.json));
 
     // VAL-ATTR-003
@@ -855,7 +855,7 @@ async function runE2e(argv) {
     const mset = await call(owner, 'set_attribution', { repo: env.repo, sha: other, agent: 'mcp-agent-1', session: 'sess-mcp', promptHash: HASH });
     const mget = await call(owner, 'get_attribution', { repo: env.repo, sha: other });
     const rget = await http(`${api}/commits/${other}/attribution`);
-    console.log(`set_attribution -> ${mset.text} (x-forge-cost ${mset.cost})\nget_attribution -> ${mget.text}\nREST GET -> ${rget.status} ${rget.text}`);
+    console.log(`set_attribution -> ${mset.text} (x-kvarm-cost ${mset.cost})\nget_attribution -> ${mget.text}\nREST GET -> ${rget.status} ${rget.text}`);
     check('VAL-ATTR-006', 'MCP set_attribution is read back identically by MCP get_attribution and REST', !mset.isError && !mget.isError && eq(mget.data, mset.data) && eq(rget.json, mset.data) && mset.data?.agent === 'mcp-agent-1');
 
     // VAL-ATTR-004: a two-parent merge driven through MCP by the owner, then one by an agent token.
@@ -871,11 +871,11 @@ async function runE2e(argv) {
       const sha = change.json?.mergeCommit;
       const a = await http(`${api}/commits/${sha}/attribution`);
       const n = showNote(dir, sha);
-      console.log(`merge_change #${cs?.number} (${label}) -> kind=${mg.data?.merge?.kind} (x-forge-cost ${mg.cost}); GET changes/${cs?.number} mergeCommit=${sha}\nGET attribution -> ${a.status} ${a.text}\ngit notes show ${sha} -> ${n.out}`);
+      console.log(`merge_change #${cs?.number} (${label}) -> kind=${mg.data?.merge?.kind} (x-kvarm-cost ${mg.cost}); GET changes/${cs?.number} mergeCommit=${sha}\nGET attribution -> ${a.status} ${a.text}\ngit notes show ${sha} -> ${n.out}`);
       return { mg, a, n };
     };
     const byOwner = await mergeWith(owner, 'owner', { 'src/owner.ts': 'export const owner = 1;\n' }, { agent: 'mcp-agent-1', session: 'sess-merge', promptHash: HASH });
-    check('VAL-ATTR-004', 'a Forge merge commit carries the merging actor and the request agent fields (REST and git notes agree)', byOwner.mg.data?.merge?.kind === 'merge' && byOwner.a.status === 200 && byOwner.a.json?.actor === OWNER && byOwner.a.json?.agent === 'mcp-agent-1' && eq(byOwner.a.json, byOwner.n.json));
+    check('VAL-ATTR-004', 'a Kvarm merge commit carries the merging actor and the request agent fields (REST and git notes agree)', byOwner.mg.data?.merge?.kind === 'merge' && byOwner.a.status === 200 && byOwner.a.json?.actor === OWNER && byOwner.a.json?.agent === 'mcp-agent-1' && eq(byOwner.a.json, byOwner.n.json));
     const agentName = `mcp-attr-${TS}`;
     const agent = await http('/api/v1/agents', { method: 'POST', json: { name: agentName } });
     const minted = await http(`/api/v1/agents/${agent.json?.agent?.id}/tokens`, { method: 'POST', json: { repo: env.repo, role: 'write', refs: ['refs/heads/*'], expiresIn: 3600 } });
@@ -895,7 +895,7 @@ async function runE2e(argv) {
     // VAL-ATTR-005
     const fresh = join(work, `${repo}-fresh`);
     const cloned = git(['clone', '-q', env.url, fresh], work);
-    const plain = git(['notes', '--ref=forge-attribution', 'show', main], fresh);
+    const plain = git(['notes', '--ref=kvarm-attribution', 'show', main], fresh);
     const freshNote = showNote(fresh, main);
     console.log(`git clone -> exit ${cloned.code}; notes before fetching the ref -> exit ${plain.code}; after git fetch origin ${notesRef} -> ${freshNote.out}`);
     check('VAL-ATTR-005', 'a fresh clone fetches the notes ref and shows the VAL-ATTR-002 record', cloned.code === 0 && freshNote.fetched === 0 && eq(freshNote.json, got.json));
@@ -903,11 +903,11 @@ async function runE2e(argv) {
     // VAL-DECISION-001
     const d1 = { task: `task-${TS}`, paths: ['src/app.ts', 'src/lib/util.ts'], chosen: 'ws-b', rejected: ['ws-a', { id: 'ws-c', reason: 'breaks util tests' }], reason: 'ws-b keeps the public API' };
     const rd1 = await http(`${api}/decisions`, { method: 'POST', json: d1 });
-    console.log(`POST decisions (task + paths) -> ${rd1.status} ${rd1.text} (x-forge-cost ${rd1.cost})`);
+    console.log(`POST decisions (task + paths) -> ${rd1.status} ${rd1.text} (x-kvarm-cost ${rd1.cost})`);
     const byTask = await http(`${api}/context?task=${encodeURIComponent(d1.task)}`);
     const byPaths = await Promise.all(d1.paths.map((p) => http(`${api}/context?path=${encodeURIComponent(p)}`)));
-    console.log(`GET context?task -> ${byTask.status} ${byTask.text} (x-forge-cost ${byTask.cost})`);
-    for (const [i, r] of byPaths.entries()) console.log(`GET context?path=${d1.paths[i]} -> ${r.status} ids=${JSON.stringify(r.json?.decisions?.map((d) => d.id))} (x-forge-cost ${r.cost})`);
+    console.log(`GET context?task -> ${byTask.status} ${byTask.text} (x-kvarm-cost ${byTask.cost})`);
+    for (const [i, r] of byPaths.entries()) console.log(`GET context?path=${d1.paths[i]} -> ${r.status} ids=${JSON.stringify(r.json?.decisions?.map((d) => d.id))} (x-kvarm-cost ${r.cost})`);
     const roundTrip = (d) => d && eq({ task: d.task, paths: d.paths, chosen: d.chosen, rejected: d.rejected, reason: d.reason }, d1) && d.actor === OWNER && isIso(d.at);
     check('VAL-DECISION-001', 'POST decisions 201; read back by task and by each path with chosen/rejected/reason/actor/at round-tripping', rd1.status === 201 && roundTrip(rd1.json) && eq(byTask.json?.decisions, [rd1.json]) && byPaths.every((r) => eq(r.json?.decisions, [rd1.json])));
     const d2 = { paths: ['docs/guide.md'], chosen: '#7', rejected: ['#6'], reason: 'paths-only decision' };
@@ -915,26 +915,26 @@ async function runE2e(argv) {
     const byDoc = await http(`${api}/context?path=docs%2Fguide.md`);
     check('VAL-DECISION-001', 'a paths-only decision is retrievable by its path', rd2.status === 201 && rd2.json?.task === null && eq(byDoc.json?.decisions, [rd2.json]));
 
-    // Literal comma-containing Git paths round-trip through REST, MCP and the forge CLI (never split).
+    // Literal comma-containing Git paths round-trip through REST, MCP and the kvarm CLI (never split).
     const d3 = { paths: ['src/a,b.ts'], chosen: 'ws-comma', rejected: [], reason: 'literal comma path' };
     const rd3 = await http(`${api}/decisions`, { method: 'POST', json: d3 });
     const restComma = await http(`${api}/context?path=${encodeURIComponent('src/a,b.ts')}`);
     const restHalves = await http(`${api}/context?path=src%2Fa&path=b.ts`);
     const mcpComma = await call(owner, 'get_context', { repo: env.repo, path: ['src/a,b.ts'] });
-    const cliComma = forge(['decision', 'context', env.repo, '--path', 'src/a,b.ts']);
-    console.log(`POST decisions paths=["src/a,b.ts"] -> ${rd3.status} (x-forge-cost ${rd3.cost}); REST context?path=src%2Fa%2Cb.ts -> ids=${JSON.stringify(restComma.json?.decisions?.map((d) => d.id))} (x-forge-cost ${restComma.cost}); path=src/a&path=b.ts -> ${JSON.stringify(restHalves.json?.decisions)}; MCP -> ids=${JSON.stringify(mcpComma.data?.decisions?.map((d) => d.id))}; CLI exit ${cliComma.code} ids=${JSON.stringify(cliComma.data?.decisions?.map((d) => d.id))} ${cliComma.err}`);
+    const cliComma = kvarm(['decision', 'context', env.repo, '--path', 'src/a,b.ts']);
+    console.log(`POST decisions paths=["src/a,b.ts"] -> ${rd3.status} (x-kvarm-cost ${rd3.cost}); REST context?path=src%2Fa%2Cb.ts -> ids=${JSON.stringify(restComma.json?.decisions?.map((d) => d.id))} (x-kvarm-cost ${restComma.cost}); path=src/a&path=b.ts -> ${JSON.stringify(restHalves.json?.decisions)}; MCP -> ids=${JSON.stringify(mcpComma.data?.decisions?.map((d) => d.id))}; CLI exit ${cliComma.code} ids=${JSON.stringify(cliComma.data?.decisions?.map((d) => d.id))} ${cliComma.err}`);
     check('VAL-DECISION-001', 'a comma-containing path recorded by REST is read back intact by REST, MCP and the CLI (and not by its comma halves)', rd3.status === 201 && eq(rd3.json?.paths, d3.paths) && eq(restComma.json?.decisions, [rd3.json]) && eq(mcpComma.data?.decisions, [rd3.json]) && cliComma.code === 0 && eq(cliComma.data?.decisions, [rd3.json]) && eq(restHalves.json?.decisions, []));
-    const cliRec = forge(['decision', 'record', env.repo, '--paths', 'docs/x,y.md', '--paths', 'docs/z.md', '--chosen', 'ws-cli', '--rejected', '[]', '--reason', 'recorded by forge']);
+    const cliRec = kvarm(['decision', 'record', env.repo, '--paths', 'docs/x,y.md', '--paths', 'docs/z.md', '--chosen', 'ws-cli', '--rejected', '[]', '--reason', 'recorded by kvarm']);
     const mcpBack = await call(owner, 'record_decision', { repo: env.repo, paths: ['docs/q,r.md'], chosen: 'ws-mcp', rejected: [], reason: 'recorded by MCP' });
     const restCli = await http(`${api}/context?path=${encodeURIComponent('docs/x,y.md')}&path=docs%2Fz.md`);
-    const cliMcp = forge(['decision', 'context', env.repo, '--path', 'docs/q,r.md']);
-    console.log(`forge decision record --paths docs/x,y.md --paths docs/z.md -> exit ${cliRec.code} paths=${JSON.stringify(cliRec.data?.paths)}; REST context -> ids=${JSON.stringify(restCli.json?.decisions?.map((d) => d.id))}; record_decision docs/q,r.md -> ${mcpBack.data?.id}; forge decision context --path docs/q,r.md -> ids=${JSON.stringify(cliMcp.data?.decisions?.map((d) => d.id))}`);
+    const cliMcp = kvarm(['decision', 'context', env.repo, '--path', 'docs/q,r.md']);
+    console.log(`kvarm decision record --paths docs/x,y.md --paths docs/z.md -> exit ${cliRec.code} paths=${JSON.stringify(cliRec.data?.paths)}; REST context -> ids=${JSON.stringify(restCli.json?.decisions?.map((d) => d.id))}; record_decision docs/q,r.md -> ${mcpBack.data?.id}; kvarm decision context --path docs/q,r.md -> ids=${JSON.stringify(cliMcp.data?.decisions?.map((d) => d.id))}`);
     check('VAL-DECISION-001', 'comma paths recorded by the CLI and by MCP are read back by REST and the CLI', cliRec.code === 0 && eq(cliRec.data?.paths, ['docs/x,y.md', 'docs/z.md']) && eq(restCli.json?.decisions, [cliRec.data]) && !mcpBack.isError && cliMcp.code === 0 && eq(cliMcp.data?.decisions, [mcpBack.data]));
 
     // VAL-DECISION-002
     const ct = await call(owner, 'get_context', { repo: env.repo, task: d1.task });
     const cp = await call(owner, 'get_context', { repo: env.repo, path: ['src/lib/util.ts'] });
-    console.log(`get_context(task) -> ${ct.text} (x-forge-cost ${ct.cost})\nget_context(path) -> ${cp.text.slice(0, 400)} (x-forge-cost ${cp.cost})`);
+    console.log(`get_context(task) -> ${ct.text} (x-kvarm-cost ${ct.cost})\nget_context(path) -> ${cp.text.slice(0, 400)} (x-kvarm-cost ${cp.cost})`);
     const reasons = (d) => d?.chosen === 'ws-b' && eq(d?.rejected, d1.rejected) && d?.reason === d1.reason;
     check('VAL-DECISION-002', 'get_context(task) and get_context(path) return the decision with chosen, rejected and rejection reasons', !ct.isError && !cp.isError && reasons(ct.data?.decisions?.[0]) && reasons(cp.data?.decisions?.[0]));
     const emptyTask = await call(owner, 'get_context', { repo: env.repo, task: `no-such-task-${TS}` });
@@ -962,7 +962,7 @@ async function runE2e(argv) {
         await bot.close();
       }
     } else {
-      check('VAL-DECISION-003', 'FORGE_PAT_BOT is set', false);
+      check('VAL-DECISION-003', 'KVARM_PAT_BOT is set', false);
     }
     const tooMany = Array.from({ length: 21 }, (_, i) => `p${i}.ts`);
     const om = await call(owner, 'get_context', { repo: env.repo, path: tooMany });
@@ -1010,7 +1010,7 @@ async function runE2e(argv) {
     for (const policy of ['draft', 'review', 'auto']) {
       const c = await call(owner, 'create_change', { repo: env.repo, title: `app ${policy}`, base: 'main', head: `fix-${policy}`, mergePolicy: policy });
       changes[policy] = c.data;
-      console.log(`create_change fix-${policy} (${policy}) -> #${c.data?.number} state=${c.data?.state} conflicts=${JSON.stringify(c.data?.conflicts)} (x-forge-cost ${c.cost})`);
+      console.log(`create_change fix-${policy} (${policy}) -> #${c.data?.number} state=${c.data?.state} conflicts=${JSON.stringify(c.data?.conflicts)} (x-kvarm-cost ${c.cost})`);
     }
 
     // VAL-DISPATCH-001
@@ -1020,7 +1020,7 @@ async function runE2e(argv) {
     const openMcp = await call(owner, 'list_tasks', { repo: env.repo, status: 'open', kind: 'resolve-conflict' });
     const taskOf = {};
     for (const p of ['draft', 'review', 'auto']) taskOf[p] = (openRest.json?.tasks ?? []).find((t) => t.change?.number === changes[p].number);
-    console.log(`merge_change #${changes.review.number} -> isError=${attempt.isError} ${attempt.text.slice(0, 200)}\nREST POST merge #${changes.auto.number} -> ${restAttempt.status} ${restAttempt.text.slice(0, 200)}\nGET tasks?status=open -> ${openRest.status} ${JSON.stringify(openRest.json?.tasks?.map((t) => ({ id: t.id, kind: t.kind, change: t.change, conflicts: t.conflicts })))} (x-forge-cost ${openRest.cost})\nlist_tasks -> ids ${JSON.stringify(openMcp.data?.tasks?.map((t) => t.id))} (x-forge-cost ${openMcp.cost}); ls-remote main=${lsRemote('refs/heads/main')}`);
+    console.log(`merge_change #${changes.review.number} -> isError=${attempt.isError} ${attempt.text.slice(0, 200)}\nREST POST merge #${changes.auto.number} -> ${restAttempt.status} ${restAttempt.text.slice(0, 200)}\nGET tasks?status=open -> ${openRest.status} ${JSON.stringify(openRest.json?.tasks?.map((t) => ({ id: t.id, kind: t.kind, change: t.change, conflicts: t.conflicts })))} (x-kvarm-cost ${openRest.cost})\nlist_tasks -> ids ${JSON.stringify(openMcp.data?.tasks?.map((t) => t.id))} (x-kvarm-cost ${openMcp.cost}); ls-remote main=${lsRemote('refs/heads/main')}`);
     check(
       'VAL-DISPATCH-001',
       'a same-line src/app.ts conflict: merge refused 409 MERGE_CONFLICT, main unchanged, changes conflicted, one open resolve-conflict task per change on REST and MCP',
@@ -1035,7 +1035,7 @@ async function runE2e(argv) {
     const ws = claim.data?.workspace;
     const wsTip = ws?.ref ? lsRemote(ws.ref) : null;
     const afterClaim = await restTask(dTask);
-    console.log(`claim_task ${dTask} (claude-code-1) -> isError=${claim.isError} workspace=${JSON.stringify({ id: ws?.id, ref: ws?.ref, headSha: ws?.headSha })} lease=${JSON.stringify(claim.data?.lease)} (x-forge-cost ${claim.cost})\ngit ls-remote ${ws?.ref} -> ${wsTip}; change head ${heads.draft}\nGET tasks/${dTask} -> status=${afterClaim?.status} claimedBy=${afterClaim?.claimedBy} workspace=${afterClaim?.workspace}`);
+    console.log(`claim_task ${dTask} (claude-code-1) -> isError=${claim.isError} workspace=${JSON.stringify({ id: ws?.id, ref: ws?.ref, headSha: ws?.headSha })} lease=${JSON.stringify(claim.data?.lease)} (x-kvarm-cost ${claim.cost})\ngit ls-remote ${ws?.ref} -> ${wsTip}; change head ${heads.draft}\nGET tasks/${dTask} -> status=${afterClaim?.status} claimedBy=${afterClaim?.claimedBy} workspace=${afterClaim?.workspace}`);
     check('VAL-DISPATCH-002', 'claim_task returns a workspace whose ref sits at the conflicting change head; task claimed by claude-code-1', !claim.isError && ws?.id && wsTip === heads.draft && afterClaim?.status === 'claimed' && afterClaim?.claimedBy === 'claude-code-1' && afterClaim?.workspace === ws.id);
     const other = await connect(PAT, 'mcp-agent-claude-code-2');
     let second;
@@ -1054,7 +1054,7 @@ async function runE2e(argv) {
     await pushRetry(dir, url, `${dRes.sha}:${ws.ref}`);
     const dDone = await call(owner, 'complete_task', { repo: env.repo, task: dTask, agent: 'claude-code-1', generation: claim.data.lease.generation, sha: dRes.sha });
     const dChange = await restChange(changes.draft.number);
-    console.log(`git merge origin/main (exit ${dRes.mergeExit}, conflict) + push ${dRes.sha} -> ${ws.ref}\ncomplete_task -> isError=${dDone.isError} task.status=${dDone.data?.task?.status} change=${JSON.stringify({ head: dDone.data?.change?.headSha, state: dDone.data?.change?.state, policy: dDone.data?.change?.mergePolicy })} headBranch=${JSON.stringify(dDone.data?.headBranch)} (x-forge-cost ${dDone.cost})\nGET changes/${changes.draft.number} -> head=${dChange?.headSha} state=${dChange?.state}; ls-remote fix-draft=${lsRemote('refs/heads/fix-draft')}`);
+    console.log(`git merge origin/main (exit ${dRes.mergeExit}, conflict) + push ${dRes.sha} -> ${ws.ref}\ncomplete_task -> isError=${dDone.isError} task.status=${dDone.data?.task?.status} change=${JSON.stringify({ head: dDone.data?.change?.headSha, state: dDone.data?.change?.state, policy: dDone.data?.change?.mergePolicy })} headBranch=${JSON.stringify(dDone.data?.headBranch)} (x-kvarm-cost ${dDone.cost})\nGET changes/${changes.draft.number} -> head=${dChange?.headSha} state=${dChange?.state}; ls-remote fix-draft=${lsRemote('refs/heads/fix-draft')}`);
     check('VAL-DISPATCH-003', 'complete_task completes the task and moves the change head (and its branch) to the pushed resolution; state leaves conflicted', !dDone.isError && dDone.data?.task?.status === 'completed' && dChange?.headSha === dRes.sha && dChange?.state === 'open' && lsRemote('refs/heads/fix-draft') === dRes.sha);
     await sleep(20_000);
     const dLater = await restChange(changes.draft.number);
@@ -1079,7 +1079,7 @@ async function runE2e(argv) {
     const rMerge = await http(`${api}/changes/${changes.review.number}/merge`, { method: 'POST' });
     const rMerged = await restChange(changes.review.number);
     mustGit(['fetch', '-q', url, '+refs/heads/main:refs/remotes/origin/main'], dir);
-    console.log(`POST changes/${changes.review.number}/merge -> ${rMerge.status} kind=${rMerge.json?.merge?.kind} (x-forge-cost ${rMerge.cost}); GET -> state=${rMerged?.state} mergeCommit=${rMerged?.mergeCommit}; origin/main=${mustGit(['rev-parse', 'origin/main'], dir)}`);
+    console.log(`POST changes/${changes.review.number}/merge -> ${rMerge.status} kind=${rMerge.json?.merge?.kind} (x-kvarm-cost ${rMerge.cost}); GET -> state=${rMerged?.state} mergeCommit=${rMerged?.mergeCommit}; origin/main=${mustGit(['rev-parse', 'origin/main'], dir)}`);
     check('VAL-DISPATCH-006', 'the resolved review change stays open until the explicit merge, then merges', !rDone.isError && rOpen?.state === 'open' && rOpen?.headSha === rRes.sha && mainBeforeMerge === mainTip && rMerge.status === 200 && rMerged?.state === 'merged' && mustGit(['rev-parse', 'origin/main'], dir) === rMerged?.mergeCommit);
 
     // Auto: the dead-agent path (VAL-WORKFLOW-001/002, VAL-CROSS-009) ending in VAL-DISPATCH-004 / VAL-CROSS-004.
@@ -1088,21 +1088,21 @@ async function runE2e(argv) {
     console.log(`list_tasks(open) -> ${JSON.stringify(listed.data?.tasks?.map((t) => ({ id: t.id, change: t.change?.number, status: t.status })))}`);
     const a1 = await call(owner, 'claim_task', { repo: env.repo, task: aTask?.id, agent: 'agent-one', ttlSeconds: 10 });
     const gen1 = a1.data?.lease?.generation;
-    const live = forge(['task', 'claim', env.repo, aTask?.id, '--agent', 'agent-two']);
+    const live = kvarm(['task', 'claim', env.repo, aTask?.id, '--agent', 'agent-two']);
     const during = await restTask(aTask?.id);
-    console.log(`MCP claim_task (agent-one, ttl 10 s) -> isError=${a1.isError} lease=${JSON.stringify(a1.data?.lease)} workspace=${a1.data?.workspace?.id}\nforge task claim (agent-two) while live -> exit ${live.code} ${JSON.stringify(live.data)?.slice(0, 300)}\nGET tasks/${aTask?.id} -> claimedBy=${during?.claimedBy} lease=${JSON.stringify(during?.lease)}`);
+    console.log(`MCP claim_task (agent-one, ttl 10 s) -> isError=${a1.isError} lease=${JSON.stringify(a1.data?.lease)} workspace=${a1.data?.workspace?.id}\nkvarm task claim (agent-two) while live -> exit ${live.code} ${JSON.stringify(live.data)?.slice(0, 300)}\nGET tasks/${aTask?.id} -> claimedBy=${during?.claimedBy} lease=${JSON.stringify(during?.lease)}`);
     check('VAL-WORKFLOW-001', 'the claim carries an expiring lease {until, generation}; a claim while it is live is refused 409 naming agent-one', !a1.isError && typeof a1.data?.lease?.until === 'string' && Number.isInteger(gen1) && live.code !== 0 && live.data?.status === 409 && live.data?.code === 'CLAIMED' && JSON.stringify(live.data).includes('agent-one') && during?.claimedBy === 'agent-one' && during?.lease?.generation === gen1);
     await sleep(Math.max(0, Date.parse(a1.data?.lease?.until ?? '') - Date.now()) + 2000);
     const lapsed = await restTask(aTask?.id);
-    const reclaim = forge(['task', 'claim', env.repo, aTask?.id, '--agent', 'agent-two']);
+    const reclaim = kvarm(['task', 'claim', env.repo, aTask?.id, '--agent', 'agent-two']);
     const gen2 = reclaim.data?.lease?.generation;
-    console.log(`after expiry GET tasks/${aTask?.id} -> status=${lapsed?.status} lease=${JSON.stringify(lapsed?.lease)}\nforge task claim (agent-two) -> exit ${reclaim.code} claimedBy=${reclaim.data?.task?.claimedBy} lease=${JSON.stringify(reclaim.data?.lease)} workspace=${reclaim.data?.workspace?.id} ${reclaim.err}`);
+    console.log(`after expiry GET tasks/${aTask?.id} -> status=${lapsed?.status} lease=${JSON.stringify(lapsed?.lease)}\nkvarm task claim (agent-two) -> exit ${reclaim.code} claimedBy=${reclaim.data?.task?.claimedBy} lease=${JSON.stringify(reclaim.data?.lease)} workspace=${reclaim.data?.workspace?.id} ${reclaim.err}`);
     check('VAL-WORKFLOW-001', 'after expiry the task is open again and the CLI reclaim gets generation n+1 with agent-two as claimant and the same workspace', lapsed?.status === 'open' && reclaim.code === 0 && gen2 === gen1 + 1 && reclaim.data?.task?.claimedBy === 'agent-two' && reclaim.data?.workspace?.id === a1.data?.workspace?.id);
     const aRes = resolve(heads.auto, 'export const app = 100 + 3 + 4; // main + review + auto\n', 'resolve auto conflict', {
-      '.forge/ci.json': `${JSON.stringify({ jobs: [{ name: 'resolution-ci', run: 'test -f src/app.ts', required: true }] })}\n`,
+      '.kvarm/ci.json': `${JSON.stringify({ jobs: [{ name: 'resolution-ci', run: 'test -f src/app.ts', required: true }] })}\n`,
     });
-    const notPushed = forge(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two']);
-    console.log(`forge task complete before the push -> exit ${notPushed.code} ${JSON.stringify(notPushed.data)?.slice(0, 250)}`);
+    const notPushed = kvarm(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two']);
+    console.log(`kvarm task complete before the push -> exit ${notPushed.code} ${JSON.stringify(notPushed.data)?.slice(0, 250)}`);
     await pushRetry(dir, url, `${aRes.sha}:${reclaim.data?.workspace?.ref}`);
     const before = await restChange(changes.auto.number);
     const stale = await call(owner, 'complete_task', { repo: env.repo, task: aTask?.id, agent: 'agent-one', generation: gen1, sha: aRes.sha });
@@ -1110,13 +1110,13 @@ async function runE2e(argv) {
     const changeAfterStale = await restChange(changes.auto.number);
     console.log(`agent-one stale complete_task (generation ${gen1}) -> isError=${stale.isError} ${stale.text.slice(0, 250)}\nGET tasks/${aTask?.id} -> status=${afterStale?.status} claimedBy=${afterStale?.claimedBy} workspace=${afterStale?.workspace}; GET changes/${changes.auto.number} head=${changeAfterStale?.headSha} state=${changeAfterStale?.state}`);
     check('VAL-WORKFLOW-002', 'the stale generation completion is refused 409 STALE_GENERATION; task and change unchanged', stale.isError && stale.data?.code === 'STALE_GENERATION' && afterStale?.status === 'claimed' && afterStale?.claimedBy === 'agent-two' && afterStale?.workspace === a1.data?.workspace?.id && changeAfterStale?.headSha === before?.headSha && changeAfterStale?.headSha === heads.auto && changeAfterStale?.state === 'conflicted');
-    const done = forge(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two', '--sha', aRes.sha]);
+    const done = kvarm(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two', '--sha', aRes.sha]);
     const runner = spawnSync(process.execPath, [CLI_BIN, 'runner', '--repo', env.repo, '--once'], {
-      env: { ...process.env, FORGE_BASE_URL: BASE },
+      env: { ...process.env, KVARM_BASE_URL: BASE },
       encoding: 'utf8',
       timeout: 120_000,
     });
-    console.log(`git push ${aRes.sha} -> ${reclaim.data?.workspace?.ref}; forge task complete (generation ${gen2}) -> exit ${done.code} task=${done.data?.task?.status} change=${JSON.stringify({ state: done.data?.change?.state, head: done.data?.change?.headSha })}; forge runner -> exit ${runner.status} ${(runner.stdout ?? '').trim()} ${done.err}`);
+    console.log(`git push ${aRes.sha} -> ${reclaim.data?.workspace?.ref}; kvarm task complete (generation ${gen2}) -> exit ${done.code} task=${done.data?.task?.status} change=${JSON.stringify({ state: done.data?.change?.state, head: done.data?.change?.headSha })}; kvarm runner -> exit ${runner.status} ${(runner.stdout ?? '').trim()} ${done.err}`);
     let merged = null;
     const t0 = Date.now();
     while (Date.now() - t0 < 120_000) {

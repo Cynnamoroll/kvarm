@@ -22,7 +22,7 @@ export function cacheableViewer<S extends AnyApp>(c: Context<S>): boolean {
 export function pageCacheKey(request: Request, generation: string | null): Request {
   if (generation === null) return request;
   const url = new URL(request.url);
-  url.searchParams.set('forge-gen', generation);
+  url.searchParams.set('kvarm-gen', generation);
   return new Request(url.toString(), { method: 'GET' });
 }
 
@@ -44,7 +44,7 @@ export async function edgeCachedPage<S extends AnyApp>(
   if (cached) {
     markCache('hit');
     const res = new Response(cached.body, cached);
-    res.headers.set('x-forge-cache', 'hit');
+    res.headers.set('x-kvarm-cache', 'hit');
     return res;
   }
 
@@ -53,7 +53,7 @@ export async function edgeCachedPage<S extends AnyApp>(
   if (res.status === 200) {
     const store = new Response(res.clone().body, res);
     store.headers.set('Cache-Control', `public, max-age=${ttlSeconds}`);
-    store.headers.set('x-forge-cache', 'miss');
+    store.headers.set('x-kvarm-cache', 'miss');
     c.executionCtx.waitUntil(
       cache.put(key, store).catch(() => undefined),
     );

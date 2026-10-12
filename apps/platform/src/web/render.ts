@@ -4,7 +4,7 @@
  * so first paint never blocks on a round-trip. Kept intentionally small.
  */
 
-import { escapeHtml, raw } from '@forge/ui';
+import { escapeHtml, raw } from '@kvarm/ui';
 import { siteName } from '../config';
 
 const CRITICAL_CSS = raw(`

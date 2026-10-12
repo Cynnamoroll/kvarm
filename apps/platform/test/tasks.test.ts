@@ -9,7 +9,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { decode } from '@forge/gitops';
+import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
@@ -17,7 +17,7 @@ import { recordGuard } from '../src/services/changes';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'td-owner';
 const MAIN = 'refs/heads/main';
@@ -197,12 +197,12 @@ afterAll(() => restoreFetch());
 // ---------------------------------------------------------------------------
 
 describe('dispatch', () => {
-  it('records one forge.task.created event per dispatched task (outbound for external agent runners)', async () => {
+  it('records one kvarm.task.created event per dispatched task (outbound for external agent runners)', async () => {
     const { task } = await dispatched('event', 'review');
     await getChange('event');
     await call('POST', repoPath('event', '/changes/1/merge'), tok.owner);
     const rows = (
-      await env.DB.prepare(`SELECT payload FROM events WHERE type = 'forge.task.created' AND json_extract(payload, '$.subject') = ?`)
+      await env.DB.prepare(`SELECT payload FROM events WHERE type = 'kvarm.task.created' AND json_extract(payload, '$.subject') = ?`)
         .bind(task.id)
         .all<{ payload: string }>()
     ).results;
@@ -210,7 +210,7 @@ describe('dispatch', () => {
     const event = JSON.parse(rows[0]!.payload);
     expect(event).toMatchObject({
       specversion: '1.0',
-      type: 'forge.task.created',
+      type: 'kvarm.task.created',
       source: `/repos/${OWNER}/event`,
       subject: task.id,
       data: { task: task.id, kind: 'resolve-conflict', repo: `${OWNER}/event`, change: 1, headSha: task.headSha, baseSha: task.baseSha },
@@ -396,13 +396,13 @@ describe('complete', () => {
     // The resolution carries the completing agent's attribution.
     const attr = await call('GET', repoPath('complete', `/commits/${res.sha}/attribution`), tok.owner);
     expect(attr.status).toBe(200);
-    expect(attr.json).toMatchObject({ agent: 'claude-code-1', session: `forge:task/${task.id}`, actor: OWNER });
+    expect(attr.json).toMatchObject({ agent: 'claude-code-1', session: `kvarm:task/${task.id}`, actor: OWNER });
 
-    // Review: open until the explicit merge, which waits for the resolution's forge/guard run (recorded by the
+    // Review: open until the explicit merge, which waits for the resolution's kvarm/guard run (recorded by the
     // head branch's push event).
     const unchecked = await call('POST', repoPath('complete', '/changes/1/merge'), tok.owner);
     expect([unchecked.status, unchecked.json.code]).toEqual([409, 'REQUIRED_CHECKS_PENDING']);
-    expect(unchecked.json.error).toContain('forge/guard');
+    expect(unchecked.json.error).toContain('kvarm/guard');
     const changeId = (await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1').bind(repoIds['complete']).first<{ id: string }>())!.id;
     expect(await recordGuard(env, repoIds['complete']!, changeId, res.sha)).toBe('recorded');
     const merged = await call('POST', repoPath('complete', '/changes/1/merge'), tok.owner);

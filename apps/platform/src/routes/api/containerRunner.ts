@@ -2,7 +2,7 @@
  * Container CI runner showcase routes (containers/ciRunnerSandbox.ts). Limited
  * to instance admins with a ci-scoped PAT on a repository they can write,
  * because every run bills a Container. The caller's own bearer token is what
- * the container's runner claims and reports with, the same as `forge runner`.
+ * the container's runner claims and reports with, the same as `kvarm runner`.
  *
  *   POST   repos/:owner/:repo/ci/container-runs {mode: cold|warm} -> 200 ContainerRunReport
  *   DELETE repos/:owner/:repo/ci/container-runs/snapshot          -> 200 {reset, snapshot}

@@ -1,5 +1,5 @@
 /**
- * Git notes commits on refs/notes/forge-attribution: what buildNotesCommit
+ * Git notes commits on refs/notes/kvarm-attribution: what buildNotesCommit
  * writes is read back by real `git notes`, and notes git itself wrote (at the
  * root or below fanout directories) are found and replaced in place.
  */
@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  FORGE_NOTES_REF,
+  KVARM_NOTES_REF,
   NotesTreeError,
   buildBlob,
   buildNotesCommit,
@@ -49,7 +49,7 @@ async function writeObjects(objects: GitObject[]): Promise<void> {
   git(['unpack-objects', '-q'], Buffer.from(await writePack(objects)));
 }
 
-const ident = { name: 'Forge', email: 'forge@forge.invalid', time: 1_790_000_000 };
+const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: 1_790_000_000 };
 const commits: string[] = [];
 
 function emptyCommit(msg: string): string {
@@ -58,7 +58,7 @@ function emptyCommit(msg: string): string {
 }
 
 function notesTip(): { commit: string; tree: string } | null {
-  const r = spawnSync('git', ['rev-parse', '--verify', '-q', FORGE_NOTES_REF], { cwd: dir });
+  const r = spawnSync('git', ['rev-parse', '--verify', '-q', KVARM_NOTES_REF], { cwd: dir });
   if (r.status !== 0) return null;
   const commit = r.stdout.toString().trim();
   return { commit, tree: git(['rev-parse', `${commit}^{tree}`]).trim() };
@@ -68,13 +68,13 @@ async function addNote(target: string, text: string) {
   const parent = notesTip();
   const r = await buildNotesCommit({ reader: repoReader, parent, target, content: encode(text), author: ident });
   await writeObjects(r.objects);
-  git(['update-ref', FORGE_NOTES_REF, r.commit, ...(parent ? [parent.commit] : [])]);
+  git(['update-ref', KVARM_NOTES_REF, r.commit, ...(parent ? [parent.commit] : [])]);
   return r;
 }
 
-const show = (sha: string) => git(['notes', '--ref=forge-attribution', 'show', sha]);
+const show = (sha: string) => git(['notes', '--ref=kvarm-attribution', 'show', sha]);
 const list = () =>
-  git(['notes', '--ref=forge-attribution', 'list'])
+  git(['notes', '--ref=kvarm-attribution', 'list'])
     .trim()
     .split('\n')
     .filter(Boolean)
@@ -95,7 +95,7 @@ describe('buildNotesCommit', () => {
     const r = await addNote(commits[0]!, '{"agent":"a1"}\n');
     expect(r.replaced).toBeNull();
     expect(show(commits[0]!)).toBe('{"agent":"a1"}\n');
-    expect(git(['cat-file', '-p', r.commit])).toMatch(/^tree [0-9a-f]{40}\nauthor Forge <forge@forge.invalid> /);
+    expect(git(['cat-file', '-p', r.commit])).toMatch(/^tree [0-9a-f]{40}\nauthor Kvarm <kvarm@kvarm.invalid> /);
     // A root notes commit has no parent; the tree is fanout-free (the path is the commit sha).
     expect(git(['rev-list', '--parents', '-n', '1', r.commit]).trim()).toBe(r.commit);
     expect(git(['ls-tree', '--name-only', r.tree]).trim()).toBe(commits[0]);
@@ -132,7 +132,7 @@ describe('buildNotesCommit', () => {
     ]);
     await writeObjects([old, keep, sub, root]);
     const c = git(['commit-tree', root.hash, '-m', 'fanout notes']).trim();
-    git(['update-ref', FORGE_NOTES_REF, c]);
+    git(['update-ref', KVARM_NOTES_REF, c]);
     expect(show(target)).toBe('old fanout note\n');
 
     expect(await findNote(repoReader, root.hash, target)).toEqual({ blob: old.hash, path: `${target.slice(0, 2)}/${target.slice(2)}` });
@@ -146,7 +146,7 @@ describe('buildNotesCommit', () => {
   });
 
   it('finds notes written by git notes add', async () => {
-    git(['notes', '--ref=forge-attribution', 'add', '-f', '-m', 'from git', commits[1]!]);
+    git(['notes', '--ref=kvarm-attribution', 'add', '-f', '-m', 'from git', commits[1]!]);
     const tip = notesTip()!;
     const loc = await findNote(repoReader, tip.tree, commits[1]!);
     expect(loc).not.toBeNull();

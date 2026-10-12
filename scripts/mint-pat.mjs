@@ -13,7 +13,7 @@
  * Usage:
  *   node scripts/mint-pat.mjs --login forge-bot --scopes read,write,api,ci \
  *     --name validation-bot --env-file apps/platform/.dev.vars.validation \
- *     --key FORGE_PAT_BOT [--email bot@example.invalid] [--rotate]
+ *     --key KVARM_PAT_BOT [--email bot@example.invalid] [--rotate]
  *
  * Requires `wrangler` (logged in) on PATH or resolvable through npx.
  */
@@ -73,7 +73,7 @@ if (keyLine.test(existing) && !args.rotate) {
   process.exit(0);
 }
 
-const token = `forge_pat_${randomBytes(32).toString('hex')}`;
+const token = `kvarm_pat_${randomBytes(32).toString('hex')}`;
 const hash = createHash('sha256').update(token).digest('hex');
 const prefix = token.slice(0, 18);
 const patId = randomUUID();
@@ -81,7 +81,7 @@ const now = Date.now();
 
 const sql = [
   `INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at)
-     SELECT ${sqlString(randomUUID())}, ${sqlString(`forge-ops:${login}`)}, ${sqlString(login)},
+     SELECT ${sqlString(randomUUID())}, ${sqlString(`kvarm-ops:${login}`)}, ${sqlString(login)},
             ${sqlString(email)}, ${sqlString(login)}, 0, ${now}
      WHERE NOT EXISTS (SELECT 1 FROM users WHERE login = ${sqlString(login)})`,
   `INSERT INTO pat (id, user_id, name, prefix, hash, scopes, created_at)

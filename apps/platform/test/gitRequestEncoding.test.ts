@@ -16,7 +16,7 @@ import { internalKey, writeCachedJson } from '../src/cache/internal';
 import worker from '../src/index';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'enc-owner';
 const REPO = 'many-refs';
 const ARTIFACTS_NAME = `${OWNER}--${REPO}`;

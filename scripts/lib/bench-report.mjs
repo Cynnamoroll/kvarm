@@ -35,6 +35,9 @@ const pct = (hits, n) => (n ? `${Math.round((hits / n) * 100)}%` : '-');
 const statCells = (s) => `${s?.n ?? 0} | ${ms(s?.min)} | ${ms(s?.p50)} | ${ms(s?.max)}`;
 const mib = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`);
 const counter = (m, k) => (m?.[k] === undefined ? '0' : String(m[k]));
+// Metric labels recorded in bench.json before the Kvarm cutover name the guard check by its retired
+// `forge/` spelling; the committed measurements stay byte-identical, only the rendered label is current.
+const metricLabel = (m) => String(m).replace(/\bforge\/guard\b/g, 'kvarm/guard');
 
 export function renderBenchReadme(r) {
   const out = [];
@@ -42,7 +45,7 @@ export function renderBenchReadme(r) {
   push(
     '# Benchmarks',
     '',
-    'Measured against the deployed worker by `node scripts/bench.mjs` (see "Reproduce" below). Every timing is a client-side `Date.now()` span around the request or process; every counter is the `x-forge-cost` header the worker returns. The counters are work counts (D1 round trips, Artifacts RPCs, Durable Object calls, R2 reads, subrequests), not a bill.',
+    'Measured against the deployed worker by `node scripts/bench.mjs` (see "Reproduce" below). Every timing is a client-side `Date.now()` span around the request or process; every counter is the `x-kvarm-cost` header the worker returns. The counters are work counts (D1 round trips, Artifacts RPCs, Durable Object calls, R2 reads, subrequests), not a bill.',
     '',
     `Generated ${r.generatedAt} from commit \`${r.commit}\`${r.worker ? ` against worker version \`${r.worker}\`` : ''}; client ${r.client}.`,
     '',
@@ -56,7 +59,7 @@ export function renderBenchReadme(r) {
     '',
     `Wall time to materialize a ref into an empty directory, median of ${cvs.runs} runs per variant (measured ${cvs.measuredAt}).`,
     '',
-    '| target | files | tree bytes | `git clone` + checkout | `git clone --depth=1` | `forge checkout` (snapshot) |',
+    '| target | files | tree bytes | `git clone` + checkout | `git clone --depth=1` | `kvarm checkout` (snapshot) |',
     '| --- | ---: | ---: | ---: | ---: | ---: |',
     ...cvs.targets.map((t) => `| ${t.name} | ${t.files} | ${mib(t.bytes)} | ${ms(t.clone.p50)} | ${ms(t.shallow.p50)} | ${ms(t.snapshot.p50)} |`),
     '',
@@ -68,7 +71,7 @@ export function renderBenchReadme(r) {
     '',
     `Fixture: ${c.fixture}. Cold runs use the instance-admin \`?nocache=1\` bypass, which reads and writes no compare cache entry; warm runs repeat the same URL after the tree-pair body is cached.`,
     '',
-    '| state | n | min | p50 | max | `x-forge-cost` (last run) |',
+    '| state | n | min | p50 | max | `x-kvarm-cost` (last run) |',
     '| --- | ---: | ---: | ---: | ---: | --- |',
     `| cold (bypass) | ${statCells(c.cold)} | \`${c.coldCost}\` |`,
     `| warm (cache hit) | ${statCells(c.warm)} | \`${c.warmCost}\` |`,
@@ -78,7 +81,7 @@ export function renderBenchReadme(r) {
   push(
     `## ${BENCH_GROUPS[2]}`,
     '',
-    'Share of repeated requests answered from the Cache API (`cache=hit` in `x-forge-cost`). The first request of each URL fills the entry and counts as a miss. The authority lookup still runs on every hit.',
+    'Share of repeated requests answered from the Cache API (`cache=hit` in `x-kvarm-cost`). The first request of each URL fills the entry and counts as a miss. The authority lookup still runs on every hit.',
     '',
     '| surface | requests | hits | hit rate |',
     '| --- | ---: | ---: | ---: |',
@@ -120,7 +123,7 @@ export function renderBenchReadme(r) {
     `| burst window (first enqueue -> last publication) | ${sec(f.windowMs)} |`,
     `| throughput (publications per minute over the burst window) | ${f.throughputPerMin} |`,
     `| enqueue -> published latency, server clock (p50 / p90) | ${sec(f.latency?.p50)} / ${sec(f.latency?.p90)} |`,
-    `| enqueue \`x-forge-cost\`, median per counter (all published) | \`${f.enqueue}\` |`,
+    `| enqueue \`x-kvarm-cost\`, median per counter (all published) | \`${f.enqueue}\` |`,
     `| stored publication cost, median per counter (all published) | \`${f.publication}\` |`,
     `| longest interval with no queue entry reaching a terminal state | ${sec(f.idleMs)} |`,
     `| driver checks | ${f.checks} |`,
@@ -134,7 +137,7 @@ export function renderBenchReadme(r) {
     '',
     '| metric | n | min | p50 | max | methodology |',
     '| --- | ---: | ---: | ---: | ---: | --- |',
-    ...r.loop.map((x) => `| ${x.metric} | ${statCells(x.stats)} | ${x.method} |`),
+    ...r.loop.map((x) => `| ${metricLabel(x.metric)} | ${statCells(x.stats)} | ${x.method} |`),
     '',
   );
 
@@ -155,7 +158,7 @@ export function renderBenchReadme(r) {
     '## Reproduce',
     '',
     '```sh',
-    'set -a; . apps/platform/.dev.vars.validation; set +a   # FORGE_BASE_URL, FORGE_PAT (instance admin, api + ci scopes)',
+    'set -a; . apps/platform/.dev.vars.validation; set +a   # KVARM_BASE_URL, KVARM_PAT (instance admin, api + ci scopes)',
     'node scripts/bench.mjs --write                         # rewrites this file',
     'node scripts/cost-sweep.mjs --cost-md <path to cost.md> # every budget row, non-zero exit on a violation',
     '```',

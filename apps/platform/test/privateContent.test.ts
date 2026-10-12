@@ -19,7 +19,7 @@ import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/met
 import worker from '../src/index';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const ORG = 'pc-org';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const SHA = 'a'.repeat(40);

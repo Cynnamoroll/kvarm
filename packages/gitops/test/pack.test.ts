@@ -50,7 +50,7 @@ function verify(pack: Uint8Array, name: string): Map<string, string> {
   return objects;
 }
 
-const ident = { name: 'Forge', email: 'forge@forge.invalid', time: 1_790_000_000 };
+const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: 1_790_000_000 };
 
 async function sampleObjects(): Promise<GitObject[]> {
   const small = await buildBlob(encode('hello\n'));

@@ -19,7 +19,7 @@
  * that as "unknown", never as clean.
  */
 
-import { diffLineOps } from '@forge/diffcore';
+import { diffLineOps } from '@kvarm/diffcore';
 
 const DEFAULT_NODE_BUDGET = 400_000;
 const DEFAULT_MARKER_SIZE = 7;

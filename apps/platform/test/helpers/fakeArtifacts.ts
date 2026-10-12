@@ -21,7 +21,7 @@ import {
   pktLine,
   readPktLines,
   type TreeEntry,
-} from '@forge/gitops';
+} from '@kvarm/gitops';
 import { countingFetch } from '../../src/cost/meter';
 
 interface Obj {

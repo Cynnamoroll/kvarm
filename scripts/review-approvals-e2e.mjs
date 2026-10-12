@@ -3,10 +3,10 @@
  * Live driver for review approvals (m5-review-approvals): VAL-PROTECT-002 and
  * VAL-REVIEW-001..005 against the deployed Worker.
  *
- * Every scenario runs in a fresh public repo owned by FORGE_USER, named
+ * Every scenario runs in a fresh public repo owned by KVARM_USER, named
  * `m5-review-<purpose>-<timestamp>`, seeded with real git pushes and deleted
- * afterwards (unless --keep). `forge-org-maint` (FORGE_PAT_MAINT) gets a write
- * grant and is the second human; three agents of FORGE_USER (two `claude`, one
+ * afterwards (unless --keep). `forge-org-maint` (KVARM_PAT_MAINT) gets a write
+ * grant and is the second human; three agents of KVARM_USER (two `claude`, one
  * `gpt`) get write tokens per repo and are revoked at the end.
  *   unset      no review policy: explicit merge with no approval; enqueue alone lands
  *   policy     N=2: 409 at 0 and 1 approvals, self-review refused (REST + MCP),
@@ -40,10 +40,10 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } } });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
-const MAINT = process.env.FORGE_PAT_MAINT ?? die('FORGE_PAT_MAINT is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
+const MAINT = process.env.KVARM_PAT_MAINT ?? die('KVARM_PAT_MAINT is not set');
 const MAINT_LOGIN = 'forge-org-maint';
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm5-review';
@@ -78,7 +78,7 @@ async function http(path, { method = 'GET', json, token = PAT } = {}) {
   } catch {
     body = null;
   }
-  return { status: res.status, text, json: body, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, json: body, cost: res.headers.get('x-kvarm-cost') };
 }
 
 function cost(label, r) {
@@ -92,9 +92,9 @@ const short = (sha) => (sha ? sha.slice(0, 10) : String(sha));
 
 const work = mkdtempSync(join(tmpdir(), 'review-approvals-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
-const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: PAT };
+const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: PAT };
 
 function git(args, cwd) {
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], { cwd, env: gitEnv, encoding: 'utf8' });
@@ -167,7 +167,7 @@ async function mcpCall(token, tool, args) {
       const res = await fetch(url, init);
       if ((init?.method ?? 'GET') === 'POST') {
         status = res.status;
-        mcpCost = res.headers.get('x-forge-cost');
+        mcpCost = res.headers.get('x-kvarm-cost');
       }
       return res;
     },
@@ -597,7 +597,7 @@ for (const a of Object.values(agents)) {
   console.log(`revoke agent ${a.name}: ${r.status}`);
 }
 rmSync(work, { recursive: true, force: true });
-console.log('\n# x-forge-cost');
+console.log('\n# x-kvarm-cost');
 for (const c of costs) console.log(`  ${c.label} (${c.status}): ${c.cost}`);
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

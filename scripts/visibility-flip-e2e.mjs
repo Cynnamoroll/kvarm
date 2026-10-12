@@ -22,9 +22,9 @@
  * authority lookup (d1<=1), while REST and git still return 401. Right after
  * the flip the same kinds of rejected Bearer get 404 on the private pages.
  *
- * Cost: warm public metadata (FORGE_PAT and the owner), warm cached info/refs,
+ * Cost: warm public metadata (KVARM_PAT and the owner), warm cached info/refs,
  * warm private personal and private org repo reads, and the first denial after
- * a grant revoke, all from x-forge-cost.
+ * a grant revoke, all from x-kvarm-cost.
  *
  * Private content: a commit-SHA raw file (and blob page) in a private personal
  * repo and a private org repo is served on repeat from the repo-scoped
@@ -35,8 +35,8 @@
  * Anonymous public raw keeps its public Cache-Control.
  *
  * Principals come from env vars by NAME (load apps/platform/.dev.vars.validation):
- * FORGE_PAT_BOT (owner), FORGE_PAT_OUTSIDER (unrelated), FORGE_PAT_MEMBER (org
- * member), FORGE_PAT (cynthia). Tokens are never printed; git runs with
+ * KVARM_PAT_BOT (owner), KVARM_PAT_OUTSIDER (unrelated), KVARM_PAT_MEMBER (org
+ * member), KVARM_PAT (cynthia). Tokens are never printed; git runs with
  * `-c credential.helper=` and a secret-free GIT_ASKPASS helper.
  *
  * Usage: node scripts/visibility-flip-e2e.mjs [--keep]
@@ -51,9 +51,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
 const KEEP = process.argv.includes('--keep');
-const P = { owner: 'FORGE_PAT_BOT', outsider: 'FORGE_PAT_OUTSIDER', member: 'FORGE_PAT_MEMBER', admin: 'FORGE_PAT' };
+const P = { owner: 'KVARM_PAT_BOT', outsider: 'KVARM_PAT_OUTSIDER', member: 'KVARM_PAT_MEMBER', admin: 'KVARM_PAT' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);
 const OWNER = 'forge-bot';
 const MEMBER = 'forge-org-member';
@@ -101,7 +101,7 @@ async function http(who, path, { method = 'GET', kind = 'bearer', headers = {}, 
   else if (body !== undefined) init.body = body;
   const res = await fetch(`${BASE}${path}`, init);
   const buf = Buffer.from(await res.arrayBuffer());
-  const header = res.headers.get('x-forge-cost');
+  const header = res.headers.get('x-kvarm-cost');
   const cacheControl = res.headers.get('cache-control');
   return { status: res.status, text: buf.toString('latin1'), header, cost: costOf(header), cacheControl, at: stamp() };
 }
@@ -110,11 +110,11 @@ const api = (who, method, path, json) => http(who, `/api/v1${path}`, { method, j
 
 const work = mkdtempSync(join(tmpdir(), 'visibility-flip-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(who, args, cwd = work) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: who ? process.env[P[who]] : '' };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: who ? process.env[P[who]] : '' };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], { cwd, env, encoding: 'utf8' });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
@@ -152,7 +152,7 @@ function d1Flip(repo, visibility) {
   return d1Exec(`UPDATE repos SET visibility = '${visibility}' WHERE owner_login = '${OWNER}' AND name = '${repo}'`);
 }
 
-const randomPat = () => `forge_pat_${randomBytes(32).toString('hex')}`;
+const randomPat = () => `kvarm_pat_${randomBytes(32).toString('hex')}`;
 const bearerOnly = (token) => ({ headers: { Authorization: `Bearer ${token}` } });
 const basicOnly = (token) => ({ kind: 'basic', headers: { Authorization: `Basic ${Buffer.from(`x:${token}`).toString('base64')}` } });
 
@@ -431,7 +431,7 @@ try {
   for (const who of ['admin', 'owner']) {
     const first = await api(who, 'GET', `/repos/${OWNER}/${COST}`);
     const warm = await api(who, 'GET', `/repos/${OWNER}/${COST}`);
-    check(`VAL-COST-002 ${who === 'admin' ? 'FORGE_PAT' : 'owner'} warm public metadata: first ${first.status} ${first.header} | warm`,
+    check(`VAL-COST-002 ${who === 'admin' ? 'KVARM_PAT' : 'owner'} warm public metadata: first ${first.status} ${first.header} | warm`,
       `${warm.status} ${warm.header}`, () => first.status === 200 && warm.status === 200 && within(warm.cost, { d1: 1, rr: 8, rw: 0, do: 0 }));
   }
 

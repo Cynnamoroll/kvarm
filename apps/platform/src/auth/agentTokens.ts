@@ -14,7 +14,7 @@
 import { toUserRow, type UserRow } from '../db/users';
 import type { PATInfo, Scope } from './pat';
 
-export const AGENT_TOKEN_PATTERN = /^forge_agt_[0-9a-f]{64}$/;
+export const AGENT_TOKEN_PATTERN = /^kvarm_agt_[0-9a-f]{64}$/;
 export const AGENT_TOKEN_PREFIX_LENGTH = 18;
 
 export type AgentRole = 'read' | 'write';
@@ -45,7 +45,7 @@ export function newAgentToken(): { token: string; prefix: string } {
   const buf = crypto.getRandomValues(new Uint8Array(32));
   let hex = '';
   for (const b of buf) hex += b.toString(16).padStart(2, '0');
-  const token = `forge_agt_${hex}`;
+  const token = `kvarm_agt_${hex}`;
   return { token, prefix: token.slice(0, AGENT_TOKEN_PREFIX_LENGTH) };
 }
 

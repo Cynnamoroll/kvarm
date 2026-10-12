@@ -9,7 +9,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines, sha256Hex } from '@forge/gitops';
+import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines, sha256Hex } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { INTENT_LIMITS, collapseObserved, minimalCover, normalizeDeclaration } from '../src/services/intents/paths';
@@ -19,7 +19,7 @@ import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'nx-owner';
 

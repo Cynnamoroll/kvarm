@@ -3,12 +3,12 @@
  * Live validation driver for the compare and diff APIs (VAL-DIFF-001..021,
  * VAL-COST-004..006).
  *
- * As cynthia (FORGE_PAT, instance admin) it creates fresh repos named
+ * As cynthia (KVARM_PAT, instance admin) it creates fresh repos named
  * m3-compare-api-<purpose>-<ts>, builds them with local git, records local
  * git ground truth (diff --numstat/--shortstat/--name-status -M, -U3 hunk
  * headers, ls-tree, ls-remote) and pushes through the git proxy. It then
  * checks every compare/file/commit-diff response against that ground truth
- * and the documented x-forge-cost budgets:
+ * and the documented x-kvarm-cost budgets:
  *
  *   fixture   the contract's compare-fixture shape (root commit, main, feature)
  *   private   private repo: anonymous and unrelated callers get the unknown-repo 404
@@ -27,7 +27,7 @@
  * repos this run created are ever deleted; a failed create aborts the part.
  *
  * Principals by env var NAME (load apps/platform/.dev.vars.validation):
- * FORGE_PAT (owner, admin), FORGE_PAT_BOT (non-admin, unrelated). Tokens are
+ * KVARM_PAT (owner, admin), KVARM_PAT_BOT (non-admin, unrelated). Tokens are
  * never printed; git runs with `-c credential.helper=` and a secret-free
  * GIT_ASKPASS helper.
  *
@@ -43,10 +43,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
 const KEEP = process.argv.includes('--keep');
 const ONLY = (process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length) ?? '').split(',').filter(Boolean);
-const P = { owner: 'FORGE_PAT', bot: 'FORGE_PAT_BOT' };
+const P = { owner: 'KVARM_PAT', bot: 'KVARM_PAT_BOT' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);
 const OWNER = 'cynthia';
 const ts = Date.now();
@@ -87,20 +87,20 @@ async function http(who, path, { method = 'GET', json } = {}) {
   } catch {
     // non-JSON
   }
-  const header = res.headers.get('x-forge-cost');
-  return { status: res.status, text, body, header, cost: costOf(header), cache: res.headers.get('x-forge-cache'), ms };
+  const header = res.headers.get('x-kvarm-cost');
+  return { status: res.status, text, body, header, cost: costOf(header), cache: res.headers.get('x-kvarm-cache'), ms };
 }
 
 const api = (repo, rest) => `/api/v1/repos/${OWNER}/${repo}/${rest}`;
-const show = (r) => `${r.status} ${r.ms}ms x-forge-cache=${r.cache} ${r.header}`;
+const show = (r) => `${r.status} ${r.ms}ms x-kvarm-cache=${r.cache} ${r.header}`;
 
 const work = mkdtempSync(join(tmpdir(), 'compare-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, who = null) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: who ? process.env[P[who]] : '' };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: who ? process.env[P[who]] : '' };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd,
     env,

@@ -91,7 +91,7 @@
     { "name": "repo-import", "binding": "REPO_IMPORT", "class_name": "RepoImport" }
   ],
   "vars": {
-    "SITE_NAME": "Forge",
+    "SITE_NAME": "Kvarm",
     "APP_ORIGIN": "https://forge-platform.cynnamoroll.workers.dev",
     "ARTIFACTS_NAMESPACE": "default",
     "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback"

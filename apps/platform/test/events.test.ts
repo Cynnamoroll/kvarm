@@ -19,7 +19,7 @@ import { eventIdentity, parsePushEvent, snapshotInstanceId } from '../src/servic
 import worker from '../src/index';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'ev-owner';
 const ZERO = '0'.repeat(40);
 const A = 'a'.repeat(40);

@@ -359,9 +359,9 @@ export async function runRunner(options) {
   const execute = options.execute ?? executeShell;
   const deltaFn =
     options.deltaFn ?? ((previous, sha) => fetchDelta({ baseUrl: options.baseUrl, repo: options.repo, pat: options.pat, apiFetch, previous, sha }));
-  const runnerId = options.runnerId ?? `forge-runner-${crypto.randomUUID()}`;
+  const runnerId = options.runnerId ?? `kvarm-runner-${crypto.randomUUID()}`;
   const tempRoot = options.tempRoot ?? tmpdir();
-  const workRoot = options.workRoot ?? join(tempRoot, 'forge-runner');
+  const workRoot = options.workRoot ?? join(tempRoot, 'kvarm-runner');
   /** @type {import('./workdir.js').Slot | undefined} */
   let slot;
   let claimed = 0;

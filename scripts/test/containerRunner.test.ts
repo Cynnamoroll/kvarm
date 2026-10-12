@@ -1,5 +1,5 @@
 /**
- * The Container CI runner writes the `forge runner` modules into its
+ * The Container CI runner writes the `kvarm runner` modules into its
  * container with one `node -e` exec and runs one job with per-exec
  * environment only. These tests run that exact payload with local node: the
  * committed module matches apps/cli/src, the writer lays the files out, and
@@ -15,7 +15,7 @@ import { OUTPUT, renderRunnerSource } from '../gen-container-runner-source.mjs';
 import { WRITE_FILES_SCRIPT, containerRunnerFiles, runnerExecEnv } from '../../apps/platform/src/containers/runnerFiles';
 import { git, startServer, tarFromCommit, tempDir } from '../../apps/cli/test/helpers';
 
-const root = tempDir('forge-container-runner-');
+const root = tempDir('kvarm-container-runner-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 function run(cmd: string[], env: Record<string, string>, stdin?: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -38,7 +38,7 @@ describe('container runner payload', () => {
   });
 
   it('writes the runner, then claims, checks out the snapshot, runs and reports one job with the per-exec token', async () => {
-    const dir = join(root, 'opt', 'forge-runner');
+    const dir = join(root, 'opt', 'kvarm-runner');
     const files = containerRunnerFiles();
     const wrote = await run(['node', '-e', WRITE_FILES_SCRIPT], {}, JSON.stringify({ dir, files }));
     expect(wrote).toMatchObject({ code: 0 });
@@ -66,21 +66,21 @@ describe('container runner payload', () => {
         return true;
       }
       if (path === `/api/v1/repos/o/r/snapshots/${sha}` && req.method === 'POST') return json(200, { state: 'ready', sha, size: tar.length }), true;
-      if (path === `/api/v1/repos/o/r/snapshots/${sha}/download`) return res.writeHead(200, { 'x-forge-snapshot-sha': sha }).end(Buffer.from(tar)), true;
+      if (path === `/api/v1/repos/o/r/snapshots/${sha}/download`) return res.writeHead(200, { 'x-kvarm-snapshot-sha': sha }).end(Buffer.from(tar)), true;
       if (path === '/api/v1/repos/o/r/ci/jobs/job-1/report') return reports.push(JSON.parse(body.toString())), json(200, { run: { id: 'run-1' } }), true;
       return json(404, { error: 'not found' }), true;
     });
     try {
-      const env = runnerExecEnv({ baseUrl: api.url, token: 'forge_pat_container_secret', repo: 'o/r', runnerId: 'container-runner-1', workRoot: join(root, 'work-root') });
-      expect(Object.keys(env).sort()).toEqual(['FORGE_BASE_URL', 'FORGE_PAT', 'FORGE_REPO', 'FORGE_RUNNER_ID', 'FORGE_WORK_ROOT', 'HOME']);
+      const env = runnerExecEnv({ baseUrl: api.url, token: 'kvarm_pat_container_secret', repo: 'o/r', runnerId: 'container-runner-1', workRoot: join(root, 'work-root') });
+      expect(Object.keys(env).sort()).toEqual(['HOME', 'KVARM_BASE_URL', 'KVARM_PAT', 'KVARM_REPO', 'KVARM_RUNNER_ID', 'KVARM_WORK_ROOT']);
       const first = await run(['node', join(dir, 'run.mjs')], env);
       expect(first.code, first.stderr).toBe(0);
       expect(first.stdout).toContain('claimed test (job-1)');
-      expect(first.stdout).not.toContain('forge_pat_container_secret');
+      expect(first.stdout).not.toContain('kvarm_pat_container_secret');
       expect(reports).toHaveLength(1);
       expect(reports[0]).toMatchObject({ runnerId: 'container-runner-1', generation: 1, conclusion: 'success', summary: { exitCode: 0, source: 'snapshot', sha } });
       expect(reports[0].summary.stdout).toBe('container-marker\n');
-      expect(api.requests.filter((r) => r.url.includes('/ci/jobs/')).every((r) => r.auth === 'Bearer forge_pat_container_secret')).toBe(true);
+      expect(api.requests.filter((r) => r.url.includes('/ci/jobs/')).every((r) => r.auth === 'Bearer kvarm_pat_container_secret')).toBe(true);
 
       const idle = await run(['node', join(dir, 'run.mjs')], env);
       expect(idle.code).toBe(3);

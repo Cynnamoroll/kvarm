@@ -1,7 +1,7 @@
 /** Small runtime config helpers over Env vars. */
 
 export function siteName(env: Env): string {
-  return env.SITE_NAME || 'Forge';
+  return env.SITE_NAME || 'Kvarm';
 }
 
 export function appOrigin(env: Env): string {

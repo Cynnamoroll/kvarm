@@ -5,10 +5,10 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { executeShell, runRunner } from '../src/runner.js';
 import { tempDir } from './helpers';
 
-const root = tempDir('forge-cli-runner-');
+const root = tempDir('kvarm-cli-runner-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-describe('forge runner', () => {
+describe('kvarm runner', () => {
   it('kills a timed-out command and its descendant process group', async () => {
     const command = `${JSON.stringify(process.execPath)} -e "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});setInterval(()=>{},1000)"`;
     const result = await executeShell(command, root, 0.1);
@@ -19,11 +19,11 @@ describe('forge runner', () => {
 
   it('gives repository commands only the allowlisted environment and disables git prompts', async () => {
     const injected = {
-      FORGE_PAT: 'forge_pat_runner_secret',
-      FORGE_PAT_BOT: 'forge_pat_bot_secret',
-      FORGE_PAT_NO_CI: 'forge_pat_no_ci_secret',
-      FORGE_PAT_ALIASED: 'forge_pat_aliased_secret',
-      FORGE_OTHER_SECRET: 'forge_other_secret',
+      KVARM_PAT: 'kvarm_pat_runner_secret',
+      KVARM_PAT_BOT: 'kvarm_pat_bot_secret',
+      KVARM_PAT_NO_CI: 'kvarm_pat_no_ci_secret',
+      KVARM_PAT_ALIASED: 'kvarm_pat_aliased_secret',
+      KVARM_OTHER_SECRET: 'kvarm_other_secret',
       GIT_ASKPASS: '/secret/askpass',
       GIT_CONFIG_COUNT: '1',
       GIT_CONFIG_KEY_0: 'credential.helper',
@@ -31,7 +31,7 @@ describe('forge runner', () => {
       GIT_TERMINAL_PROMPT: '1',
       RUNNER_UNRELATED_SECRET: 'unrelated_secret',
       LANG: 'C',
-      LC_FORGE_TEST: 'C',
+      LC_KVARM_TEST: 'C',
       TZ: 'UTC',
       TMPDIR: process.env.TMPDIR ?? root,
     };
@@ -39,7 +39,7 @@ describe('forge runner', () => {
     Object.assign(process.env, injected);
     try {
       const script =
-        "process.stdout.write(JSON.stringify({path:process.env.PATH,home:process.env.HOME,lang:process.env.LANG,lc:process.env.LC_FORGE_TEST,tz:process.env.TZ,tmpdir:process.env.TMPDIR,prompt:process.env.GIT_TERMINAL_PROMPT,unrelated:process.env.RUNNER_UNRELATED_SECRET,leaked:Object.fromEntries(Object.entries(process.env).filter(([key])=>(key.startsWith('FORGE_')||key.startsWith('GIT_'))&&key!=='GIT_TERMINAL_PROMPT'))}))";
+        "process.stdout.write(JSON.stringify({path:process.env.PATH,home:process.env.HOME,lang:process.env.LANG,lc:process.env.LC_KVARM_TEST,tz:process.env.TZ,tmpdir:process.env.TMPDIR,prompt:process.env.GIT_TERMINAL_PROMPT,unrelated:process.env.RUNNER_UNRELATED_SECRET,leaked:Object.fromEntries(Object.entries(process.env).filter(([key])=>(key.startsWith('KVARM_')||key.startsWith('GIT_'))&&key!=='GIT_TERMINAL_PROMPT'))}))";
       const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
       const result = await executeShell(command, root, 5);
       expect(result).toMatchObject({ code: 0, timedOut: false });
@@ -103,8 +103,8 @@ describe('forge runner', () => {
     });
 
     const result = await runRunner({
-      baseUrl: 'https://forge.test',
-      pat: 'forge_pat_test',
+      baseUrl: 'https://kvarm.test',
+      pat: 'kvarm_pat_test',
       repo: 'cynthia/demo',
       once: true,
       runnerId: 'runner-test',
@@ -150,7 +150,7 @@ describe('forge runner', () => {
       return { source: 'clone' as const, sha: 'c'.repeat(40) };
     };
     const first = await runRunner({
-      baseUrl: 'https://forge.test',
+      baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'cynthia/demo',
       once: true,
@@ -165,7 +165,7 @@ describe('forge runner', () => {
     expect(first).toEqual({ claimed: 1, reported: 1 });
     expect(reports[0]).toMatchObject({ conclusion: 'failure', summary: { timedOut: true, stderr: 'timed out' } });
     const empty = await runRunner({
-      baseUrl: 'https://forge.test',
+      baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'cynthia/demo',
       once: true,
@@ -202,7 +202,7 @@ describe('forge runner', () => {
       return Response.json({});
     };
     const result = await runRunner({
-      baseUrl: 'https://forge.test',
+      baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'cynthia/demo',
       once: true,
@@ -242,7 +242,7 @@ describe('forge runner', () => {
     };
 
     const result = await runRunner({
-      baseUrl: 'https://forge.test',
+      baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'cynthia/demo',
       once: true,
@@ -296,7 +296,7 @@ describe('forge runner', () => {
     };
 
     const result = await runRunner({
-      baseUrl: 'https://forge.test',
+      baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'cynthia/demo',
       once: true,
@@ -355,7 +355,7 @@ describe('forge runner', () => {
         return Response.json({});
       };
       const run = runRunner({
-        baseUrl: 'https://forge.test',
+        baseUrl: 'https://kvarm.test',
         pat: 'p',
         repo: 'cynthia/demo',
         apiFetch,
@@ -426,7 +426,7 @@ describe('forge runner', () => {
       return Response.json({ error: 'not found' }, { status: 404 });
     };
     const options = {
-      baseUrl: 'https://forge.test',
+      baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'cynthia/demo',
       once: true,
@@ -495,7 +495,7 @@ describe('forge runner', () => {
       return Response.json({ error: 'not found' }, { status: 404 });
     };
     const options = {
-      baseUrl: 'https://forge.test',
+      baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'cynthia/demo',
       once: true,

@@ -8,7 +8,7 @@ import { authorizeGitRequest } from '../src/routes/git';
 
 // Worker secrets (WorkOS) are declared on the global Env but absent in tests.
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 
 /** Authorization outcome only; allowed requests would otherwise proxy to Artifacts. */
 async function gitAccess(path: string, init: RequestInit = {}): Promise<{ ok: boolean; status?: number; text?: string }> {
@@ -229,7 +229,7 @@ describe('git gate', () => {
   });
 
   it('fails closed for unknown and expired tokens', async () => {
-    expect((await call(upload, { headers: basic(`forge_pat_${'0'.repeat(64)}`) })).status).toBe(401);
+    expect((await call(upload, { headers: basic(`kvarm_pat_${'0'.repeat(64)}`) })).status).toBe(401);
     expect((await call('/authz-owner/open.git/info/refs?service=git-upload-pack', { headers: basic(principals.ghost.tokens.full!) })).status).toBe(401);
   });
 });

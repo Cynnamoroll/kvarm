@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Persistent per-repository working directories for `forge runner`.
+ * Persistent per-repository working directories for `kvarm runner`.
  *
  * Layout: `<workRoot>/<owner>/<repo>/slot-<n>/{work,staging,state.json}` with
  * the slot's lock beside it (`slot-<n>.lock`). One runner process owns a slot
@@ -217,7 +217,7 @@ export function openWorkdir(o) {
     if (err instanceof CliError) throw err;
     o.stderr(`workdir: ${o.workRoot} is unusable (${err instanceof Error ? err.message : String(err)}); using a temporary directory`);
   }
-  const dir = mkdtempSync(join(o.tempRoot, 'forge-ci-'));
+  const dir = mkdtempSync(join(o.tempRoot, 'kvarm-ci-'));
   return {
     dir,
     work: join(dir, 'work'),

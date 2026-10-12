@@ -1,5 +1,5 @@
 /**
- * @forge/diffcore — line diff engine sized for 1M-line pull requests.
+ * @kvarm/diffcore — line diff engine sized for 1M-line pull requests.
  *
  * Core: the linear-space Myers "middle snake" algorithm, ported faithfully
  * from the formulation used by git's xdiff (as documented by James Coglan's
@@ -12,7 +12,7 @@
  *  - The quadratic part (k-iterations across d) is budgeted: over budget,
  *    we fall back to chunked replace hunks — a *correct* (every changed
  *    line shown), never-hanging view, labeled `approximate` so the UI can
- *    say so. This mirrors how big forges degrade on pathological files.
+ *    say so. This mirrors how big code hosts degrade on pathological files.
  *
  * Fuzz-verified against `git diff` by scripts/fuzz-diff.mjs.
  */

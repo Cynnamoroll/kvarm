@@ -4,7 +4,7 @@
  * git protocol (info/refs) because the binding has no refs enumeration.
  */
 
-import { parseRefAdvertisement, type GitRef } from '@forge/gitops';
+import { parseRefAdvertisement, type GitRef } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
 import { getGitToken } from './tokens';
 

@@ -28,7 +28,7 @@
  * --dry-run builds locally and writes the expected-counts record without
  * touching the live worker. --force overwrites remote refs that point at
  * other commits (never needed for an unchanged generator). The PAT
- * (FORGE_PAT) is passed to git through a secret-free GIT_ASKPASS helper and
+ * (KVARM_PAT) is passed to git through a secret-free GIT_ASKPASS helper and
  * never printed; git runs with `-c credential.helper=`.
  */
 
@@ -41,12 +41,12 @@ import { fileURLToPath } from 'node:url';
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const DRY = process.argv.includes('--dry-run');
 const FORCE = process.argv.includes('--force');
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
 const REPO = arg('repo', 'fixture-1m');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const OUT = resolve(root, arg('out', 'docs/benchmarks/fixture-1m.json'));
-if (!DRY && !process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set (load apps/platform/.dev.vars.validation)');
+if (!DRY && !process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set (load apps/platform/.dev.vars.validation)');
 
 export const SHAPE = {
   version: 1,
@@ -119,7 +119,7 @@ writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv
 chmodSync(askpass, 0o700);
 
 function git(args, opts = {}) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FIXTURE_GIT_TOKEN: opts.auth ? process.env.FORGE_PAT : '' };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FIXTURE_GIT_TOKEN: opts.auth ? process.env.KVARM_PAT : '' };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd: opts.cwd ?? local,
     env,
@@ -222,10 +222,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function api(path, init = {}) {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { Authorization: `Bearer ${process.env.FORGE_PAT}`, ...(init.body ? { 'content-type': 'application/json' } : {}) },
+    headers: { Authorization: `Bearer ${process.env.KVARM_PAT}`, ...(init.body ? { 'content-type': 'application/json' } : {}) },
   });
   const text = await res.text();
-  return { status: res.status, text, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, cost: res.headers.get('x-kvarm-cost') };
 }
 
 async function ensureRepo() {

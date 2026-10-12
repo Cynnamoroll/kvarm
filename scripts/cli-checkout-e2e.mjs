@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Live validation driver for `forge checkout` (VAL-SNAP-007, VAL-SNAP-008).
+ * Live validation driver for `kvarm checkout` (VAL-SNAP-007, VAL-SNAP-008).
  *
  * Sections (all by default, or pick with --only=ready,lazy,private):
  *
@@ -8,7 +8,7 @@
  *            unicode name, an empty file and literal backslash/drive-like
  *            POSIX names (`docs/back\slash.txt`, `..\literal.txt`,
  *            `C:notes`) pushed to main. After the eager
- *            build is ready, `forge checkout <repo> main <dir>` exits 0,
+ *            build is ready, `kvarm checkout <repo> main <dir>` exits 0,
  *            prints `source: snapshot` and the sha from ls-remote, and
  *            `diff -r -x .git` against a git clone + checkout is empty. The
  *            documented "attach history" recipe (git init, fetch the sha,
@@ -22,13 +22,13 @@
  *            commit with the identical tree on another fresh branch: its
  *            demand reuses the tarball (reused, objects=0, r2a=0) and its
  *            checkout prints `source: snapshot` once ready.
- * - private  private repo: checkout with FORGE_PAT uses the snapshot; with
- *            FORGE_PAT_NO_API (git scope but no api scope) the API refuses
+ * - private  private repo: checkout with KVARM_PAT uses the snapshot; with
+ *            KVARM_PAT_NO_API (git scope but no api scope) the API refuses
  *            and checkout clones; without a token checkout exits 1 and
  *            leaves no directory behind.
  *
- * Env (load apps/platform/.dev.vars.validation): FORGE_PAT (cynthia, owner),
- * FORGE_PAT_NO_API. Tokens are never printed; git runs with
+ * Env (load apps/platform/.dev.vars.validation): KVARM_PAT (cynthia, owner),
+ * KVARM_PAT_NO_API. Tokens are never printed; git runs with
  * `-c credential.helper=` and a secret-free GIT_ASKPASS helper, with the
  * configured git identity.
  *
@@ -46,13 +46,13 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: args } = parseArgs({ options: { only: { type: 'string' }, keep: { type: 'boolean', default: false } } });
-const BASE = (process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev').replace(/\/+$/, '');
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-if (!process.env.FORGE_PAT) throw new Error('env FORGE_PAT is not set');
+const BASE = (process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev').replace(/\/+$/, '');
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const SECTIONS = new Set((args.only ?? 'ready,lazy,private').split(','));
 const READY_BOUND_MS = 120_000;
 const PREFIX = 'm4-cli-checkout';
-const FORGE_BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'cli', 'bin', 'forge.js');
+const KVARM_BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'cli', 'bin', 'kvarm.js');
 const ts = Date.now();
 
 const results = [];
@@ -64,7 +64,7 @@ function check(label, actual, expected) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function http(path, { method = 'GET', json, token = process.env.FORGE_PAT } = {}) {
+async function http(path, { method = 'GET', json, token = process.env.KVARM_PAT } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (json !== undefined) headers['content-type'] = 'application/json';
@@ -78,7 +78,7 @@ async function http(path, { method = 'GET', json, token = process.env.FORGE_PAT 
   } catch {
     body = null;
   }
-  return { status: res.status, body, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, body, cost: res.headers.get('x-kvarm-cost') };
 }
 const snapPath = (repo, ref) => `/api/v1/repos/${OWNER}/${repo}/snapshots/${ref}`;
 
@@ -88,19 +88,19 @@ writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) prin
 chmodSync(askpass, 0o700);
 
 function git(dir, gitArgs) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', E2E_GIT_TOKEN: process.env.FORGE_PAT };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', E2E_GIT_TOKEN: process.env.KVARM_PAT };
   const r = spawnSync('git', ['-c', 'credential.helper=', '-c', 'core.quotepath=off', ...gitArgs], { cwd: dir, env, encoding: 'utf8', maxBuffer: 64 << 20 });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
 }
 
 /** Runs the real CLI with only the given token env (never inherited). */
-function forge(cliArgs, token) {
-  const env = { PATH: process.env.PATH, HOME: process.env.HOME, FORGE_BASE_URL: BASE };
-  if (token) env.FORGE_PAT = process.env[token];
+function kvarm(cliArgs, token) {
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, KVARM_BASE_URL: BASE };
+  if (token) env.KVARM_PAT = process.env[token];
   const t0 = Date.now();
-  const r = spawnSync(process.execPath, [FORGE_BIN, ...cliArgs], { env, encoding: 'utf8', maxBuffer: 64 << 20 });
+  const r = spawnSync(process.execPath, [KVARM_BIN, ...cliArgs], { env, encoding: 'utf8', maxBuffer: 64 << 20 });
   const out = { code: r.status, stdout: r.stdout ?? '', stderr: (r.stderr ?? '').trim(), ms: Date.now() - t0 };
-  console.log(`#   forge ${cliArgs.join(' ')} [${token ?? 'no token'}] exit ${out.code} in ${out.ms} ms`);
+  console.log(`#   kvarm ${cliArgs.join(' ')} [${token ?? 'no token'}] exit ${out.code} in ${out.ms} ms`);
   for (const line of out.stdout.trim().split('\n')) console.log(`#     stdout: ${line}`);
   for (const line of out.stderr.split('\n').filter(Boolean)) console.log(`#     stderr: ${line}`);
   return out;
@@ -179,7 +179,7 @@ function diffAgainstCheckout(label, name, sha, dir) {
   check(`${label}: ground-truth git clone`, cl.code, 0);
   check(`${label}: ground-truth git checkout ${sha.slice(0, 12)}`, git(truth, ['checkout', '-q', sha]).code, 0);
   const d = spawnSync('diff', ['-r', '-x', '.git', dir, truth], { encoding: 'utf8' });
-  check(`${label}: diff -r -x .git <forge checkout> <git checkout> is empty`, `${d.status} ${d.stdout}${d.stderr}`.trim(), '0');
+  check(`${label}: diff -r -x .git <kvarm checkout> <git checkout> is empty`, `${d.status} ${d.stdout}${d.stderr}`.trim(), '0');
 }
 
 const http4fixture = (path, init = {}) => http(path, init);
@@ -197,8 +197,8 @@ async function sectionReady() {
     check(`ready: snapshots/main ready within ${READY_BOUND_MS / 1000}s (${ready.ms} ms)`, ready.ok, true);
 
     const out = join(work, 'ready-checkout');
-    const r = forge(['checkout', `${OWNER}/${name}`, 'main', out], 'FORGE_PAT');
-    check('ready: forge checkout exit 0', r.code, 0);
+    const r = kvarm(['checkout', `${OWNER}/${name}`, 'main', out], 'KVARM_PAT');
+    check('ready: kvarm checkout exit 0', r.code, 0);
     check('ready: stdout first line is `source: snapshot`', r.stdout.split('\n')[0], 'source: snapshot');
     check('ready: printed sha equals ls-remote', field(r.stdout, 'sha'), lsRemote);
     check('ready: printed bytes equal metadata size', Number(field(r.stdout, 'bytes')), ready.body?.size);
@@ -244,8 +244,8 @@ async function sectionLazy() {
     check('lazy: before any demand the branch snapshot is 202 absent (no eager build)', `${before.status} ${before.body?.state}`, '202 absent');
 
     const first = join(work, 'lazy-first');
-    const r1 = forge(['checkout', `${OWNER}/${name}`, branch, first], 'FORGE_PAT');
-    check('lazy: first forge checkout exit 0', r1.code, 0);
+    const r1 = kvarm(['checkout', `${OWNER}/${name}`, branch, first], 'KVARM_PAT');
+    check('lazy: first kvarm checkout exit 0', r1.code, 0);
     check('lazy: first checkout prints `source: clone`', r1.stdout.split('\n')[0], 'source: clone');
     check('lazy: first checkout explains the demanded build on stderr', r1.stderr, (s) => /snapshot (building|absent)/.test(s) && /falling back to git clone/.test(s));
     check('lazy: first checkout sha', field(r1.stdout, 'sha'), sha);
@@ -257,8 +257,8 @@ async function sectionLazy() {
     console.log(`#   ready metadata: ${JSON.stringify({ size: ready.body?.size, files: ready.body?.files, reused: ready.body?.reused, buildCost: ready.body?.buildCost })}`);
 
     const second = join(work, 'lazy-second');
-    const r2 = forge(['checkout', `${OWNER}/${name}`, branch, second], 'FORGE_PAT');
-    check('lazy: later forge checkout exit 0', r2.code, 0);
+    const r2 = kvarm(['checkout', `${OWNER}/${name}`, branch, second], 'KVARM_PAT');
+    check('lazy: later kvarm checkout exit 0', r2.code, 0);
     check('lazy: later checkout prints `source: snapshot`', r2.stdout.split('\n')[0], 'source: snapshot');
     diffAgainstCheckout('lazy later (snapshot)', name, sha, second);
 
@@ -268,7 +268,7 @@ async function sectionLazy() {
     git(dir, ['branch', twin, twinSha]);
     check(`lazy: push ${twin} (same tree, new commit)`, (await push(dir, twin)).code, 0);
     const third = join(work, 'lazy-twin');
-    const r3 = forge(['checkout', `${OWNER}/${name}`, twin, third], 'FORGE_PAT');
+    const r3 = kvarm(['checkout', `${OWNER}/${name}`, twin, third], 'KVARM_PAT');
     check('lazy: twin checkout exit 0', r3.code, 0);
     check('lazy: twin checkout sha', field(r3.stdout, 'sha'), twinSha);
     diffAgainstCheckout(`lazy twin (${r3.stdout.split('\n')[0]})`, name, twinSha, third);
@@ -277,7 +277,7 @@ async function sectionLazy() {
     const bc = twinReady.body?.buildCost ?? {};
     check('lazy: twin reuses the identical tree tarball (reused, objects=0, r2a=0, same size)', `${twinReady.body?.reused} ${bc.objects} ${bc.r2a} ${twinReady.body?.size === ready.body?.size}`, 'true 0 0 true');
     const fourth = join(work, 'lazy-twin-again');
-    const r4 = forge(['checkout', `${OWNER}/${name}`, twin, fourth], 'FORGE_PAT');
+    const r4 = kvarm(['checkout', `${OWNER}/${name}`, twin, fourth], 'KVARM_PAT');
     check('lazy: twin checkout after ready prints `source: snapshot`', r4.stdout.split('\n')[0], 'source: snapshot');
     diffAgainstCheckout('lazy twin again', name, twinSha, fourth);
   });
@@ -295,20 +295,20 @@ async function sectionPrivate() {
     check(`private: snapshots/main ready (${ready.ms} ms)`, ready.ok, true);
 
     const a = join(work, 'private-pat');
-    const r1 = forge(['checkout', `${OWNER}/${name}`, 'main', a], 'FORGE_PAT');
-    check('private: checkout with FORGE_PAT prints `source: snapshot`', `${r1.code} ${r1.stdout.split('\n')[0]}`, '0 source: snapshot');
+    const r1 = kvarm(['checkout', `${OWNER}/${name}`, 'main', a], 'KVARM_PAT');
+    check('private: checkout with KVARM_PAT prints `source: snapshot`', `${r1.code} ${r1.stdout.split('\n')[0]}`, '0 source: snapshot');
     diffAgainstCheckout('private snapshot', name, sha, a);
 
-    if (process.env.FORGE_PAT_NO_API) {
+    if (process.env.KVARM_PAT_NO_API) {
       const b = join(work, 'private-noapi');
-      const r2 = forge(['checkout', `${OWNER}/${name}`, 'main', b], 'FORGE_PAT_NO_API');
+      const r2 = kvarm(['checkout', `${OWNER}/${name}`, 'main', b], 'KVARM_PAT_NO_API');
       check('private: checkout with a no-api PAT falls back to `source: clone`', `${r2.code} ${r2.stdout.split('\n')[0]}`, '0 source: clone');
       check('private: no-api fallback reason names the refused token', r2.stderr, (s) => /refused the token \(401/.test(s));
       diffAgainstCheckout('private no-api clone', name, sha, b);
     }
 
     const c = join(work, 'private-anon');
-    const r3 = forge(['checkout', `${OWNER}/${name}`, 'main', c], undefined);
+    const r3 = kvarm(['checkout', `${OWNER}/${name}`, 'main', c], undefined);
     check('private: checkout without a token exits 1', r3.code, 1);
     check('private: anonymous failure leaves no directory', existsSync(c), false);
   });

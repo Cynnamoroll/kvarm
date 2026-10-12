@@ -13,11 +13,11 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { ZERO_OID } from '@forge/gitops';
+import { ZERO_OID } from '@kvarm/gitops';
 import { internalKey, writeCachedJson } from '../src/cache/internal';
 import { defaultChecksGate } from '../src/services/checksGate';
 import { artifactsPusher } from '../src/services/gitwrite';
-import { FORGE_COMMITTER, prepareMerge, publishMerge } from '../src/services/merge';
+import { KVARM_COMMITTER, prepareMerge, publishMerge } from '../src/services/merge';
 import { MemGit } from './helpers/memGit';
 
 const env = cfEnv as unknown as Env & { LIVE_MERGE: string; LIVE_GITWRITE_REMOTE: string; LIVE_GITWRITE_NAME: string; LIVE_GITWRITE_TOKEN: string };
@@ -101,7 +101,7 @@ describe.skipIf(!live)('live: merge publication through GitPusher', () => {
           mergeCommit: threeWay.value.mergeCommit,
           mergeTree: threeWay.value.treeSha,
           mergeObjects: threeWay.value.objects.length,
-          committer: `${FORGE_COMMITTER.name} <${FORGE_COMMITTER.email}>`,
+          committer: `${KVARM_COMMITTER.name} <${KVARM_COMMITTER.email}>`,
           work: threeWay.value.work,
           steps,
         },

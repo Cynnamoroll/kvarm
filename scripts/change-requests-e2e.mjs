@@ -3,7 +3,7 @@
  * Live driver for change requests (m5-change-requests): VAL-CHANGE-001..011,
  * VAL-MERGE-001/002/004/005/009 and VAL-CROSS-005.
  *
- * Every scenario runs in a fresh public repo owned by FORGE_USER (cynthia),
+ * Every scenario runs in a fresh public repo owned by KVARM_USER (cynthia),
  * named `m5-change-requests-<purpose>-<timestamp>`, seeded with real git
  * pushes through the platform gate, and deleted afterwards (unless --keep):
  *   crud      create/list/get/patch/close/reopen, refusals, auth, head refresh
@@ -34,11 +34,11 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' }, quick: { type: 'boolean', default: false } },
 });
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.FORGE_USER ?? 'cynthia';
-const PAT = process.env.FORGE_PAT ?? die('FORGE_PAT is not set');
-const PAT_BOT = process.env.FORGE_PAT_BOT ?? die('FORGE_PAT_BOT is not set');
-const PAT_NO_API = process.env.FORGE_PAT_NO_API ?? die('FORGE_PAT_NO_API is not set');
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
+const PAT_BOT = process.env.KVARM_PAT_BOT ?? die('KVARM_PAT_BOT is not set');
+const PAT_NO_API = process.env.KVARM_PAT_NO_API ?? die('KVARM_PAT_NO_API is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm5-change-requests';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -72,7 +72,7 @@ async function http(path, { method = 'GET', json, token = PAT } = {}) {
   } catch {
     body = null;
   }
-  return { status: res.status, text, json: body, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, json: body, cost: res.headers.get('x-kvarm-cost') };
 }
 
 function costOf(label, r) {
@@ -82,7 +82,7 @@ function costOf(label, r) {
 
 const work = mkdtempSync(join(tmpdir(), 'change-requests-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, token = PAT) {
@@ -92,7 +92,7 @@ function git(args, cwd, token = PAT) {
       ...process.env,
       GIT_ASKPASS: askpass,
       GIT_TERMINAL_PROMPT: '0',
-      FORGE_E2E_TOKEN: token,
+      KVARM_E2E_TOKEN: token,
       GIT_AUTHOR_DATE: '2026-10-01T00:00:00Z',
       GIT_COMMITTER_DATE: '2026-10-01T00:00:00Z',
     },
@@ -450,7 +450,7 @@ await scenario('threeway', async (repo) => {
     'VAL-MERGE-002',
     'merge tree (read through the Artifacts binding) == git merge-tree --write-tree',
     mt.code === 0 && mt.out.split('\n')[0] === tree && tree === m?.treeSha,
-    `forge ${tree} / git ${mt.out.split('\n')[0]} / mergeability ${m?.treeSha}`,
+    `kvarm ${tree} / git ${mt.out.split('\n')[0]} / mergeability ${m?.treeSha}`,
   );
   check('VAL-MERGE-009', 'HEAD == mergeCommit, merge commit on main (graph shows it)', head === M && graph.includes('Merge change #1'), `HEAD=${head}`);
   check('VAL-MERGE-009', 'a.txt and b.txt present with expected content in the clone', a === 'A' && b === 'B');
@@ -547,7 +547,7 @@ await scenario('auto', async (repo) => {
 });
 
 rmSync(work, { recursive: true, force: true });
-console.log('\n# x-forge-cost');
+console.log('\n# x-kvarm-cost');
 for (const c of costs) console.log(`  ${c.label} (${c.status}): ${c.cost}`);
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

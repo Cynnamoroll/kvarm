@@ -5,7 +5,7 @@
  * counting proxies, outbound `fetch` is counted through AsyncLocalStorage, and
  * response-level Cache API layers report hit/miss. The totals are emitted as
  *
- *   x-forge-cost: d1=..;rr=..;rw=..;art=..;do=..;r2a=..;r2b=..;q=..;sub=..;cache=hit|miss|none|bypass
+ *   x-kvarm-cost: d1=..;rr=..;rw=..;art=..;do=..;r2a=..;r2b=..;q=..;sub=..;cache=hit|miss|none|bypass
  *
  * These are work counters, not a bill: CPU, duration, storage, payload sizes
  * and background (waitUntil) work after the response are not included.
@@ -27,7 +27,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-export const COST_HEADER = 'x-forge-cost';
+export const COST_HEADER = 'x-kvarm-cost';
 
 export type CacheState = 'hit' | 'miss' | 'none' | 'bypass';
 

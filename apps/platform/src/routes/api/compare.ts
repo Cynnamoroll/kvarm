@@ -46,7 +46,7 @@ function parseRange(raw: string): { base: string; head: string; file: boolean } 
 }
 
 function withCacheHeader(res: Response, cache: svc.CacheOutcome, timer?: svc.PhaseTimer): Response {
-  res.headers.set('x-forge-cache', cache);
+  res.headers.set('x-kvarm-cache', cache);
   if (timer) res.headers.set('server-timing', timer.header());
   return res;
 }

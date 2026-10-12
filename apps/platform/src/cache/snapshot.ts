@@ -14,13 +14,13 @@
 import { markCache } from '../cost/meter';
 
 const IMMUTABLE_TTL_SECONDS = 31536000;
-const TREE_HEADER = 'x-forge-snapshot-tree';
-const SIZE_HEADER = 'x-forge-snapshot-size';
+const TREE_HEADER = 'x-kvarm-snapshot-tree';
+const SIZE_HEADER = 'x-kvarm-snapshot-size';
 /** The Cache API refuses larger objects; storing one would only waste the write. */
 const MAX_CACHED_BYTES = 512 * 1024 * 1024;
 
 export function snapshotCacheKey(repoId: string, sha: string): Request {
-  const url = new URL('https://forge.internal/snapshot/v1/tar');
+  const url = new URL('https://kvarm.internal/snapshot/v1/tar');
   url.searchParams.set('repo', repoId);
   url.searchParams.set('sha', sha);
   return new Request(url.toString(), { method: 'GET' });

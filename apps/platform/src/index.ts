@@ -94,7 +94,7 @@ app.all('*', async (c) => {
 });
 
 export default {
-  // Every response carries x-forge-cost (src/cost/meter.ts). Responses to a
+  // Every response carries x-kvarm-cost (src/cost/meter.ts). Responses to a
   // presented credential are never shared-cacheable, on every transport.
   fetch: (request, env, ctx) =>
     serveMetered(request, env, ctx, async (req, e, cx) => {

@@ -8,8 +8,8 @@
  * as inert test data).
  *
  * Principals come from env vars by NAME (load apps/platform/.dev.vars.validation):
- *   FORGE_PAT_BOT (org owner, non-admin), FORGE_PAT_MAINT, FORGE_PAT_MEMBER,
- *   FORGE_PAT_OUTSIDER. Tokens are never printed; git runs with
+ *   KVARM_PAT_BOT (org owner, non-admin), KVARM_PAT_MAINT, KVARM_PAT_MEMBER,
+ *   KVARM_PAT_OUTSIDER. Tokens are never printed; git runs with
  *   `-c credential.helper=` and a secret-free GIT_ASKPASS helper.
  *
  * Usage: node scripts/org-tenancy-e2e.mjs [--keep]
@@ -22,9 +22,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const BASE = process.env.FORGE_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
 const KEEP = process.argv.includes('--keep');
-const P = { owner: 'FORGE_PAT_BOT', maint: 'FORGE_PAT_MAINT', member: 'FORGE_PAT_MEMBER', outsider: 'FORGE_PAT_OUTSIDER' };
+const P = { owner: 'KVARM_PAT_BOT', maint: 'KVARM_PAT_MAINT', member: 'KVARM_PAT_MEMBER', outsider: 'KVARM_PAT_OUTSIDER' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);
 const LOGIN = { owner: 'forge-bot', maint: 'forge-org-maint', member: 'forge-org-member', outsider: 'forge-outsider' };
 
@@ -61,14 +61,14 @@ async function api(who, method, path, json) {
   } catch {
     body = text;
   }
-  return { status: res.status, body, text, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, body, text, cost: res.headers.get('x-kvarm-cost') };
 }
 
 async function raw(who, path) {
   const headers = who ? { Authorization: `Basic ${Buffer.from(`x:${process.env[P[who]]}`).toString('base64')}` } : {};
   const res = await fetch(`${BASE}${path}`, { headers, redirect: 'manual' });
   const text = await res.text();
-  return { status: res.status, text, cost: res.headers.get('x-forge-cost') };
+  return { status: res.status, text, cost: res.headers.get('x-kvarm-cost') };
 }
 
 async function page(who, path) {
@@ -80,11 +80,11 @@ async function page(who, path) {
 
 const work = mkdtempSync(join(tmpdir(), 'org-tenancy-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv FORGE_E2E_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(who, args, cwd = work) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', FORGE_E2E_TOKEN: who ? process.env[P[who]] : '' };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: who ? process.env[P[who]] : '' };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], { cwd, env, encoding: 'utf8' });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }

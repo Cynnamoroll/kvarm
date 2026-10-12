@@ -53,7 +53,7 @@ function sampleReport() {
       { metric: 'explicit merge (POST merge -> 200)', stats: stats(900), method: '5 fast-forward merges' },
       { metric: 'mergeability cold', stats: stats(400), method: 'first read of a new change' },
       { metric: 'mergeability warm', stats: stats(80), method: 'repeat read' },
-      { metric: 'push -> forge/guard recorded', stats: stats(8000), method: 'git push to first guard run at the new head' },
+      { metric: 'push -> kvarm/guard recorded', stats: stats(8000), method: 'git push to first guard run at the new head' },
       { metric: 'push -> CI job claimable', stats: stats(6000), method: 'git push to a claim that returns the job' },
       { metric: 'runner claim -> report, cold install', stats: stats(20_000), method: 'runner-warm-bench' },
       { metric: 'runner claim -> report, warm workdir', stats: stats(6_000), method: 'runner-warm-bench' },
@@ -70,7 +70,7 @@ describe('spanStats', () => {
 });
 
 describe('cacheRate', () => {
-  it('counts cache=hit among parsed x-forge-cost samples', () => {
+  it('counts cache=hit among parsed x-kvarm-cost samples', () => {
     expect(cacheRate([{ cache: 'hit' }, { cache: 'miss' }, { cache: 'hit' }, { cache: 'hit' }])).toEqual({ requests: 4, hits: 3, rate: 0.75 });
   });
 });

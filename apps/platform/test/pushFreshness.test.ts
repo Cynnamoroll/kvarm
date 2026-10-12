@@ -13,7 +13,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildReportStatus, pktLine } from '@forge/gitops';
+import { buildReportStatus, pktLine } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { refGeneration } from '../src/cache/compare';
 import { pageCacheKey } from '../src/cache/edge';
@@ -25,7 +25,7 @@ import { relayReceivePackReply, repoViewGeneration } from '../src/services/pushF
 import worker from '../src/index';
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://forge.test';
+const ORIGIN = 'https://kvarm.test';
 const OWNER = 'pf-owner';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const enc = new TextEncoder();

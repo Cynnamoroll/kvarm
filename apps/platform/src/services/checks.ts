@@ -1,18 +1,18 @@
 /**
  * Check runs (architecture §3/§4 services/checks.ts): the `check_runs` rows
- * with their tree identity, the `forge/guard` evaluation of a change's own
+ * with their tree identity, the `kvarm/guard` evaluation of a change's own
  * edits, the commit status rollup, reported runs, and the checks-gate
  * producer over all of them.
  *
  * The producer answers the gate from recorded runs only: the required runs
  * on the exact tree, plus the guard verdict of the head the tree publishes
  * (the guard judges a change's edits, which a merge or composition carries
- * unchanged). `forge/guard` is always required; a head it has not judged is
+ * unchanged). `kvarm/guard` is always required; a head it has not judged is
  * `pending`, never a pass. Concurrent gate questions in one request are
  * answered by one D1 batch of bounded index ranges.
  */
 
-import { guard, guardWants, type GuardChange, type GuardContent, type GuardResult } from '@forge/review';
+import { guard, guardWants, type GuardChange, type GuardContent, type GuardResult } from '@kvarm/review';
 import type { LazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -21,8 +21,8 @@ import { treePairBody, type CompareBody } from './compare';
 import { runPool } from './pool';
 import { resolveCommitish, type ResolveContext } from './refs';
 
-export const GUARD_CHECK = 'forge/guard';
-export const CHECKS_WINDOW_CHECK = 'forge/checks-window';
+export const GUARD_CHECK = 'kvarm/guard';
+export const CHECKS_WINDOW_CHECK = 'kvarm/checks-window';
 export const GUARD_VERSION = 'guard/v1';
 const PRODUCER = 'check-runs';
 
@@ -275,7 +275,7 @@ export function guardRunExists(db: D1Database, repoId: string, changeId: string,
         .bind(repoId, headSha, changeId, baseTree);
 }
 
-/** Whether a gate answer's `forge/guard` entry is pending. */
+/** Whether a gate answer's `kvarm/guard` entry is pending. */
 export function guardPending(checks: { required: ReadonlyArray<{ name: string; state: string }> }): boolean {
   return checks.required.some((c) => c.name === GUARD_CHECK && c.state === 'pending');
 }
@@ -455,7 +455,7 @@ function parseReport(input: unknown): ServiceResult<ReportInput> {
     return bad(`name is required (1-${CHECK_LIMITS.nameMax} characters)`, 'INVALID_NAME');
   }
   const name = b.name.trim();
-  if (name.toLowerCase().startsWith('forge/')) return bad('check names under forge/ are reserved for the platform', 'RESERVED_CHECK_NAME');
+  if (name.toLowerCase().startsWith('kvarm/')) return bad('check names under kvarm/ are reserved for the platform', 'RESERVED_CHECK_NAME');
   let conclusion: string | null = null;
   let status: RunStatus;
   if (b.conclusion !== undefined && b.conclusion !== null) {
@@ -565,7 +565,7 @@ export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input:
           summary = CASE WHEN ?5 IS NULL THEN summary ELSE ?5 END,
           started_at = CASE WHEN ?3 = 'queued' THEN started_at ELSE COALESCE(started_at, ?6) END,
           finished_at = CASE WHEN ?7 = 1 THEN ?6 ELSE NULL END
-       WHERE id = ?1 AND repo_id = ?2 AND name NOT LIKE 'forge/%'
+       WHERE id = ?1 AND repo_id = ?2 AND name NOT LIKE 'kvarm/%'
          AND NOT EXISTS (SELECT 1 FROM ci_jobs j WHERE j.check_run_id = check_runs.id)
        RETURNING ${CHECK_RUN_COLUMNS.replaceAll('k.', '')}`,
     ).bind(id, repo.id, status, conclusion ?? (terminal ? status : null), summary === undefined ? null : summary, now, terminal ? 1 : 0),
@@ -586,7 +586,7 @@ export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input:
       return {
         ok: false,
         status: 403,
-        error: owned.name.startsWith('forge/') ? 'platform check runs cannot be updated' : 'runner-owned check runs must be updated through CI reporting',
+        error: owned.name.startsWith('kvarm/') ? 'platform check runs cannot be updated' : 'runner-owned check runs must be updated through CI reporting',
         code: 'RESERVED_CHECK_RUN',
       };
     }

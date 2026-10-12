@@ -7,11 +7,11 @@
  * pass. The result is stored in the content-addressed compare body.
  */
 
-import type { TreeChange } from '@forge/gitops';
-import { classifyFile, needsContent, rateChange, type ChangeRating, type RiskChange, type RiskContent } from '@forge/review';
+import type { TreeChange } from '@kvarm/gitops';
+import { classifyFile, needsContent, rateChange, type ChangeRating, type RiskChange, type RiskContent } from '@kvarm/review';
 import { runPool } from './pool';
 
-export type { ChangeRating } from '@forge/review';
+export type { ChangeRating } from '@kvarm/review';
 
 export interface FileRisk {
   score: number;

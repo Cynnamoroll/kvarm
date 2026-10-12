@@ -2,13 +2,13 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { findCommand } from '@forge/ops';
+import { findCommand } from '@kvarm/ops';
 import { CliError, checkout } from './checkout.js';
 import { commandHelp, commandUsage, groupCommands, operationsOverview, runOperation } from './ops.js';
 import { STATUS_HELP, runStatus } from './status.js';
 import { runRunner } from './runner.js';
 
-const USAGE = `usage: forge <command> [args]
+const USAGE = `usage: kvarm <command> [args]
 
 commands:
   checkout <owner/repo> <ref> <dir>   materialize <ref> into <dir> from a snapshot, or git clone
@@ -18,21 +18,21 @@ commands:
   help [command]                      show help (for API commands: help <group> <verb>)
 
 environment:
-  FORGE_BASE_URL   platform origin, e.g. https://forge-platform.cynnamoroll.workers.dev (required)
-  FORGE_PAT        personal access or agent token (needed for private repos and snapshot demands)`;
+  KVARM_BASE_URL   platform origin, e.g. https://forge-platform.cynnamoroll.workers.dev (required)
+  KVARM_PAT        personal access or agent token (needed for private repos and snapshot demands)`;
 
-const CHECKOUT_HELP = `usage: forge checkout <owner/repo> <ref> <dir>
+const CHECKOUT_HELP = `usage: kvarm checkout <owner/repo> <ref> <dir>
 
 Materializes <ref> (branch, tag or commit SHA) into <dir>, which must be
 missing or empty.
 
-With FORGE_PAT set, checkout demands the snapshot (POST .../snapshots/<ref>),
+With KVARM_PAT set, checkout demands the snapshot (POST .../snapshots/<ref>),
 which starts a build for a ref that has none (non-default branches and
 workspace refs build lazily, only on demand). If the snapshot is ready it is
 downloaded and extracted and checkout prints "source: snapshot". Otherwise,
 including while the demanded build is still running, it falls back to
 "git clone" + "git checkout" and prints "source: clone"; a later checkout of
-the same ref uses the snapshot once it is ready. Without FORGE_PAT checkout
+the same ref uses the snapshot once it is ready. Without KVARM_PAT checkout
 only reads snapshot metadata and never starts a build.
 
 Output (stdout): "source: snapshot|clone" and "sha: <commit>" (plus
@@ -45,7 +45,7 @@ first, for example:
 
   cd <dir>
   git init -q
-  git remote add origin "$FORGE_BASE_URL/<owner>/<repo>.git"
+  git remote add origin "$KVARM_BASE_URL/<owner>/<repo>.git"
   git fetch -q origin <sha>          # the sha printed by checkout
   git reset -q <sha>                 # index and HEAD at <sha>, files untouched
   git switch -q -c <new-branch>      # then commit and push as usual
@@ -53,7 +53,7 @@ first, for example:
 "git status" is clean right after the reset because the snapshot tree equals
 the commit tree.`;
 
-const RUNNER_HELP = `usage: forge runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]
+const RUNNER_HELP = `usage: kvarm runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]
 
 Claims CI jobs for the repository, materializes each job's exact immutable
 commit through snapshot checkout (with clone fallback), runs the configured
@@ -63,7 +63,7 @@ runner. --once exits after one job, or immediately when none is queued.
 
 Jobs run in a persistent working directory per repository, locked to this
 runner process (a concurrent runner uses another one), under --workdir
-(default $XDG_CACHE_HOME/forge/runner, else ~/.cache/forge/runner). The
+(default $XDG_CACHE_HOME/kvarm/runner, else ~/.cache/kvarm/runner). The
 first job checks out fully; later jobs sync the directory to the new commit:
 tracked files are rewritten exactly, files the new commit lacks are deleted,
 and other untracked paths are removed except dependency caches
@@ -91,34 +91,34 @@ export async function main(argv, io) {
     if (command === 'status') return await runStatus(rest, { env: io.env, stdout: io.stdout, stderr: io.stderr, apiFetch: io.apiFetch });
     const verbs = groupCommands(command);
     if (verbs.length === 0) {
-      io.stderr(`forge: unknown command "${command}"\n\n${usage()}`);
+      io.stderr(`kvarm: unknown command "${command}"\n\n${usage()}`);
       return 2;
     }
     const [verb, ...args] = rest;
     if (!verb || verb === '--help' || verb === '-h') {
-      io.stderr(`forge ${command}: expected one of:\n${verbs.map((op) => `  ${commandUsage(op).replace(/^usage: /, '')}`).join('\n')}`);
+      io.stderr(`kvarm ${command}: expected one of:\n${verbs.map((op) => `  ${commandUsage(op).replace(/^usage: /, '')}`).join('\n')}`);
       return 2;
     }
     const op = findCommand([command, verb]);
     if (!op) {
-      io.stderr(`forge: unknown command "${command} ${verb}"; "forge ${command}" lists its commands`);
+      io.stderr(`kvarm: unknown command "${command} ${verb}"; "kvarm ${command}" lists its commands`);
       return 2;
     }
     label = `${command} ${verb}`;
     return await runOperation(op, args, { env: io.env, stdout: io.stdout, stderr: io.stderr, apiFetch: io.apiFetch });
   } catch (err) {
     if (err instanceof CliError) {
-      io.stderr(`forge ${label}: ${err.message}`);
-      if (err.exitCode === 2) io.stderr(`run "forge help ${label}" for usage`);
+      io.stderr(`kvarm ${label}: ${err.message}`);
+      if (err.exitCode === 2) io.stderr(`run "kvarm help ${label}" for usage`);
       return err.exitCode;
     }
-    io.stderr(`forge ${label}: ${err instanceof Error ? err.message : String(err)}`);
+    io.stderr(`kvarm ${label}: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 }
 
 function usage() {
-  return `${USAGE}\n\nAPI commands (each maps to one REST endpoint and one MCP tool; "forge help <group> <verb>" for details):\n${operationsOverview()}`;
+  return `${USAGE}\n\nAPI commands (each maps to one REST endpoint and one MCP tool; "kvarm help <group> <verb>" for details):\n${operationsOverview()}`;
 }
 
 /**
@@ -139,10 +139,10 @@ async function runCheckout(args, io) {
   }
   if (positionals.length !== 3) throw new CliError('expected <owner/repo> <ref> <dir>', 2);
   const [repo, ref, dir] = /** @type {[string, string, string]} */ (positionals);
-  const baseUrl = io.env.FORGE_BASE_URL;
-  if (!baseUrl) throw new CliError('FORGE_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
-  if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`FORGE_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
-  await checkout({ baseUrl, pat: io.env.FORGE_PAT || undefined, repo, ref, dir, env: io.env, stdout: io.stdout, stderr: io.stderr, fetch: io.fetch });
+  const baseUrl = io.env.KVARM_BASE_URL;
+  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
+  if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`KVARM_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
+  await checkout({ baseUrl, pat: io.env.KVARM_PAT || undefined, repo, ref, dir, env: io.env, stdout: io.stdout, stderr: io.stderr, fetch: io.fetch });
   return 0;
 }
 
@@ -174,10 +174,10 @@ async function runCiRunner(args, io) {
   }
   const repo = parsed.values.repo;
   if (!repo || !/^[^/\s]+\/[^/\s]+$/.test(repo)) throw new CliError('expected --repo <owner/repo>', 2);
-  const baseUrl = io.env.FORGE_BASE_URL;
-  const pat = io.env.FORGE_PAT;
-  if (!baseUrl) throw new CliError('FORGE_BASE_URL is not set', 2);
-  if (!pat) throw new CliError('FORGE_PAT is not set (the runner requires ci scope)', 2);
+  const baseUrl = io.env.KVARM_BASE_URL;
+  const pat = io.env.KVARM_PAT;
+  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set', 2);
+  if (!pat) throw new CliError('KVARM_PAT is not set (the runner requires ci scope)', 2);
   await runRunner({
     baseUrl,
     pat,
@@ -186,7 +186,7 @@ async function runCiRunner(args, io) {
     fresh: parsed.values.fresh,
     workRoot: parsed.values.workdir
       ? resolve(parsed.values.workdir)
-      : join(io.env.XDG_CACHE_HOME && isAbsolute(io.env.XDG_CACHE_HOME) ? io.env.XDG_CACHE_HOME : join(io.env.HOME || homedir(), '.cache'), 'forge', 'runner'),
+      : join(io.env.XDG_CACHE_HOME && isAbsolute(io.env.XDG_CACHE_HOME) ? io.env.XDG_CACHE_HOME : join(io.env.HOME || homedir(), '.cache'), 'kvarm', 'runner'),
     stdout: io.stdout,
     stderr: io.stderr,
     apiFetch: io.apiFetch,
