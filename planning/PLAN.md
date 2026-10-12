@@ -1,12 +1,16 @@
 # The fastest git platform on Cloudflare Artifacts
 
-> **Status (2026-10-07): prototype VALIDATED — mission-ready.** Live at
-> `forge-platform.<subdomain>.workers.dev`: git push + byte-identical clone
-> through the platform, SSR repo pages with edge-cache HITs confirmed, remote
-> D1 + queues provisioned, 27/27 tests green. M0-M3a committed (through
-> `28cdadb`). Execution plan, acceptance gates, and pivot triggers live in
-> **MISSION.md** — that file drives mission mode; this one stays the
-> architecture reference.
+> **Historical document.** This is the original design plan of October 7,
+> 2026, kept as a record of the starting point. It is superseded by
+> [`docs/architecture.md`](../docs/architecture.md), which describes the system
+> as built. The working names below (`slipstream`, `.slipstream/ci.yaml`) were
+> never shipped: the platform is Kvarm, its CLI is `kvarm` and CI reads
+> `.kvarm/ci.json`. Section numbers here are internal to this plan; source
+> comments that cite "architecture §N" refer to `docs/architecture.md`.
+>
+> Status at the time (2026-10-07): the prototype was validated (git push and a
+> byte-identical clone through the platform, SSR repository pages with edge
+> cache hits, remote D1 and queues provisioned, 27/27 tests green).
 
 Working name: **TBD** (name deferred; the codebase uses a single `SITE_NAME` config constant so renaming is trivial). A git platform for the agentic era, built for the Cloudflare "next Git platform" competition. Deadline: **October 14, 2026** (one week). Submission: 5-10 min video, permissively licensed source, run instructions.
 

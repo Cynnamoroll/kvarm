@@ -26,6 +26,8 @@ Kvarm is a git platform for teams of people and coding agents, built on [Cloudfl
 
 ## Architecture
 
+[`docs/architecture.md`](docs/architecture.md) describes the design in full: the decisions behind it, the invariants, every package and platform module, the data model, the cost model, tenancy, the Nexus forecast and the integration train. Source comments cite its numbered sections ("architecture §11.4").
+
 ```
 git client  --smart-HTTP-->  git gate (routes/git.ts) ------------------------> Artifacts (git storage)
 REST client --/api/v1/*-->   Hono routers (thin) --> services/* (all logic) --> Artifacts reads (binding)

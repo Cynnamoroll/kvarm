@@ -15,6 +15,6 @@ coverage/
 .idea/
 .vscode/
 
-# Third-party reference media (not MIT-licensed; kept locally only)
-planning/aesthetic/*.jpg
-planning/aesthetic/*.mp4
+# Local UI design reference: third-party media (not MIT-licensed) and the notes
+# that describe it, kept on disk only
+planning/aesthetic/

@@ -1,7 +1,7 @@
 /**
  * Git smart-HTTP proxy: the fastest possible clone path on Artifacts.
  *
- * Design (see planning/PLAN.md §3.1):
+ * Design (see docs/architecture.md §1.1):
  *  - Platform auth happens here (PATs or anonymous public reads); storage is
  *    Cloudflare Artifacts, reached same-network over the Worker fetch API.
  *  - The proxy streams both directions and buffers nothing, so clones and

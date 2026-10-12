@@ -1,7 +1,8 @@
 # Compare benchmark (M3 gate)
 
-The M3 gate (planning/MISSION.md §6) requires the cold compare file-list
-endpoint on a ~1M-changed-line diff to answer with p50 < 500 ms over 10 runs.
+The M3 gate ([docs/architecture.md §9](../architecture.md#9-pinned-behaviors),
+"Compare performance gate") requires the cold compare file-list endpoint on a
+~1M-changed-line diff to answer with p50 < 500 ms over 10 runs.
 The gate is met on the live worker without pivot P1.
 
 ## Fixture
