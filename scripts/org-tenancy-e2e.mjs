@@ -7,7 +7,7 @@
  * route spellings) over REST, the repo page and git, and deletes its repos at the end (orgs have no delete API and are left
  * as inert test data).
  *
- * Principals come from env vars by NAME (load apps/platform/.dev.vars.validation):
+ * Principals come from env vars by NAME (load .env.local):
  *   KVARM_PAT_BOT (org owner, non-admin), KVARM_PAT_MAINT, KVARM_PAT_MEMBER,
  *   KVARM_PAT_OUTSIDER. Tokens are never printed; git runs with
  *   `-c credential.helper=` and a secret-free GIT_ASKPASS helper.
@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const KEEP = process.argv.includes('--keep');
 const P = { owner: 'KVARM_PAT_BOT', maint: 'KVARM_PAT_MAINT', member: 'KVARM_PAT_MEMBER', outsider: 'KVARM_PAT_OUTSIDER' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);

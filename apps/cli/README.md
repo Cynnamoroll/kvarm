@@ -6,10 +6,10 @@ registry it shares with the MCP server.
 
 ```bash
 npm install                      # from the repo root; links the `kvarm` bin
-export KVARM_BASE_URL=https://forge-platform.cynnamoroll.workers.dev
+export KVARM_BASE_URL=https://kvarm.example.com   # your deployment's origin
 export KVARM_PAT=...             # personal access or agent token
-npx kvarm checkout cynthia/demo main ./demo
-# or: node apps/cli/bin/kvarm.js checkout cynthia/demo main ./demo
+npx kvarm checkout <owner>/demo main ./demo
+# or: node apps/cli/bin/kvarm.js checkout <owner>/demo main ./demo
 ```
 
 ## Configuration
@@ -37,12 +37,12 @@ group's verbs.
 
 ```bash
 kvarm repo list --json
-kvarm file read cynthia/demo README.md --ref main
-kvarm tree get cynthia/demo src --ref main
-kvarm compare get cynthia/demo main feature/x --order=risk
-kvarm workspace create cynthia/demo --task "fix parser" --intent '{"paths":["src/parse.ts"]}'
-kvarm workspace change-set cynthia/demo <workspace-id> --title "Fix parser" --merge-policy review
-kvarm change merge cynthia/demo 3
+kvarm file read <owner>/demo README.md --ref main
+kvarm tree get <owner>/demo src --ref main
+kvarm compare get <owner>/demo main feature/x --order=risk
+kvarm workspace create <owner>/demo --task "fix parser" --intent '{"paths":["src/parse.ts"]}'
+kvarm workspace change-set <owner>/demo <workspace-id> --title "Fix parser" --merge-policy review
+kvarm change merge <owner>/demo 3
 ```
 
 Positional arguments come in the order shown by the usage line; the other

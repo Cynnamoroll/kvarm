@@ -5,7 +5,7 @@
  * the owner. HTTP 200 alone is never treated as success.
  *
  * Usage (tokens come from env vars by NAME; they are never printed):
- *   node scripts/receive-pack-probe.mjs --repo cynthia/<name> --ref refs/heads/authz-probe \
+ *   node scripts/receive-pack-probe.mjs --repo <owner>/<name> --ref refs/heads/authz-probe \
  *     --workdir /path/to/local/clone --new <sha> --as KVARM_PAT_BOT --owner KVARM_PAT
  *
  * The local workdir must contain the <new> commit and the current remote <old>

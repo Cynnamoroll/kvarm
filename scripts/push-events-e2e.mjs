@@ -3,7 +3,7 @@
  * Live validation driver for the queue push dispatcher (VAL-EVENT-001, 003,
  * 004 live half, 005).
  *
- * As cynthia (KVARM_PAT) it creates a public repo, pushes a seed commit and
+ * As KVARM_USER (KVARM_PAT) it creates a public repo, pushes a seed commit and
  * waits for its Artifacts push event to be processed (GET .../events). Then:
  *
  * - VAL-EVENT-001/003: pushes commit A, polls GET /api/v1/repos/:o/:r until
@@ -26,7 +26,7 @@
  * With --tail it also runs `wrangler tail` and prints the consumer's
  * per-message {cost, outcome} lines.
  *
- * Tokens come from env by NAME (load apps/platform/.dev.vars.validation) and
+ * Tokens come from env by NAME (load .env.local) and
  * are never printed; git runs with `-c credential.helper=` and a secret-free
  * GIT_ASKPASS helper. Commits use the configured git identity. Wrangler must
  * be on PATH (`. "$HOME/.config/vite-plus/env"`).
@@ -46,8 +46,8 @@ import { parseArgs } from 'node:util';
 const { values: args } = parseArgs({
   options: { tail: { type: 'boolean', default: false }, keep: { type: 'boolean', default: false } },
 });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const PLATFORM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'platform');
 const PUSHED_AT_BOUND_MS = 10000;

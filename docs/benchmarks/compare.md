@@ -8,7 +8,7 @@ The gate is met on the live worker without pivot P1.
 
 `scripts/fixture-1m.mjs` builds the repo deterministically with
 `git fast-import` (fixed identity and timestamps), creates
-`cynthia/fixture-1m` through `POST /api/v1/repos`, and pushes one ref at a
+`<owner>/fixture-1m` through `POST /api/v1/repos`, and pushes one ref at a
 time through the live proxy with retry on 429/503 (the 120/min write limit).
 Re-running it produces the same SHAs. The generated record is
 `docs/benchmarks/fixture-1m.json`.
@@ -33,10 +33,10 @@ Re-running it produces the same SHAs. The generated record is
 ## Gate
 
 `scripts/gate-m3.mjs` runs against the live worker
-(`set -a; . apps/platform/.dev.vars.validation; set +a; node scripts/gate-m3.mjs --json=out.json`).
+(`set -a; . ./.env.local; set +a; node scripts/gate-m3.mjs --json=out.json`).
 The latest run is committed as `docs/benchmarks/gate-m3.json`.
 
-Result on 2026-10-08 (worker version `c6972ad1`): 17/17 checks pass.
+Result on 2026-10-08: 17/17 checks pass.
 Since this version an admin `?nocache=1` reads and writes no compare cache
 entry at all (body, risk, ref, ref generation, commit or line counts), so
 every one of the 10 runs is a truly cold computation. Only the colo's git
@@ -62,7 +62,7 @@ bypass now also skips the commit cache: the refs stage takes ~85-150 ms
 instead of ~70-90 ms.
 
 Earlier results, when the bypass still read the immutable commit and
-line-count entries (worker `a107390b`): cold p50 401 ms (min 361, max 796),
+line-count entries: cold p50 401 ms (min 361, max 796),
 `art=55`; other runs gave 402 ms and 396 ms. Those runs were not fully cold.
 
 ### Where the cold time goes

@@ -21,7 +21,7 @@
  *           same expected old ref: exactly one accepted, ls-remote == winner
  *
  * Tokens come from env by NAME and are never printed:
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/merge-queue-e2e.mjs [--keep] [--only draft,train,stale,race]
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper. Exit 0 only when every check held.
@@ -35,8 +35,8 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } } });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm5-merge-queue';

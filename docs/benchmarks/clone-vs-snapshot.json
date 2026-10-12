@@ -1,6 +1,5 @@
 {
   "measuredAt": "2026-10-12T00:49:27.570Z",
-  "baseUrl": "https://forge-platform.cynnamoroll.workers.dev",
   "runs": 3,
   "host": {
     "platform": "darwin 27.0.0",
@@ -12,7 +11,7 @@
   "targets": [
     {
       "target": "fixture",
-      "repo": "cynthia/fixture-1m",
+      "repo": "<owner>/fixture-1m",
       "ref": "bench-head",
       "sha": "08333c79998f410b9c40a84cc430ce9762c29ae8",
       "snapshot": {
@@ -116,7 +115,7 @@
     },
     {
       "target": "small",
-      "repo": "cynthia/m4-cli-checkout-bench-1791766098069",
+      "repo": "<owner>/m4-cli-checkout-bench-1791766098069",
       "ref": "main",
       "sha": "8a0d68e32960d119fff71540b14634b020a7dc77",
       "snapshot": {

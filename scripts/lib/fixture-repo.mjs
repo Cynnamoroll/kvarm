@@ -2,7 +2,7 @@
  * Isolated scratch repos for the live fixture drivers. A run may only use a
  * repo it creates itself, named `<prefix>-<purpose>-<timestamp>`, and only
  * ever deletes that repo. Existing repos, including protected bootstrap data
- * such as cynthia/forge-e2e, are rejected before any push and never deleted.
+ * such as the forge-e2e repository, are rejected before any push and never deleted.
  */
 
 const PROTECTED = new Set(['forge-e2e']);

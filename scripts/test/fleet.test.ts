@@ -210,13 +210,13 @@ describe('cost parsing and budgets', () => {
   });
 
   it('classifies endpoints by template, never by id', () => {
-    expect(endpointClass('POST', '/api/v1/repos/cynthia/r-1/changes/12/enqueue')).toBe('POST /repos/:o/:r/changes/:n/enqueue');
-    expect(endpointClass('GET', '/api/v1/repos/cynthia/r-1/workspaces?status=active&limit=30&cursor=x')).toBe('GET /repos/:o/:r/workspaces');
+    expect(endpointClass('POST', '/api/v1/repos/alice/r-1/changes/12/enqueue')).toBe('POST /repos/:o/:r/changes/:n/enqueue');
+    expect(endpointClass('GET', '/api/v1/repos/alice/r-1/workspaces?status=active&limit=30&cursor=x')).toBe('GET /repos/:o/:r/workspaces');
     expect(endpointClass('POST', '/api/v1/agents/abc123/tokens')).toBe('POST /agents/:id/tokens');
-    expect(endpointClass('POST', '/api/v1/repos/cynthia/r-1/workspaces/0123456789abcdef/change-set')).toBe(
+    expect(endpointClass('POST', '/api/v1/repos/alice/r-1/workspaces/0123456789abcdef/change-set')).toBe(
       'POST /repos/:o/:r/workspaces/:id/change-set',
     );
-    expect(endpointClass('GET', '/api/v1/repos/cynthia/r-1/workspaces/overlap?base=main')).toBe('GET /repos/:o/:r/workspaces/overlap');
+    expect(endpointClass('GET', '/api/v1/repos/alice/r-1/workspaces/overlap?base=main')).toBe('GET /repos/:o/:r/workspaces/overlap');
   });
 });
 
@@ -439,7 +439,7 @@ describe('findMonetary', () => {
 describe('renderBenchmarkMarkdown', () => {
   it('renders the measured rows with the limits in force and no monetary derivation', () => {
     const md = renderBenchmarkMarkdown({
-      run: { repo: 'cynthia/x', worker: 'v1', startedAt: '2026-10-11T00:00:00Z', finishedAt: '2026-10-11T00:20:00Z', head: 'abc' },
+      run: { repo: 'alice/x', worker: 'v1', startedAt: '2026-10-11T00:00:00Z', finishedAt: '2026-10-11T00:20:00Z', head: 'abc' },
       limits: { gitChildren: 3, httpInFlight: 5, ceiling: 10000, gitWritesPerMin: 120, pushesPerMinute: 30, enqueueIntervalMs: 600 },
       fleet: { workspaces: 100, burst: 99, overlapPairs: 69 },
       burst: {
@@ -467,7 +467,7 @@ describe('renderBenchmarkMarkdown', () => {
 
   it('lists measured observations outside the tables as notes', () => {
     const md = renderBenchmarkMarkdown({
-      run: { repo: 'cynthia/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
+      run: { repo: 'alice/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
       limits: { gitChildren: 3, httpInFlight: 5, ceiling: 10000, gitWritesPerMin: 120, pushesPerMinute: 30, enqueueIntervalMs: 600 },
       fleet: { workspaces: 100, burst: 99, overlapPairs: 69 },
       burst: { accepted: 99, incomplete: 0, windowMs: 1, throughputPerMin: 1, latencyMs: { p50: 1, p90: 1, max: 1 }, backlogMax: 1, queueFull429: 0, retries: 0 },
@@ -482,7 +482,7 @@ describe('renderBenchmarkMarkdown', () => {
 
   it('states the check outcome and lists every failed check with its detail', () => {
     const base = {
-      run: { repo: 'cynthia/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
+      run: { repo: 'alice/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
       limits: { gitChildren: 3, httpInFlight: 5, ceiling: 10000, gitWritesPerMin: 120, pushesPerMinute: 30, enqueueIntervalMs: 600 },
       fleet: { workspaces: 100, burst: 99, overlapPairs: 69 },
       burst: { accepted: 99, incomplete: 0, windowMs: 1, throughputPerMin: 1, latencyMs: { p50: 1, p90: 1, max: 1 }, backlogMax: 1, queueFull429: 0, retries: 0 },
@@ -505,7 +505,7 @@ describe('renderBenchmarkMarkdown', () => {
 
   it('states the longest interval without a terminal queue transition when measured', () => {
     const md = renderBenchmarkMarkdown({
-      run: { repo: 'cynthia/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
+      run: { repo: 'alice/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
       limits: { gitChildren: 3, httpInFlight: 5, ceiling: 10000, gitWritesPerMin: 120, pushesPerMinute: 30, enqueueIntervalMs: 600 },
       fleet: { workspaces: 100, burst: 99, overlapPairs: 69 },
       burst: {
@@ -582,7 +582,7 @@ describe('pre-burst forecast invariant', () => {
 describe('fleet timing labels', () => {
   it('labels throughput, window and latency as the initial-burst population, distinct from all accepted publications', () => {
     const md = renderBenchmarkMarkdown({
-      run: { repo: 'cynthia/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
+      run: { repo: 'alice/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
       limits: { gitChildren: 3, httpInFlight: 5, ceiling: 10000, gitWritesPerMin: 120, pushesPerMinute: 30, enqueueIntervalMs: 600 },
       fleet: { workspaces: 100, burst: 99, overlapPairs: 69 },
       burst: {

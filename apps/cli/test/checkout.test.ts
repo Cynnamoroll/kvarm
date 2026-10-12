@@ -15,7 +15,7 @@ const expectedFeature = join(root, 'expected-feature');
 gitCheckout(repo.bare, repo.feature, expectedFeature);
 
 const BASE = 'https://kvarm.test';
-const SNAP = `${BASE}/api/v1/repos/cynthia/demo/snapshots`;
+const SNAP = `${BASE}/api/v1/repos/alice/demo/snapshots`;
 
 type Call = { method: string; url: string; auth: string | null };
 
@@ -49,7 +49,7 @@ function run(fetchImpl: HttpFetch, opts: { ref: string; dir: string; pat?: strin
   const promise = checkout({
     baseUrl: BASE,
     pat: opts.pat,
-    repo: 'cynthia/demo',
+    repo: 'alice/demo',
     ref: opts.ref,
     dir: opts.dir,
     fetch: fetchImpl,

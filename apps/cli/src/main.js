@@ -18,7 +18,7 @@ commands:
   help [command]                      show help (for API commands: help <group> <verb>)
 
 environment:
-  KVARM_BASE_URL   platform origin, e.g. https://forge-platform.cynnamoroll.workers.dev (required)
+  KVARM_BASE_URL   platform origin, e.g. https://kvarm.example.com (required)
   KVARM_PAT        personal access or agent token (needed for private repos and snapshot demands)`;
 
 const CHECKOUT_HELP = `usage: kvarm checkout <owner/repo> <ref> <dir>
@@ -140,7 +140,7 @@ async function runCheckout(args, io) {
   if (positionals.length !== 3) throw new CliError('expected <owner/repo> <ref> <dir>', 2);
   const [repo, ref, dir] = /** @type {[string, string, string]} */ (positionals);
   const baseUrl = io.env.KVARM_BASE_URL;
-  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
+  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://kvarm.example.com)', 2);
   if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`KVARM_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
   await checkout({ baseUrl, pat: io.env.KVARM_PAT || undefined, repo, ref, dir, env: io.env, stdout: io.stdout, stderr: io.stderr, fetch: io.fetch });
   return 0;

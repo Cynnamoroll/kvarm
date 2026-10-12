@@ -1,6 +1,6 @@
 /**
  * The live fixture drivers must never delete a repository they did not
- * create in the same run (protected bootstrap data such as cynthia/forge-e2e
+ * create in the same run (protected bootstrap data such as the forge-e2e repository
  * included). Exercised against a fake REST API that records every call.
  */
 
@@ -32,7 +32,7 @@ function fakeApi(existing: Set<string>, { createStatus = 201 } = {}): { http: Fi
   return { http, calls };
 }
 
-const OPTS = { owner: 'cynthia', prefix: 'm3-risk-engine' };
+const OPTS = { owner: 'alice', prefix: 'm3-risk-engine' };
 const deletes = (calls: Call[]) => calls.filter((c) => c.method === 'DELETE');
 
 describe('checkIsolatedName', () => {
@@ -91,7 +91,7 @@ describe('withFixtureRepo', () => {
         throw new Error('push failed');
       }),
     ).rejects.toThrow('push failed');
-    expect(deletes(calls)).toEqual([{ method: 'DELETE', path: `/api/v1/repos/cynthia/${name}` }]);
+    expect(deletes(calls)).toEqual([{ method: 'DELETE', path: `/api/v1/repos/alice/${name}` }]);
     expect(existing.has('forge-e2e')).toBe(true);
   });
 
@@ -120,7 +120,7 @@ describe('scripts/risk-fixture.mjs against a fake worker', () => {
     const { port } = server.address() as AddressInfo;
     try {
       const child = spawn(process.execPath, [fileURLToPath(new URL('../risk-fixture.mjs', import.meta.url)), `--repo=${repoArg}`], {
-        env: { ...process.env, KVARM_BASE_URL: `http://127.0.0.1:${port}`, KVARM_PAT: 'not-a-real-token' },
+        env: { ...process.env, KVARM_BASE_URL: `http://127.0.0.1:${port}`, KVARM_USER: 'alice', KVARM_PAT: 'not-a-real-token' },
       });
       let out = '';
       child.stdout.on('data', (d) => (out += d));
@@ -143,6 +143,6 @@ describe('scripts/risk-fixture.mjs against a fake worker', () => {
     const { code, calls, out } = await runDriver('m3-risk-engine-fixture-1791400000009');
     expect(code).toBe(1);
     expect(out).toMatch(/already exists/);
-    expect(calls).toEqual([{ method: 'GET', path: '/api/v1/repos/cynthia/m3-risk-engine-fixture-1791400000009' }]);
+    expect(calls).toEqual([{ method: 'GET', path: '/api/v1/repos/alice/m3-risk-engine-fixture-1791400000009' }]);
   });
 });

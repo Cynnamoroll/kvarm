@@ -11,15 +11,15 @@ const PAT = 'kvarm_pat_cli_test_token';
 const root = tempDir('kvarm-cli-bin-');
 const repo = makeRepo(root);
 const gitRoot = join(root, 'served');
-mkdirSync(join(gitRoot, 'cynthia'), { recursive: true });
-git(root, ['clone', '-q', '--bare', repo.work, join(gitRoot, 'cynthia', 'demo.git')]);
+mkdirSync(join(gitRoot, 'alice'), { recursive: true });
+git(root, ['clone', '-q', '--bare', repo.work, join(gitRoot, 'alice', 'demo.git')]);
 const tarMain = tarFromCommit(repo.bare, repo.main);
 
 let server: Awaited<ReturnType<typeof startServer>>;
 beforeAll(async () => {
   server = await startServer(gitRoot, (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const m = /^\/api\/v1\/repos\/cynthia\/demo\/snapshots\/(.+)$/.exec(url.pathname);
+    const m = /^\/api\/v1\/repos\/alice\/demo\/snapshots\/(.+)$/.exec(url.pathname);
     if (!m) return false;
     const rest = decodeURIComponent(m[1]!);
     if (rest === `${repo.main}/download`) {
@@ -53,7 +53,7 @@ function kvarm(args: string[], env: Record<string, string | undefined>): Promise
 describe('kvarm bin', () => {
   it('checkout of a ready snapshot prints source: snapshot and matches git checkout', async () => {
     const dir = join(root, 'out-main');
-    const r = await kvarm(['checkout', 'cynthia/demo', 'main', dir], { KVARM_BASE_URL: server.url, KVARM_PAT: PAT });
+    const r = await kvarm(['checkout', 'alice/demo', 'main', dir], { KVARM_BASE_URL: server.url, KVARM_PAT: PAT });
     expect(r.code, r.stderr).toBe(0);
     expect(r.stdout.split('\n')[0]).toBe('source: snapshot');
     const expected = join(root, 'expected-main');
@@ -64,13 +64,13 @@ describe('kvarm bin', () => {
   it('checkout while building clones over smart HTTP with the PAT as basic auth and prints source: clone', async () => {
     const before = server.requests.length;
     const dir = join(root, 'out-feature');
-    const r = await kvarm(['checkout', 'cynthia/demo', 'feature', dir], { KVARM_BASE_URL: server.url, KVARM_PAT: PAT });
+    const r = await kvarm(['checkout', 'alice/demo', 'feature', dir], { KVARM_BASE_URL: server.url, KVARM_PAT: PAT });
     expect(r.code, r.stderr).toBe(0);
     expect(r.stdout).toBe(`source: clone\nsha: ${repo.feature}\n`);
     const expected = join(root, 'expected-feature');
     gitCheckout(repo.bare, repo.feature, expected);
     expect(diffTrees(dir, expected)).toEqual({ code: 0, out: '' });
-    const gitRequests = server.requests.slice(before).filter((q) => q.url.startsWith('/cynthia/demo.git/'));
+    const gitRequests = server.requests.slice(before).filter((q) => q.url.startsWith('/alice/demo.git/'));
     expect(gitRequests.length).toBeGreaterThan(0);
     const basic = `Basic ${Buffer.from(`forge:${PAT}`).toString('base64')}`;
     expect(gitRequests.every((q) => q.auth === basic)).toBe(true);
@@ -79,9 +79,9 @@ describe('kvarm bin', () => {
   });
 
   it('exits 2 with usage for bad arguments and a missing KVARM_BASE_URL', async () => {
-    expect((await kvarm(['checkout', 'cynthia/demo'], { KVARM_BASE_URL: server.url })).code).toBe(2);
+    expect((await kvarm(['checkout', 'alice/demo'], { KVARM_BASE_URL: server.url })).code).toBe(2);
     expect((await kvarm(['checkout', 'not-a-repo', 'main', join(root, 'x')], { KVARM_BASE_URL: server.url })).code).toBe(2);
-    const missing = await kvarm(['checkout', 'cynthia/demo', 'main', join(root, 'y')], {});
+    const missing = await kvarm(['checkout', 'alice/demo', 'main', join(root, 'y')], {});
     expect(missing.code).toBe(2);
     expect(missing.stderr).toMatch(/KVARM_BASE_URL is not set/);
     expect((await kvarm(['frobnicate'], {})).code).toBe(2);
@@ -95,13 +95,13 @@ describe('kvarm bin', () => {
     expect(help.code).toBe(0);
     expect(help.stdout).toMatch(/^usage: kvarm <command>/);
     expect(help.stdout.replace(/https:\/\/\S+/g, '')).not.toMatch(/forge/i);
-    const retired = await kvarm(['checkout', 'cynthia/demo', 'main', join(root, 'retired-env')], { FORGE_BASE_URL: server.url, FORGE_PAT: PAT });
+    const retired = await kvarm(['checkout', 'alice/demo', 'main', join(root, 'retired-env')], { FORGE_BASE_URL: server.url, FORGE_PAT: PAT });
     expect(retired.code).toBe(2);
     expect(retired.stderr).toMatch(/KVARM_BASE_URL is not set/);
   });
 
   it('exits 1 when neither the snapshot nor git can provide the ref', async () => {
-    const r = await kvarm(['checkout', 'cynthia/demo', 'nope', join(root, 'out-nope')], { KVARM_BASE_URL: server.url, KVARM_PAT: PAT });
+    const r = await kvarm(['checkout', 'alice/demo', 'nope', join(root, 'out-nope')], { KVARM_BASE_URL: server.url, KVARM_PAT: PAT });
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/git checkout nope failed/);
   });

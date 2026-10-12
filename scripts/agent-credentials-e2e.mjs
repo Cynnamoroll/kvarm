@@ -14,7 +14,7 @@
  *
  * Tokens come from env vars (KVARM_PAT_BOT, KVARM_BASE_URL) and are never
  * printed; agent tokens are shown by prefix only.
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/agent-credentials-e2e.mjs [--keep] [--skip-expiry]
  * Exit 0 only when every check holds.
  */

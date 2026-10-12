@@ -7,7 +7,7 @@
  * section mints a short-lived write agent token (refs/heads/agents/*) for its
  * workspace creation and pushes, and revokes it and its scratch agent at exit.
  *
- * Usage (after loading apps/platform/.dev.vars.validation):
+ * Usage (after loading .env.local):
  *   node scripts/ci-e2e.mjs [--keep] [--skip-lease]
  */
 
@@ -18,10 +18,10 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({ options: { keep: { type: 'boolean', default: false }, 'skip-lease': { type: 'boolean', default: false } } });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const PAT = process.env.KVARM_PAT;
 const NO_CI = process.env.KVARM_PAT_NO_CI;
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!PAT || !NO_CI) throw new Error('KVARM_PAT and KVARM_PAT_NO_CI are required');
 const repo = `m5-ci-pipeline-runner-core-${Math.floor(Date.now() / 1000)}`;
 const R = `/api/v1/repos/${OWNER}/${repo}`;

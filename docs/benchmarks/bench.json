@@ -4,7 +4,7 @@
   "worker": null,
   "client": "darwin 27.0.0/arm64 (6 CPUs), Node v26.8.2",
   "compare": {
-    "fixture": "`cynthia/fixture-1m` `bench-base...bench-head` (502 changed files)",
+    "fixture": "`<owner>/fixture-1m` `bench-base...bench-head` (502 changed files)",
     "cold": {
       "n": 10,
       "min": 327,
@@ -90,7 +90,7 @@
     "runs": 3,
     "targets": [
       {
-        "name": "fixture (`cynthia/fixture-1m`@`bench-head`)",
+        "name": "fixture (`<owner>/fixture-1m`@`bench-head`)",
         "files": 502,
         "bytes": 33032000,
         "clone": {

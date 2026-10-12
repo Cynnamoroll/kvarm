@@ -22,7 +22,7 @@
  *   main         = bench-base (a sane default branch; bench-head stays non-default)
  *
  * Usage (from the repo root, validation env loaded):
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/fixture-1m.mjs [--repo=fixture-1m] [--dry-run] [--force] [--out=docs/benchmarks/fixture-1m.json]
  *
  * --dry-run builds locally and writes the expected-counts record without
@@ -41,12 +41,12 @@ import { fileURLToPath } from 'node:url';
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const DRY = process.argv.includes('--dry-run');
 const FORCE = process.argv.includes('--force');
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const REPO = arg('repo', 'fixture-1m');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const OUT = resolve(root, arg('out', 'docs/benchmarks/fixture-1m.json'));
-if (!DRY && !process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set (load apps/platform/.dev.vars.validation)');
+if (!DRY && !process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set (load .env.local)');
 
 export const SHAPE = {
   version: 1,

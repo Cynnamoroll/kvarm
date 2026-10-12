@@ -101,9 +101,9 @@ describe('kvarm help', () => {
 describe('kvarm operations', () => {
   it('maps positionals and flags onto the REST request and prints the JSON reply', async () => {
     reply = { status: 200, body: { ref: 'main', path: 'README.md', encoding: 'utf-8', content: 'hi\n' } };
-    const r = await kvarm(['file', 'read', 'cynthia/demo', 'README.md', '--ref', 'main', '--json']);
+    const r = await kvarm(['file', 'read', 'alice/demo', 'README.md', '--ref', 'main', '--json']);
     expect(r.code, r.stderr).toBe(0);
-    expect(last()).toMatchObject({ method: 'GET', url: '/api/v1/repos/cynthia/demo/contents?path=README.md&ref=main', auth: `Bearer ${PAT}` });
+    expect(last()).toMatchObject({ method: 'GET', url: '/api/v1/repos/alice/demo/contents?path=README.md&ref=main', auth: `Bearer ${PAT}` });
     expect(r.stdout.split('\n')).toHaveLength(1);
     expect(JSON.parse(r.stdout)).toEqual({ ref: 'main', path: 'README.md', encoding: 'utf-8', content: 'hi\n' });
   });
@@ -245,10 +245,10 @@ describe('kvarm status', () => {
 describe('kvarm failures', () => {
   it('exits 1 on an API error with the code, the cause and a next step, and never prints the token', async () => {
     reply = { status: 404, body: { error: 'not found', code: 'NOT_FOUND' } };
-    const r = await kvarm(['repo', 'get', 'cynthia/private', '--json']);
+    const r = await kvarm(['repo', 'get', 'alice/private', '--json']);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('NOT_FOUND');
-    expect(r.stderr).toContain('cynthia/private');
+    expect(r.stderr).toContain('alice/private');
     expect(r.stderr).toMatch(/hint: /);
     expect(JSON.parse(r.stdout)).toEqual({ status: 404, error: 'not found', code: 'NOT_FOUND' });
     expect(r.stdout + r.stderr).not.toContain(PAT);

@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "node ../../scripts/wrangler-target.mjs deploy",
     "types": "wrangler types",
-    "db:migrate:local": "wrangler d1 migrations apply forge --local",
-    "db:migrate:remote": "wrangler d1 migrations apply forge --remote",
+    "wrangler:target": "node ../../scripts/wrangler-target.mjs",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "node ../../scripts/wrangler-target.mjs d1 migrations apply DB --remote",
     "test": "vitest run"
   },
   "dependencies": {

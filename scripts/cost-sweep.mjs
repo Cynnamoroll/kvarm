@@ -2,7 +2,7 @@
 /**
  * Final cost sweep: every table row of library/cost.md against the live worker.
  *
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   . "$HOME/.config/vite-plus/env"          # wrangler (tail + read-only D1)
  *   node scripts/cost-sweep.mjs --cost-md <path to library/cost.md> [--out report.json] [--keep]
  *   node scripts/cost-sweep.mjs --cost-md <path> --coverage-only   # no network
@@ -79,7 +79,7 @@ const TOKENS = {
 };
 for (const [k, v] of Object.entries({ KVARM_BASE_URL: BASE, KVARM_PAT: PAT, KVARM_USER: OWNER, ...Object.fromEntries(Object.entries(TOKENS).map(([k, v]) => [`token ${k}`, v])) })) {
   if (!v) {
-    console.error(`missing ${k}: source apps/platform/.dev.vars.validation first`);
+    console.error(`missing ${k}: source .env.local first`);
     process.exit(2);
   }
 }

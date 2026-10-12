@@ -3,7 +3,7 @@
  * Benchmark entrypoint: measures the deployed worker and renders the
  * committed table in docs/benchmarks/README.md.
  *
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/bench.mjs [--samples 10] [--write] [--out report.json] [--reuse clone,runner,container] [--keep]
  *
  * Groups (scripts/lib/bench-report.mjs BENCH_GROUPS):
@@ -61,7 +61,7 @@ const BASE = process.env.KVARM_BASE_URL;
 const PAT = process.env.KVARM_PAT;
 const OWNER = process.env.KVARM_USER;
 if (!BASE || !PAT || !OWNER) {
-  console.error('missing KVARM_BASE_URL / KVARM_PAT / KVARM_USER: source apps/platform/.dev.vars.validation first');
+  console.error('missing KVARM_BASE_URL / KVARM_PAT / KVARM_USER: source .env.local first');
   process.exit(2);
 }
 const FIXTURE = process.env.KVARM_FIXTURE_REPO ?? `${OWNER}/fixture-1m`;

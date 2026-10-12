@@ -69,7 +69,7 @@ function makeHistory() {
 
 const history = makeHistory();
 const BASE = 'https://kvarm.test';
-const API = `${BASE}/api/v1/repos/cynthia/demo`;
+const API = `${BASE}/api/v1/repos/alice/demo`;
 const SNAP = `${API}/snapshots/`;
 
 /** Full-tarball downloads served by the fake snapshot service (the counting fake). */
@@ -97,7 +97,7 @@ const realCheckout = (o: any) => {
 /** A fresh snapshot checkout of `sha`, the ground truth for the warm workdir. */
 async function freshCheckout(sha: string): Promise<string> {
   const dir = tempDir('kvarm-cli-warm-fresh-');
-  await checkout({ baseUrl: BASE, pat: 'p', repo: 'cynthia/demo', ref: sha, dir, fetch: snapshotFetch, stdout: () => {}, stderr: () => {} });
+  await checkout({ baseUrl: BASE, pat: 'p', repo: 'alice/demo', ref: sha, dir, fetch: snapshotFetch, stdout: () => {}, stderr: () => {} });
   return dir;
 }
 
@@ -202,14 +202,14 @@ function fakePlatform(jobs: Job[], opts: { failCompare?: number; truncateCompare
       reports.push({ path, ...body });
       return Response.json({ run: { status: body.conclusion } });
     }
-    if (path.startsWith(`/api/v1/repos/cynthia/demo/compare/`)) {
+    if (path.startsWith(`/api/v1/repos/alice/demo/compare/`)) {
       restGets.push('compare');
       if (failCompare-- > 0) return Response.json({ error: 'unavailable' }, { status: 503 });
       if (opts.truncateCompare) return Response.json({ files: [], truncated: true, truncatedReason: 'changed file budget exhausted (20000 files)' });
-      const [base, head] = path.slice(`/api/v1/repos/cynthia/demo/compare/`.length).split('...') as [string, string];
+      const [base, head] = path.slice(`/api/v1/repos/alice/demo/compare/`.length).split('...') as [string, string];
       return Response.json({ files: await compareAt(base, head), truncated: false });
     }
-    if (path === '/api/v1/repos/cynthia/demo/tree') {
+    if (path === '/api/v1/repos/alice/demo/tree') {
       const ref = url.searchParams.get('ref') ?? '';
       const treePath = url.searchParams.get('path') ?? '';
       restGets.push(`tree ${ref} ${treePath}`);
@@ -228,7 +228,7 @@ function fakePlatform(jobs: Job[], opts: { failCompare?: number; truncateCompare
         })),
       });
     }
-    if (path === '/api/v1/repos/cynthia/demo/contents') {
+    if (path === '/api/v1/repos/alice/demo/contents') {
       const filePath = url.searchParams.get('path') ?? '';
       const ref = url.searchParams.get('ref') ?? '';
       restGets.push(`contents ${filePath}`);
@@ -256,7 +256,7 @@ async function runOnce(
   const result = await runRunner({
     baseUrl: BASE,
     pat: 'p',
-    repo: 'cynthia/demo',
+    repo: 'alice/demo',
     once: true,
     apiFetch: api.apiFetch,
     checkoutFn: realCheckout as any,
@@ -383,7 +383,7 @@ describe('kvarm runner warm workdir', () => {
       ['bin/run.sh', 'link', 'modify.txt', 'new/added.txt'].sort(),
     );
     expect(observed).toEqual(treeState(fresh3));
-    expect(readFileSync(join(slotPaths(workRoot, 'cynthia/demo', 0).work, 'node_modules', 'dep2', 'index.js'), 'utf8')).toBe('cache\n');
+    expect(readFileSync(join(slotPaths(workRoot, 'alice/demo', 0).work, 'node_modules', 'dep2', 'index.js'), 'utf8')).toBe('cache\n');
     expect(observed).not.toHaveProperty('dist');
     expect(observed).not.toHaveProperty('stray.log');
   });
@@ -421,7 +421,7 @@ describe('kvarm runner warm workdir', () => {
     const seen: string[] = [];
     await runOnce(workRoot, [job('f1', history.c1)], dirtyFirstJob(outside, seen));
     const coldDownloads = snapshotDownloads.count;
-    const work = slotPaths(workRoot, 'cynthia/demo', 0).work;
+    const work = slotPaths(workRoot, 'alice/demo', 0).work;
     let observed: Record<string, string> = {};
     const second = await runOnce(
       workRoot,
@@ -496,7 +496,7 @@ describe('kvarm runner warm workdir', () => {
     expect(truncated.stdout).toContain('workdir: fresh');
     expect(observed).toEqual(treeState(await freshCheckout(history.c2)));
 
-    const slot = slotPaths(workRoot, 'cynthia/demo', 0);
+    const slot = slotPaths(workRoot, 'alice/demo', 0);
     writeFileSync(slot.state, JSON.stringify({ version: 1, sha: history.c2, files: ['README.md'] }));
     const legacy = await runOnce(workRoot, [job('x3', history.c1)], async () => ok);
     expect(legacy.reports[0]).toMatchObject({ conclusion: 'success' });
@@ -527,7 +527,7 @@ describe('kvarm runner warm workdir', () => {
     };
     const first = await runOnce(workRoot, [job('g0', history.c1)], async () => ok, { checkoutFn: cloneCheckout });
     expect(first.stdout).toContain('workdir: fresh');
-    expect(existsSync(join(slotPaths(workRoot, 'cynthia/demo', 0).work, '.git'))).toBe(true);
+    expect(existsSync(join(slotPaths(workRoot, 'alice/demo', 0).work, '.git'))).toBe(true);
 
     const coldDownloads = snapshotDownloads.count;
     const checkoutsBefore = checkoutCalls.length;
@@ -559,17 +559,17 @@ describe('kvarm runner warm workdir', () => {
     };
     await Promise.all([runOnce(workRoot, [job('a', history.c1)], execute), runOnce(workRoot, [job('b', history.c2)], execute)]);
     expect(new Set(cwds).size).toBe(2);
-    expect(cwds.sort()).toEqual([slotPaths(workRoot, 'cynthia/demo', 0).work, slotPaths(workRoot, 'cynthia/demo', 1).work].sort());
+    expect(cwds.sort()).toEqual([slotPaths(workRoot, 'alice/demo', 0).work, slotPaths(workRoot, 'alice/demo', 1).work].sort());
 
     // A lock held by another live owner is never taken; a dead owner's lock is reclaimed.
-    const slot0 = slotPaths(workRoot, 'cynthia/demo', 0);
+    const slot0 = slotPaths(workRoot, 'alice/demo', 0);
     writeFileSync(slot0.lock, JSON.stringify({ pid: process.pid, host: hostname(), token: 'someone-else' }));
     const busy = await runOnce(workRoot, [job('c', history.c1)], async (_command, cwd) => {
       cwds.push(cwd);
       return ok;
     });
     expect(busy.reports[0]).toMatchObject({ conclusion: 'success' });
-    expect(cwds.at(-1)).toBe(slotPaths(workRoot, 'cynthia/demo', 1).work);
+    expect(cwds.at(-1)).toBe(slotPaths(workRoot, 'alice/demo', 1).work);
     expect(JSON.parse(readFileSync(slot0.lock, 'utf8')).token).toBe('someone-else');
 
     const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
@@ -593,12 +593,12 @@ describe('kvarm runner warm workdir', () => {
     const run = runRunner({
       baseUrl: BASE,
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       apiFetch: api.apiFetch,
       checkoutFn: realCheckout as any,
       execute: async (_command, cwd) => {
         cwds.push(cwd);
-        expect(existsSync(slotPaths(workRoot, 'cynthia/demo', 0).lock)).toBe(true);
+        expect(existsSync(slotPaths(workRoot, 'alice/demo', 0).lock)).toBe(true);
         return ok;
       },
       stdout: (l) => stdout.push(l),
@@ -608,14 +608,14 @@ describe('kvarm runner warm workdir', () => {
     });
     await expect(run).rejects.toThrow(/runner stopped/);
     expect(api.reports.map((r) => r.conclusion)).toEqual(['success', 'success']);
-    expect(cwds).toEqual([slotPaths(workRoot, 'cynthia/demo', 0).work, slotPaths(workRoot, 'cynthia/demo', 0).work]);
+    expect(cwds).toEqual([slotPaths(workRoot, 'alice/demo', 0).work, slotPaths(workRoot, 'alice/demo', 0).work]);
     expect(stdout.filter((l) => l.startsWith('workdir:'))).toEqual(['workdir: fresh', 'workdir: warm']);
     expect(snapshotDownloads.count).toBe(coldDownloads + 1);
-    expect(existsSync(slotPaths(workRoot, 'cynthia/demo', 0).lock)).toBe(false);
+    expect(existsSync(slotPaths(workRoot, 'alice/demo', 0).lock)).toBe(false);
   });
 
   it('rejects repository names that would escape the workdir root', () => {
-    expect(() => slotPaths(join(root, 'escape'), 'cynthia/..', 0)).toThrow(/invalid repository/);
+    expect(() => slotPaths(join(root, 'escape'), 'alice/..', 0)).toThrow(/invalid repository/);
     expect(() => slotPaths(join(root, 'escape'), '../demo', 0)).toThrow(/invalid repository/);
   });
 });
@@ -642,7 +642,7 @@ describe('kvarm runner warm workdir edge cases', () => {
     expect(second.reports[0]).toMatchObject({ conclusion: 'success', summary: { sha: history.c2 } });
     expect(second.stdout).toContain('workdir: warm');
     expect(observed).toEqual(treeState(await freshCheckout(history.c2)));
-    const work = slotPaths(workRoot, 'cynthia/demo', 0).work;
+    const work = slotPaths(workRoot, 'alice/demo', 0).work;
     expect(lstatSync(join(work, 'node_modules', 'linked')).isSymbolicLink()).toBe(false);
     // The external destination keeps its exact files, bytes and modes.
     expect(readdirSync(outside).sort()).toEqual(['file.txt', 'sibling.txt']);
@@ -701,7 +701,7 @@ describe('kvarm runner warm workdir edge cases', () => {
     writeFileSync(join(outside, 'node_modules', 'ext', 'index.js'), 'external cache\n');
     writeFileSync(join(outside, 'loose.txt'), 'external loose file\n');
     await runOnce(workRoot, [job('n1', history.c1)], nestedCaches(outside));
-    const work = slotPaths(workRoot, 'cynthia/demo', 0).work;
+    const work = slotPaths(workRoot, 'alice/demo', 0).work;
     expect(existsSync(join(work, 'gone', 'deep', 'node_modules', 'pkg', 'index.js'))).toBe(true);
 
     const ignore = ['environments/python/.venv', 'tools/node_modules', 'gone/deep/node_modules'];
@@ -748,14 +748,14 @@ describe('kvarm runner warm workdir edge cases', () => {
       return ok;
     });
     expect(second.stdout).toContain('workdir: warm');
-    expectNestedCachesKept(slotPaths(workRoot, 'cynthia/demo', 0).work, observed, treeState(await freshCheckout(history.c2)), []);
+    expectNestedCachesKept(slotPaths(workRoot, 'alice/demo', 0).work, observed, treeState(await freshCheckout(history.c2)), []);
     expect(readdirSync(outside)).toEqual(['keep.txt']);
   });
 
   it.skipIf(process.getuid?.() === 0)('falls back to a full snapshot checkout when the recorded state is unreadable, and the job still completes', async () => {
     const workRoot = join(root, 'unreadable-state');
     await runOnce(workRoot, [job('u1', history.c1)], async () => ok);
-    const slot = slotPaths(workRoot, 'cynthia/demo', 0);
+    const slot = slotPaths(workRoot, 'alice/demo', 0);
     chmodSync(slot.state, 0o000);
     const before = snapshotDownloads.count;
     let observed: Record<string, string> = {};
@@ -778,7 +778,7 @@ describe('kvarm runner warm workdir edge cases', () => {
   it('falls back when the recorded state path is a directory, and the job still completes', async () => {
     const workRoot = join(root, 'dir-state');
     await runOnce(workRoot, [job('v1', history.c1)], async () => ok);
-    const slot = slotPaths(workRoot, 'cynthia/demo', 0);
+    const slot = slotPaths(workRoot, 'alice/demo', 0);
     rmSync(slot.state);
     mkdirSync(join(slot.state, 'nested'), { recursive: true });
     let observed: Record<string, string> = {};

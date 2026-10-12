@@ -3,7 +3,7 @@
  * Live driver for agent workspaces (m6a-workspaces): VAL-WS-001..010 and
  * VAL-COST-016, plus the agent-token binding to workspace ownership.
  *
- * Every scenario runs in a fresh public repo owned by KVARM_USER (cynthia),
+ * Every scenario runs in a fresh public repo owned by KVARM_USER,
  * named `m6a-workspaces-<purpose>-<timestamp>`, seeded with real git pushes
  * through the platform gate, and deleted afterwards (unless --keep):
  *   lifecycle  create (ref exists at the base head before any push), git push
@@ -16,7 +16,7 @@
  *              workspace and an unknown workspace id refused
  *
  * Tokens come from env by NAME and are never printed:
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/workspaces-e2e.mjs [--keep] [--only lifecycle,policy,...]
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper; commits use the configured git identity.
@@ -33,8 +33,8 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } },
 });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm6a-workspaces';

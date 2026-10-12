@@ -4,7 +4,7 @@
  * (nexus-intents-forecast): VAL-INTENT-001..007, VAL-FORECAST-001..005,
  * VAL-OVERLAP-001..004 and the overlap half of VAL-COST-015.
  *
- * Every section runs in a fresh public repo owned by KVARM_USER (cynthia),
+ * Every section runs in a fresh public repo owned by KVARM_USER,
  * named `nexus-intents-forecast-<section>-<timestamp>`, seeded and changed
  * with real git pushes through the platform gate, and deleted afterwards
  * (unless --keep):
@@ -24,7 +24,7 @@
  *                 workspace, base filter, abandon exclusion, second call art=0
  *
  * Tokens come from env by NAME and are never printed:
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/intents-forecast-e2e.mjs [--keep] [--only intent,forecast,...]
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper; commits use the configured git identity.
@@ -41,8 +41,8 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } },
 });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'nexus-intents-forecast';

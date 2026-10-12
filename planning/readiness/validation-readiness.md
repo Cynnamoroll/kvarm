@@ -1,7 +1,7 @@
 # Mission Validation-Readiness — Forge (live deployed surface)
 
 Verification run: 2026-10-07 21:21 UTC, against the live worker
-`https://forge-platform.cynnamoroll.workers.dev`. Companion to
+`https://forge-platform.<subdomain>.workers.dev`. Companion to
 `planning/readiness/dependency-readiness.md` (which verified D1 / R2 / Queues /
 Artifacts / MCP SDK / test pool — not repeated here). This run was strictly
 read-only: no deploy, no migration, no push, no source modification, no commit.
@@ -32,26 +32,26 @@ signals: `x-forge-cache: hit` on app-cache hits (misses return **no**
 
 | URL | Status | Total time | Notes |
 |---|---|---|---|
-| `https://forge-platform.cynnamoroll.workers.dev/healthz` | 200 | 0.406 s | body `ok`; DNS 0.11 s + TLS 0.32 s included |
-| `https://forge-platform.cynnamoroll.workers.dev/` | 200 | 0.378 s | anonymous landing HTML renders (`<title>Home · Forge</title>`) |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e` | 200 | 1.415 s (miss) → 0.38 s-class (hit) | tree page; `x-forge-cache: hit`, `cf-cache-status: HIT`, `cache-control: public, max-age=60`, `age: 2–3` on repeat |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/branches` | 200 | 1.920 s | uncached |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/commits` | 200 | 0.537 s | |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/commit/1da064aec583141a5e2836affe43c7af285e6c6b` | 200 | 0.501 s | commit-SHA ref → immutable-cached class |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/tree/main/src` | 200 | 0.656 s | subdir tree |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/blob/main/README.md` | 200 | 0.552 s | |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/raw/main/README.md` | 200 | 0.870 s (miss) → 0.460 s (hit) | hit 2: `x-forge-cache: hit`, `cf-cache-status: HIT`, `max-age=60` |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/raw/main/src/hello.ts` | 200 | 0.580 s | content verified (TS source served) |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/raw/1da064aec583141a5e2836affe43c7af285e6c6b/README.md` | 200 | 0.535 s | `cache-control: public, max-age=31536000, immutable` |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/does-not-exist` | 404 | — | correct not-found for unknown repo |
-| `https://forge-platform.cynnamoroll.workers.dev/definitely/not/a/route` | 404 | — | |
-| `https://forge-platform.cynnamoroll.workers.dev/auth/sign-in` | **503** | — | body: `auth is not configured: set WORKOS_CLIENT_ID, WORKOS_API_KEY and WORKOS_COOKIE_PASSWORD (see apps/platform/.dev.vars.example)` |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e/settings` (anon) | 404 | — | deliberate owner-only 404 (`repoPages.ts:566-568`), not a redirect |
-| `https://forge-platform.cynnamoroll.workers.dev/api/v1/user` + `Authorization: Bearer <PAT>` | 200 | 0.267 s | `{"user":{"login":"cynthia","name":"Cynthia","isAdmin":1},"via":"pat"}` |
-| `https://forge-platform.cynnamoroll.workers.dev/api/v1/user` (anon) | 401 | — | correct |
-| `https://forge-platform.cynnamoroll.workers.dev/api/v1/repos` + Bearer PAT | 200 | 0.288 s | lists `cynthia/forge-e2e`, `cloneUrl` = `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e.git` |
-| `https://forge-platform.cynnamoroll.workers.dev/api/v1/repos/cynthia/forge-e2e` + Bearer PAT | 200 | 0.283 s | |
-| `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e.git/info/refs?service=git-upload-pack` | 200 | 0.409 s / 0.442 s | `cf-cache-status: HIT`, `cache-control: public, max-age=30`, `age: 25` — clone bootstrap edge-cached as designed |
+| `https://forge-platform.<subdomain>.workers.dev/healthz` | 200 | 0.406 s | body `ok`; DNS 0.11 s + TLS 0.32 s included |
+| `https://forge-platform.<subdomain>.workers.dev/` | 200 | 0.378 s | anonymous landing HTML renders (`<title>Home · Forge</title>`) |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e` | 200 | 1.415 s (miss) → 0.38 s-class (hit) | tree page; `x-forge-cache: hit`, `cf-cache-status: HIT`, `cache-control: public, max-age=60`, `age: 2–3` on repeat |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/branches` | 200 | 1.920 s | uncached |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/commits` | 200 | 0.537 s | |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/commit/1da064aec583141a5e2836affe43c7af285e6c6b` | 200 | 0.501 s | commit-SHA ref → immutable-cached class |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/tree/main/src` | 200 | 0.656 s | subdir tree |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/blob/main/README.md` | 200 | 0.552 s | |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/raw/main/README.md` | 200 | 0.870 s (miss) → 0.460 s (hit) | hit 2: `x-forge-cache: hit`, `cf-cache-status: HIT`, `max-age=60` |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/raw/main/src/hello.ts` | 200 | 0.580 s | content verified (TS source served) |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/raw/1da064aec583141a5e2836affe43c7af285e6c6b/README.md` | 200 | 0.535 s | `cache-control: public, max-age=31536000, immutable` |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/does-not-exist` | 404 | — | correct not-found for unknown repo |
+| `https://forge-platform.<subdomain>.workers.dev/definitely/not/a/route` | 404 | — | |
+| `https://forge-platform.<subdomain>.workers.dev/auth/sign-in` | **503** | — | body: `auth is not configured: set WORKOS_CLIENT_ID, WORKOS_API_KEY and WORKOS_COOKIE_PASSWORD (see apps/platform/.dev.vars.example)` |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e/settings` (anon) | 404 | — | deliberate owner-only 404 (`repoPages.ts:566-568`), not a redirect |
+| `https://forge-platform.<subdomain>.workers.dev/api/v1/user` + `Authorization: Bearer <PAT>` | 200 | 0.267 s | `{"user":{"login":"<owner>","name":"<Owner>","isAdmin":1},"via":"pat"}` |
+| `https://forge-platform.<subdomain>.workers.dev/api/v1/user` (anon) | 401 | — | correct |
+| `https://forge-platform.<subdomain>.workers.dev/api/v1/repos` + Bearer PAT | 200 | 0.288 s | lists `<owner>/forge-e2e`, `cloneUrl` = `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e.git` |
+| `https://forge-platform.<subdomain>.workers.dev/api/v1/repos/<owner>/forge-e2e` + Bearer PAT | 200 | 0.283 s | |
+| `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e.git/info/refs?service=git-upload-pack` | 200 | 0.409 s / 0.442 s | `cf-cache-status: HIT`, `cache-control: public, max-age=30`, `age: 25` — clone bootstrap edge-cached as designed |
 
 Evidence snippet (tree page, second hit):
 
@@ -72,15 +72,15 @@ x-forge-cache: hit
   `WORKOS_REDIRECT_URI` as `http://localhost:8787`, so even with secrets the
   live callback would be wrong until those vars are productionized.
 - **Everything authenticated is drivable via the PAT** (`/tmp/forge-e2e.token`):
-  git basic auth (`cynthia` + token) and API bearer auth both verified 200.
+  git basic auth (`<owner>` + token) and API bearer auth both verified 200.
 - Anonymous public pages are fully drivable (curl + browser).
 
 ### Rendering observations (validators will hit these)
 
 - Markdown rendering does not rebase repo-relative links: the fixture README
   (`see [src/hello.ts](src/hello.ts)`) renders as
-  `https://forge-platform.cynnamoroll.workers.dev/cynthia/src/hello.ts` → 404
-  on the blob page. GitHub-style rebasing to `/cynthia/forge-e2e/blob/main/src/hello.ts`
+  `https://forge-platform.<subdomain>.workers.dev/<owner>/src/hello.ts` → 404
+  on the blob page. GitHub-style rebasing to `/<owner>/forge-e2e/blob/main/src/hello.ts`
   is absent. Not a readiness blocker; a real product gap and a good first
   validation target.
 - `x-forge-cache` is only visible on hits (by design — `cache/edge.ts` sets
@@ -89,13 +89,13 @@ x-forge-cache: hit
 
 ## Git checks
 
-Clone URL scheme: `https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e.git`
+Clone URL scheme: `https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e.git`
 (served by the git gate on `/{owner}/{repo}(.git)/...`; plain `/.git`-less form
 also matches — `GIT_PATH_RE` in `routes/git.ts`).
 
 ```
-$ git -c http.extraHeader="Authorization: Basic <cynthia:PAT>" ls-remote \
-    https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e.git
+$ git -c http.extraHeader="Authorization: Basic <<owner>:PAT>" ls-remote \
+    https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e.git
 1da064aec583141a5e2836affe43c7af285e6c6b	HEAD
 1da064aec583141a5e2836affe43c7af285e6c6b	refs/heads/main
 real	1.012s
@@ -113,7 +113,7 @@ real	1.012s
 ## Deploy checks (read-only)
 
 - `npx wrangler whoami` (from `apps/platform`): wrangler 4.148.0, OAuth as
-  `cloudflare@cynthia.sh`, account `15e645a3e487b9c63fbbcd0c5d0757b4` (matches
+  `<owner-email>`, account `<account-id>` (matches
   expected). Token scopes include workers/d1/queues/artifacts (write).
 - `npx wrangler deploy --dry-run --outdir /tmp/forge-dryrun`: **PASS in 1.18 s real**.
   Config parses; bundle 897.72 KiB (gzip 200.02 KiB); all 16 bindings resolved:
@@ -132,13 +132,13 @@ real	1.012s
 `agent-browser` is available and drives the **Factory desktop embedded browser
 pane** via CDP (`FACTORY_DESKTOP_CDP_PORT` set). Against the live repo page:
 
-- `agent-browser --cdp "$AGENT_BROWSER_CDP" open https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e`
-  — works; page title `cynthia/forge-e2e · Forge`.
+- `agent-browser --cdp "$AGENT_BROWSER_CDP" open https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e`
+  — works; page title `<owner>/forge-e2e · Forge`.
 - `snapshot -i -u -d 3` — works; interactive refs resolve (evidence excerpt):
 
 ```
-- heading "cynthia / forge-e2e public" [level=1, ref=e3]
-- link "code" [ref=e11, url=.../cynthia/forge-e2e/tree/main]
+- heading "<owner> / forge-e2e public" [level=1, ref=e3]
+- link "code" [ref=e11, url=.../<owner>/forge-e2e/tree/main]
 - link "commits" [ref=e12, url=.../commits?ref=main]
 - link "branches" [ref=e13, url=.../branches]
 - link "▸ src" [ref=e5, url=.../tree/main/src]
@@ -164,7 +164,7 @@ pane** via CDP (`FACTORY_DESKTOP_CDP_PORT` set). Against the live repo page:
 | CPU | 6 cores, Apple A18 Pro (`hw.ncpu=6`) |
 | RAM | 8 GiB (`hw.memsize=8589934592`) |
 | Uptime / load | up 4 days 21:49; load avg **3.93 / 3.41 / 3.20** (machine already ~65% busy — other agents/workers active) |
-| Disk (`/Users/cyn/git`) | 460 GiB volume, 123 GiB used, **306 GiB available (29%)** |
+| Disk (`<repo-root>`) | 460 GiB volume, 123 GiB used, **306 GiB available (29%)** |
 
 ## Recommended validator concurrency + isolation notes
 
@@ -199,7 +199,7 @@ Classification by cost, with measured numbers:
 Isolation notes:
 
 1. **There is no per-validator data isolation**: the live D1 has exactly one
-   user (`cynthia`, admin) and one repo (`cynthia/forge-e2e`). Any validator
+   user (`<owner>`, admin) and one repo (`<owner>/forge-e2e`). Any validator
    creating repos/tokens/PATs via the API mutates shared state — coordinate,
    namespace names (e.g. `e2e-<validator>-<ts>`), and clean up.
 2. **Edge-cache TTLs can make read-after-write probes flaky**: branch-ref

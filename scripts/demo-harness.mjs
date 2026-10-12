@@ -34,7 +34,7 @@
  * Environment (tokens are read by name and never printed):
  *   KVARM_BASE_URL  platform origin
  *   KVARM_PAT       api-scope PAT of the human principal (ci scope too for --container)
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper that reads the token from the environment.
@@ -59,7 +59,7 @@ const { values: opts } = parseArgs({
 const BASE = (process.env.KVARM_BASE_URL ?? '').replace(/\/+$/, '');
 const PAT = process.env.KVARM_PAT ?? '';
 if (!BASE || !PAT) {
-  console.error('demo-harness: KVARM_BASE_URL and KVARM_PAT must be set (set -a; . apps/platform/.dev.vars.validation; set +a)');
+  console.error('demo-harness: KVARM_BASE_URL and KVARM_PAT must be set (set -a; . ./.env.local; set +a)');
   process.exit(2);
 }
 

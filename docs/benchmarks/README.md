@@ -12,12 +12,12 @@ Wall time to materialize a ref into an empty directory, median of 3 runs per var
 
 | target | files | tree bytes | `git clone` + checkout | `git clone --depth=1` | `kvarm checkout` (snapshot) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| fixture (`cynthia/fixture-1m`@`bench-head`) | 502 | 31.5 MiB | 12.3 s | 894 ms | 893 ms |
+| fixture (`<owner>/fixture-1m`@`bench-head`) | 502 | 31.5 MiB | 12.3 s | 894 ms | 893 ms |
 | small (61-file scratch repo) | 61 | 262.2 KiB | 535 ms | 462 ms | 328 ms |
 
 ## Compare timings
 
-Fixture: `cynthia/fixture-1m` `bench-base...bench-head` (502 changed files). Cold runs use the instance-admin `?nocache=1` bypass, which reads and writes no compare cache entry; warm runs repeat the same URL after the tree-pair body is cached.
+Fixture: `<owner>/fixture-1m` `bench-base...bench-head` (502 changed files). Cold runs use the instance-admin `?nocache=1` bypass, which reads and writes no compare cache entry; warm runs repeat the same URL after the tree-pair body is cached.
 
 | state | n | min | p50 | max | `x-kvarm-cost` (last run) |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -107,7 +107,7 @@ Container CI runner (Cloudflare Containers, public beta): run 1 starts from the 
 ## Reproduce
 
 ```sh
-set -a; . apps/platform/.dev.vars.validation; set +a   # KVARM_BASE_URL, KVARM_PAT (instance admin, api + ci scopes)
+set -a; . ./.env.local; set +a   # KVARM_BASE_URL, KVARM_PAT (instance admin, api + ci scopes)
 node scripts/bench.mjs --write                         # rewrites this file
 node scripts/cost-sweep.mjs --cost-md <path to cost.md> # every budget row, non-zero exit on a violation
 ```

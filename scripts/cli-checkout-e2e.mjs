@@ -27,7 +27,7 @@
  *            and checkout clones; without a token checkout exits 1 and
  *            leaves no directory behind.
  *
- * Env (load apps/platform/.dev.vars.validation): KVARM_PAT (cynthia, owner),
+ * Env (load .env.local): KVARM_PAT (KVARM_USER, owner),
  * KVARM_PAT_NO_API. Tokens are never printed; git runs with
  * `-c credential.helper=` and a secret-free GIT_ASKPASS helper, with the
  * configured git identity.
@@ -46,8 +46,8 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: args } = parseArgs({ options: { only: { type: 'string' }, keep: { type: 'boolean', default: false } } });
-const BASE = (process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev').replace(/\/+$/, '');
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = (process.env.KVARM_BASE_URL ?? 'http://localhost:8787').replace(/\/+$/, '');
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const SECTIONS = new Set((args.only ?? 'ready,lazy,private').split(','));
 const READY_BOUND_MS = 120_000;

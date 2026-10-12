@@ -158,7 +158,7 @@ export function renderBenchReadme(r) {
     '## Reproduce',
     '',
     '```sh',
-    'set -a; . apps/platform/.dev.vars.validation; set +a   # KVARM_BASE_URL, KVARM_PAT (instance admin, api + ci scopes)',
+    'set -a; . ./.env.local; set +a   # KVARM_BASE_URL, KVARM_PAT (instance admin, api + ci scopes)',
     'node scripts/bench.mjs --write                         # rewrites this file',
     'node scripts/cost-sweep.mjs --cost-md <path to cost.md> # every budget row, non-zero exit on a violation',
     '```',

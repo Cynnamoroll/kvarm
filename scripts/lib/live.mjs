@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLimiter, parseCost, retryAfterMs } from './fleet.mjs';
+import { remoteD1Args } from './wrangler-target.mjs';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 export const PLATFORM = join(ROOT, 'apps/platform');
@@ -164,7 +165,7 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
 
   /** Read-only remote D1 query through wrangler (needs `. "$HOME/.config/vite-plus/env"`). */
   function d1(sql) {
-    const r = spawnSync('wrangler', ['d1', 'execute', 'forge', '--remote', '--json', '--command', sql], { cwd: PLATFORM, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const r = spawnSync(process.execPath, remoteD1Args(sql), { cwd: PLATFORM, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     if (r.status !== 0) throw new Error(`wrangler d1 execute failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
     return JSON.parse(r.stdout).map((x) => x.results ?? []);
   }

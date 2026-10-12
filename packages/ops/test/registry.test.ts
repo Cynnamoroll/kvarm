@@ -139,12 +139,12 @@ describe('buildRequest', () => {
   };
 
   it('splits owner/name and encodes refs in the compare range', () => {
-    const r = buildRequest(op('compare'), { repo: 'cynthia/demo', base: 'main', head: 'feature/x', order: 'risk', limit: 10 });
+    const r = buildRequest(op('compare'), { repo: 'alice/demo', base: 'main', head: 'feature/x', order: 'risk', limit: 10 });
     expect(r.method).toBe('GET');
-    expect(r.path).toBe('/api/v1/repos/cynthia/demo/compare/main...feature%2Fx');
+    expect(r.path).toBe('/api/v1/repos/alice/demo/compare/main...feature%2Fx');
     expect(r.query).toBe('order=risk&limit=10');
     expect(r.body).toBeUndefined();
-    expect(requestTarget(r)).toBe('/api/v1/repos/cynthia/demo/compare/main...feature%2Fx?order=risk&limit=10');
+    expect(requestTarget(r)).toBe('/api/v1/repos/alice/demo/compare/main...feature%2Fx?order=risk&limit=10');
   });
 
   it('maps get_file_diff onto the compare file route with an encoded path query', () => {

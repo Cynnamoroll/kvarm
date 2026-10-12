@@ -105,7 +105,7 @@ describe('kvarm runner', () => {
     const result = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'kvarm_pat_test',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       runnerId: 'runner-test',
       apiFetch,
@@ -117,8 +117,8 @@ describe('kvarm runner', () => {
     });
     expect(result).toEqual({ claimed: 1, reported: 1 });
     expect(calls.map((c) => c.path)).toEqual([
-      '/api/v1/repos/cynthia/demo/ci/jobs/claim',
-      '/api/v1/repos/cynthia/demo/ci/jobs/job-1/report',
+      '/api/v1/repos/alice/demo/ci/jobs/claim',
+      '/api/v1/repos/alice/demo/ci/jobs/job-1/report',
     ]);
     expect(calls[1]!.body).toMatchObject({
       runnerId: 'runner-test',
@@ -152,7 +152,7 @@ describe('kvarm runner', () => {
     const first = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       runnerId: 'r',
       apiFetch,
@@ -167,7 +167,7 @@ describe('kvarm runner', () => {
     const empty = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       runnerId: 'r',
       apiFetch,
@@ -204,7 +204,7 @@ describe('kvarm runner', () => {
     const result = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       apiFetch,
       checkoutFn: async (o: any) => {
@@ -244,7 +244,7 @@ describe('kvarm runner', () => {
     const result = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       runnerId: 'runner-byte-edge',
       apiFetch,
@@ -298,7 +298,7 @@ describe('kvarm runner', () => {
     const result = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       runnerId: 'runner-fits',
       apiFetch,
@@ -357,7 +357,7 @@ describe('kvarm runner', () => {
       const run = runRunner({
         baseUrl: 'https://kvarm.test',
         pat: 'p',
-        repo: 'cynthia/demo',
+        repo: 'alice/demo',
         apiFetch,
         checkoutFn: async (o: any) => {
           mkdirSync(o.dir, { recursive: true });
@@ -411,7 +411,7 @@ describe('kvarm runner', () => {
         reports.push(body);
         return Response.json({ run: { status: body.conclusion } });
       }
-      if (path === `/api/v1/repos/cynthia/demo/compare/${a}...${b}`) {
+      if (path === `/api/v1/repos/alice/demo/compare/${a}...${b}`) {
         return Response.json({
           files: [
             { path: 'a.txt', status: 'modified', oldHash: blobSha('v1\n'), newHash: blobSha('v2\n'), oldMode: '100644', newMode: '100644' },
@@ -419,7 +419,7 @@ describe('kvarm runner', () => {
           truncated: false,
         });
       }
-      if (path === '/api/v1/repos/cynthia/demo/contents') {
+      if (path === '/api/v1/repos/alice/demo/contents') {
         contentsGets.push(String(url.searchParams.get('path')));
         return Response.json({ ref: b, path: 'a.txt', size: 4, encoding: 'utf-8', content: 'v2\n' });
       }
@@ -428,7 +428,7 @@ describe('kvarm runner', () => {
     const options = {
       baseUrl: 'https://kvarm.test',
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       apiFetch,
       checkoutFn: async (o: any) => {
@@ -457,7 +457,7 @@ describe('kvarm runner', () => {
     expect(contentsGets).toEqual(['a.txt']);
     expect(stdout.join('\n')).toContain('workdir: warm');
     expect(reports[1]).toMatchObject({ conclusion: 'success', summary: { sha: b, source: 'delta' } });
-    const work = join(root, 'delta-work', 'cynthia', 'demo', 'slot-0', 'work');
+    const work = join(root, 'delta-work', 'alice', 'demo', 'slot-0', 'work');
     expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('v2\n');
     expect(readFileSync(join(work, 'b.txt'), 'utf8')).toBe('same\n');
   });
@@ -479,7 +479,7 @@ describe('kvarm runner', () => {
         return next ? Response.json({ job: next }) : new Response(null, { status: 204 });
       }
       if (path.endsWith('/report')) return Response.json({ run: { status: 'success' } });
-      if (path === `/api/v1/repos/cynthia/demo/compare/${a}...${c}`) {
+      if (path === `/api/v1/repos/alice/demo/compare/${a}...${c}`) {
         return Response.json({
           files: Array.from({ length: 1_500 }, (_, i) => ({
             path: `f${i}.txt`,
@@ -497,7 +497,7 @@ describe('kvarm runner', () => {
     const options = {
       baseUrl: 'https://kvarm.test',
       pat: 'p',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       apiFetch,
       checkoutFn: async (o: any) => {
@@ -519,7 +519,7 @@ describe('kvarm runner', () => {
     expect(checkouts).toBe(2);
     expect(stderr.join('\n')).toMatch(/warm sync failed: .*warm budget/);
     expect(stdout.join('\n')).not.toContain('workdir: warm');
-    const work = join(root, 'delta-budget-work', 'cynthia', 'demo', 'slot-0', 'work');
+    const work = join(root, 'delta-budget-work', 'alice', 'demo', 'slot-0', 'work');
     expect(readFileSync(join(work, 'seed.txt'), 'utf8')).toBe(`seed ${c}\n`);
   });
 
@@ -531,7 +531,7 @@ describe('kvarm runner', () => {
     const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
       const path = new URL(String(input)).pathname;
       const body = init?.body ? JSON.parse(String(init.body)) : {};
-      calls.push(path.slice('/api/v1/repos/cynthia/demo/'.length));
+      calls.push(path.slice('/api/v1/repos/alice/demo/'.length));
       if (path.endsWith('/claim')) {
         if (!queued) return new Response(null, { status: 204 });
         queued = false;
@@ -553,7 +553,7 @@ describe('kvarm runner', () => {
       const result = await runRunner({
         baseUrl: 'https://kvarm.test',
         pat: 'kvarm_pat_test',
-        repo: 'cynthia/demo',
+        repo: 'alice/demo',
         once: true,
         runnerId: 'runner-prepared',
         apiFetch: platform.apiFetch,
@@ -596,7 +596,7 @@ describe('kvarm runner', () => {
     const result = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'kvarm_pat_test',
-      repo: 'cynthia/demo',
+      repo: 'alice/demo',
       once: true,
       apiFetch: platform.apiFetch,
       checkoutFn: async (o: any) => {

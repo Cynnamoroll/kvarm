@@ -24,7 +24,7 @@
  * push and only a repo created by this run is ever deleted (failure
  * included, see scripts/lib/fixture-repo.mjs).
  *
- * As cynthia (KVARM_PAT, instance admin). Tokens are read from env var
+ * As KVARM_USER (KVARM_PAT, instance admin). Tokens are read from env var
  * NAMES only and never printed; git runs with `-c credential.helper=` and a
  * secret-free GIT_ASKPASS helper.
  *
@@ -42,12 +42,12 @@ import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const arg = (k) => process.argv.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
 const KEEP = process.argv.includes('--keep');
 const VERIFY = !process.argv.includes('--no-verify');
 if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
-const OWNER = 'cynthia';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const RUN = String(Date.now());
 const REPO = arg('repo') ?? `m3-risk-engine-fixture-${RUN}`;
 

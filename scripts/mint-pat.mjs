@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Ops script: mint a platform PAT directly in the remote D1 `forge` database.
+ * Ops script: mint a platform PAT directly in your deployment's remote D1
+ * database (the target configured for scripts/wrangler-target.mjs).
  *
  * Creates the user (non-admin) when the login does not exist yet, inserts a
  * PAT row with the given scopes, and writes the plaintext token to KEY=<token>
@@ -11,11 +12,12 @@
  * --rotate is passed (the old PAT row is left in place).
  *
  * Usage:
- *   node scripts/mint-pat.mjs --login forge-bot --scopes read,write,api,ci \
- *     --name validation-bot --env-file apps/platform/.dev.vars.validation \
- *     --key KVARM_PAT_BOT [--email bot@example.invalid] [--rotate]
+ *   node scripts/mint-pat.mjs --login <login> --scopes read,write,api,ci \
+ *     --name my-token --env-file .env.local \
+ *     --key KVARM_PAT [--email you@example.invalid] [--rotate]
  *
- * Requires `wrangler` (logged in) on PATH or resolvable through npx.
+ * Requires `wrangler` (logged in) resolvable through npx, and
+ * KVARM_D1_DATABASE_ID in the environment or apps/platform/.env.deploy.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -24,6 +26,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { remoteD1Args } from './lib/wrangler-target.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const platformDir = resolve(repoRoot, 'apps/platform');
@@ -92,11 +95,7 @@ const sql = [
      FROM pat p JOIN users u ON u.id = p.user_id WHERE p.id = ${sqlString(patId)}`,
 ].join(';\n');
 
-const wrangler = spawnSync(
-  'npx',
-  ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql],
-  { cwd: platformDir, encoding: 'utf8' },
-);
+const wrangler = spawnSync(process.execPath, remoteD1Args(sql), { cwd: platformDir, encoding: 'utf8' });
 if (wrangler.status !== 0) {
   fail(`wrangler d1 execute failed (exit ${wrangler.status})\n${wrangler.stderr}\n${wrangler.stdout}`);
 }

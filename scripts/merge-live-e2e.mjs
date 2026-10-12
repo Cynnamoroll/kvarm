@@ -2,7 +2,7 @@
 /**
  * Live driver for merge publication (m5-merge-engine).
  *
- * 1. As cynthia (KVARM_PAT) creates a fresh private repo
+ * 1. As KVARM_USER (KVARM_PAT) creates a fresh private repo
  *    `m5-merge-engine-live-<timestamp>` (empty).
  * 2. Reads its Artifacts remote and issues a short-lived repo-scoped WRITE
  *    token with `wrangler artifacts repos issue-token` (captured in memory,
@@ -20,7 +20,7 @@
  *
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper; tokens come from env by NAME (load
- * apps/platform/.dev.vars.validation).
+ * .env.local).
  *
  * Usage: node scripts/merge-live-e2e.mjs [--keep]
  * Exit 0 when every check held, 1 otherwise.
@@ -35,8 +35,8 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: args } = parseArgs({ options: { keep: { type: 'boolean', default: false } } });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PLATFORM = join(ROOT, 'apps/platform');
@@ -137,7 +137,7 @@ async function run() {
   const parents = git(['rev-list', '--parents', '-n', '1', mergeAt], dir).out.split(' ').slice(1);
   check('three-way: two parents [target C1, head F1]', parents.join(',') === `${live.c1},${live.f1}`, parents.join(','));
   const who = git(['log', '-1', '--format=%cn <%ce>|%an <%ae>', mergeAt], dir).out;
-  check('three-way: committed by Kvarm, authored by the merging user', who === `${live.committer}|Cynthia <cynthia@forge.invalid>`, who);
+  check('three-way: committed by Kvarm, authored by the merging user', who === `${live.committer}|Alice <alice@example.invalid>`, who);
   const tree = git(['rev-parse', `${mergeAt}^{tree}`], dir).out;
   const gitTree = git(['merge-tree', '--write-tree', 'origin/main', 'origin/feature'], dir);
   check(

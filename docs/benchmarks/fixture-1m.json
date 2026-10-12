@@ -1,7 +1,7 @@
 {
   "generator": "scripts/fixture-1m.mjs",
   "version": 1,
-  "repo": "cynthia/fixture-1m",
+  "repo": "<owner>/fixture-1m",
   "shape": {
     "version": 1,
     "bench": {

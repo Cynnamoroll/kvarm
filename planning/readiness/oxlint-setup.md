@@ -1,7 +1,7 @@
 # oxlint quality gate — setup report
 
 **Status: complete. Gate is green (typecheck + test + lint all exit 0).**
-Date: setup performed in this session. Repo: `/Users/cyn/git` (branch `main`).
+Date: setup performed in this session. Repo: `<repo-root>` (branch `main`).
 Nothing was committed, deployed, or served. No files touched in `apps/platform/wrangler*.jsonc`.
 
 ## 1. oxlint version
@@ -10,8 +10,8 @@ Nothing was committed, deployed, or served. No files touched in `apps/platform/w
 | --- | --- |
 | Package | `oxlint` |
 | Installed version | **1.87.0** (exact-pinned, `"oxlint": "1.87.0"`) |
-| Install command used | `npm install -D --save-exact oxlint` (from `/Users/cyn/git`) |
-| Location | root `devDependencies` in `/Users/cyn/git/package.json` |
+| Install command used | `npm install -D --save-exact oxlint` (from `<repo-root>`) |
+| Location | root `devDependencies` in `<repo-root>/package.json` |
 | Binary | `node_modules/.bin/oxlint` |
 
 Also verified: **no pre-existing lint tooling** existed in the repo. No `eslint.config.*`,
@@ -32,7 +32,7 @@ Root `vitest.config.ts` includes `packages/**/test/**/*.test.ts`, environment `n
 There are no test files and no vitest config under `apps/`, so the root `npm run test`
 covers every test that currently exists in the repo (27 tests / 4 files).
 
-## 3. Config file: `/Users/cyn/git/.oxlintrc.json`
+## 3. Config file: `<repo-root>/.oxlintrc.json`
 
 ```json
 {
@@ -118,7 +118,7 @@ Other file changes (not source code):
 
 ## 5. Gate command strings for the mission manifest
 
-Run from the repo root `/Users/cyn/git`, in this order:
+Run from the repo root `<repo-root>`, in this order:
 
 | # | Command | Tool |
 | --- | --- | --- |

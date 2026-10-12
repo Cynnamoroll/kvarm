@@ -27,7 +27,7 @@
  *            requests are 404 while the owner still gets 200; flip back, warm
  *            again and repeat with the owner's PATCH visibility=private.
  *            Needs wrangler on PATH (`. "$HOME/.config/vite-plus/env"`).
- * - fixture  cynthia/fixture-1m (read-only): explicit demand for bench-head,
+ * - fixture  <owner>/fixture-1m (read-only): explicit demand for bench-head,
  *            poll to ready within 15 minutes, download, diff -r against a
  *            clone checked out at the same sha.
  * - large    sixteen 9 MiB files (144 MiB of blobs, compressible so the push
@@ -42,7 +42,7 @@
  *
  * Cleanup DELETEs of every created repo are checked for d1 ≤ 2 too.
  *
- * Env (load apps/platform/.dev.vars.validation): KVARM_PAT (cynthia, owner),
+ * Env (load .env.local): KVARM_PAT (KVARM_USER, owner),
  * KVARM_PAT_OUTSIDER (unrelated principal). Tokens are never printed; git
  * runs with `-c credential.helper=` and a secret-free GIT_ASKPASS helper and
  * uses the configured git identity.
@@ -57,12 +57,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { remoteD1Args } from './lib/wrangler-target.mjs';
 
 const { values: args } = parseArgs({
   options: { only: { type: 'string' }, keep: { type: 'boolean', default: false } },
 });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const SECTIONS = new Set((args.only ?? 'core,cost,lazy,private,flip,fixture,large,delete').split(','));
 const PART_SIZE = 8 * 1024 * 1024;
@@ -119,13 +120,13 @@ function git(dir, gitArgs) {
 }
 const PLATFORM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'platform');
 function d1Exec(sql) {
-  const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql], { cwd: PLATFORM_DIR, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, remoteD1Args(sql), { cwd: PLATFORM_DIR, encoding: 'utf8' });
   if (r.status !== 0) console.log(`#   wrangler d1 execute failed: ${(r.stderr ?? '').slice(-300)}`);
   return r.status;
 }
 /** Rows of one read-only remote D1 query, or null when it failed. */
 function d1Query(sql) {
-  const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql], { cwd: PLATFORM_DIR, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, remoteD1Args(sql), { cwd: PLATFORM_DIR, encoding: 'utf8' });
   if (r.status !== 0) {
     console.log(`#   wrangler d1 execute failed: ${(r.stderr ?? '').slice(-300)}`);
     return null;
@@ -432,7 +433,7 @@ try {
 
   // ---------------------------------------------------------------- fixture
   if (SECTIONS.has('fixture')) {
-    console.log('# fixture: VAL-SNAP-005 (cynthia/fixture-1m, read-only)');
+    console.log('# fixture: VAL-SNAP-005 (<owner>/fixture-1m, read-only)');
     const t0 = Date.now();
     const demand = await http(snapPath(FIXTURE.repo, FIXTURE.ref), { method: 'POST' });
     console.log(`#   demand ${demand.status} ${JSON.stringify(demand.body)} (${demand.cost})`);

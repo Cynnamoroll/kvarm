@@ -1,7 +1,6 @@
 {
   "at": "2026-10-08T17:53:38.547Z",
-  "base": "https://forge-platform.cynnamoroll.workers.dev",
-  "repo": "cynthia/fixture-1m",
+  "repo": "<owner>/fixture-1m",
   "refs": {
     "bench-base": {
       "sha": "cc72e4a02c8f53fcca94df9cb21ef1f94f0f5792",
@@ -273,7 +272,7 @@
     }
   ],
   "edge": {
-    "repo": "cynthia/m3-fixture-1m-gate-edge-1791482034642",
+    "repo": "<owner>/m3-fixture-1m-gate-edge-1791482034642",
     "base": "d846ee27d73a1360d9b8d7a764e7ec2430f8920a",
     "head": "46a8ffead6b83629c02ea4ae467375c08b4ec07e",
     "headParent": "4a505020138fc0417ec0ee2f9e76baa058ea2576",
@@ -357,7 +356,7 @@
     },
     {
       "ok": true,
-      "label": "edge: create cynthia/m3-fixture-1m-gate-edge-1791482034642 (new, created by this run)",
+      "label": "edge: create <owner>/m3-fixture-1m-gate-edge-1791482034642 (new, created by this run)",
       "detail": ""
     },
     {

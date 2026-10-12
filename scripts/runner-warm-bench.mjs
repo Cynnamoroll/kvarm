@@ -11,7 +11,7 @@
  * the runner's own claim->report span is collected. A final section runs two
  * runner processes concurrently and checks they hold different slots.
  *
- * Usage (after loading apps/platform/.dev.vars.validation):
+ * Usage (after loading .env.local):
  *   node scripts/runner-warm-bench.mjs [--samples 5] [--isolated-npm-cache] [--snapshot-ready] [--keep]
  *
  * By default npm installs from the machine's npm cache (~/.npm). With
@@ -32,9 +32,9 @@ import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({ options: { samples: { type: 'string', default: '5' }, keep: { type: 'boolean', default: false }, 'isolated-npm-cache': { type: 'boolean', default: false }, 'snapshot-ready': { type: 'boolean', default: false } } });
 const SAMPLES = Number(values.samples);
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const PAT = process.env.KVARM_PAT;
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!PAT) throw new Error('KVARM_PAT is required');
 if (!Number.isInteger(SAMPLES) || SAMPLES < 1) throw new Error('--samples must be a positive integer');
 const repo = `ci-runner-warm-workdir-bench-${Math.floor(Date.now() / 1000)}`;

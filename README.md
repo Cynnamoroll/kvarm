@@ -94,7 +94,7 @@ Deliberately unchanged:
 | MCP tool names | every tool name in `packages/ops/src/index.js` (`list_repos`, `merge_change`, `enqueue_change`, …) |
 | agent workspace refs (platform-reserved) | `refs/heads/agents/**` |
 | provisioned Cloudflare resources | worker `forge-platform`, D1 `forge`, R2 `forge-snapshots`, queues `forge-events` and `forge-events-dlq`, Artifacts namespace `default`, event subscription `forge-artifacts-pushed` |
-| live worker URL | the `APP_ORIGIN` var in `apps/platform/wrangler.jsonc` |
+| live worker URL | your `KVARM_APP_ORIGIN` setting (see [Deploy from zero](#deploy-from-zero)) |
 
 Moving the platform onto Kvarm-named Cloudflare resources is a separate, later operations migration. Until then the commands below use the existing resource names.
 
@@ -116,10 +116,11 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 
    npm may report that it skipped the `workerd`/`esbuild` install scripts; the binaries work regardless.
 
-2. **D1 database.** Create it, then put the printed `database_id` into the `d1_databases` entry of `apps/platform/wrangler.jsonc` (and of `wrangler.dev.jsonc` for local development).
+2. **D1 database and deployment target.** The committed `wrangler.jsonc` pins no deployment: its `database_id` and `APP_ORIGIN` are neutral placeholders. Your own values go in `apps/platform/.env.deploy` (gitignored), which `npm run deploy`, `npm run db:migrate:remote` and the scripts that query remote D1 read through `scripts/wrangler-target.mjs`. Environment variables of the same name take precedence over the file. Create the database, then copy the example and put the printed `database_id` into `KVARM_D1_DATABASE_ID`.
 
    ```sh
    npx wrangler d1 create forge
+   cp .env.deploy.example .env.deploy   # set KVARM_D1_DATABASE_ID
    ```
 
 3. **R2 bucket for snapshots.**
@@ -135,7 +136,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    npx wrangler queues create forge-events-dlq
    ```
 
-5. **Vars.** In `apps/platform/wrangler.jsonc` set `vars.APP_ORIGIN` to your worker's origin (`https://forge-platform.<your-subdomain>.workers.dev`, or a custom domain). Clone URLs and links are built from it. `ARTIFACTS_NAMESPACE` stays `default`.
+5. **Origin.** In `apps/platform/.env.deploy` set `KVARM_APP_ORIGIN` to your worker's origin (`https://forge-platform.<your-subdomain>.workers.dev`, or a custom domain); the deploy writes it into `vars.APP_ORIGIN`. Set `CLOUDFLARE_ACCOUNT_ID` there too if your login can see more than one account. Clone URLs and links are built from it. `ARTIFACTS_NAMESPACE` stays `default`.
 
 6. **Rate limiting binding.** `READ_LIMITER` (600 requests per 60 s) and `WRITE_LIMITER` (120 per 60 s) are declared in the `ratelimits` block of `wrangler.jsonc`. Workers Rate Limiting has no create command: the binding is created by the deploy in step 8. If the `namespace_id` values (`4601`, `4602`) collide with another Worker in your account, pick other unique integers.
 
@@ -149,7 +150,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 8. **Deploy.** This creates the Worker, its Durable Objects, Workflows, the Container class, the rate limiters and the queue consumer.
 
    ```sh
-   npm run deploy            # runs `wrangler deploy` in apps/platform
+   npm run deploy            # runs `wrangler deploy` with your target (scripts/wrangler-target.mjs)
    curl -s https://forge-platform.<your-subdomain>.workers.dev/healthz   # ok
    ```
 
@@ -168,15 +169,13 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 
     ```sh
     node scripts/mint-pat.mjs --login <admin-login> --scopes read,write,api,ci \
-      --name bootstrap --env-file apps/platform/.dev.vars.validation --key KVARM_PAT
-    cd apps/platform
-    npx wrangler d1 execute forge --remote \
+      --name bootstrap --env-file .env.local --key KVARM_PAT
+    node scripts/wrangler-target.mjs d1 execute DB --remote \
       --command "UPDATE users SET is_admin = 1 WHERE login = '<admin-login>'"
-    cd ../..
-    echo "KVARM_BASE_URL=https://forge-platform.<your-subdomain>.workers.dev" >> apps/platform/.dev.vars.validation
+    printf 'KVARM_BASE_URL=%s\nKVARM_USER=%s\n' https://forge-platform.<your-subdomain>.workers.dev <admin-login> >> .env.local
     ```
 
-    Load it with `set -a; . apps/platform/.dev.vars.validation; set +a`. Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
+    `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
 
 11. **First repository and the Artifacts namespace.** The Worker's `ARTIFACTS` binding uses the namespace `default`. Wrangler 4.148 has no namespace create command (only `artifacts namespaces list|get`); the namespace appears with the first repository created in it.
 
@@ -207,8 +206,9 @@ git clone <repository-url> kvarm && cd kvarm
 git checkout <commit>
 npm install
 cd apps/platform && npx wrangler whoami && cd ../..          # wrangler must be authenticated for the account
+cp apps/platform/.env.deploy.example apps/platform/.env.deploy   # once: KVARM_D1_DATABASE_ID, KVARM_APP_ORIGIN
 npm run db:migrate:remote --workspace apps/platform           # applies only migrations not yet applied
-cd apps/platform && npx wrangler deploy                       # same as `npm run deploy` from the root
+npm run deploy                                                # wrangler deploy with your target settings
 curl -s -o /dev/null -w '%{http_code}\n' https://forge-platform.<your-subdomain>.workers.dev/healthz   # 200 (the APP_ORIGIN host)
 ```
 
@@ -293,7 +293,7 @@ The exact path, parameters and reply of every registry operation are printed by 
 One command drives four scripted agent principals (two authors, two reviewers) and one human through MCP against a deployed worker, on a fresh private repository. No hosted model is called.
 
 ```sh
-set -a; . apps/platform/.dev.vars.validation; set +a   # KVARM_BASE_URL, KVARM_PAT
+set -a; . ./.env.local; set +a   # KVARM_BASE_URL, KVARM_PAT
 node scripts/demo-harness.mjs              # the seven agent-coordination steps
 node scripts/demo-harness.mjs --container  # plus the Container CI runner (cold vs snapshot-warm)
 node scripts/demo-harness.mjs --keep       # keep the repository afterwards

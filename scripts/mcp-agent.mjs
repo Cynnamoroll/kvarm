@@ -23,11 +23,11 @@
  *
  * Environment (tokens are read by NAME and never printed):
  *   KVARM_BASE_URL  platform origin
- *   KVARM_PAT       api-scope PAT of KVARM_USER (default cynthia)
+ *   KVARM_PAT       api-scope PAT of KVARM_USER (default admin)
  *   KVARM_PAT_BOT   api-scope PAT of an unrelated user (e2e visibility and attribution)
  *   MCP_TOKEN_ENV   name of the env var holding the token for info/call
  *                   (default KVARM_PAT)
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *
  * The e2e visibility scenario also flips visibility by a direct remote D1
  * UPDATE (`wrangler d1 execute`, simulating another colo); it needs wrangler
@@ -82,9 +82,10 @@ import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { remoteD1Args } from './lib/wrangler-target.mjs';
 
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PLATFORM_DIR = fileURLToPath(new URL('../apps/platform/', import.meta.url));
 const CLI_BIN = fileURLToPath(new URL('../apps/cli/bin/kvarm.js', import.meta.url));
 const eq = isDeepStrictEqual;
@@ -655,7 +656,7 @@ async function e2eChecks(argv, scratch) {
         return;
       }
       const d1 = (visibility) => {
-        const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', `UPDATE repos SET visibility = '${visibility}' WHERE owner_login = '${OWNER}' AND name = '${repo}'`], { cwd: PLATFORM_DIR, encoding: 'utf8' });
+        const r = spawnSync(process.execPath, remoteD1Args(`UPDATE repos SET visibility = '${visibility}' WHERE owner_login = '${OWNER}' AND name = '${repo}'`), { cwd: PLATFORM_DIR, encoding: 'utf8' });
         let changes = null;
         try {
           changes = JSON.parse(r.stdout)[0]?.meta?.changes ?? null;

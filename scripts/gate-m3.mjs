@@ -27,7 +27,7 @@
  *           repo created by this run is deleted (scripts/lib/fixture-repo.mjs)
  *
  * Usage (from the repo root, after `node scripts/fixture-1m.mjs`):
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/gate-m3.mjs [--repo=fixture-1m] [--runs=10] [--skip-edge] [--json=out.json]
  *
  * Tokens reach curl on stdin (`-K -`) and git through a secret-free
@@ -43,14 +43,14 @@ import { fileURLToPath } from 'node:url';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const REPO = arg('repo', 'fixture-1m');
 const RUNS = Number(arg('runs', '10'));
 const JSON_OUT = arg('json', null);
 const SKIP_EDGE = process.argv.includes('--skip-edge');
 const P = { admin: 'KVARM_PAT', bot: 'KVARM_PAT_BOT' };
-for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set (load apps/platform/.dev.vars.validation)`);
+for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set (load .env.local)`);
 const root = fileURLToPath(new URL('..', import.meta.url));
 const expected = JSON.parse(readFileSync(resolve(root, arg('expected', 'docs/benchmarks/fixture-1m.json')), 'utf8'));
 
@@ -126,7 +126,7 @@ const median = (xs) => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
 };
-const summary = { at: new Date().toISOString(), base: BASE, repo: `${OWNER}/${REPO}`, refs: expected.refs };
+const summary = { at: new Date().toISOString(), repo: `${OWNER}/${REPO}`, refs: expected.refs };
 
 // ---------------------------------------------------------------------------
 

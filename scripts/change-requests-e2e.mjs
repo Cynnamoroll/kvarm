@@ -3,7 +3,7 @@
  * Live driver for change requests (m5-change-requests): VAL-CHANGE-001..011,
  * VAL-MERGE-001/002/004/005/009 and VAL-CROSS-005.
  *
- * Every scenario runs in a fresh public repo owned by KVARM_USER (cynthia),
+ * Every scenario runs in a fresh public repo owned by KVARM_USER,
  * named `m5-change-requests-<purpose>-<timestamp>`, seeded with real git
  * pushes through the platform gate, and deleted afterwards (unless --keep):
  *   crud      create/list/get/patch/close/reopen, refusals, auth, head refresh
@@ -17,7 +17,7 @@
  *             once a push resolves them
  *
  * Tokens come from env by NAME and are never printed:
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/change-requests-e2e.mjs [--keep] [--only crud,ff,...] [--quick]
  * --quick shortens the VAL-MERGE-005 no-auto-merge poll from 90 s to 10 s.
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
@@ -34,8 +34,8 @@ import { withFixtureRepo } from './lib/fixture-repo.mjs';
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' }, quick: { type: 'boolean', default: false } },
 });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const PAT_BOT = process.env.KVARM_PAT_BOT ?? die('KVARM_PAT_BOT is not set');
 const PAT_NO_API = process.env.KVARM_PAT_NO_API ?? die('KVARM_PAT_NO_API is not set');

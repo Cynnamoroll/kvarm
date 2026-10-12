@@ -23,7 +23,7 @@
  *              blocked, human approval bound to the head, a pushed head stales
  *              it, reapproval of the new head publishes through the train
  *
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/review-approvals-e2e.mjs [--keep] [--only unset,policy,...]
  * Tokens are read by NAME and never printed. Git runs with
  * `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a secret-free
@@ -40,8 +40,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } } });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const MAINT = process.env.KVARM_PAT_MAINT ?? die('KVARM_PAT_MAINT is not set');
 const MAINT_LOGIN = 'forge-org-maint';

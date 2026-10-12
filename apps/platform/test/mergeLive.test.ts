@@ -70,7 +70,7 @@ describe.skipIf(!live)('live: merge publication through GitPusher', () => {
     }
 
     const threeWay = await step('prepareThreeWay', () =>
-      prepareMerge(git, { targetSha: c1, headSha: f1, message: 'Merge feature into scratch', author: { name: 'Cynthia', email: 'cynthia@forge.invalid' } }),
+      prepareMerge(git, { targetSha: c1, headSha: f1, message: 'Merge feature into scratch', author: { name: 'Alice', email: 'alice@example.invalid' } }),
     );
     if (!threeWay.ok) throw new Error(`prepare failed: ${threeWay.code} ${threeWay.error}`);
     expect(threeWay.value.kind).toBe('merge');

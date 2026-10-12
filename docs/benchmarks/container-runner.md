@@ -1,6 +1,6 @@
 # Container CI runner: cold vs snapshot-warm
 
-Measured by `node scripts/demo-harness.mjs --container-only` (`scripts/lib/container-runner-demo.mjs`) against the deployed worker (version `da2007dc`) on Oct 12, 2026. Each sample is one private scratch repository with one required `typecheck` job (`tsc --noEmit -p .`). Phases are measured inside the `CiRunnerSandbox` Durable Object; "wall" is the harness's round trip for `POST …/ci/container-runs`.
+Measured by `node scripts/demo-harness.mjs --container-only` (`scripts/lib/container-runner-demo.mjs`) against the deployed worker on Oct 12, 2026. Each sample is one private scratch repository with one required `typecheck` job (`tsc --noEmit -p .`). Phases are measured inside the `CiRunnerSandbox` Durable Object; "wall" is the harness's round trip for `POST …/ci/container-runs`.
 
 - Run 1 (cold): `ctx.container.start({image: "cloudflare/debian-trixie", instance: "standard-2"})`, write the `kvarm runner` modules, `npm install --global typescript@5.9.3`, then the runner claims change #1's job and snapshot-checks-out its workspace. The runner then stops before the command, and the controller saves the prepared container with `snapshotContainer`. The runner then runs the command and reports.
 - Run 2 (warm): a second change, opened on another branch at the same head, queues its own ordinary `typecheck` run. `ctx.container.start({containerSnapshot})` restores the prepared container with no setup; the runner claims that job, and its warm delta sync finds the workspace already at the head (`workdir: warm`, no checkout). It runs and reports.
@@ -27,4 +27,4 @@ The cost sweep's container phase ran the same showcase once more on the same wor
 
 The route's `x-kvarm-cost` was `d1=1;rr=4;do=1` for every run.
 
-Earlier samples (Oct 11, worker `2dacea9f` and `0604f51d`) took the snapshot before the runner claimed a job, so both runs checked out a fresh workdir; they are superseded by the table above.
+Earlier samples (Oct 11, two earlier worker versions) took the snapshot before the runner claimed a job, so both runs checked out a fresh workdir; they are superseded by the table above.

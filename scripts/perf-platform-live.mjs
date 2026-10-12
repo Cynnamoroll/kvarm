@@ -4,7 +4,7 @@
  * Setup only: one fresh public repo seeded with the fleet shape
  * (scripts/lib/fleet.mjs planFleet, 100 workspaces), no change burst.
  *
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   . "$HOME/.config/vite-plus/env"     # wrangler: read-only remote D1 reads and the train tail
  *   node scripts/perf-platform-live.mjs [--workspaces 100] [--only nexus,snapshot,changes,train] [--keep] [--out <dir>]
  *
@@ -38,6 +38,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { CONFIG_PATH, createLimiter, memberFiles, parseCost, planFleet, retryAfterMs } from './lib/fleet.mjs';
+import { remoteD1Args } from './lib/wrangler-target.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PLATFORM = join(ROOT, 'apps/platform');
@@ -57,11 +58,11 @@ const { values: opts } = parseArgs({
 });
 const N = Number(opts.workspaces);
 const ONLY = new Set(opts.only.split(','));
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT;
 if (!PAT) {
-  console.error('perf-platform-live: KVARM_PAT is not set (set -a; . apps/platform/.dev.vars.validation; set +a)');
+  console.error('perf-platform-live: KVARM_PAT is not set (set -a; . ./.env.local; set +a)');
   process.exit(2);
 }
 if (!Number.isInteger(N) || N < 16) {
@@ -176,7 +177,7 @@ async function git(args, { cwd = work, network = false, input, env = {}, token =
 }
 
 function d1(sql) {
-  const r = spawnSync('wrangler', ['d1', 'execute', 'forge', '--remote', '--json', '--command', sql], {
+  const r = spawnSync(process.execPath, remoteD1Args(sql), {
     cwd: PLATFORM,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,

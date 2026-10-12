@@ -1,10 +1,10 @@
 {
   "run": {
-    "repo": "cynthia/scale-staged-campaign-fleet-1791734157",
+    "repo": "<owner>/scale-staged-campaign-fleet-1791734157",
     "smoke": false,
     "startedAt": "2026-10-11T15:55:57.607Z",
     "head": "777ce61",
-    "worker": "3e0d79ae-f9c0-489d-aeb5-a4ab5cf80c79",
+    "worker": "<worker-version>",
     "finishedAt": "2026-10-11T16:07:34.375Z"
   },
   "limits": {
@@ -144,7 +144,7 @@
   "bootstrapBefore": {
     "user": {
       "status": 200,
-      "login": "cynthia"
+      "login": "<owner>"
     },
     "forgeE2e": {
       "status": 200,
@@ -1217,7 +1217,7 @@
   "bootstrapAfter": {
     "user": {
       "status": 200,
-      "login": "cynthia"
+      "login": "<owner>"
     },
     "forgeE2e": {
       "status": 200,
@@ -3419,19 +3419,19 @@
   "checks": [
     {
       "id": "setup",
-      "label": "bootstrap readable: user cynthia and cynthia/forge-e2e",
+      "label": "bootstrap readable: user <owner> and <owner>/forge-e2e",
       "ok": true,
       "detail": ""
     },
     {
       "id": "setup",
-      "label": "cynthia/scale-staged-campaign-fleet-1791734157 does not exist yet",
+      "label": "<owner>/scale-staged-campaign-fleet-1791734157 does not exist yet",
       "ok": true,
       "detail": "GET 404"
     },
     {
       "id": "setup",
-      "label": "created cynthia/scale-staged-campaign-fleet-1791734157",
+      "label": "created <owner>/scale-staged-campaign-fleet-1791734157",
       "ok": true,
       "detail": "POST 201"
     },
@@ -3593,7 +3593,7 @@
     },
     {
       "id": "VAL-SCALE-004b",
-      "label": "bootstrap data untouched (user cynthia, cynthia/forge-e2e, PAT rows)",
+      "label": "bootstrap data untouched (user <owner>, <owner>/forge-e2e, PAT rows)",
       "ok": true,
       "detail": "pats 8, digests equal"
     },
@@ -3611,7 +3611,7 @@
     },
     {
       "id": "VAL-SCALE-004b",
-      "label": "deleted only the repo this run created (cynthia/scale-staged-campaign-fleet-1791734157): DELETE then owner GET 404",
+      "label": "deleted only the repo this run created (<owner>/scale-staged-campaign-fleet-1791734157): DELETE then owner GET 404",
       "ok": true,
       "detail": "DELETE 200, GET 404"
     },

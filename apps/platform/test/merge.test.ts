@@ -314,7 +314,7 @@ describe('prepareMerge + publishMerge', () => {
     const { head, main, mergedTree } = await divergent(store);
     const pusher = new FakePusher(store);
     pusher.refs.set('refs/heads/main', main);
-    const author = { name: 'Cynthia', email: 'cynthia@example.test' };
+    const author = { name: 'Alice', email: 'alice@example.test' };
 
     const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'Merge change 2: feature', author, now: 1_790_100_000 });
     expect(prepared.ok).toBe(true);
@@ -324,7 +324,7 @@ describe('prepareMerge + publishMerge', () => {
     const text = decode(commitObj.raw.subarray(commitObj.raw.indexOf(0) + 1));
     expect(text).toBe(
       `tree ${mergedTree}\nparent ${main}\nparent ${head}\n` +
-        `author Cynthia <cynthia@example.test> 1790100000 +0000\n` +
+        `author Alice <alice@example.test> 1790100000 +0000\n` +
         `committer ${KVARM_COMMITTER.name} <${KVARM_COMMITTER.email}> 1790100000 +0000\n\nMerge change 2: feature\n`,
     );
 

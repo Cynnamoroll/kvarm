@@ -4,6 +4,11 @@ dist/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
+.env
+.env.*
+!.env.example
+!.env.*.example
+apps/platform/wrangler.target.json
 coverage/
 *.log
 .DS_Store

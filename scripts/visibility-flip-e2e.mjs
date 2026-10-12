@@ -34,9 +34,9 @@
  * retained bytes, while the still-authorized owner keeps hitting the entry.
  * Anonymous public raw keeps its public Cache-Control.
  *
- * Principals come from env vars by NAME (load apps/platform/.dev.vars.validation):
+ * Principals come from env vars by NAME (load .env.local):
  * KVARM_PAT_BOT (owner), KVARM_PAT_OUTSIDER (unrelated), KVARM_PAT_MEMBER (org
- * member), KVARM_PAT (cynthia). Tokens are never printed; git runs with
+ * member), KVARM_PAT (KVARM_USER). Tokens are never printed; git runs with
  * `-c credential.helper=` and a secret-free GIT_ASKPASS helper.
  *
  * Usage: node scripts/visibility-flip-e2e.mjs [--keep]
@@ -50,8 +50,9 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { remoteD1Args } from './lib/wrangler-target.mjs';
 
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const KEEP = process.argv.includes('--keep');
 const P = { owner: 'KVARM_PAT_BOT', outsider: 'KVARM_PAT_OUTSIDER', member: 'KVARM_PAT_MEMBER', admin: 'KVARM_PAT' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);
@@ -135,7 +136,7 @@ function uploadPack(who, repo, sha) {
 
 /** Runs SQL on the remote D1 directly; `changes` is from the first statement. */
 function d1Exec(sql) {
-  const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql], {
+  const r = spawnSync(process.execPath, remoteD1Args(sql), {
     cwd: platformDir,
     encoding: 'utf8',
   });

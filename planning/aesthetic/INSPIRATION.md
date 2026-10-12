@@ -18,7 +18,7 @@ The local archive contains five supplied still images and one supplied video. Th
 | [post-2107553909162356906-poster.jpg](post-2107553909162356906-poster.jpg) | Existing still with query, catalog, and ownership panels |
 | [post-2107553909162356906-video-1080p.mp4](post-2107553909162356906-video-1080p.mp4) | Existing local video; SHA-256 matches the supplied video, so no duplicate was saved. Not viewed for motion. |
 
-All filenames above are relative to `/Users/cyn/git/planning/aesthetic/`.
+All filenames above are relative to `<repo-root>/planning/aesthetic/`.
 
 ## Visual observations
 

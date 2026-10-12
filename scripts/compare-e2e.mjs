@@ -3,7 +3,7 @@
  * Live validation driver for the compare and diff APIs (VAL-DIFF-001..021,
  * VAL-COST-004..006).
  *
- * As cynthia (KVARM_PAT, instance admin) it creates fresh repos named
+ * As KVARM_USER (KVARM_PAT, instance admin) it creates fresh repos named
  * m3-compare-api-<purpose>-<ts>, builds them with local git, records local
  * git ground truth (diff --numstat/--shortstat/--name-status -M, -U3 hunk
  * headers, ls-tree, ls-remote) and pushes through the git proxy. It then
@@ -26,7 +26,7 @@
  * pairs are new and the first normal compare is a genuine cache miss. Only
  * repos this run created are ever deleted; a failed create aborts the part.
  *
- * Principals by env var NAME (load apps/platform/.dev.vars.validation):
+ * Principals by env var NAME (load .env.local):
  * KVARM_PAT (owner, admin), KVARM_PAT_BOT (non-admin, unrelated). Tokens are
  * never printed; git runs with `-c credential.helper=` and a secret-free
  * GIT_ASKPASS helper.
@@ -42,13 +42,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { remoteD1Args } from './lib/wrangler-target.mjs';
 
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const KEEP = process.argv.includes('--keep');
 const ONLY = (process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length) ?? '').split(',').filter(Boolean);
 const P = { owner: 'KVARM_PAT', bot: 'KVARM_PAT_BOT' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);
-const OWNER = 'cynthia';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const ts = Date.now();
 const PREFIX = 'm3-compare-api';
 const name = (purpose) => `${PREFIX}-${purpose}-${ts}`;
@@ -144,7 +145,7 @@ function commitAll(dir, message) {
 }
 
 function d1Exec(sql) {
-  const r = spawnSync('npx', ['wrangler', 'd1', 'execute', 'forge', '--remote', '--json', '--command', sql], {
+  const r = spawnSync(process.execPath, remoteD1Args(sql), {
     cwd: platformDir,
     encoding: 'utf8',
   });

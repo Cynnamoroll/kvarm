@@ -2,7 +2,7 @@
 /**
  * Live driver for the server-side git write path (m5-gitops-write-path).
  *
- * 1. As cynthia (KVARM_PAT) creates a fresh private repo
+ * 1. As KVARM_USER (KVARM_PAT) creates a fresh private repo
  *    `m5-gitops-write-path-live-<timestamp>` (empty).
  * 2. Reads its Artifacts remote and issues a short-lived repo-scoped WRITE
  *    token with `wrangler artifacts repos issue-token` (captured in memory,
@@ -20,7 +20,7 @@
  *
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper; tokens come from env by NAME (load
- * apps/platform/.dev.vars.validation).
+ * .env.local).
  *
  * Usage: node scripts/gitwrite-live-e2e.mjs [--keep]
  * Exit 0 when every check held, 1 otherwise.
@@ -35,8 +35,8 @@ import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: args } = parseArgs({ options: { keep: { type: 'boolean', default: false } } });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PLATFORM = join(ROOT, 'apps/platform');

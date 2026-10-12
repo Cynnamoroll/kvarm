@@ -16,11 +16,15 @@
       "remote": true
     }
   ],
+  // The database_id and vars.APP_ORIGIN are neutral placeholders. Remote
+  // commands (npm run deploy, db:migrate:remote) go through
+  // scripts/wrangler-target.mjs, which fills in your own values from
+  // KVARM_D1_DATABASE_ID and KVARM_APP_ORIGIN (see .env.deploy.example).
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "forge",
-      "database_id": "cfbbc1cf-f4a7-4927-b810-f71160bc1de8",
+      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ],
@@ -92,7 +96,7 @@
   ],
   "vars": {
     "SITE_NAME": "Kvarm",
-    "APP_ORIGIN": "https://forge-platform.cynnamoroll.workers.dev",
+    "APP_ORIGIN": "http://localhost:8787",
     "ARTIFACTS_NAMESPACE": "default",
     "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback"
   },

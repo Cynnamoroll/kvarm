@@ -26,12 +26,12 @@ Two claims to make real and provable:
 ## 2. Prototype validation log (evidence, not claims)
 
 Everything below ran against **production** Cloudflare (account
-`15e645a3`, worker `forge-platform.cynnamoroll.workers.dev`, deployed
+`<account-id>`, worker `forge-platform.<subdomain>.workers.dev`, deployed
 2026-10-07):
 
 | Capability | Evidence |
 | --- | --- |
-| Worker deploy with full binding set | 4 DOs, 4 Workflows, queue producer+consumer, D1, Artifacts namespace `default` — version `ddbe17a3` |
+| Worker deploy with full binding set | 4 DOs, 4 Workflows, queue producer+consumer, D1, Artifacts namespace `default` |
 | Git push (write path) | `git push` via PAT through smart-HTTP proxy into Artifacts — accepted `main -> main` |
 | Git clone (read path) | Fresh clone byte-identical to source (`diff -r` clean) |
 | Web SSR of pushed content | Tree, blob, raw, commits, branches pages all 200 with correct content |
@@ -40,9 +40,9 @@ Everything below ran against **production** Cloudflare (account
 | Object engines | gitops verified against real git hash vectors; diffcore fuzz-verified vs `git diff` (250 cases: minimal + replay-valid); treediff prune behavior asserted (2 reads for a one-file change) |
 | Test suite | 27/27 green; typecheck clean (root DOM lib + platform workers-types configs) |
 
-Infra provisioned: D1 `forge` (`cfbbc1cf…`, migrations applied remote+local),
+Infra provisioned: D1 `forge` (`<database-id>`, migrations applied remote+local),
 queues `forge-events`/`forge-events-dlq`, Artifacts namespace `default`,
-first repo `cynthia/forge-e2e` seeded with a bootstrap PAT (`/tmp/forge-e2e.token`).
+first repo `<owner>/forge-e2e` seeded with a bootstrap PAT (`/tmp/forge-e2e.token`).
 
 ## 3. Architecture (as validated)
 
@@ -155,8 +155,8 @@ layers are internal), P4/P5 scope the claim instead of breaking the demo.
 
 - **WorkOS** (human sign-in): `WORKOS_CLIENT_ID`, `WORKOS_API_KEY`,
   `WORKOS_COOKIE_PASSWORD` as worker secrets + redirect URI
-  `https://forge-platform.cynnamoroll.workers.dev/auth/callback`. Until
-  then the seed admin (`cynthia`, `bootstrap-cynthia` workos id — UPDATE
+  `https://forge-platform.<subdomain>.workers.dev/auth/callback`. Until
+  then the seed admin (`<owner>`, `bootstrap-<owner>` workos id — UPDATE
   the row when the real AuthKit user id is known) and PATs cover everything.
 - **R2 activation** (one dashboard click) for M4 snapshots; then
   `wrangler r2 bucket create forge-snapshots` + uncomment the binding.

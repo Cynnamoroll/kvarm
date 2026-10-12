@@ -257,7 +257,7 @@ export async function callOperation(op, args, io) {
     throw err;
   }
   const baseUrl = io.env.KVARM_BASE_URL;
-  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://forge-platform.cynnamoroll.workers.dev)', 2);
+  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://kvarm.example.com)', 2);
   if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`KVARM_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
   /** @type {Record<string, string>} */
   const headers = { accept: 'application/json' };

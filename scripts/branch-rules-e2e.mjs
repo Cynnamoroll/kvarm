@@ -10,14 +10,14 @@
  *  - ordinary workflows on unprotected refs still succeed (git CLI fast-forward,
  *    new branch, force update), with owner readback;
  *  - direct pushes to the protected ref are denied for the owner, the write
- *    collaborator and the global instance admin (cynthia, KVARM_PAT, no grant):
+ *    collaborator and the global instance admin (KVARM_PAT, no grant):
  *    git CLI fast-forward and force push, plus raw receive-pack commands with
  *    the exact expected old OID (fast-forward, non-fast-forward, delete, mixed
  *    push), each with parsed report-status and unchanged owner readback;
  *  - removing the rule restores the ordinary fast-forward push.
  *
  * Tokens come from env vars and are never printed.
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/branch-rules-e2e.mjs [--keep]
  * Exit 0 only when every check holds.
  */

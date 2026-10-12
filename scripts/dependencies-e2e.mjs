@@ -26,7 +26,7 @@
  *             and `kvarm --help` vs the registry of record (VAL-CROSS-008,
  *             VAL-CLI-001/002/003/005)
  *
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   node scripts/dependencies-e2e.mjs [--keep] [--only pins,stale,...] [--api-doc <library/api.md>]
  * Tokens are read by NAME and never printed. Git runs with
  * `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a secret-free
@@ -44,8 +44,8 @@ import { OPERATIONS } from '@kvarm/ops';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' }, 'api-doc': { type: 'string' } } });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const BOT = process.env.KVARM_PAT_BOT ?? '';
 const CLI_BIN = fileURLToPath(new URL('../apps/cli/bin/kvarm.js', import.meta.url));

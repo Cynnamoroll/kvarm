@@ -1,7 +1,7 @@
 # The fastest git platform on Cloudflare Artifacts
 
 > **Status (2026-10-07): prototype VALIDATED — mission-ready.** Live at
-> `forge-platform.cynnamoroll.workers.dev`: git push + byte-identical clone
+> `forge-platform.<subdomain>.workers.dev`: git push + byte-identical clone
 > through the platform, SSR repo pages with edge-cache HITs confirmed, remote
 > D1 + queues provisioned, 27/27 tests green. M0-M3a committed (through
 > `28cdadb`). Execution plan, acceptance gates, and pivot triggers live in

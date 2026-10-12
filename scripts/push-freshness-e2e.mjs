@@ -3,7 +3,7 @@
  * Live validation driver for confirmed-push freshness at the git gate
  * (VAL-EVENT-002, and the info/refs half that VAL-EVENT-003 reads).
  *
- * As cynthia (KVARM_PAT) it creates a public repo, pushes a seed commit and
+ * As KVARM_USER (KVARM_PAT) it creates a public repo, pushes a seed commit and
  * warms the anonymous tree page and info/refs (v0 and Git-Protocol v2) until
  * they are edge-cache hits. Then, for each round, it commits a README with a
  * unique REFRESH token plus a MARK file, runs `git push`, and immediately
@@ -16,7 +16,7 @@
  * `pushedAt` or retire the warm page/info/refs entries (still cache=hit with
  * the previous token).
  *
- * Tokens come from env by NAME (load apps/platform/.dev.vars.validation) and
+ * Tokens come from env by NAME (load .env.local) and
  * are never printed; git runs with `-c credential.helper=` and a secret-free
  * GIT_ASKPASS helper. Commits use the configured git identity.
  *
@@ -34,8 +34,8 @@ import { parseArgs } from 'node:util';
 const { values: args } = parseArgs({
   options: { rounds: { type: 'string', default: '3' }, keep: { type: 'boolean', default: false } },
 });
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
 if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const ROUNDS = Number(args.rounds);
 const BOUND_MS = 2000;

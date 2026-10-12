@@ -1,6 +1,6 @@
 # Fleet run: 100 active workspaces and a paced change burst
 
-Run 2026-10-11T15:55:57.607Z → 2026-10-11T16:07:34.375Z against the live worker (version 3e0d79ae-f9c0-489d-aeb5-a4ab5cf80c79), driver `scripts/fleet-driver.mjs` at `777ce61`, scratch repo `cynthia/scale-staged-campaign-fleet-1791734157` (deleted afterwards).
+Run 2026-10-11T15:55:57.607Z → 2026-10-11T16:07:34.375Z against the live worker (version <worker-version>), driver `scripts/fleet-driver.mjs` at `777ce61`, scratch repo `<owner>/scale-staged-campaign-fleet-1791734157` (deleted afterwards).
 
 ## Limits in force
 

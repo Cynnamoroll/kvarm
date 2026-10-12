@@ -4,7 +4,7 @@
  * repo, with crafted overlapping edits and a paced change burst through the
  * merge queue (VAL-SCALE-001..004).
  *
- *   set -a; . apps/platform/.dev.vars.validation; set +a
+ *   set -a; . ./.env.local; set +a
  *   . "$HOME/.config/vite-plus/env"           # wrangler, for read-only D1 counters
  *   node scripts/fleet-driver.mjs --preflight-only            # projection only, no network
  *   node scripts/fleet-driver.mjs --ceiling 1000              # forced over-projection: exit 3, nothing runs
@@ -48,6 +48,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { checkIsolatedName } from './lib/fixture-repo.mjs';
+import { remoteD1Args } from './lib/wrangler-target.mjs';
 import {
   BUDGET_ROWS,
   CAMPAIGN_LIMITS,
@@ -183,11 +184,12 @@ if (opts['preflight-only']) process.exit(0);
 
 // ---------------------------------------------------------------- environment
 
-const BASE = process.env.KVARM_BASE_URL ?? 'https://forge-platform.cynnamoroll.workers.dev';
-const OWNER = process.env.KVARM_USER ?? 'cynthia';
+const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
+const OWNER = process.env.KVARM_USER ?? 'admin';
+if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(OWNER)) throw new Error(`KVARM_USER ${JSON.stringify(OWNER)} is not a valid login`);
 const PAT = process.env.KVARM_PAT;
 if (!PAT) {
-  console.error('fleet-driver: KVARM_PAT is not set (set -a; . apps/platform/.dev.vars.validation; set +a)');
+  console.error('fleet-driver: KVARM_PAT is not set (set -a; . ./.env.local; set +a)');
   process.exit(2);
 }
 if (spawnSync('wrangler', ['--version'], { encoding: 'utf8' }).status !== 0) {
@@ -350,7 +352,7 @@ function pacer(intervalMs) {
 }
 
 function wrangler(sql) {
-  const r = spawnSync('wrangler', ['d1', 'execute', 'forge', '--remote', '--json', '--command', sql], {
+  const r = spawnSync(process.execPath, remoteD1Args(sql), {
     cwd: join(ROOT, 'apps/platform'),
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -403,7 +405,7 @@ async function bootstrapSnapshot() {
   const user = await api('/api/v1/user');
   const e2e = await api(`/api/v1/repos/${OWNER}/forge-e2e`);
   const [pats, users, repos] = wrangler(
-    "SELECT id, user_id, name, prefix, scopes, created_at, expires_at FROM pat ORDER BY id; SELECT id, login FROM users WHERE login = 'cynthia'; SELECT id, owner_login, name, visibility, default_branch, artifacts_name, created_at, pushed_at FROM repos WHERE owner_login = 'cynthia' AND name = 'forge-e2e'",
+    `SELECT id, user_id, name, prefix, scopes, created_at, expires_at FROM pat ORDER BY id; SELECT id, login FROM users WHERE login = '${OWNER}'; SELECT id, owner_login, name, visibility, default_branch, artifacts_name, created_at, pushed_at FROM repos WHERE owner_login = '${OWNER}' AND name = 'forge-e2e'`,
   );
   return {
     user: { status: user.status, login: user.json?.user?.login ?? null },
@@ -845,7 +847,7 @@ async function main() {
   report.reconciliation = { created: created.length, ...recon };
 
   report.bootstrapAfter = await bootstrapSnapshot();
-  check('VAL-SCALE-004b', 'bootstrap data untouched (user cynthia, cynthia/forge-e2e, PAT rows)', JSON.stringify(report.bootstrapAfter) === JSON.stringify(report.bootstrapBefore), `pats ${report.bootstrapAfter.d1.pats}, digests equal`);
+  check('VAL-SCALE-004b', `bootstrap data untouched (user ${OWNER}, ${OWNER}/forge-e2e, PAT rows)`, JSON.stringify(report.bootstrapAfter) === JSON.stringify(report.bootstrapBefore), `pats ${report.bootstrapAfter.d1.pats}, digests equal`);
 
   // Measured burst results.
   const lat = [...burst.enqueue.entries()]

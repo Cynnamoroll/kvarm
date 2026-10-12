@@ -6,13 +6,13 @@ Verification run: 2026-10-07 21:05 UTC. All checks were executed against live re
 
 | # | Item | Command run | Result |
 |---|------|-------------|--------|
-| 1 | wrangler CLI | `. "$HOME/.config/vite-plus/env"; wrangler --version; wrangler whoami` | **4.148.0**; OAuth-logged-in as `cloudflare@cynthia.sh`; account `15e645a3e487b9c63fbbcd0c5d0757b4` (matches expected); token scopes include `artifacts (write)`, `d1 (write)`, `queues (write)`, `workers (write)` |
-| 2a | Live worker health | `curl -s -o /dev/null -w '%{http_code}' https://forge-platform.cynnamoroll.workers.dev/healthz` | **200** |
-| 2b | Repo tree page | `curl -s -o /dev/null -w '%{http_code}' https://forge-platform.cynnamoroll.workers.dev/cynthia/forge-e2e` | **200** |
-| 3 | Remote D1 | `cd apps/platform && wrangler d1 execute forge --remote --command "SELECT COUNT(*) ... FROM users; ... repos; ... pat" -c wrangler.jsonc` | **users=1, repos=1, pats=1** (DB `forge`, id `cfbbc1cf-f4a7-4927-b810-f71160bc1de8`, v3-prod, WNAM/SEA) |
+| 1 | wrangler CLI | `. "$HOME/.config/vite-plus/env"; wrangler --version; wrangler whoami` | **4.148.0**; OAuth-logged-in as `<owner-email>`; account `<account-id>` (matches expected); token scopes include `artifacts (write)`, `d1 (write)`, `queues (write)`, `workers (write)` |
+| 2a | Live worker health | `curl -s -o /dev/null -w '%{http_code}' https://forge-platform.<subdomain>.workers.dev/healthz` | **200** |
+| 2b | Repo tree page | `curl -s -o /dev/null -w '%{http_code}' https://forge-platform.<subdomain>.workers.dev/<owner>/forge-e2e` | **200** |
+| 3 | Remote D1 | `cd apps/platform && wrangler d1 execute forge --remote --command "SELECT COUNT(*) ... FROM users; ... repos; ... pat" -c wrangler.jsonc` | **users=1, repos=1, pats=1** (DB `forge`, id `<database-id>`, v3-prod, WNAM/SEA) |
 | 4 | R2 | `wrangler r2 bucket list` | **forge-snapshots** exists (created 2026-10-07T20:53:14.970Z) |
-| 5 | Queues | `wrangler queues list` | **forge-events** (id `8f1c9431cce94ca7accfc1b9c1799966`, 1 producer / 1 consumer) and **forge-events-dlq** (id `1f4c70bc506e4808a2debb01a2aa348d`, 0/0) |
-| 6 | Artifacts repo | `wrangler artifacts repos get cynthia--forge-e2e --namespace default` | exists; id `wxw9ok0emnesd2za`; **default_branch: main**; remote `https://15e645a3e487b9c63fbbcd0c5d0757b4.artifacts.cloudflare.net/git/default/cynthia--forge-e2e.git`; read_only false (open-beta command) |
+| 5 | Queues | `wrangler queues list` | **forge-events** (id `<queue-id>`, 1 producer / 1 consumer) and **forge-events-dlq** (id `<dlq-id>`, 0/0) |
+| 6 | Artifacts repo | `wrangler artifacts repos get <owner>--forge-e2e --namespace default` | exists; id `<artifacts-repo-id>`; **default_branch: main**; remote `https://<account-id>.artifacts.cloudflare.net/git/default/<owner>--forge-e2e.git`; read_only false (open-beta command) |
 | 7 | Config parse under pool-workers' pinned wrangler | nested `wrangler@4.124.0 deploy --dry-run` against `apps/platform/wrangler.jsonc` | dry-run OK; all bindings recognized incl. `env.ARTIFACTS` (Artifacts), 4 DOs, 4 Workflows, DB, SNAPSHOTS, EVENTS |
 | 8 | Typecheck after provisioning | `npm run typecheck` (repo root) | **PASS** (exit 0) |
 
@@ -66,7 +66,7 @@ Verification run: 2026-10-07 21:05 UTC. All checks were executed against live re
   ```
 - **Options schema** (zod, both packages): `main`, `remoteBindings` (**default true**), `verbose`, `additionalExports` (`Record<string, "WorkerEntrypoint" | "DurableObject" | "WorkflowEntrypoint">`), `miniflare.workers[]`, `wrangler.configPath/environment`.
 - **Config caveats for this Worker app (Artifacts remote binding, D1, R2, queues, 4 DOs, 4 workflows):**
-  1. `ARTIFACTS` (remote: true): `remoteBindings` defaults to **true** → tests reach the real Artifacts namespace using the local wrangler OAuth against account `15e645a3e487b9c63fbbcd0c5d0757b4` out of the box. Set `remoteBindings: false` for hermetic tests; plan a live-vs-hermetic split for M-mission CI tests.
+  1. `ARTIFACTS` (remote: true): `remoteBindings` defaults to **true** → tests reach the real Artifacts namespace using the local wrangler OAuth against account `<account-id>` out of the box. Set `remoteBindings: false` for hermetic tests; plan a live-vs-hermetic split for M-mission CI tests.
   2. DO/Workflow classes: all 8 (`TokenCache`, `RateLimiter`, `RealtimeHub`, `MergeLock`; `SnapshotBuilder`, `CiPipeline`, `MergeWorkflow`, `RepoImport`) are exported from `apps/platform/src/index.ts:8-9`, so the pool auto-derives the worker export map (`guessWorkerExports`); `additionalExports` is available as an explicit override.
   3. **No workers-pool test config exists yet**: root `vitest.config.ts` is `environment: 'node'` and includes only `packages/**/test/**`; `apps/platform` has a `test` script but no `vitest.config`. The mission must add `apps/platform/vitest.config.ts` (or extend the root config with projects) using the pattern above — preferably with `@cloudflare/vitest-plugin`.
   4. `smart_placement` in `wrangler.jsonc` is no longer a recognized wrangler key — wrangler 4.148 warns on every command that parses the config (observed on `d1 execute` and dry-run). The schema key today is `placement`. Harmless to deploys; clean it up before mission config work.
