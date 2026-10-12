@@ -2,7 +2,7 @@
   "name": "forge",
   "private": true,
   "version": "0.1.0",
-  "description": "The fastest git platform on Cloudflare Artifacts",
+  "description": "A git platform for the agentic era on Cloudflare Artifacts",
   "type": "module",
   "license": "MIT",
   "workspaces": [

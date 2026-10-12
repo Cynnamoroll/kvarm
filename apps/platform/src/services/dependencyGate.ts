@@ -201,12 +201,14 @@ export function changeNumberDependenciesStatement(db: D1Database, repoId: string
  * has no stale or broken pin (enqueue admission).
  */
 export function noBlockedPinCondition(c: string): string {
+  // A change is linked to at most one workspace: LIMIT 1 ends the idx_ws_change probe at that row.
   return `NOT EXISTS (
-    SELECT 1 FROM workspaces dw INDEXED BY idx_ws_change
-      CROSS JOIN workspace_dependencies dd INDEXED BY idx_dep_edge ON dd.repo_id = dw.repo_id AND dd.workspace_id = dw.id
+    SELECT 1 FROM workspace_dependencies dd INDEXED BY idx_dep_edge
       LEFT JOIN workspaces ds ON ds.repo_id = dd.repo_id AND ds.id = dd.on_workspace
       LEFT JOIN repo_refs df ON df.repo_id = ds.repo_id AND df.ref = ds.ref
-     WHERE dw.change_set_id = ${c}.id AND dw.repo_id = ${c}.repo_id AND dd.satisfied_commit IS NULL
+     WHERE dd.repo_id = ${c}.repo_id
+       AND dd.workspace_id = (SELECT dw.id FROM workspaces dw INDEXED BY idx_ws_change WHERE dw.change_set_id = ${c}.id AND dw.repo_id = ${c}.repo_id LIMIT 1)
+       AND dd.satisfied_commit IS NULL
        AND (dd.broken_code IS NOT NULL OR ds.id IS NULL OR ds.status != 'active' OR ${sourceHeadSql('ds', 'df', 'dd')} IS NOT dd.revision))`;
 }
 

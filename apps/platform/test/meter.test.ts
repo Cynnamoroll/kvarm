@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { LazyRepo, withRepo } from '../src/artifacts/repo';
 import {
   CostMeter,
+  CostSpan,
   countingFetch,
+  withCostSpan,
   markCache,
   parseCostHeader,
   runWithMeter,
@@ -242,6 +244,30 @@ describe('request scope', () => {
     });
     await counted('https://example.invalid/outside');
     expect(m.sub).toBe(2);
+  });
+
+  it('a cost span counts the work of its own async context, not concurrent work on the same meter', async () => {
+    const { db } = fakeD1({ results: [], meta: { rows_read: 5, rows_written: 1 } });
+    const { m, e } = metered({ DB: db as unknown as D1Database });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const earlier = new CostSpan();
+    let background!: Promise<unknown>;
+    await withCostSpan(earlier, async () => {
+      await e.DB.prepare('SELECT 1').all();
+      // Left running after the earlier operation returned, like a deferred wake in waitUntil.
+      background = gate.then(() => e.DB.batch([e.DB.prepare('UPDATE x')]));
+    });
+    const later = new CostSpan();
+    await withCostSpan(later, async () => {
+      await e.DB.prepare('SELECT 2').run();
+      release();
+      await background;
+      await withCostSpan(new CostSpan(), () => e.DB.prepare('SELECT 3').all());
+    });
+    expect(m.snapshot()).toMatchObject({ d1: 4, rr: 20, rw: 4 });
+    expect(later.snapshot()).toMatchObject({ d1: 2, rr: 10, rw: 2 });
+    expect(earlier.snapshot()).toMatchObject({ d1: 2, rr: 10, rw: 2 });
   });
 
   it('keeps the first response-cache outcome', () => {

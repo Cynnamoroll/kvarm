@@ -599,6 +599,9 @@ describe('composition', () => {
       ],
     });
     expect(r.json.changeSet).toEqual(expect.any(Number));
+    // library/cost.md "POST …/candidates/compose (clean)": d1 ≤ 8, sub ≤ 3.
+    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(8);
+    expect(r.cost.sub).toBeLessThanOrEqual(3);
     expect(r.json.workspace).toMatchObject({ status: 'active', base: 'main', changeSet: r.json.changeSet });
     expect(repo.refs.get(r.json.workspace.ref)).toBe(r.json.commitSha);
     // The composed workspace's head is the composed commit, not the base, before its push event is consumed.

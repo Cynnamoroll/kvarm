@@ -63,6 +63,36 @@ interface D1Meta {
   rows_written?: number;
 }
 
+type Counter = Exclude<keyof CostCounters, 'cache'>;
+
+/**
+ * The work counted while running inside one async context (`withCostSpan`),
+ * and in the promises started from it. Work that other contexts run
+ * concurrently on the same meter (for example a deferred wake that an
+ * earlier operation left in waitUntil) counts on the meter but not here.
+ */
+export class CostSpan {
+  d1 = 0;
+  rr = 0;
+  rw = 0;
+  art = 0;
+  do = 0;
+  r2a = 0;
+  r2b = 0;
+  q = 0;
+  sub = 0;
+
+  snapshot(): CostCounters {
+    return { d1: this.d1, rr: this.rr, rw: this.rw, art: this.art, do: this.do, r2a: this.r2a, r2b: this.r2b, q: this.q, sub: this.sub, cache: 'none' };
+  }
+}
+
+const spans = new AsyncLocalStorage<readonly CostSpan[]>();
+
+export function withCostSpan<R>(span: CostSpan, fn: () => R): R {
+  return spans.run([...(spans.getStore() ?? []), span], fn);
+}
+
 export class CostMeter {
   d1 = 0;
   rr = 0;
@@ -80,10 +110,17 @@ export class CostMeter {
     if (this.cache === 'none') this.cache = state;
   }
 
+  /** Adds `n` to one counter here and on every span of the current async context. */
+  count(counter: Counter, n = 1): void {
+    if (n <= 0) return;
+    this[counter] += n;
+    for (const s of spans.getStore() ?? []) s[counter] += n;
+  }
+
   addRows(meta: D1Meta | undefined | null): void {
     if (!meta) return;
-    this.rr += toCount(meta.rows_read);
-    this.rw += toCount(meta.rows_written);
+    this.count('rr', toCount(meta.rows_read));
+    this.count('rw', toCount(meta.rows_written));
   }
 
   snapshot(): CostCounters {
@@ -219,7 +256,7 @@ function mapAsync(result: unknown, map: (v: object) => unknown): unknown {
 
 function wrapArtifacts(ns: object, m: CostMeter): object {
   const countArt = () => {
-    m.art++;
+    m.count('art');
   };
   return countCalls(ns, countArt, (name, result) =>
     name === 'get' ? mapAsync(result, (handle) => countCalls(handle, countArt)) : result,
@@ -229,7 +266,7 @@ function wrapArtifacts(ns: object, m: CostMeter): object {
 function wrapDurableObjectNamespace(ns: object, m: CostMeter): object {
   const stub = (s: object) =>
     countCalls(s, () => {
-      m.do++;
+      m.count('do');
     });
   return new Proxy(ns, {
     get(t, prop) {
@@ -253,8 +290,8 @@ const R2_CLASS_B = new Set(['get', 'head']);
 
 function wrapR2(bucket: object, m: CostMeter): object {
   const count = (name: string) => {
-    if (R2_CLASS_A.has(name)) m.r2a++;
-    else if (R2_CLASS_B.has(name)) m.r2b++;
+    if (R2_CLASS_A.has(name)) m.count('r2a');
+    else if (R2_CLASS_B.has(name)) m.count('r2b');
   };
   const upload = (u: object) => countCalls(u, count);
   return countCalls(bucket, count, (name, result) =>
@@ -264,7 +301,7 @@ function wrapR2(bucket: object, m: CostMeter): object {
 
 function wrapQueue(queue: object, m: CostMeter): object {
   return countCalls(queue, (name) => {
-    if (name === 'send' || name === 'sendBatch') m.q++;
+    if (name === 'send' || name === 'sendBatch') m.count('q');
   });
 }
 
@@ -281,7 +318,7 @@ class MeteredStatement {
   // first() hides D1 meta, so run the identical query through all() (first()
   // never adds a LIMIT) and pick the first row.
   async first<T = Record<string, unknown>>(colName?: string): Promise<T | null> {
-    this.m.d1++;
+    this.m.count('d1');
     const res = await this.inner.all<Record<string, unknown>>();
     this.m.addRows(res.meta);
     const row = res.results?.[0];
@@ -291,21 +328,21 @@ class MeteredStatement {
   }
 
   async all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    this.m.d1++;
+    this.m.count('d1');
     const res = await this.inner.all<T>();
     this.m.addRows(res.meta);
     return res;
   }
 
   async run<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    this.m.d1++;
+    this.m.count('d1');
     const res = await this.inner.run<T>();
     this.m.addRows(res.meta);
     return res;
   }
 
   raw<T = unknown[]>(options?: { columnNames?: boolean }): Promise<T[]> {
-    this.m.d1++;
+    this.m.count('d1');
     return this.inner.raw<T>(options as { columnNames: true }) as Promise<T[]>;
   }
 }
@@ -327,7 +364,7 @@ function wrapD1Like<T extends D1Like>(db: T, m: CostMeter): T {
       }
       if (prop === 'batch') {
         return async (statements: D1PreparedStatement[]) => {
-          m.d1++;
+          m.count('d1');
           const results = await t.batch(statements.map(unwrapStatement));
           for (const r of results) m.addRows(r.meta);
           return results;
@@ -335,7 +372,7 @@ function wrapD1Like<T extends D1Like>(db: T, m: CostMeter): T {
       }
       if (prop === 'exec') {
         return (query: string) => {
-          m.d1++;
+          m.count('d1');
           return (t as unknown as D1Database).exec(query);
         };
       }
@@ -376,7 +413,7 @@ export function markCache(state: 'hit' | 'miss' | 'bypass'): void {
 export function countingFetch(inner: typeof fetch): typeof fetch {
   return ((input: RequestInfo | URL, init?: RequestInit) => {
     const meter = scope.getStore();
-    if (meter) meter.sub++;
+    meter?.count('sub');
     return Reflect.apply(inner, globalThis, [input, init]) as Promise<Response>;
   }) as typeof fetch;
 }

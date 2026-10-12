@@ -34,7 +34,7 @@
 import { ZERO_OID, type GitObject } from '@forge/gitops';
 import type { AgentGrant } from '../auth/agentTokens';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
-import { currentMeter, type CostCounters } from '../cost/meter';
+import { CostSpan, currentMeter, withCostSpan, type CostCounters } from '../cost/meter';
 import type { RepoRow } from '../db/repos';
 import { toUserRow, type UserRow } from '../db/users';
 import type { ServiceResult } from '../repos/service';
@@ -1294,7 +1294,8 @@ async function trainPass(
       if (plan.next === 'checking' || plan.next === 'preparing') out.waiting = true;
       break;
     }
-    const r = await publishCandidate(env, ctx, repo, rules, ref, plan, owner, deps, gate);
+    const span = new CostSpan();
+    const r = await withCostSpan(span, () => publishCandidate(env, ctx, repo, rules, ref, plan, owner, deps, gate, span));
     if (r.kind === 'published') {
       out.published.push(plan.e.change_number);
       out.progress = true;
@@ -1387,6 +1388,10 @@ function meterSnapshot(): CostCounters | null {
   return currentMeter()?.snapshot() ?? null;
 }
 
+function spanSnapshot(span: CostSpan): CostCounters | null {
+  return currentMeter() ? span.snapshot() : null;
+}
+
 function costDelta(a: CostCounters | null, b: CostCounters | null): Partial<CostCounters> | undefined {
   if (!a || !b) return undefined;
   return { d1: b.d1 - a.d1, rr: b.rr - a.rr, rw: b.rw - a.rw, art: b.art - a.art, do: b.do - a.do, q: b.q - a.q, sub: b.sub - a.sub };
@@ -1414,11 +1419,13 @@ async function publishCandidate(
   owner: string,
   deps: TrainDeps,
   gate: ChecksGate,
+  span: CostSpan,
 ): Promise<PublishResult> {
   const db = env.DB;
   const e = plan.e;
   const pv = plan.prepared!;
-  const start = meterSnapshot();
+  // The span, not the meter: an earlier publication's deferred wake may run on the same meter meanwhile.
+  const start = spanSnapshot(span);
   const claimedGen = plan.generation + 1;
   // Before the claim the entry is `ready` at the pass's generation; after it, `publishing` at the claimed one.
   let fence = { generation: plan.generation, state: 'ready' as QueueState };
@@ -1622,7 +1629,7 @@ async function publishCandidate(
   }
 
   const mergedAt = deps.now();
-  const cost = costDelta(start, meterSnapshot());
+  const cost = costDelta(start, spanSnapshot(span));
   const recordCost = cost ? { ...cost, d1: (cost.d1 ?? 0) + 1 } : null;
   const record = mergedRecordStatements(
     db,
@@ -1663,7 +1670,7 @@ async function publishCandidate(
     console.warn(JSON.stringify({ trainRecord: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, entry: entryWrite?.meta.changes, change: changeWrite?.meta.changes } }));
   }
   deps.observe?.({ type: 'publish', number: e.change_number, status: 'recorded', mergeCommit: pv.mergeCommit, previous: pv.targetSha, ...(cost ? { cost: recordCost! } : {}) });
-  console.log(JSON.stringify({ trainPublished: { repo: repo.id, ref, number: e.change_number, kind: pv.kind, mergeCommit: pv.mergeCommit, leaseGeneration: acq.generation, cost: costDelta(start, meterSnapshot()) } }));
+  console.log(JSON.stringify({ trainPublished: { repo: repo.id, ref, number: e.change_number, kind: pv.kind, mergeCommit: pv.mergeCommit, leaseGeneration: acq.generation, cost: costDelta(start, spanSnapshot(span)) } }));
   if (pv.kind === 'merge') {
     // A Forge merge commit carries the enqueuing principal; a fast-forward publishes the author's commit untouched.
     const input = parseJson<AttributionInput>(e.attribution);

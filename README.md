@@ -29,6 +29,12 @@ The seven steps: workspaces and declared intents, the overlap forecast, pushes a
 
 `--container` adds the Container CI runner showcase (Cloudflare Containers, public beta): an instance-admin route runs one `forge runner --once` job inside a `cloudflare/debian-trixie` container through the native `ctx.container` API. Run 1 prepares the container and saves it with `snapshotContainer`; run 2 starts from that snapshot and skips setup. Both check runs record through the standard CI endpoints. The user-owned `forge runner` CLI remains the primary runner.
 
+## Benchmarks and work budgets
+
+[`docs/benchmarks/README.md`](docs/benchmarks/README.md) holds the measured numbers (clone versus snapshot checkout, compare cold and warm, edge-cache hit rates, per-endpoint `x-forge-cost` medians, overlap forecast and composition timings, the 100-workspace fleet run and the dev-loop turnarounds), each with its method and sample count. Speed statements in this repository refer to those measurements. `node scripts/bench.mjs --write` re-measures against a deployed worker and rewrites the table.
+
+`node scripts/cost-sweep.mjs --cost-md <path to cost.md>` checks every row of the work-budget document against the live worker (or names why a row cannot be triggered live) and exits non-zero on any violation. The counters are work counters (D1 round trips and rows, Artifacts and Durable Object calls, queue sends, subrequests), not a bill.
+
 ## License
 
 MIT

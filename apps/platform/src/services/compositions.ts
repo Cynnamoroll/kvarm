@@ -18,6 +18,7 @@
 
 import { buildCommit, composeTrees, mergeBase, type ComposePiece, type GitIdent } from '@forge/gitops';
 import { withLazyRepo } from '../artifacts/repo';
+import { touchRepoPushedStatement } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { credentialMayUpdateRef } from './authz';
 import { CHANGE_LIMITS, MERGE_POLICIES, mergeAuthor, normalizeBranch } from './changes';
@@ -375,13 +376,11 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     const commit = await buildCommit({ tree: treeSha, parents: [baseSha], author, committer, message: `${task}\n\n${lines.join('\n')}\n` });
 
     const gate = cx.gate ?? deps.gate(cx.env);
-    // Before the composed change exists there is deliberately no guard subject:
-    // the provisional answer remains pending rather than borrowing another
-    // change's verdict for the same commit.
-    const checks = await gate.requiredChecksFor({ id: cx.repo.id }, treeSha, null);
-    const conflict = semanticConflict(checks);
 
-    const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref, oldOid: ZERO_SHA, newOid: commit.hash }, [commit, ...objects]);
+    // pushed_at rides the workspace insert batch below.
+    const pushed = await deps
+      .pusher(cx.env, cx.repo)
+      .updateRef({ ref, oldOid: ZERO_SHA, newOid: commit.hash }, [commit, ...objects], { deferPushedAt: true });
     let created = pushed.status === 'ok';
     if (pushed.status === 'unknown') created = (await liveRefs(cx, [ref])).get(ref) === commit.hash;
     if (!created) {
@@ -420,6 +419,26 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
     await db.batch([
       workspaceInsertStatement(cx, { id, ref, task, agent: p.agent, base: p.base, baseSha, headSha: commit.hash }, now),
       ...observed,
+      touchRepoPushedStatement(db, cx.repo.id),
+    ]);
+
+    const linked: { id?: string } = {};
+    const change = await openChangeSet(cx, id, { title: task, base: p.base, mergePolicy: p.mergePolicy }, (opened) => {
+      linked.id = opened.id;
+    });
+    const changeId = change.ok ? (linked.id ?? null) : null;
+    // The gate is asked once, after opening the change: that may register CI
+    // jobs for this exact tree, and the change is the guard subject (before it
+    // exists there is none, and the answer would only be a provisional pending).
+    const checks = await gate.requiredChecksFor(
+      { id: cx.repo.id },
+      treeSha,
+      null,
+      changeId ? { changeId, headSha: commit.hash, guardBaseTree: baseTree } : undefined,
+    );
+    const read = await readComposition(
+      cx,
+      compositionId,
       db
         .prepare(
           `INSERT INTO compositions (id, repo_id, base_ref, base_sha, tree_sha, commit_sha, sources, workspace_id, checks, conflict_kind, created_by, agent_id, created_at)
@@ -435,31 +454,12 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
           JSON.stringify(recorded),
           id,
           JSON.stringify(checks),
-          conflict ? 'semantic' : null,
+          semanticConflict(checks) ? 'semantic' : null,
           cx.actor?.user.id ?? null,
           cx.actor?.agent?.agentId ?? null,
           now,
         ),
-    ]);
-
-    const change = await openChangeSet(cx, id, { title: task, base: p.base, mergePolicy: p.mergePolicy });
-    // Opening the composed change may register CI jobs for this exact tree.
-    // Persist the post-registration gate answer, rather than the provisional
-    // answer taken before the immutable composed ref existed.
-    const changeId = change.ok
-      ? await db.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2').bind(cx.repo.id, change.value.number).first<string>('id')
-      : null;
-    const currentChecks = await gate.requiredChecksFor(
-      { id: cx.repo.id },
-      treeSha,
-      null,
-      changeId ? { changeId, headSha: commit.hash, guardBaseTree: baseTree } : undefined,
     );
-    await db
-      .prepare(`UPDATE compositions SET checks = ?3, conflict_kind = ?4 WHERE repo_id = ?1 AND id = ?2`)
-      .bind(cx.repo.id, compositionId, JSON.stringify(currentChecks), semanticConflict(currentChecks) ? 'semantic' : null)
-      .run();
-    const read = await readComposition(cx, compositionId);
     if (!read) return fail(500, 'composition could not be read back', 'CREATE_FAILED');
     if (!change.ok) {
       return { ok: true, value: { ...read, changeSetError: { status: change.status, error: change.error, ...(change.code ? { code: change.code } : {}) } } };
@@ -468,15 +468,18 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
   });
 }
 
-async function readComposition(cx: ComposeContext, id: string): Promise<CompositionView | null> {
+/** Reads one composition with its workspace; `write` runs first in the same batch. */
+async function readComposition(cx: ComposeContext, id: string, write?: D1PreparedStatement): Promise<CompositionView | null> {
   if (!WORKSPACE_ID_RE.test(id)) return null;
   const db = cx.env.DB;
-  const [k, w] = await db.batch([
+  const results = await db.batch([
+    ...(write ? [write] : []),
     db.prepare(`${COMPOSITION_SELECT} WHERE k.repo_id = ?1 AND k.id = ?2`).bind(cx.repo.id, id),
     db
       .prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ?1 AND w.id = (SELECT workspace_id FROM compositions WHERE repo_id = ?1 AND id = ?2)`)
       .bind(cx.repo.id, id),
   ]);
+  const [k, w] = results.slice(write ? 1 : 0);
   const row = (k?.results as CompositionRow[] | undefined)?.[0];
   if (!row) return null;
   return compositionView(row, (w?.results as WorkspaceRow[] | undefined)?.[0] ?? null, cx);

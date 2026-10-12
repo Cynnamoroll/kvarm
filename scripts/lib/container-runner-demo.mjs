@@ -30,7 +30,9 @@ const TSCONFIG = `${JSON.stringify({ compilerOptions: { strict: true, target: 'e
 const LIMITS = (limit) => `export interface Limits {\n  steady: number;\n  burst: number;\n}\n\nexport const limits: Limits = { steady: ${limit}, burst: 25 };\n`;
 
 /**
- * @param {{ base: string, pat: string, ts: number, keep?: boolean, log?: (line: string) => void }} o
+ * `onResult` receives each completed run's Durable Object timings, harness wall
+ * time and x-forge-cost, plus the snapshot reset's cost, after cleanup.
+ * @param {{ base: string, pat: string, ts: number, keep?: boolean, log?: (line: string) => void, onResult?: (r: { runs: Record<string, { totalMs: number, wall: number, readyMs: number, phases: object, cost: string | null }>, resetCost: string | null }) => void }} o
  * @returns {Promise<boolean>}
  */
 export async function runContainerShowcase(o) {
@@ -41,6 +43,8 @@ export async function runContainerShowcase(o) {
   chmodSync(askpass, 0o700);
   const dir = join(work, 'repo');
   const state = { created: false, owner: '', name: `demo-harness-ci-${o.ts}` };
+  const runs = {};
+  let resetCost = null;
   let ok = false;
 
   async function rest(path, { method = 'GET', json } = {}) {
@@ -108,6 +112,7 @@ export async function runContainerShowcase(o) {
     }
     const run = await waitFor(`typecheck result at ${short(sha)}`, typecheckAt(sha, ['success', 'failure']), 30_000);
     log(`  human  ${'GET changes/1/checks'.padEnd(19)} -> typecheck ${run.id} ${run.status} at ${short(run.headSha)} (source ${run.summary?.source}, command ${run.summary?.durationMs} ms)`);
+    runs[mode] = { totalMs: rep.totalMs, wall, readyMs: rep.phases.boot + (rep.phases.setup ?? 0), phases: rep.phases, cost: r.cost };
     return { report: rep, wall, run };
   }
 
@@ -180,7 +185,8 @@ export async function runContainerShowcase(o) {
     log(`  container showcase FAILED: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     if (state.created) {
-      const reset = await rest(`${R()}/ci/container-runs/snapshot`, { method: 'DELETE' }).catch(() => ({ status: 0 }));
+      const reset = await rest(`${R()}/ci/container-runs/snapshot`, { method: 'DELETE' }).catch(() => ({ status: 0, cost: null }));
+      resetCost = reset.cost ?? null;
       log(`  human  ${'DELETE container snap'.padEnd(19)} -> ${reset.status} (stored snapshot handle cleared${reset.json?.snapshot ? `: ${reset.json.snapshot.id}` : ''})`);
       if (!o.keep) {
         const del = await rest(`/api/v1/repos/${state.owner}/${state.name}`, { method: 'DELETE' });
@@ -192,6 +198,7 @@ export async function runContainerShowcase(o) {
     }
     rmSync(work, { recursive: true, force: true });
   }
+  o.onResult?.({ runs, resetCost });
   log(`  container showcase ${ok ? 'ok' : 'FAILED'}`);
   return ok;
 }

@@ -12,7 +12,7 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { CostMeter, runWithMeter, type CostCounters } from '../src/cost/meter';
+import { CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
 import { headWorkspacePins, headWorkspacePinsStatement, type HeadWorkspacePinRow } from '../src/services/dependencyGate';
@@ -82,7 +82,7 @@ async function seedRepo(name: string): Promise<{ repo: FakeRepo; main: string }>
   return { repo, main: main.sha };
 }
 
-async function call(method: string, path: string, token: string, body?: unknown): Promise<{ status: number; json: Record<string, any> }> {
+async function call(method: string, path: string, token: string, body?: unknown): Promise<{ status: number; json: Record<string, any>; cost: CostCounters | null }> {
   const ctx = createExecutionContext();
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   if (body !== undefined) headers['content-type'] = 'application/json';
@@ -96,7 +96,7 @@ async function call(method: string, path: string, token: string, body?: unknown)
   } catch {
     // non-JSON body
   }
-  return { status: res.status, json };
+  return { status: res.status, json, cost: parseCostHeader(res.headers.get('x-forge-cost')) };
 }
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
@@ -287,6 +287,31 @@ describe('train liveness while entries wait', () => {
   });
 });
 
+describe('workspace-backed enqueue', () => {
+  // library/cost.md: POST …/changes/:n/enqueue (new entry) of a workspace-backed change.
+  const ROW = { d1: 2, rr: 12, rw: 4, art: 0, do: 1, q: 1 };
+  const within = (c: CostCounters) => c.d1 <= ROW.d1 && c.rr <= ROW.rr && c.rw <= ROW.rw && c.art === ROW.art && c.do <= ROW.do && c.q <= ROW.q;
+
+  it('stays within the row with and without an explicit review policy, the workspace probes reading the linked workspace once', async () => {
+    const name = 'enqueue-ws-cost';
+    await seedRepo(name);
+    const plain = await member(name, { 'p.txt': 'p\n' });
+    const first = await enqueue(name, plain);
+    expect(first.status).toBe(201);
+    expect(within(first.cost!), JSON.stringify(first.cost)).toBe(true);
+    expect((await call('PUT', api(name, '/review-policy'), ownerToken, { requiredReviews: 0 })).status).toBe(200);
+    const costs: CostCounters[] = [];
+    for (const f of ['x.txt', 'y.txt', 'z.txt']) {
+      const m = await member(name, { [f]: `${f}\n` });
+      const r = await enqueue(name, m);
+      expect(r.status).toBe(201);
+      costs.push(r.cost!);
+    }
+    console.log(JSON.stringify({ enqueueWs: { noPolicy: first.cost, withPolicy: costs } }));
+    for (const c of costs) expect(within(c), JSON.stringify(c)).toBe(true);
+  });
+});
+
 describe('workspace-backed publication window', () => {
   const ROW = { d1: 3, rr: 12, rw: 8, art: 4, sub: 2 };
   const within = (cost: CostCounters) =>
@@ -340,6 +365,28 @@ describe('workspace-backed publication window', () => {
     const cost = JSON.parse((await entries(name)).get(c.change)!.cost!) as CostCounters;
     console.log(JSON.stringify({ twoPinPublication: cost }));
     expect(within(cost), JSON.stringify(cost)).toBe(true);
+  });
+
+  it("a publication does not carry the deferred dependent wake of the source published before it in the same run", async () => {
+    const name = 'window-after-wake';
+    await seedRepo(name);
+    const a = await member(name, { 'iface/a.txt': 'a\n' });
+    const x = await member(name, { 'x.txt': 'x\n' });
+    const b = await member(name, { 'iface/b.txt': 'b\n' }, a);
+    const c = await member(name, { 'iface/c.txt': 'c\n' }, a);
+    expect((await pin(name, b, a)).status).toBe(201);
+    expect((await pin(name, c, a)).status).toBe(201);
+    // As the sweep enqueues: the source and an independent first, then the waiting dependents.
+    for (const m of [a, x, b, c]) expect((await enqueue(name, m)).status).toBe(201);
+    const published: number[] = [];
+    for (let i = 0; i < 6 && published.length < 4; i++) {
+      const meter = new CostMeter();
+      published.push(...(await runWithMeter(meter, () => runTrain(meter.wrapEnv(env), repoIds[name]!, MAIN, trainDeps()))).published);
+    }
+    expect(published.slice(0, 2)).toEqual([a.change, x.change]);
+    const costs = [...(await entries(name)).values()].map((e) => ({ number: e.change_number, cost: JSON.parse(e.cost!) as CostCounters }));
+    console.log(JSON.stringify({ afterWake: costs }));
+    for (const { number, cost } of costs) expect(within(cost), `#${number} ${JSON.stringify(cost)}`).toBe(true);
   });
 
   /**

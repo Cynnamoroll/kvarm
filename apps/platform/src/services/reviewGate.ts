@@ -126,7 +126,8 @@ export function reviewFactExpressions(c = 'c') {
     open: `(SELECT json_group_array(e.reason) FROM change_escalations e WHERE e.change_set_id = ${c}.id AND e.state = 'open')`,
     openCount: `(SELECT COUNT(*) FROM change_escalations e WHERE e.change_set_id = ${c}.id AND e.state = 'open')`,
     protectedSeen: `EXISTS (SELECT 1 FROM change_escalations e WHERE e.change_set_id = ${c}.id AND e.reason = 'protected-path')`,
-    finalSelected: `EXISTS (SELECT 1 FROM workspaces w JOIN arenas a ON a.id = w.arena_id WHERE w.change_set_id = ${c}.id AND a.selected_workspace = w.id)`,
+    // A change is linked to at most one workspace: LIMIT 1 ends the idx_ws_change probe at that row.
+    finalSelected: `COALESCE((SELECT a.selected_workspace = w.id FROM workspaces w LEFT JOIN arenas a ON a.id = w.arena_id WHERE w.change_set_id = ${c}.id LIMIT 1), 0)`,
     finalSeen: `EXISTS (SELECT 1 FROM change_escalations e WHERE e.change_set_id = ${c}.id AND e.reason = 'final-selection')`,
   };
 }

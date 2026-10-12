@@ -476,7 +476,13 @@ export async function listWorkspaces(
  * loses the link and its change is closed in that same batch, unpublished;
  * the merge's send-time check re-reads the workspace admission.
  */
-export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown): Promise<ServiceResult<ChangeDetail & { workspace: string }>> {
+export function openChangeSet(
+  cx: WorkspaceContext,
+  id: string,
+  input: unknown,
+  /** Told the internal id of the change once the workspace link is won. */
+  onLinked?: (change: { id: string; number: number }) => void,
+): Promise<ServiceResult<ChangeDetail & { workspace: string }>> {
   return guarded(async () => {
     if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
     const b = input as Record<string, unknown>;
@@ -503,7 +509,10 @@ export function openChangeSet(cx: WorkspaceContext, id: string, input: unknown):
         ).bind(cx.repo.id, row.id, change.id, now),
         retireClosedChangeTask(cx.env.DB, '?2', [change.id], now),
       ]);
-      if (link?.meta.changes) return null;
+      if (link?.meta.changes) {
+        onLinked?.(change);
+        return null;
+      }
       return fail(409, 'the workspace got a change set or left active meanwhile; this change was closed', 'CHANGE_SET_EXISTS', {
         closedChange: change.number,
       });
