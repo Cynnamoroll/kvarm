@@ -1,0 +1,1393 @@
+{
+  "generatedAt": "2026-10-12T00:49:31.086Z",
+  "commit": "40a5207",
+  "worker": null,
+  "client": "darwin 27.0.0/arm64 (6 CPUs), Node v26.8.2",
+  "compare": {
+    "fixture": "`cynthia/fixture-1m` `bench-base...bench-head` (502 changed files)",
+    "cold": {
+      "n": 10,
+      "min": 327,
+      "p50": 364,
+      "max": 780
+    },
+    "warm": {
+      "n": 10,
+      "min": 69,
+      "p50": 75,
+      "max": 102
+    },
+    "coldCost": "d1=1;rr=4;rw=0;art=56;do=0;sub=1;cache=bypass",
+    "warmCost": "d1=1;rr=4;rw=0;art=0;do=0;sub=0;cache=hit"
+  },
+  "forecast": {
+    "stats": {
+      "n": 10,
+      "min": 66,
+      "p50": 82,
+      "max": 96
+    },
+    "method": "10 identical calls (`paths=src/util.js,docs/guide.md`, excluding the caller's workspace) over 2 active agent workspaces with declared and observed paths overlapping on `src/util.js`, in a 6-file repo; the forecast has no response cache (`cache=none`), so every call reads the Nexus index (`d1=2`)"
+  },
+  "compose": {
+    "stats": {
+      "n": 10,
+      "min": 1088,
+      "p50": 1197,
+      "max": 1578
+    },
+    "method": "10 compositions of the same 2 workspaces (one clean merge3 hunk each in `src/util.js` plus one file each); every call folds both pieces, writes and pushes a new composed commit and records a workspace and a draft change set, so no run is served from a cache"
+  },
+  "runner": {
+    "measuredAt": "2026-10-12T00:47:29.475Z",
+    "cold": [
+      2804,
+      2593,
+      2631,
+      2669,
+      2737
+    ],
+    "warm": [
+      1573,
+      1704,
+      1555,
+      1574,
+      1536
+    ],
+    "checks": "12/12"
+  },
+  "container": {
+    "measuredAt": "2026-10-12T00:48:18.001Z",
+    "cold": {
+      "totalMs": 18870,
+      "wall": 19400,
+      "readyMs": 5055,
+      "phases": {
+        "boot": 579,
+        "setup": 4476,
+        "snapshot": 5793,
+        "run": 7786,
+        "stop": 236
+      },
+      "cost": "d1=1;rr=4;rw=0;art=0;do=1;r2a=0;r2b=0;q=0;sub=0;cache=none"
+    },
+    "warm": {
+      "totalMs": 8748,
+      "wall": 8924,
+      "readyMs": 637,
+      "phases": {
+        "boot": 637,
+        "setup": null,
+        "snapshot": null,
+        "run": 7861,
+        "stop": 250
+      },
+      "cost": "d1=1;rr=4;rw=0;art=0;do=1;r2a=0;r2b=0;q=0;sub=0;cache=none"
+    }
+  },
+  "cloneVsSnapshot": {
+    "measuredAt": "2026-10-12T00:49:27.570Z",
+    "runs": 3,
+    "targets": [
+      {
+        "name": "fixture (`cynthia/fixture-1m`@`bench-head`)",
+        "files": 502,
+        "bytes": 33032000,
+        "clone": {
+          "n": 3,
+          "min": 12042.3,
+          "p50": 12309.6,
+          "max": 22740.6
+        },
+        "shallow": {
+          "n": 3,
+          "min": 867.3,
+          "p50": 893.8,
+          "max": 1102.9
+        },
+        "snapshot": {
+          "n": 3,
+          "min": 888.4,
+          "p50": 892.8,
+          "max": 963.4
+        }
+      },
+      {
+        "name": "small (61-file scratch repo)",
+        "files": 61,
+        "bytes": 268487,
+        "clone": {
+          "n": 3,
+          "min": 532.1,
+          "p50": 534.6,
+          "max": 812.2
+        },
+        "shallow": {
+          "n": 3,
+          "min": 444.9,
+          "p50": 461.7,
+          "max": 565.1
+        },
+        "snapshot": {
+          "n": 3,
+          "min": 315.1,
+          "p50": 328.1,
+          "max": 561.4
+        }
+      }
+    ]
+  },
+  "fleet": {
+    "measuredAt": "2026-10-11T16:07:34.375Z",
+    "workspaces": 100,
+    "published": 99,
+    "windowMs": 361946,
+    "throughputPerMin": 15.91,
+    "latency": {
+      "p50": 94045,
+      "p90": 219098,
+      "max": 361946,
+      "samples": 96
+    },
+    "enqueue": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none",
+    "publication": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2",
+    "idleMs": 79684,
+    "checks": "34/34 passed"
+  },
+  "cache": [
+    {
+      "surface": "warm compare (fixture, 502 changed files)",
+      "requests": 11,
+      "hits": 11,
+      "rate": 1
+    },
+    {
+      "surface": "per-file diff",
+      "requests": 6,
+      "hits": 6,
+      "rate": 1
+    },
+    {
+      "surface": "repo page `GET /:o/:r` (anonymous)",
+      "requests": 6,
+      "hits": 5,
+      "rate": 0.8333333333333334
+    },
+    {
+      "surface": "git gate `info/refs` (anonymous)",
+      "requests": 6,
+      "hits": 5,
+      "rate": 0.8333333333333334
+    },
+    {
+      "surface": "snapshot download (by SHA, edge cached)",
+      "requests": 6,
+      "hits": 5,
+      "rate": 0.8333333333333334
+    },
+    {
+      "surface": "change detail (open)",
+      "requests": 6,
+      "hits": 6,
+      "rate": 1
+    },
+    {
+      "surface": "candidates (2 workspaces)",
+      "requests": 6,
+      "hits": 6,
+      "rate": 1
+    },
+    {
+      "surface": "MCP `read_file`",
+      "requests": 6,
+      "hits": 6,
+      "rate": 1
+    }
+  ],
+  "costs": [
+    {
+      "endpoint": "warm compare (fixture, 502 changed files)",
+      "n": 10,
+      "median": {
+        "d1": 1,
+        "rr": 4,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1<=1;art=0;do=0;sub=0;cache=hit",
+      "ok": true,
+      "row": "GET …/compare/:base…:head, …/commits/:sha/diff"
+    },
+    {
+      "endpoint": "per-file diff",
+      "n": 5,
+      "median": {
+        "d1": 1,
+        "rr": 4,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1<=1;art=0;do=0;sub=0;cache=hit",
+      "ok": true,
+      "row": "GET …/compare/:base…:head/file"
+    },
+    {
+      "endpoint": "repo page `GET /:o/:r` (anonymous)",
+      "n": 5,
+      "median": {
+        "d1": 1,
+        "rr": 1,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1<=1;art=0;do=0;cache=hit",
+      "ok": true,
+      "row": "repo page GET /:o/:r (public, anonymous)"
+    },
+    {
+      "endpoint": "git gate `info/refs` (anonymous)",
+      "n": 5,
+      "median": {
+        "d1": 1,
+        "rr": 1,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1<=1;art=0;do=0;sub=0;cache=hit",
+      "ok": true,
+      "row": "git gate info/refs?service=git-upload-pack, public, anonymous"
+    },
+    {
+      "endpoint": "snapshot metadata (warm ref)",
+      "n": 5,
+      "median": {
+        "d1": 2,
+        "rr": 6,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "none"
+      },
+      "budget": "d1<=2;art=0;r2a=0;r2b=0;do=0;sub=0",
+      "ok": true,
+      "row": "GET /api/v1/repos/:o/:r/snapshots/:ref"
+    },
+    {
+      "endpoint": "snapshot download (by SHA, edge cached)",
+      "n": 5,
+      "median": {
+        "d1": 1,
+        "rr": 4,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1<=1;r2b=0;art=0;cache=hit",
+      "ok": true,
+      "row": "GET …/snapshots/:sha/download"
+    },
+    {
+      "endpoint": "change detail (open)",
+      "n": 5,
+      "median": {
+        "d1": 3,
+        "rr": 12,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1=3;art=0;sub=0;do=0",
+      "ok": true,
+      "row": "GET …/changes/:n (detail, open)"
+    },
+    {
+      "endpoint": "workspace list",
+      "n": 5,
+      "median": {
+        "d1": 2,
+        "rr": 50,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "none"
+      },
+      "budget": "d1=2;do=0;art=0;sub=0",
+      "ok": true,
+      "row": "GET …/workspaces (list)"
+    },
+    {
+      "endpoint": "candidates (2 workspaces)",
+      "n": 5,
+      "median": {
+        "d1": 3,
+        "rr": 74,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1=3;art=0;do=0;sub=0",
+      "ok": true,
+      "row": "GET …/candidates warm"
+    },
+    {
+      "endpoint": "MCP `read_file`",
+      "n": 5,
+      "median": {
+        "d1": 1,
+        "rr": 4,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0,
+        "cache": "hit"
+      },
+      "budget": "d1=1;art=0;do=0;r2b=0;sub=0 (= the REST contents read)",
+      "ok": true,
+      "row": "POST /mcp tools/call"
+    }
+  ],
+  "loop": [
+    {
+      "metric": "explicit merge (`POST …/merge` -> 200)",
+      "stats": {
+        "n": 10,
+        "min": 531,
+        "p50": 1108,
+        "max": 1310
+      },
+      "method": "`POST …/changes/:n/merge` until its 200 (publication happens inside the request); 10 changes adding one file each: 1 fast-forward, 9 three-way (main moved by the previous merge)"
+    },
+    {
+      "metric": "mergeability, cold",
+      "stats": {
+        "n": 10,
+        "min": 298,
+        "p50": 366,
+        "max": 466
+      },
+      "method": "first `GET …/mergeability` of a change right after main moved: new (target, head) pair, merge plan computed (`art` 6-7)"
+    },
+    {
+      "metric": "mergeability, warm",
+      "stats": {
+        "n": 10,
+        "min": 117,
+        "p50": 136,
+        "max": 238
+      },
+      "method": "the same read repeated: plan served from the content-addressed cache (`art=0`), gate asked fresh"
+    },
+    {
+      "metric": "push -> forge/guard verdict recorded",
+      "stats": {
+        "n": 10,
+        "min": 6394,
+        "p50": 6589,
+        "max": 7308
+      },
+      "method": "Date.now() before `git push` to the server-recorded `finishedAt` of the guard run at the pushed head (host clock NTP-synchronized); 10 pushes of a one-file change to an open change's head branch; `git push` itself took p50 603 ms"
+    },
+    {
+      "metric": "push -> forge/guard verdict visible to the client",
+      "stats": {
+        "n": 10,
+        "min": 6637,
+        "p50": 6825,
+        "max": 7566
+      },
+      "method": "the same pushes, ending at the first `GET …/changes/:n/checks` (polled every 250 ms) that shows the verdict"
+    },
+    {
+      "metric": "push -> CI job created (claimable)",
+      "stats": {
+        "n": 10,
+        "min": 6861,
+        "p50": 7032,
+        "max": 7764
+      },
+      "method": "the same pushes, ending at the server-recorded `createdAt` of the queued CI check run (the job is claimable from then)"
+    },
+    {
+      "metric": "push -> CI job claimed by a polling client",
+      "stats": {
+        "n": 10,
+        "min": 7458,
+        "p50": 7751,
+        "max": 8580
+      },
+      "method": "the same pushes, ending at the first `POST …/ci/jobs/claim` (polled every 250 ms) that returns the job for the pushed head"
+    },
+    {
+      "metric": "runner claim -> report, cold install (`--fresh`)",
+      "stats": {
+        "n": 5,
+        "min": 2593,
+        "p50": 2669,
+        "max": 2804
+      },
+      "method": "`scripts/runner-warm-bench.mjs --samples 5` (measured 2026-10-12): the runner's own claim response -> report response span for `npm install && npm test` on a TypeScript + vitest fixture; empty workdir, full install from the machine npm cache, checkout by clone fallback"
+    },
+    {
+      "metric": "runner claim -> report, warm workdir",
+      "stats": {
+        "n": 5,
+        "min": 1536,
+        "p50": 1573,
+        "max": 1704
+      },
+      "method": "`scripts/runner-warm-bench.mjs --samples 5` (measured 2026-10-12): the runner's own claim response -> report response span for `npm install && npm test` on a TypeScript + vitest fixture; next commit delta-synced into the same workdir, node_modules reused"
+    }
+  ],
+  "samples": {
+    "warm compare (fixture, 502 changed files)": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 77
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 75
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 79
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 102
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 69
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 70
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 70
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 74
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 91
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 80
+      }
+    ],
+    "per-file diff": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 84
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 89
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 76
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 79
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 79
+      }
+    ],
+    "repo page `GET /:o/:r` (anonymous)": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 64
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 51
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 57
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 49
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 50
+      }
+    ],
+    "git gate `info/refs` (anonymous)": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 89
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 94
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 47
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 54
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 1,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 66
+      }
+    ],
+    "snapshot metadata (warm ref)": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 6,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 132
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 6,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 104
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 6,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 92
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 6,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 96
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 6,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 92
+      }
+    ],
+    "snapshot download (by SHA, edge cached)": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 57
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 57
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 55
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 68
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 97
+      }
+    ],
+    "change detail (open)": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 12,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 144
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 12,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 119
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 12,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 136
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 12,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 124
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 12,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 153
+      }
+    ],
+    "workspace list": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 50,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 89
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 50,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 74
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 50,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 74
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 50,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 88
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 2,
+          "rr": 50,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "none"
+        },
+        "ms": 96
+      }
+    ],
+    "candidates (2 workspaces)": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 74,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 137
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 74,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 120
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 74,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 124
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 74,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 135
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 3,
+          "rr": 74,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 128
+      }
+    ],
+    "MCP `read_file`": [
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 74
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 68
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 62
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 67
+      },
+      {
+        "status": 200,
+        "cost": {
+          "d1": 1,
+          "rr": 4,
+          "rw": 0,
+          "art": 0,
+          "do": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "q": 0,
+          "sub": 0,
+          "cache": "hit"
+        },
+        "ms": 85
+      }
+    ]
+  }
+}
