@@ -1,0 +1,109 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kvarm-platform",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "default",
+      "remote": true
+    }
+  ],
+  // The database_id and vars.APP_ORIGIN are neutral placeholders. Remote
+  // commands (npm run deploy, db:migrate:remote) go through
+  // scripts/wrangler-target.mjs, which fills in your own values from
+  // KVARM_D1_DATABASE_ID and KVARM_APP_ORIGIN (see .env.deploy.example).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kvarm",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "SNAPSHOTS",
+      "bucket_name": "kvarm-snapshots"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "EVENTS",
+        "queue": "kvarm-events"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "kvarm-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "kvarm-events-dlq"
+      }
+    ]
+  },
+  // Workers Rate Limiting (per-colo counters). The RateLimiter Durable Object
+  // stays exported for its migration but is no longer on any request path.
+  "ratelimits": [
+    { "name": "READ_LIMITER", "namespace_id": "4601", "simple": { "limit": 600, "period": 60 } },
+    { "name": "WRITE_LIMITER", "namespace_id": "4602", "simple": { "limit": 120, "period": 60 } }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TOKENS", "class_name": "TokenCache" },
+      { "name": "RATE_LIMIT", "class_name": "RateLimiter" },
+      { "name": "MERGE_LOCK", "class_name": "MergeLock" },
+      { "name": "CI_SANDBOX", "class_name": "CiRunnerSandbox" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TokenCache", "RateLimiter", "RealtimeHub", "MergeLock"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["CiRunnerSandbox"]
+    },
+    {
+      "tag": "v3",
+      "deleted_classes": ["RealtimeHub"]
+    }
+  ],
+  // Container CI runner showcase (public beta). No image or dockerfile key:
+  // the Cloudflare-managed cloudflare/debian-trixie image is chosen at
+  // ctx.container.start(), which only the durable_object policy allows.
+  "containers": [
+    {
+      "class_name": "CiRunnerSandbox",
+      "scheduling_policy": "durable_object"
+    }
+  ],
+  "workflows": [
+    { "name": "snapshot-builder", "binding": "SNAPSHOT_BUILDER", "class_name": "SnapshotBuilder" },
+    { "name": "ci-pipeline", "binding": "CI_PIPELINE", "class_name": "CiPipeline" },
+    { "name": "merge", "binding": "MERGE_WORKFLOW", "class_name": "MergeWorkflow" },
+    { "name": "repo-import", "binding": "REPO_IMPORT", "class_name": "RepoImport" }
+  ],
+  "vars": {
+    "SITE_NAME": "Kvarm",
+    "APP_ORIGIN": "http://localhost:8787",
+    "ARTIFACTS_NAMESPACE": "default",
+    "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "placement": {
+    "mode": "smart"
+  }
+}

@@ -1,0 +1,1191 @@
+/**
+ * Change requests (services/changes.ts) through the Worker's routes and push
+ * queue, over the in-memory Artifacts fake: ls-refs and receive-pack are
+ * served by the fake remote, so merges publish real git objects with a
+ * compare-and-swap on the base ref exactly like the Artifacts remote.
+ */
+
+import { env as cfEnv } from 'cloudflare:workers';
+import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { decode } from '@kvarm/gitops';
+import { mintPAT, type Scope } from '../src/auth/pat';
+import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import worker from '../src/index';
+import { getRepoById } from '../src/db/repos';
+import { defaultMergeDeps, listChangesSql, mergeChange, mergeReadyAutoChanges, recordGuard, type MergeDeps } from '../src/services/changes';
+import {
+  FakeRepo,
+  commit,
+  fakeArtifacts,
+  fakeRepos,
+  installFakeGitRemote,
+  restoreFetch,
+  type Files,
+} from './helpers/fakeArtifacts';
+
+const baseEnv = cfEnv as unknown as Env;
+const ORIGIN = 'https://kvarm.test';
+const FULL: Scope[] = ['read', 'write', 'api'];
+const OWNER = 'cr-owner';
+
+class FakeWorkflow {
+  async create(opts: { id?: string }) {
+    return { id: opts.id ?? crypto.randomUUID() };
+  }
+  async get(id: string) {
+    return { id };
+  }
+}
+
+const env = {
+  ...baseEnv,
+  ARTIFACTS: fakeArtifacts,
+  SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
+} as Env;
+
+const tok = { owner: '', noApi: '', bot: '', writer: '', reader: '' };
+const userIds: Record<string, string> = {};
+const repoIds: Record<string, string> = {};
+
+async function seedUser(login: string): Promise<string> {
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
+  )
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
+    .run();
+  userIds[login] = id;
+  return id;
+}
+
+async function seedRepo(name: string, visibility: 'public' | 'private' = 'public'): Promise<FakeRepo> {
+  const artifactsName = `${OWNER}--${name}`;
+  const repo = new FakeRepo();
+  fakeRepos.set(artifactsName, repo);
+  const id = crypto.randomUUID();
+  repoIds[name] = id;
+  await env.DB.prepare(
+    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
+  )
+    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
+    .run();
+  return repo;
+}
+
+async function grant(repo: string, login: string, role: 'read' | 'write' | 'admin'): Promise<void> {
+  await env.DB.prepare(
+    'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+  )
+    .bind(repoIds[repo], userIds[login], role, userIds[OWNER], Date.now(), Date.now())
+    .run();
+}
+
+interface Reply {
+  status: number;
+  json: Record<string, any>;
+  cost: CostCounters;
+}
+
+async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
+  const ctx = createExecutionContext();
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+  const text = await res.text();
+  await waitOnExecutionContext(ctx);
+  const cost = parseCostHeader(res.headers.get(COST_HEADER));
+  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
+  let json: Record<string, any> = {};
+  try {
+    json = JSON.parse(text) as Record<string, any>;
+  } catch {
+    // non-JSON body
+  }
+  return { status: res.status, json, cost: cost! };
+}
+
+const path = (repo: string, rest = '') => `/api/v1/repos/${OWNER}/${repo}/changes${rest}`;
+const create = (repo: string, body: unknown, token = tok.owner) => call('POST', path(repo), token, body);
+const get = (repo: string, n: number, token: string | undefined = tok.owner) => call('GET', path(repo, `/${n}`), token);
+const patch = (repo: string, n: number, body: unknown, token = tok.owner) => call('PATCH', path(repo, `/${n}`), token, body);
+const merge = (repo: string, n: number, token = tok.owner) => call('POST', path(repo, `/${n}/merge`), token);
+const list = (repo: string, q = '', token: string | undefined = tok.owner) => call('GET', path(repo, q), token);
+
+async function rowCount(repo: string): Promise<number> {
+  const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_sets WHERE repo_id = ?').bind(repoIds[repo]).first<{ n: number }>();
+  return r?.n ?? 0;
+}
+
+/** main at M (README); feature = M + one benign file. */
+async function linear(repo: FakeRepo, extra: Files = { 'notes.txt': 'hello\n' }) {
+  const main = await commit(repo, { 'README.md': 'readme\n' });
+  const feature = await commit(repo, { 'README.md': 'readme\n', ...extra }, [main.sha]);
+  repo.refs.set('refs/heads/main', main.sha);
+  repo.refs.set('refs/heads/feature', feature.sha);
+  return { main, feature };
+}
+
+/** From a branch point, main adds a.txt and feature adds b.txt. */
+async function divergent(repo: FakeRepo) {
+  const root = await commit(repo, { 'README.md': 'readme\n' });
+  const main = await commit(repo, { 'README.md': 'readme\n', 'a.txt': 'A\n' }, [root.sha]);
+  const feature = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B\n' }, [root.sha]);
+  repo.refs.set('refs/heads/main', main.sha);
+  repo.refs.set('refs/heads/feature', feature.sha);
+  return { root, main, feature };
+}
+
+/** main and feature edit the same line of README differently. */
+async function conflicting(repo: FakeRepo) {
+  const root = await commit(repo, { 'README.md': 'one\n' });
+  const main = await commit(repo, { 'README.md': 'main\n' }, [root.sha]);
+  const feature = await commit(repo, { 'README.md': 'feature\n' }, [root.sha]);
+  repo.refs.set('refs/heads/main', main.sha);
+  repo.refs.set('refs/heads/feature', feature.sha);
+  return { root, main, feature };
+}
+
+function commitOf(repo: FakeRepo, sha: string): { tree: string; parents: string[] } {
+  const o = repo.objects.get(sha);
+  expect(o?.type).toBe('commit');
+  const head = decode(o!.content).split('\n\n')[0]!;
+  return {
+    tree: /^tree ([0-9a-f]{40})$/m.exec(head)![1]!,
+    parents: [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!),
+  };
+}
+
+function treeNames(repo: FakeRepo, tree: string): Record<string, string> {
+  const o = repo.objects.get(tree);
+  expect(o?.type).toBe('tree');
+  const out: Record<string, string> = {};
+  let off = 0;
+  const c = o!.content;
+  while (off < c.length) {
+    const sp = c.indexOf(0x20, off);
+    const nul = c.indexOf(0, sp);
+    const name = decode(c.subarray(sp + 1, nul));
+    const hash = [...c.subarray(nul + 1, nul + 21)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    const blob = repo.objects.get(hash);
+    out[name] = blob?.type === 'blob' ? decode(blob.content) : `<${blob?.type ?? 'missing'}>`;
+    off = nul + 21;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Push events
+// ---------------------------------------------------------------------------
+
+function pushBody(repo: string, ref: string, before: string, after: string, at: number) {
+  return {
+    type: 'cf.artifacts.repo.pushed',
+    source: { type: 'artifacts', namespace: 'default', repoName: `${OWNER}--${repo}` },
+    payload: { ref, before, after, commits: [], totalCommitsCount: 0, commitsTruncated: false },
+    metadata: { accountId: 'acct', eventSubscriptionId: 'sub', eventSchemaVersion: 1, eventTimestamp: new Date(at).toISOString() },
+  };
+}
+
+async function deliver(body: unknown) {
+  const batch = createMessageBatch('kvarm-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
+  const ctx = createExecutionContext();
+  await worker.queue!(batch, env, ctx);
+  const result = await getQueueResult(batch, ctx);
+  await waitOnExecutionContext(ctx);
+  expect(result.explicitAcks).toHaveLength(1);
+}
+
+async function effectDetail(repo: string, effect: string): Promise<{ state: string; detail: string | null } | null> {
+  return env.DB.prepare(
+    `SELECT x.state, x.detail FROM push_event_effects x JOIN push_events p ON p.id = x.event_id
+      WHERE p.repo_id = ? AND x.effect = ? ORDER BY p.event_at DESC LIMIT 1`,
+  )
+    .bind(repoIds[repo], effect)
+    .first<{ state: string; detail: string | null }>();
+}
+
+beforeAll(async () => {
+  installFakeGitRemote();
+  const ownerId = await seedUser(OWNER);
+  tok.owner = (await mintPAT(env, ownerId, 'owner', FULL)).token;
+  tok.noApi = (await mintPAT(env, ownerId, 'no-api', ['read', 'write'])).token;
+  tok.bot = (await mintPAT(env, await seedUser('cr-bot'), 'bot', FULL)).token;
+  tok.writer = (await mintPAT(env, await seedUser('cr-writer'), 'writer', FULL)).token;
+  tok.reader = (await mintPAT(env, await seedUser('cr-reader'), 'reader', FULL)).token;
+});
+
+afterAll(() => restoreFetch());
+
+// ---------------------------------------------------------------------------
+
+describe('create, read, list', () => {
+  it('creates a change with the review default, the head tip and per-repo numbers', async () => {
+    const repo = await seedRepo('create');
+    const { main, feature } = await linear(repo);
+    const r = await create('create', { title: 'Add feature', base: 'main', head: 'feature' });
+    expect(r.status).toBe(201);
+    expect(r.json).toMatchObject({
+      number: 1,
+      title: 'Add feature',
+      state: 'open',
+      mergePolicy: 'review',
+      base: 'main',
+      head: 'feature',
+      headSha: feature.sha,
+      baseSha: main.sha,
+      author: OWNER,
+      mergeCommit: null,
+    });
+    expect(r.json.rating).toMatchObject({ score: expect.any(Number), level: expect.stringMatching(/^(low|medium|high)$/) });
+
+    const again = await get('create', 1);
+    expect(again.status).toBe(200);
+    expect(again.json).toMatchObject({ number: 1, state: 'open', mergePolicy: 'review', headSha: feature.sha });
+
+    expect((await create('create', { title: 'Second', base: 'main', head: 'refs/heads/feature' })).json.number).toBe(2);
+    const other = await seedRepo('create-other');
+    await linear(other);
+    expect((await create('create-other', { title: 'Other repo', base: 'main', head: 'feature' })).json.number).toBe(1);
+    expect((await create('create', { title: 'Third', base: 'main', head: 'feature' })).json.number).toBe(3);
+  });
+
+  it('missing branches and base == head are refused before anything is written', async () => {
+    const repo = await seedRepo('refuse');
+    await linear(repo);
+    const cases: Array<[unknown, number, string]> = [
+      [{ title: 'x', base: 'main', head: 'no-such-branch' }, 422, 'REF_NOT_FOUND'],
+      [{ title: 'x', base: 'no-such-branch', head: 'feature' }, 422, 'REF_NOT_FOUND'],
+      [{ title: 'x', base: 'main', head: 'main' }, 422, 'SAME_REF'],
+      [{ title: 'x', base: 'main', head: 'refs/heads/main' }, 422, 'SAME_REF'],
+      [{ title: '', base: 'main', head: 'feature' }, 422, 'INVALID_TITLE'],
+      [{ title: 'x', base: 'main', head: 'feature', mergePolicy: 'yolo' }, 422, 'INVALID_MERGE_POLICY'],
+      [{ title: 'x', base: 'main', head: 'bad..name' }, 422, 'INVALID_REF'],
+      [{ title: 'x', base: 'refs/tags/v1', head: 'feature' }, 422, 'INVALID_REF'],
+    ];
+    for (const [body, status, code] of cases) {
+      const r = await create('refuse', body);
+      expect([r.status, r.json.code], JSON.stringify(body)).toEqual([status, code]);
+      expect(typeof r.json.error).toBe('string');
+    }
+    expect(await rowCount('refuse')).toBe(0);
+    expect((await list('refuse')).json.changes).toEqual([]);
+    expect((await create('refuse', { title: 'ok', base: 'main', head: 'feature' })).json.number).toBe(1);
+  });
+
+  it('lists by state, newest first, with a cursor', async () => {
+    const repo = await seedRepo('list');
+    await linear(repo);
+    for (const t of ['one', 'two', 'three']) expect((await create('list', { title: t, base: 'main', head: 'feature' })).status).toBe(201);
+    expect((await patch('list', 1, { state: 'closed' })).status).toBe(200);
+
+    const open = await list('list');
+    expect(open.json.changes.map((c: { number: number }) => c.number)).toEqual([3, 2]);
+    expect((await list('list', '?state=closed')).json.changes.map((c: { number: number }) => c.number)).toEqual([1]);
+    expect((await list('list', '?state=merged')).json.changes).toEqual([]);
+    const all = await list('list', '?state=all&limit=2');
+    expect(all.json.changes.map((c: { number: number }) => c.number)).toEqual([3, 2]);
+    expect(all.json.nextCursor).toBe('2');
+    const rest = await list('list', '?state=all&limit=2&cursor=2');
+    expect(rest.json.changes.map((c: { number: number }) => c.number)).toEqual([1]);
+    expect(rest.json.nextCursor).toBeNull();
+    expect((await list('list', '?state=bogus')).status).toBe(400);
+    expect((await list('list', '?limit=0')).status).toBe(400);
+  });
+
+  it('updates title and policy, closes and reopens; the head never moves on PATCH', async () => {
+    const repo = await seedRepo('patch');
+    const { feature } = await linear(repo);
+    await create('patch', { title: 'Add feature', base: 'main', head: 'feature' });
+
+    const renamed = await patch('patch', 1, { title: 'Renamed', mergePolicy: 'draft', body: 'details' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.json).toMatchObject({ title: 'Renamed', mergePolicy: 'draft', body: 'details', headSha: feature.sha });
+    expect((await get('patch', 1)).json).toMatchObject({ title: 'Renamed', mergePolicy: 'draft', headSha: feature.sha });
+
+    expect((await patch('patch', 1, { state: 'closed' })).json.state).toBe('closed');
+    expect((await get('patch', 1)).json.state).toBe('closed');
+    expect((await list('patch')).json.changes).toEqual([]);
+    expect((await list('patch', '?state=closed')).json.changes).toHaveLength(1);
+    expect((await patch('patch', 1, { state: 'open' })).json.state).toBe('open');
+    expect((await list('patch')).json.changes.map((c: { number: number }) => c.number)).toEqual([1]);
+
+    expect((await patch('patch', 1, {})).json.code).toBe('EMPTY_PATCH');
+    expect((await patch('patch', 1, { state: 'merged' })).json.code).toBe('INVALID_STATE');
+    expect((await patch('patch', 1, { mergePolicy: 'later' })).json.code).toBe('INVALID_MERGE_POLICY');
+    expect((await patch('patch', 9, { title: 'x' })).status).toBe(404);
+    expect((await get('patch', 9)).status).toBe(404);
+    expect((await get('patch', 0)).status).toBe(404);
+  });
+});
+
+describe('authorization', () => {
+  it('writes need an api-scope credential with the write role; public reads stay open', async () => {
+    const repo = await seedRepo('auth');
+    await linear(repo);
+    const body = { title: 'x', base: 'main', head: 'feature' };
+
+    expect((await create('auth', body, '')).status).toBe(401);
+    const noApi = await create('auth', body, tok.noApi);
+    // A PAT without the api scope is no API credential at all.
+    expect([noApi.status, noApi.json.code]).toEqual([401, 'UNAUTHENTICATED']);
+    const bot = await create('auth', body, tok.bot);
+    expect(bot.status).toBe(403);
+    expect(typeof bot.json.error).toBe('string');
+    expect(await rowCount('auth')).toBe(0);
+
+    expect((await create('auth', body)).status).toBe(201);
+    expect((await list('auth', '', tok.bot)).status).toBe(200);
+    expect((await list('auth', '', '')).json.changes).toHaveLength(1);
+    expect((await get('auth', 1, tok.bot)).status).toBe(200);
+    for (const r of [await patch('auth', 1, { title: 'bot' }, tok.bot), await merge('auth', 1, tok.bot)]) expect(r.status).toBe(403);
+
+    await grant('auth', 'cr-writer', 'write');
+    await grant('auth', 'cr-reader', 'read');
+    const granted = await create('auth', body, tok.writer);
+    expect([granted.status, granted.json.author]).toEqual([201, 'cr-writer']);
+    expect((await create('auth', body, tok.reader)).status).toBe(403);
+    expect(await rowCount('auth')).toBe(2);
+  });
+
+  it('a private repo hides its changes from outsiders', async () => {
+    const repo = await seedRepo('private', 'private');
+    await linear(repo);
+    expect((await create('private', { title: 'x', base: 'main', head: 'feature' })).status).toBe(201);
+    expect((await list('private', '', '')).status).toBe(404);
+    expect((await get('private', 1, tok.bot)).status).toBe(404);
+    expect((await create('private', { title: 'x', base: 'main', head: 'feature' }, tok.bot)).status).toBe(404);
+  });
+
+  it('an agent token may open changes but merges only into refs it may update', async () => {
+    const repo = await seedRepo('agent');
+    const { main } = await linear(repo);
+    const agent = await call('POST', '/api/v1/agents', tok.owner, { name: 'cr-agent' });
+    expect(agent.status).toBe(201);
+    const minted = await call('POST', `/api/v1/agents/${agent.json.agent.id}/tokens`, tok.owner, {
+      repo: `${OWNER}/agent`,
+      role: 'write',
+      refs: ['refs/heads/agents/*'],
+    });
+    expect(minted.status).toBe(201);
+    const t = minted.json.token as string;
+
+    const opened = await create('agent', { title: 'by agent', base: 'main', head: 'feature' }, t);
+    expect(opened.status).toBe(201);
+    expect(opened.json.agent).toMatchObject({ name: 'cr-agent' });
+    expect((await create('agent', { title: 'auto', base: 'main', head: 'feature', mergePolicy: 'auto' }, t)).json.code).toBe(
+      'AGENT_REF_FORBIDDEN',
+    );
+    expect((await patch('agent', 1, { mergePolicy: 'auto' }, t)).json.code).toBe('AGENT_REF_FORBIDDEN');
+    expect((await merge('agent', 1, t)).json.code).toBe('AGENT_REF_FORBIDDEN');
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('agent', 1)).json.state).toBe('open');
+  });
+
+  async function workspaceAgentToken(repo: string, name: string): Promise<string> {
+    const agent = await call('POST', '/api/v1/agents', tok.owner, { name });
+    expect(agent.status).toBe(201);
+    const minted = await call('POST', `/api/v1/agents/${agent.json.agent.id}/tokens`, tok.owner, {
+      repo: `${OWNER}/${repo}`,
+      role: 'write',
+      refs: ['refs/heads/agents/*'],
+    });
+    expect(minted.status).toBe(201);
+    return minted.json.token as string;
+  }
+
+  it('a workspace-scoped agent cannot publish to the base by reopening a closed auto change', async () => {
+    const repo = await seedRepo('agent-reopen');
+    const { main } = await linear(repo);
+    const t = await workspaceAgentToken('agent-reopen', 'cr-agent-reopen');
+    await create('agent-reopen', { title: 'x', base: 'main', head: 'feature' });
+    expect((await patch('agent-reopen', 1, { mergePolicy: 'auto', state: 'closed' })).json).toMatchObject({ state: 'closed', mergePolicy: 'auto' });
+
+    const reopened = await patch('agent-reopen', 1, { state: 'open' }, t);
+    expect([reopened.status, reopened.json.code]).toEqual([403, 'AGENT_REF_FORBIDDEN']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('agent-reopen', 1)).json).toMatchObject({ state: 'closed', mergePolicy: 'auto', mergeCommit: null });
+    expect(repo.count('receivePack:')).toBe(0);
+  });
+
+  it('no other agent edit of an open auto change publishes to a base the agent may not update', async () => {
+    const repo = await seedRepo('agent-implicit');
+    const { root, main } = await conflicting(repo);
+    const t = await workspaceAgentToken('agent-implicit', 'cr-agent-implicit');
+    expect((await create('agent-implicit', { title: 'x', base: 'main', head: 'feature', mergePolicy: 'auto' })).json.state).toBe('conflicted');
+    // The base moves back so the change is mergeable, with no push to its head; it is open but not yet
+    // merged (as between a base move and the base push event that resumes it).
+    repo.refs.set('refs/heads/main', root.sha);
+    await env.DB.prepare(`UPDATE change_sets SET state = 'open', conflicts = NULL WHERE repo_id = ? AND number = 1`).bind(repoIds['agent-implicit']).run();
+
+    const edited = await patch('agent-implicit', 1, { title: 'renamed by agent' }, t);
+    expect(edited.status).toBe(200);
+    expect(edited.json).toMatchObject({ title: 'renamed by agent', state: 'open' });
+    expect(repo.refs.get('refs/heads/main')).toBe(root.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(main.sha).not.toBe(root.sha);
+  });
+});
+
+describe('detail: rating, mergeability, checks', () => {
+  it('the rating equals the compare rating for the same base and head', async () => {
+    const repo = await seedRepo('rating');
+    const base: Files = {
+      'README.md': 'readme\n',
+      'src/app.ts': 'export const x = 1;\n',
+      'test/app.test.ts': 'test("x", () => {});\n',
+      '.github/workflows/ci.yml': 'on: push\njobs: {}\n',
+    };
+    const main = await commit(repo, base);
+    const { 'test/app.test.ts': _gone, ...rest } = base;
+    const feature = await commit(repo, { ...rest, '.github/workflows/ci.yml': 'on: [push, pull_request]\njobs: {}\n' }, [main.sha]);
+    repo.refs.set('refs/heads/main', main.sha);
+    repo.refs.set('refs/heads/feature', feature.sha);
+
+    const created = await create('rating', { title: 'risky', base: 'main', head: 'feature' });
+    const detail = await get('rating', 1);
+    const compare = await call('GET', `/api/v1/repos/${OWNER}/rating/compare/main...${feature.sha}`, tok.owner);
+    expect(compare.status).toBe(200);
+    expect(detail.json.rating).toEqual(compare.json.rating);
+    expect(created.json.rating).toEqual(compare.json.rating);
+    expect(detail.json.rating.reasons.length).toBeGreaterThan(0);
+    expect(detail.json.rating.score).toBeGreaterThan(0);
+  });
+
+  it('reports a fast-forward as mergeable and a conflict as not, with the conflicting paths', async () => {
+    const repo = await seedRepo('mergeable');
+    const { main, feature } = await linear(repo);
+    await create('mergeable', { title: 'ff', base: 'main', head: 'feature' });
+    const d = await get('mergeable', 1);
+    expect(d.json.headSha).toBe(feature.sha);
+    expect(d.json.mergeability).toMatchObject({
+      status: 'fast-forward',
+      mergeable: true,
+      fastForward: true,
+      conflicts: [],
+      targetSha: main.sha,
+      headSha: feature.sha,
+      treeSha: feature.tree,
+      checks: { state: 'success', required: [{ name: 'kvarm/guard', state: 'success', producer: 'check-runs' }] },
+    });
+    // Creation records the kvarm/guard run of the head, the only check on a repo without CI.
+    expect(d.json.checks).toMatchObject([{ name: 'kvarm/guard', headSha: feature.sha, treeSha: feature.tree, status: 'success', required: true }]);
+
+    const c = await seedRepo('conflicted');
+    await conflicting(c);
+    await create('conflicted', { title: 'conflict', base: 'main', head: 'feature' });
+    const m = await call('GET', path('conflicted', '/1/mergeability'), tok.owner);
+    expect(m.status).toBe(200);
+    expect(m.json.mergeability).toMatchObject({
+      status: 'conflicts',
+      mergeable: false,
+      fastForward: false,
+      conflicts: [{ path: 'README.md', kind: expect.any(String) }],
+      treeSha: null,
+    });
+    const refused = await merge('conflicted', 1);
+    expect([refused.status, refused.json.code]).toEqual([409, 'MERGE_CONFLICT']);
+    expect(refused.json.conflicts).toEqual([{ path: 'README.md', kind: expect.any(String) }]);
+    expect((await get('conflicted', 1)).json).toMatchObject({ state: 'conflicted', conflicts: [{ path: 'README.md', kind: expect.any(String) }] });
+  });
+
+  it('detail D1 cost stays constant as check runs accumulate', async () => {
+    const repo = await seedRepo('cost');
+    await linear(repo);
+    await create('cost', { title: 'cost', base: 'main', head: 'feature' });
+    await get('cost', 1);
+    const before = await get('cost', 1);
+    const changeId = (await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ?').bind(repoIds.cost).first<{ id: string; head_sha: string }>())!;
+    const stmts = Array.from({ length: 120 }, (_, i) =>
+      env.DB.prepare(
+        `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, created_at)
+         VALUES (?, ?, ?, ?, ?, 'success', 'success', ?)`,
+      ).bind(crypto.randomUUID(), repoIds.cost, changeId.id, changeId.head_sha, `check-${i}`, Date.now() + i),
+    );
+    await env.DB.batch(stmts);
+    const after = await get('cost', 1);
+    expect(after.json.checks).toHaveLength(100);
+    expect(after.json.checks[0].name).toBe('check-119');
+    expect(after.cost.d1).toBe(before.cost.d1);
+    // Authority, the change + newest runs batch, and the checks-gate read.
+    expect(after.cost.d1).toBeLessThanOrEqual(3);
+    const checks = await call('GET', path('cost', '/1/checks'), tok.owner);
+    expect(checks.json.checks).toHaveLength(100);
+    expect(checks.cost.d1).toBeLessThanOrEqual(2);
+    expect((await list('cost')).cost.d1).toBeLessThanOrEqual(2);
+  });
+
+  it('detail rows read stay bounded as check history grows (newest-check index)', async () => {
+    const repo = await seedRepo('cost-rows');
+    await linear(repo);
+    await create('cost-rows', { title: 'rows', base: 'main', head: 'feature' });
+    const change = (await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ?').bind(repoIds['cost-rows']).first<{ id: string; head_sha: string }>())!;
+    let n = 0;
+    // After the guard run recorded at creation, so the newest 100 are these.
+    const later = Date.now() + 60_000;
+    const addRuns = async (count: number) => {
+      for (let done = 0; done < count; done += 250) {
+        await env.DB.batch(
+          Array.from({ length: Math.min(250, count - done) }, () => {
+            n++;
+            return env.DB.prepare(
+              `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, created_at)
+               VALUES (?, ?, ?, ?, ?, 'success', 'success', ?)`,
+            ).bind(crypto.randomUUID(), repoIds['cost-rows'], change.id, change.head_sha, `check-${n}`, later + n);
+          }),
+        );
+      }
+    };
+    await addRuns(150);
+    await get('cost-rows', 1);
+    const short = await get('cost-rows', 1);
+    const shortChecks = await call('GET', path('cost-rows', '/1/checks'), tok.owner);
+    await addRuns(1_500);
+    const long = await get('cost-rows', 1);
+    const longChecks = await call('GET', path('cost-rows', '/1/checks'), tok.owner);
+    expect(long.json.checks).toHaveLength(100);
+    expect(long.json.checks[0].name).toBe('check-1650');
+    expect(longChecks.json.checks[99].name).toBe('check-1551');
+    // Ten times the history reads the same rows: the newest 100 come straight off the index.
+    expect(long.cost.rr).toBe(short.cost.rr);
+    expect(longChecks.cost.rr).toBe(shortChecks.cost.rr);
+    expect(longChecks.cost.rr).toBeLessThan(150);
+  });
+});
+
+describe('merge', () => {
+  it('fast-forward moves the base to the head and records the head as mergeCommit', async () => {
+    const repo = await seedRepo('ff');
+    const { feature } = await linear(repo);
+    const objects = repo.objects.size;
+    await create('ff', { title: 'ff', base: 'main', head: 'feature' });
+    const r = await merge('ff', 1);
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ state: 'merged', mergeCommit: feature.sha, merge: { kind: 'fast-forward', mergeCommit: feature.sha } });
+    expect(repo.refs.get('refs/heads/main')).toBe(feature.sha);
+    expect(repo.objects.size).toBe(objects);
+    expect((await get('ff', 1)).json).toMatchObject({ state: 'merged', mergeCommit: feature.sha, mergedAt: expect.any(String), mergeability: null });
+    expect((await list('ff', '?state=merged')).json.changes).toHaveLength(1);
+
+    expect((await merge('ff', 1)).json.code).toBe('ALREADY_MERGED');
+    expect([(await patch('ff', 1, { state: 'closed' })).status, (await get('ff', 1)).json.state]).toEqual([409, 'merged']);
+  });
+
+  it('three-way merge publishes a two-parent commit holding both sides', async () => {
+    const repo = await seedRepo('threeway');
+    const { main, feature } = await divergent(repo);
+    await create('threeway', { title: 'both', base: 'main', head: 'feature' });
+    const m = await get('threeway', 1);
+    expect(m.json.mergeability).toMatchObject({ status: 'clean', mergeable: true, fastForward: false });
+
+    const r = await merge('threeway', 1);
+    expect(r.status).toBe(200);
+    const mc = r.json.mergeCommit as string;
+    expect(r.json).toMatchObject({ state: 'merged', merge: { kind: 'merge', previous: main.sha, treeSha: m.json.mergeability.treeSha } });
+    expect(repo.refs.get('refs/heads/main')).toBe(mc);
+    const c = commitOf(repo, mc);
+    expect(c.parents).toEqual([main.sha, feature.sha]);
+    expect(c.tree).toBe(m.json.mergeability.treeSha);
+    expect(treeNames(repo, c.tree)).toEqual({ 'README.md': 'readme\n', 'a.txt': 'A\n', 'b.txt': 'B\n' });
+    expect(decode(repo.objects.get(mc)!.content)).toMatch(/^author cr-owner <cr-owner@kvarm\.invalid> /m);
+  });
+
+  it('a draft never merges; switching to review allows the explicit merge', async () => {
+    const repo = await seedRepo('draft');
+    const { main, feature } = await linear(repo);
+    expect((await create('draft', { title: 'wip', base: 'main', head: 'feature', mergePolicy: 'draft' })).json.mergePolicy).toBe('draft');
+    const refused = await merge('draft', 1);
+    expect([refused.status, refused.json.code]).toEqual([409, 'DRAFT']);
+    expect(refused.json.error).toMatch(/draft/);
+    expect((await get('draft', 1)).json.state).toBe('open');
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+
+    expect((await patch('draft', 1, { mergePolicy: 'review' })).status).toBe(200);
+    expect((await merge('draft', 1)).json).toMatchObject({ state: 'merged', mergeCommit: feature.sha });
+  });
+
+  it('closed changes refuse to merge until reopened', async () => {
+    const repo = await seedRepo('closed');
+    await linear(repo);
+    await create('closed', { title: 'x', base: 'main', head: 'feature' });
+    await patch('closed', 1, { state: 'closed' });
+    expect((await merge('closed', 1)).json.code).toBe('CHANGE_CLOSED');
+    await patch('closed', 1, { state: 'open' });
+    expect((await merge('closed', 1)).json.state).toBe('merged');
+  });
+
+  it('auto merges as soon as the change is mergeable (immediately with an empty required set)', async () => {
+    const repo = await seedRepo('auto');
+    const { feature } = await linear(repo);
+    const r = await create('auto', { title: 'auto', base: 'main', head: 'feature', mergePolicy: 'auto' });
+    expect(r.status).toBe(201);
+    expect(r.json).toMatchObject({ state: 'merged', mergePolicy: 'auto', mergeCommit: feature.sha });
+    expect(repo.refs.get('refs/heads/main')).toBe(feature.sha);
+
+    const second = await seedRepo('auto-patch');
+    const s = await linear(second);
+    await create('auto-patch', { title: 'later', base: 'main', head: 'feature' });
+    expect(second.refs.get('refs/heads/main')).toBe(s.main.sha);
+    expect((await patch('auto-patch', 1, { mergePolicy: 'auto' })).json).toMatchObject({ state: 'merged', mergeCommit: s.feature.sha });
+  });
+
+  it('branch rules on the base gate merges: approvals and required checks', async () => {
+    const repo = await seedRepo('rules');
+    const { main } = await linear(repo);
+    await create('rules', { title: 'x', base: 'main', head: 'feature' });
+    const rule = await call('POST', `/api/v1/repos/${OWNER}/rules/branch-rules`, tok.owner, { pattern: 'main', requiredApprovals: 1 });
+    expect(rule.status).toBe(201);
+    const blocked = await merge('rules', 1);
+    expect([blocked.status, blocked.json.code]).toEqual([409, 'APPROVALS_REQUIRED']);
+    expect(blocked.json.error).toMatch(/1 approving review/);
+
+    const ruleId = rule.json.id ?? rule.json.rule?.id;
+    expect((await call('PATCH', `/api/v1/repos/${OWNER}/rules/branch-rules/${ruleId}`, tok.owner, { requiredApprovals: 0, requiredChecks: ['ci'] })).status).toBe(200);
+    // The protected target escalates to a human even without a human approval requirement.
+    const escalated = await merge('rules', 1);
+    expect([escalated.status, escalated.json.code]).toEqual([409, 'ESCALATION_OPEN']);
+    expect(escalated.json.review.openEscalations).toEqual(['protected-path']);
+    const packet = await call('GET', `/api/v1/repos/${OWNER}/rules/changes/1/reviews`, tok.owner);
+    const esc = packet.json.escalations.find((e: { reason: string }) => e.reason === 'protected-path');
+    expect((await call('POST', `/api/v1/repos/${OWNER}/rules/changes/1/escalations/${esc.id}/resolve`, tok.owner, { resolution: 'acknowledge' })).status).toBe(200);
+    const pending = await merge('rules', 1);
+    expect([pending.status, pending.json.code]).toEqual([409, 'REQUIRED_CHECKS_PENDING']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('rules', 1)).json.state).toBe('open');
+  });
+
+  it('an unconfirmed publication leaves the change open and the base unmoved', async () => {
+    const repo = await seedRepo('unknown');
+    const { main } = await divergent(repo);
+    await create('unknown', { title: 'x', base: 'main', head: 'feature' });
+    repo.receivePackStatus = 503;
+    const r = await merge('unknown', 1);
+    expect([r.status, r.json.code]).toEqual([502, 'PUBLISH_UNKNOWN']);
+    repo.receivePackStatus = 403;
+    expect((await merge('unknown', 1)).json.code).toBe('PUBLISH_REJECTED');
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('unknown', 1)).json.state).toBe('open');
+    repo.receivePackStatus = null;
+    expect((await merge('unknown', 1)).json.state).toBe('merged');
+  });
+
+  it('re-plans once when the base moved between planning and publication', async () => {
+    const repo = await seedRepo('moving');
+    const { main, feature } = await divergent(repo);
+    await create('moving', { title: 'x', base: 'main', head: 'feature' });
+    // The first receive-pack sees a newer main than ls-refs reported.
+    const moved = await commit(repo, { 'README.md': 'readme\n', 'a.txt': 'A\n', 'c.txt': 'C\n' }, [main.sha]);
+    let first = true;
+    const origCalls = repo.calls.push.bind(repo.calls);
+    repo.calls.push = (...items: string[]) => {
+      if (first && items.some((i) => i.startsWith('receivePack:'))) {
+        first = false;
+        repo.refs.set('refs/heads/main', moved.sha);
+      }
+      return origCalls(...items);
+    };
+    const r = await merge('moving', 1);
+    expect(r.status).toBe(200);
+    const c = commitOf(repo, r.json.mergeCommit);
+    expect(c.parents).toEqual([moved.sha, feature.sha]);
+    expect(treeNames(repo, c.tree)).toEqual({ 'README.md': 'readme\n', 'a.txt': 'A\n', 'b.txt': 'B\n', 'c.txt': 'C\n' });
+  });
+
+  /** Runs `fn` once, at the first fake Artifacts call that starts with `prefix`. */
+  function interleave(repo: FakeRepo, prefix: string, fn: () => Promise<void>) {
+    repo.hook = async (c) => {
+      if (!c.startsWith(prefix)) return;
+      repo.hook = null;
+      await fn();
+    };
+  }
+
+  it('a draft PATCH that lands while the merge is prepared stops publication', async () => {
+    const repo = await seedRepo('race-draft');
+    const { main } = await divergent(repo);
+    await create('race-draft', { title: 'x', base: 'main', head: 'feature' });
+    interleave(repo, 'lsRefs', async () => {
+      expect((await patch('race-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await merge('race-draft', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'DRAFT']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect((await get('race-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null });
+  });
+
+  it('a head refresh that lands while the merge is prepared stops publication of the old head', async () => {
+    const repo = await seedRepo('race-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    interleave(repo, 'lsRefs', async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await merge('race-head', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'HEAD_MOVED']);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect((await get('race-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha });
+
+    const again = await merge('race-head', 1);
+    expect(again.json).toMatchObject({ state: 'merged', headSha: c2.sha });
+    expect(commitOf(repo, again.json.mergeCommit).parents).toEqual([main.sha, c2.sha]);
+  });
+
+  it('a head refresh during publication leaves the change open on its new head, not merged', async () => {
+    const repo = await seedRepo('race-publish-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-publish-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    interleave(repo, 'receivePack:', async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-publish-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await merge('race-publish-head', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'CHANGE_UPDATED_DURING_MERGE']);
+    // The old head was published; the change records neither it nor its new head as merged.
+    const published = repo.refs.get('refs/heads/main')!;
+    expect(commitOf(repo, published).parents).toEqual([main.sha, feature.sha]);
+    expect((await get('race-publish-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha, mergeCommit: null });
+  });
+
+  it('a draft PATCH during publication is never recorded as merged', async () => {
+    const repo = await seedRepo('race-publish-draft');
+    await divergent(repo);
+    await create('race-publish-draft', { title: 'x', base: 'main', head: 'feature' });
+    interleave(repo, 'receivePack:', async () => {
+      expect((await patch('race-publish-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await merge('race-publish-draft', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'CHANGE_UPDATED_DURING_MERGE']);
+    expect((await get('race-publish-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null, mergedAt: null });
+  });
+
+  it('an auto merge stops when the change leaves auto while it is prepared', async () => {
+    const repo = await seedRepo('race-auto');
+    const { main } = await divergent(repo);
+    await create('race-auto', { title: 'x', base: 'main', head: 'feature' });
+    // PATCH to auto triggers the merge; a second PATCH back to review lands during its preparation.
+    interleave(repo, 'lsRefs', async () => {
+      expect((await patch('race-auto', 1, { mergePolicy: 'review' })).status).toBe(200);
+    });
+    const r = await patch('race-auto', 1, { mergePolicy: 'auto' });
+    expect(r.status).toBe(200);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-auto', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'review', mergeCommit: null });
+  });
+
+  it('a draft PATCH that lands while the write token is minted stops publication', async () => {
+    const repo = await seedRepo('race-token-draft');
+    const { main } = await divergent(repo);
+    await create('race-token-draft', { title: 'x', base: 'main', head: 'feature' });
+    interleave(repo, 'createToken:write', async () => {
+      expect((await patch('race-token-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await merge('race-token-draft', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'DRAFT']);
+    expect(repo.hook).toBeNull();
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-token-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null });
+  });
+
+  it('a head refresh that lands while the write token is minted stops publication of the old head', async () => {
+    const repo = await seedRepo('race-token-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-token-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    interleave(repo, 'createToken:write', async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-token-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await merge('race-token-head', 1);
+    expect([r.status, r.json.code]).toEqual([409, 'HEAD_MOVED']);
+    expect(repo.hook).toBeNull();
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-token-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha, mergeCommit: null });
+
+    const again = await merge('race-token-head', 1);
+    expect(again.json).toMatchObject({ state: 'merged', headSha: c2.sha });
+    expect(commitOf(repo, again.json.mergeCommit).parents).toEqual([main.sha, c2.sha]);
+  });
+
+  /** Merge deps whose pusher runs `fn` once, after the real pusher built the pack and before anything is sent. */
+  function pausedAfterPack(fn: () => Promise<void>): MergeDeps & { paused: () => boolean } {
+    let pending: (() => Promise<void>) | null = fn;
+    return {
+      ...defaultMergeDeps,
+      paused: () => pending === null,
+      pusher(e, r) {
+        const real = defaultMergeDeps.pusher(e, r);
+        return {
+          listRefs: () => real.listRefs(),
+          updateRef: (command, objects) => real.updateRef(command, objects),
+          async prepareUpdate(command, objects) {
+            const prepared = await real.prepareUpdate(command, objects);
+            const run = pending;
+            pending = null;
+            await run?.();
+            return prepared;
+          },
+        };
+      },
+    };
+  }
+
+  async function mergeWith(name: string, number: number, deps: MergeDeps) {
+    const row = await getRepoById(env.DB, repoIds[name]!);
+    const waits: Promise<unknown>[] = [];
+    const r = await mergeChange({ env, repo: row!, actor: null, waitUntil: (p) => void waits.push(p) }, String(number), deps);
+    await Promise.allSettled(waits);
+    return r;
+  }
+
+  it('a draft PATCH that lands while the pack is prepared stops publication', async () => {
+    const repo = await seedRepo('race-pack-draft');
+    const { main } = await divergent(repo);
+    await create('race-pack-draft', { title: 'x', base: 'main', head: 'feature' });
+    const deps = pausedAfterPack(async () => {
+      expect((await patch('race-pack-draft', 1, { mergePolicy: 'draft' })).status).toBe(200);
+    });
+    const r = await mergeWith('race-pack-draft', 1, deps);
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'DRAFT' });
+    expect(deps.paused()).toBe(true);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-pack-draft', 1)).json).toMatchObject({ state: 'open', mergePolicy: 'draft', mergeCommit: null });
+  });
+
+  it('a protection rule added while the pack is prepared applies to the publication', async () => {
+    const repo = await seedRepo('race-pack-rule');
+    const { main } = await divergent(repo);
+    await create('race-pack-rule', { title: 'x', base: 'main', head: 'feature' });
+    const deps = pausedAfterPack(async () => {
+      await env.DB.prepare(
+        `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals, created_by, created_at, updated_by, updated_at)
+         VALUES (?, ?, 'refs/heads/main', '[]', 1, ?, ?, ?, ?)`,
+      )
+        .bind(crypto.randomUUID(), repoIds['race-pack-rule'], userIds[OWNER], Date.now(), userIds[OWNER], Date.now())
+        .run();
+    });
+    const r = await mergeWith('race-pack-rule', 1, deps);
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'APPROVALS_REQUIRED' });
+    expect(deps.paused()).toBe(true);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-pack-rule', 1)).json).toMatchObject({ state: 'open', mergeCommit: null });
+  });
+
+  it('a head refresh that lands while the pack is prepared stops publication of the old head', async () => {
+    const repo = await seedRepo('race-pack-head');
+    const { main, feature } = await divergent(repo);
+    await create('race-pack-head', { title: 'x', base: 'main', head: 'feature' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'B2\n' }, [feature.sha]);
+    const deps = pausedAfterPack(async () => {
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-pack-head', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    });
+    const r = await mergeWith('race-pack-head', 1, deps);
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'HEAD_MOVED' });
+    expect(deps.paused()).toBe(true);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect((await get('race-pack-head', 1)).json).toMatchObject({ state: 'open', headSha: c2.sha, mergeCommit: null });
+  });
+
+  it('a merge right after a force-push, before its event, refuses HEAD_MOVED naming the live head and never publishes the previous head', async () => {
+    const repo = await seedRepo('live-force');
+    const { root, main, feature } = await divergent(repo);
+    await create('live-force', { title: 'x', base: 'main', head: 'feature' });
+    // The force-pushed head does not contain the recorded one; its push event has not been delivered.
+    const rewritten = await commit(repo, { 'README.md': 'readme\n', 'b.txt': 'rewritten\n' }, [root.sha]);
+    repo.refs.set('refs/heads/feature', rewritten.sha);
+    const r = await merge('live-force', 1);
+    expect([r.status, r.json.code, r.json.headSha, r.json.recordedHead]).toEqual([409, 'HEAD_MOVED', rewritten.sha, feature.sha]);
+    expect(r.json.error).toContain(rewritten.sha);
+    expect(r.cost.sub).toBe(1);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect((await get('live-force', 1)).json).toMatchObject({ state: 'open', headSha: feature.sha, mergeCommit: null });
+
+    await deliver(pushBody('live-force', 'refs/heads/feature', feature.sha, rewritten.sha, Date.now()));
+    const again = await merge('live-force', 1);
+    expect(again.json).toMatchObject({ state: 'merged', headSha: rewritten.sha });
+    const c = commitOf(repo, again.json.mergeCommit);
+    expect(c.parents).toEqual([main.sha, rewritten.sha]);
+    expect(treeNames(repo, c.tree)).toEqual({ 'README.md': 'readme\n', 'a.txt': 'A\n', 'b.txt': 'rewritten\n' });
+  });
+
+  it('a merge right after a fast-forward push, before its event, never fast-forwards the base to the previous head', async () => {
+    const repo = await seedRepo('live-ff');
+    const { main, feature } = await linear(repo);
+    await create('live-ff', { title: 'x', base: 'main', head: 'feature' });
+    const next = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'hello\nmore\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', next.sha);
+    const r = await merge('live-ff', 1);
+    expect([r.status, r.json.code, r.json.headSha, r.json.recordedHead]).toEqual([409, 'HEAD_MOVED', next.sha, feature.sha]);
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+
+    await deliver(pushBody('live-ff', 'refs/heads/feature', feature.sha, next.sha, Date.now()));
+    const again = await merge('live-ff', 1);
+    expect(again.json).toMatchObject({ state: 'merged', mergeCommit: next.sha, merge: { kind: 'fast-forward' } });
+    // The live-head confirmation rides in the base ls-refs round trip: still one ls-refs and one receive-pack.
+    expect(again.cost.sub).toBe(2);
+    expect(repo.refs.get('refs/heads/main')).toBe(next.sha);
+  });
+
+  it('an auto merge right after a push, before its event, leaves the change open; the event then merges the live head', async () => {
+    const repo = await seedRepo('live-auto');
+    const { main, feature } = await linear(repo);
+    await create('live-auto', { title: 'x', base: 'main', head: 'feature' });
+    const next = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', next.sha);
+    const r = await patch('live-auto', 1, { mergePolicy: 'auto' });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ state: 'open', mergePolicy: 'auto', headSha: feature.sha, mergeCommit: null });
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+    expect(repo.count('receivePack:')).toBe(0);
+
+    await deliver(pushBody('live-auto', 'refs/heads/feature', feature.sha, next.sha, Date.now()));
+    expect((await get('live-auto', 1)).json).toMatchObject({ state: 'merged', headSha: next.sha, mergeCommit: next.sha });
+    expect(repo.refs.get('refs/heads/main')).toBe(next.sha);
+  });
+});
+
+describe('head refresh on push', () => {
+  it('a push moves the head; an older event never rolls it back; review changes stay open', async () => {
+    const repo = await seedRepo('refresh');
+    const { main, feature } = await linear(repo);
+    const created = Date.now();
+    await create('refresh', { title: 'x', base: 'main', head: 'feature' });
+
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'hello\nmore\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', c2.sha);
+    await deliver(pushBody('refresh', 'refs/heads/feature', feature.sha, c2.sha, created + 5_000));
+    expect((await get('refresh', 1)).json).toMatchObject({ headSha: c2.sha, state: 'open' });
+    expect(await effectDetail('refresh', 'change-hooks')).toMatchObject({ state: 'done', detail: 'heads #1' });
+
+    // The push that created the branch, delivered late, is older than the change.
+    await deliver(pushBody('refresh', 'refs/heads/feature', '0'.repeat(40), feature.sha, created - 60_000));
+    expect((await get('refresh', 1)).json.headSha).toBe(c2.sha);
+
+    // Other branches and deletes leave the head alone.
+    await deliver(pushBody('refresh', 'refs/heads/main', main.sha, main.sha, created + 6_000));
+    await deliver(pushBody('refresh', 'refs/heads/feature', c2.sha, '0'.repeat(40), created + 7_000));
+    expect((await get('refresh', 1)).json).toMatchObject({ headSha: c2.sha, state: 'open' });
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+  });
+
+  it('closed and merged changes keep their head', async () => {
+    const repo = await seedRepo('refresh-closed');
+    const { feature } = await linear(repo);
+    const created = Date.now();
+    await create('refresh-closed', { title: 'x', base: 'main', head: 'feature' });
+    await patch('refresh-closed', 1, { state: 'closed' });
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', c2.sha);
+    await deliver(pushBody('refresh-closed', 'refs/heads/feature', feature.sha, c2.sha, created + 5_000));
+    expect((await get('refresh-closed', 1)).json.headSha).toBe(feature.sha);
+  });
+
+  it('an auto change merges when a push makes it mergeable', async () => {
+    const repo = await seedRepo('refresh-auto');
+    const { main, feature } = await conflicting(repo);
+    const created = Date.now();
+    const r = await create('refresh-auto', { title: 'x', base: 'main', head: 'feature', mergePolicy: 'auto' });
+    expect(r.json.state).toBe('conflicted');
+    expect(repo.refs.get('refs/heads/main')).toBe(main.sha);
+
+    // Resolve by merging main into feature.
+    const resolved = await commit(repo, { 'README.md': 'resolved\n' }, [feature.sha, main.sha]);
+    repo.refs.set('refs/heads/feature', resolved.sha);
+    await deliver(pushBody('refresh-auto', 'refs/heads/feature', feature.sha, resolved.sha, created + 5_000));
+    expect((await get('refresh-auto', 1)).json).toMatchObject({ state: 'merged', headSha: resolved.sha, mergeCommit: resolved.sha });
+    expect(repo.refs.get('refs/heads/main')).toBe(resolved.sha);
+    expect(await effectDetail('refresh-auto', 'change-hooks')).toMatchObject({ state: 'done', detail: 'heads #1; auto-merged #1' });
+  });
+
+  it('a push that lands while the change is created and is delivered before the insert is adopted', async () => {
+    const repo = await seedRepo('race-create-before');
+    const { feature } = await linear(repo);
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.hook = async (c) => {
+      if (c !== 'lsRefs') return;
+      repo.hook = null;
+      repo.refs.set('refs/heads/feature', c2.sha);
+      await deliver(pushBody('race-create-before', 'refs/heads/feature', feature.sha, c2.sha, Date.now()));
+    };
+    const r = await create('race-create-before', { title: 'x', base: 'main', head: 'feature' });
+    expect(r.status).toBe(201);
+    expect(r.json.headSha).toBe(c2.sha);
+    expect((await get('race-create-before', 1)).json.headSha).toBe(c2.sha);
+  });
+
+  it('a push that lands while the change is created and is delivered after the insert refreshes the head', async () => {
+    const repo = await seedRepo('race-create-after');
+    const { feature } = await linear(repo);
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    let pushedAt = 0;
+    repo.hook = async (c) => {
+      if (c !== 'lsRefs') return;
+      repo.hook = null;
+      repo.refs.set('refs/heads/feature', c2.sha);
+      pushedAt = Date.now();
+    };
+    const r = await create('race-create-after', { title: 'x', base: 'main', head: 'feature' });
+    expect(r.json.headSha).toBe(feature.sha);
+    await deliver(pushBody('race-create-after', 'refs/heads/feature', feature.sha, c2.sha, pushedAt));
+    expect((await get('race-create-after', 1)).json.headSha).toBe(c2.sha);
+    // The push that put the observed head there, delivered late, still never rolls it back.
+    await deliver(pushBody('race-create-after', 'refs/heads/feature', '0'.repeat(40), feature.sha, pushedAt - 60_000));
+    expect((await get('race-create-after', 1)).json.headSha).toBe(c2.sha);
+  });
+
+  it('a change created after its head push was ingested keeps that push as its watermark', async () => {
+    const repo = await seedRepo('race-create-ingested');
+    const { feature } = await linear(repo);
+    const pushedAt = Date.now() - 30_000;
+    await deliver(pushBody('race-create-ingested', 'refs/heads/feature', '0'.repeat(40), feature.sha, pushedAt));
+    expect((await create('race-create-ingested', { title: 'x', base: 'main', head: 'feature' })).json.headSha).toBe(feature.sha);
+    const row = await env.DB.prepare('SELECT head_event_at FROM change_sets WHERE repo_id = ?').bind(repoIds['race-create-ingested']).first<{ head_event_at: number }>();
+    expect(row?.head_event_at).toBe(pushedAt);
+    const c2 = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', c2.sha);
+    await deliver(pushBody('race-create-ingested', 'refs/heads/feature', feature.sha, c2.sha, pushedAt + 1));
+    expect((await get('race-create-ingested', 1)).json.headSha).toBe(c2.sha);
+  });
+});
+
+describe('auto-merge selection', () => {
+  /** Twenty older open auto changes (#1-#20) on their own branches, all conflicting with main. */
+  async function seedStuckAutoChanges(repo: string, headSha: string) {
+    await env.DB.batch(
+      Array.from({ length: 20 }, (_, i) =>
+        env.DB.prepare(
+          `INSERT INTO change_sets (id, repo_id, number, title, base_ref, head_ref, head_sha, state, merge_policy, kind, created_at, updated_at, head_event_at)
+           VALUES (?, ?, ?, ?, 'main', ?, ?, 'open', 'auto', 'change', ?, ?, ?)`,
+        ).bind(crypto.randomUUID(), repoIds[repo], i + 1, `stuck ${i + 1}`, `stuck-${i + 1}`, headSha, Date.now(), Date.now(), Date.now()),
+      ),
+    );
+  }
+
+  it('a push merges its ready auto change even behind twenty older unmergeable auto changes', async () => {
+    const repo = await seedRepo('auto-many');
+    const { main, feature } = await conflicting(repo);
+    await seedStuckAutoChanges('auto-many', feature.sha);
+    const created = await create('auto-many', { title: 'mine', base: 'main', head: 'feature', mergePolicy: 'auto' });
+    expect(created.json).toMatchObject({ number: 21, state: 'conflicted' });
+
+    const resolved = await commit(repo, { 'README.md': 'resolved\n' }, [feature.sha, main.sha]);
+    repo.refs.set('refs/heads/feature', resolved.sha);
+    await deliver(pushBody('auto-many', 'refs/heads/feature', feature.sha, resolved.sha, Date.now() + 5_000));
+    expect((await get('auto-many', 21)).json).toMatchObject({ state: 'merged', mergeCommit: resolved.sha });
+    expect(await effectDetail('auto-many', 'change-hooks')).toMatchObject({ state: 'done', detail: 'heads #21; auto-merged #21' });
+    expect((await get('auto-many', 1)).json.state).toBe('open');
+  });
+
+  it('processing every auto change is bounded per call and reports where to continue', async () => {
+    const repo = await seedRepo('auto-all');
+    const { root, feature } = await conflicting(repo);
+    await seedStuckAutoChanges('auto-all', feature.sha);
+    await create('auto-all', { title: 'mine', base: 'main', head: 'feature', mergePolicy: 'auto' });
+    const r21 = await commit(repo, { 'README.md': 'one\n', 'mine.txt': 'mine\n' }, [root.sha]);
+    repo.refs.set('refs/heads/feature', r21.sha);
+    await env.DB.prepare(`UPDATE change_sets SET head_sha = ?, state = 'open', conflicts = NULL WHERE repo_id = ? AND number = 21`).bind(r21.sha, repoIds['auto-all']).run();
+
+    const repoId = repoIds['auto-all']!;
+    const id21 = (await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 21').bind(repoId).first<{ id: string }>())!.id;
+    expect(await recordGuard(env, repoId, id21, r21.sha)).toBe('recorded');
+    const first = await mergeReadyAutoChanges(env, repoId, null, () => {});
+    expect(first).toEqual({ merged: [], failed: [], next: 20 });
+    expect(await mergeReadyAutoChanges(env, repoId, null, () => {}, { after: first.next! })).toEqual({ merged: [21], failed: [], next: null });
+  });
+});
+
+describe('list state=all over a long history', () => {
+  const STATES = ['open', 'merged', 'closed', 'merged', 'conflicted'] as const;
+
+  async function seedHistory(repo: string, count: number) {
+    await seedRepo(repo);
+    const now = Date.now();
+    for (let start = 0; start < count; start += 50) {
+      await env.DB.batch(
+        Array.from({ length: Math.min(50, count - start) }, (_, j) => {
+          const n = start + j + 1;
+          return env.DB.prepare(
+            `INSERT INTO change_sets (id, repo_id, number, title, base_ref, head_ref, head_sha, state, merge_policy, kind, created_at, updated_at, head_event_at)
+             VALUES (?, ?, ?, ?, 'main', ?, ?, ?, 'review', 'change', ?, ?, ?)`,
+          ).bind(crypto.randomUUID(), repoIds[repo], n, `history ${n}`, `h-${n}`, 'a'.repeat(40), STATES[n % STATES.length], now, now, now);
+        }),
+      );
+    }
+  }
+
+  async function plan(state: string): Promise<string> {
+    const sql = listChangesSql(state, 11);
+    const stmt = env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+    const bound = state === 'all' ? stmt.bind('repo', 1e9) : stmt.bind('repo', 1e9, state);
+    const { results } = await bound.all<{ detail: string }>();
+    return results.map((r) => r.detail).join('\n');
+  }
+
+  // The UNIQUE(repo_id, number) constraint index of change_sets serves the
+  // state=all filter, cursor and ORDER BY; a separate (repo_id, number) index
+  // would only duplicate it.
+  it('the state=all page walks (repo_id, number) newest first: no temp B-tree sort', async () => {
+    const all = await plan('all');
+    expect(all).toMatch(/SEARCH c USING (COVERING )?INDEX \S+ \(repo_id=\? AND number<\?\)/);
+    expect(all).not.toContain('USE TEMP B-TREE');
+    const open = await plan('open');
+    expect(open).toContain('idx_cs_repo_state_number');
+    expect(open).not.toContain('USE TEMP B-TREE');
+  });
+
+  it('rows read by a state=all page do not grow with the repo history', async () => {
+    await seedHistory('hist-20', 20);
+    await seedHistory('hist-200', 200);
+    // Settles the token's last-used stamp so both pages pay the same authority rows.
+    await list('hist-20', '?state=all&limit=1');
+    const small = await list('hist-20', '?state=all&limit=10');
+    const large = await list('hist-200', '?state=all&limit=10');
+    expect(small.status).toBe(200);
+    expect(large.status).toBe(200);
+    expect(small.json.changes.map((c: { number: number }) => c.number)).toEqual([20, 19, 18, 17, 16, 15, 14, 13, 12, 11]);
+    expect(large.json.changes.map((c: { number: number }) => c.number)).toEqual([200, 199, 198, 197, 196, 195, 194, 193, 192, 191]);
+    expect(large.json.nextCursor).toBe('191');
+    const deep = await list('hist-200', '?state=all&limit=10&cursor=101');
+    expect(deep.json.changes[0].number).toBe(100);
+    expect(small.cost.d1).toBe(2);
+    expect(large.cost.d1).toBe(2);
+    expect(large.cost.rr).toBe(small.cost.rr);
+    expect(deep.cost.rr).toBe(small.cost.rr);
+    for (const [repo, cursor] of [['hist-20', Number.MAX_SAFE_INTEGER], ['hist-200', Number.MAX_SAFE_INTEGER], ['hist-200', 101]] as const) {
+      const page = await env.DB.prepare(listChangesSql('all', 11)).bind(repoIds[repo], cursor).all();
+      expect(page.meta.rows_read, `${repo} < ${cursor}`).toBe(11);
+    }
+  });
+});
+
+describe('repo delete', () => {
+  it('removes the changes and their check runs with the repo', async () => {
+    const repo = await seedRepo('delete');
+    await linear(repo);
+    await create('delete', { title: 'x', base: 'main', head: 'feature' });
+    const row = (await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ?').bind(repoIds.delete).first<{ id: string; head_sha: string }>())!;
+    await env.DB.prepare(
+      `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, created_at) VALUES (?, ?, ?, ?, 'ci', 'queued', ?)`,
+    )
+      .bind(crypto.randomUUID(), repoIds.delete, row.id, row.head_sha, Date.now())
+      .run();
+    const del = await call('DELETE', `/api/v1/repos/${OWNER}/delete`, tok.owner);
+    expect(del.status).toBeLessThan(300);
+    expect(await rowCount('delete')).toBe(0);
+    const runs = await env.DB.prepare('SELECT COUNT(*) AS n FROM check_runs WHERE repo_id = ?').bind(repoIds.delete).first<{ n: number }>();
+    expect(runs?.n).toBe(0);
+  });
+});

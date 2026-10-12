@@ -1,0 +1,10 @@
+{
+  "name": "@kvarm/ops",
+  "version": "0.1.0",
+  "description": "The one operation registry shared by the kvarm CLI and the MCP server",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  }
+}

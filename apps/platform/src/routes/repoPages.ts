@@ -1,0 +1,655 @@
+/**
+ * Repo web pages: tree browser, file view, raw files, commit history, commit
+ * detail, branch list, settings. SSR HTML, zero client JS except the copy
+ * button. Public anonymous views are edge-cached; mutable-ref keys carry the
+ * repo view generation that a confirmed push moves.
+ *
+ * Speed choices baked in:
+ *  - No last-commit-message per tree row (that needs a history walk per path,
+ *    which is the slowest part of GitHub's file browser). Rows are O(entries).
+ *  - Huge files render in line windows instead of one giant DOM.
+ *  - README HTML is cached content-addressed by blob SHA: render once ever.
+ *
+ * Escaping convention: user data is interpolated bare into html`` (escaped
+ * once); composed fragments and pre-encoded URLs go through raw(). Never
+ * pre-escape a value that html`` will interpolate.
+ */
+
+import { Hono, type Context } from 'hono';
+import { escapeHtml, formatBytes, html, raw, timeAgo } from '@kvarm/ui';
+import type { RepoRow } from '../db/repos';
+import { clientIp, requestCredential, type ApiActor } from './api';
+import { layout } from '../web/render';
+import { repoPage } from '../render/repoShell';
+import {
+  commitAt,
+  isCommitRef,
+  listRefs,
+  readFileAt,
+  readCommit,
+  readTreeAtPath,
+  README_CANDIDATES,
+} from '../artifacts/repo';
+import { renderMarkdown } from '../render/markdown';
+import { edgeCachedPage } from '../cache/edge';
+import { readFileImmutable } from '../cache/content';
+import { PRIVATE_CACHE_CONTROL } from '../cache/scope';
+import * as svc from '../repos/service';
+import type { RepoNeed, RepoRole } from '../services/authz';
+import { resolveRepoAccess } from '../services/access';
+import { repoViewGeneration } from '../services/pushFreshness';
+
+type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
+export const repoPages = new Hono<App>();
+
+const MAX_RENDER_LINES = 1500;
+const WINDOW_LINES = 1000;
+
+interface Resolved {
+  repo: RepoRow;
+  viewer: ApiActor | null;
+  role: RepoRole;
+}
+
+/** Persist refreshed session cookies (threaded by requestCredential) on responses. */
+function finish(c: Context<App>, res: Response): Response {
+  for (const cookie of c.get('refreshCookies') ?? []) res.headers.append('Set-Cookie', cookie);
+  return res;
+}
+
+/** Percent-encode each path segment, keeping the slashes. */
+function encodePath(path: string): string {
+  return path
+    .split('/')
+    .filter((p) => p.length > 0)
+    .map((p) => encodeURIComponent(p))
+    .join('/');
+}
+
+/**
+ * Owner/name -> repo row + permission check. 404 when invisible. A rejected
+ * Bearer token on a page is treated as an anonymous view.
+ */
+async function resolveRepo(c: Context<App>, need: RepoNeed = 'read'): Promise<Resolved | null> {
+  const owner = c.req.param('owner');
+  const name = c.req.param('repo');
+  if (!owner || !name) return null;
+  const access = await resolveRepoAccess(c.env, {
+    owner,
+    name,
+    need,
+    transport: 'page',
+    credential: await requestCredential(c),
+    clientIp: clientIp(c),
+    rejectedCredentialAsAnonymous: true,
+  });
+  if (!access.ok) return null;
+  return { repo: access.repo, viewer: access.actor, role: access.role };
+}
+
+/** Settings pages are concealed from viewers without admin on the repo. */
+function canAdminister(resolved: Resolved): resolved is Resolved & { viewer: ApiActor } {
+  return resolved.viewer !== null && resolved.role === 'admin';
+}
+
+/** Segments after /{owner}/{repo}/{marker}/..., with ref and path decoded. */
+function refAndRest(c: Context<App>, marker: string): { ref: string; rest: string } | null {
+  const segs = new URL(c.req.url).pathname.split('/').filter(Boolean);
+  // [owner, repo, marker, ref, ...rest]
+  if (segs.length < 4 || segs[2] !== marker) return null;
+  try {
+    const ref = decodeURIComponent(segs[3]!);
+    const rest = segs.slice(4).map((s) => decodeURIComponent(s)).join('/');
+    return { ref, rest };
+  } catch {
+    return null; // malformed percent-encoding
+  }
+}
+
+function notFound(_c: Context<App>): Response {
+  return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+}
+
+/** Artifacts can 404 while an import is still warming up. */
+function warmingPage(c: Context<App>, repo: RepoRow, viewerLogin: string | null): Response {
+  return finish(
+    c,
+    new Response(
+      layout(
+        c.env,
+        { title: `${repo.owner_login}/${repo.name}`, userLogin: viewerLogin },
+        `<div class="card"><p>This repository is still being imported upstream.</p>
+         <p class="muted">Content will appear here once the import completes.</p></div>`,
+      ),
+      { status: 202, headers: { 'content-type': 'text/html; charset=utf-8', refresh: '10' } },
+    ),
+  );
+}
+
+function isWarming(err: unknown): boolean {
+  return /NOT_FOUND|not exist|not ready|importing/i.test(String(err));
+}
+
+/** Anonymous public view cache; mutable refs are keyed by the repo view generation. */
+async function cachedView(
+  c: Context<App>,
+  resolved: Resolved,
+  ref: string,
+  render: () => Promise<Response>,
+): Promise<Response> {
+  if (isCommitRef(ref)) return edgeCachedPage(c, 31536000, null, render);
+  return edgeCachedPage(c, 60, await repoViewGeneration(resolved.repo), render);
+}
+
+async function defaultRef(c: Context<App>, repo: RepoRow): Promise<string> {
+  const q = c.req.query('ref');
+  if (q) return q;
+  return repo.default_branch || 'main';
+}
+
+// ---------------------------------------------------------------------------
+// Repo home + tree
+// ---------------------------------------------------------------------------
+
+async function renderTreeView(
+  c: Context<App>,
+  resolved: Resolved,
+  ref: string,
+  path: string,
+  viewerLogin: string | null,
+): Promise<Response> {
+  let tree: {
+    entries: ArtifactsTreeEntry[];
+    rootTreeHash: string;
+    commit: ArtifactsCommitMetadata;
+  } | null;
+  try {
+    tree = await readTreeAtPath(c.env, resolved.repo.artifacts_name, ref, path);
+  } catch (err) {
+    if (isWarming(err)) return warmingPage(c, resolved.repo, viewerLogin);
+    throw err;
+  }
+  if (!tree) return notFound(c);
+
+  const sorted = [...tree.entries].sort((a, b) => {
+    const aDir = a.mode === '40000' ? 0 : 1;
+    const bDir = b.mode === '40000' ? 0 : 1;
+    if (aDir !== bDir) return aDir - bDir;
+    return a.name < b.name ? -1 : 1;
+  });
+
+  const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  const encRef = encodeURIComponent(ref);
+  const dirPrefix = path ? `${encodePath(path)}/` : '';
+  const rows = sorted
+    .map((e) => {
+      const isDir = e.mode === '40000';
+      const href = `${base}/${isDir ? 'tree' : 'blob'}/${encRef}/${dirPrefix}${encodeURIComponent(e.name)}`;
+      return html`
+        <div class="tree-row">
+          <a class="${isDir ? 'dir' : 'file'}" href="${raw(href)}">${isDir ? '▸' : '≡'} ${e.name}</a>
+        </div>
+      `;
+    })
+    .join('');
+
+  const upHref = path
+    ? `${base}/tree/${encRef}${path.includes('/') ? `/${encodePath(path.split('/').slice(0, -1).join('/'))}` : ''}`
+    : '';
+  const upRow = upHref ? html`<div class="tree-row"><a href="${raw(upHref)}">..</a></div>` : '';
+
+  // README below the tree, rendered once per blob content and cached by SHA.
+  let readmeHtml = '';
+  for (const candidate of README_CANDIDATES) {
+    const entry = sorted.find((e) => e.name.toLowerCase() === candidate.toLowerCase());
+    if (!entry) continue;
+    const cache = caches.default;
+    const mdKey = new Request(`https://kvarm.internal/md/${entry.hash}`, { method: 'GET' });
+    let rendered = await cache.match(mdKey);
+    if (!rendered) {
+      const blob = await readFileAt(
+        c.env,
+        resolved.repo.artifacts_name,
+        ref,
+        path ? `${path}/${entry.name}` : entry.name,
+      );
+      if (!blob) continue;
+      const text = await blob.text();
+      rendered = new Response(renderMarkdown(text), {
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'public, max-age=31536000, immutable',
+        },
+      });
+      c.executionCtx.waitUntil(cache.put(mdKey, rendered.clone()).catch(() => undefined));
+    }
+    readmeHtml = html`
+      <div class="card md">
+        <div class="card-title">${entry.name}</div>
+        ${raw(await rendered.text())}
+      </div>
+    `;
+    break;
+  }
+
+  const body = html`
+    <div class="card">
+      <div class="tree-list">
+        ${raw(upRow)}
+        ${raw(rows || '<p class="muted">empty directory</p>')}
+      </div>
+    </div>
+    ${raw(readmeHtml)}
+  `;
+
+  const page = repoPage(
+    c.env,
+    { repo: resolved.repo, ref, path, tab: 'code' },
+    viewerLogin,
+    body,
+  );
+  return finish(
+    c,
+    new Response(page, {
+      status: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    }),
+  );
+}
+
+repoPages.get('/', async (c) => {
+  const resolved = await resolveRepo(c);
+  if (!resolved) return notFound(c);
+  const ref = await defaultRef(c, resolved.repo);
+  const cacheable =
+    resolved.repo.visibility === 'public' &&
+    !c.req.header('cookie')?.includes('wos-session');
+  if (cacheable) {
+    const render = () => renderTreeView(c, resolved, ref, '', null);
+    return cachedView(c, resolved, ref, render);
+  }
+  const viewerLogin = resolved.viewer?.user.login ?? null;
+  return renderTreeView(c, resolved, ref, '', viewerLogin);
+});
+
+repoPages.get('/tree/:ref{.+}', async (c) => {
+  const resolved = await resolveRepo(c);
+  if (!resolved) return notFound(c);
+  const parsed = refAndRest(c, 'tree');
+  if (!parsed) return notFound(c);
+  const cacheable =
+    resolved.repo.visibility === 'public' &&
+    !c.req.header('cookie')?.includes('wos-session');
+  if (cacheable) {
+    const render = () => renderTreeView(c, resolved, parsed.ref, parsed.rest, null);
+    return cachedView(c, resolved, parsed.ref, render);
+  }
+  const viewerLogin = resolved.viewer?.user.login ?? null;
+  return renderTreeView(c, resolved, parsed.ref, parsed.rest, viewerLogin);
+});
+
+// ---------------------------------------------------------------------------
+// Blob + raw
+// ---------------------------------------------------------------------------
+
+async function renderBlob(
+  c: Context<App>,
+  resolved: Resolved,
+  ref: string,
+  path: string,
+  viewerLogin: string | null,
+  contentCache: boolean,
+): Promise<Response> {
+  let blob: Blob | null;
+  try {
+    blob = contentCache
+      ? await readFileImmutable(c.env, c.executionCtx, resolved.repo, ref, path)
+      : await readFileAt(c.env, resolved.repo.artifacts_name, ref, path);
+  } catch (err) {
+    if (isWarming(err)) return warmingPage(c, resolved.repo, viewerLogin);
+    throw err;
+  }
+  if (!blob) return notFound(c);
+
+  const name = path.split('/').pop() ?? '';
+  const isImage = blob.type.startsWith('image/');
+  const isMarkdown = /\.(md|markdown|mdx)$/i.test(name);
+  const rawBase = `/${resolved.repo.owner_login}/${resolved.repo.name}/raw/${encodeURIComponent(ref)}/${encodePath(path)}`;
+  const headers = { 'content-type': 'text/html; charset=utf-8' };
+
+  if (isImage) {
+    const body = html`<div class="card"><img src="${rawBase}" alt="${name}" style="max-width:100%"></div>`;
+    return finish(
+      c,
+      new Response(
+        repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body),
+        { status: 200, headers },
+      ),
+    );
+  }
+
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const binary = buf.slice(0, 8000).includes(0);
+  if (binary) {
+    const body = html`
+      <div class="card">
+        <p>This file is binary (${formatBytes(buf.length)}).</p>
+        <p><a class="btn" href="${raw(rawBase)}">Download raw</a></p>
+      </div>
+    `;
+    return finish(
+      c,
+      new Response(
+        repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body),
+        { status: 200, headers },
+      ),
+    );
+  }
+
+  const text = new TextDecoder().decode(buf);
+  const totalLines = text.length === 0 ? 1 : text.split('\n').length;
+  const fromParam = Number(c.req.query('from') ?? 1);
+  const from = Math.max(1, Math.min(totalLines, Number.isFinite(fromParam) ? fromParam : 1));
+  const needsWindow = totalLines > MAX_RENDER_LINES;
+  const to = needsWindow ? Math.min(totalLines, from + WINDOW_LINES - 1) : totalLines;
+  const lines = needsWindow ? text.split('\n').slice(from - 1, to) : text.split('\n');
+
+  let contentHtml: string;
+  if (isMarkdown && !needsWindow) {
+    contentHtml = renderMarkdown(text);
+  } else {
+    const rows = lines
+      .map((lineText, i) => {
+        const no = from + i;
+        return `<div class="code-row" id="L${no}"><span class="ln">${no}</span><span class="cl">${escapeHtml(lineText)}</span></div>`;
+      })
+      .join('');
+    contentHtml = `<div class="codeview">${rows}</div>`;
+  }
+
+  const pagerHtml = needsWindow
+    ? html`
+        <div class="pager">
+          ${from > 1 ? raw(`<a class="btn" href="?from=${Math.max(1, from - WINDOW_LINES)}">Previous</a>`) : ''}
+          <span class="muted">lines ${from}–${to} of ${totalLines}</span>
+          ${to < totalLines ? raw(`<a class="btn" href="?from=${to + 1}">Next</a>`) : ''}
+          <a class="btn" href="${raw(rawBase)}">Raw</a>
+        </div>
+      `
+    : html`<div class="pager"><a class="btn" href="${raw(rawBase)}">Raw</a></div>`;
+
+  const body = html`
+    <div class="card">
+      <div class="card-title">
+        ${name}
+        <span class="muted">${formatBytes(buf.length)} · ${totalLines} lines</span>
+      </div>
+      ${raw(pagerHtml)}
+      ${raw(contentHtml)}
+    </div>
+  `;
+  return finish(
+    c,
+    new Response(
+      repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body),
+      { status: 200, headers },
+    ),
+  );
+}
+
+repoPages.get('/blob/:ref{.+}', async (c) => {
+  const resolved = await resolveRepo(c);
+  if (!resolved) return notFound(c);
+  const parsed = refAndRest(c, 'blob');
+  if (!parsed) return notFound(c);
+  const cacheable =
+    resolved.repo.visibility === 'public' &&
+    !c.req.header('cookie')?.includes('wos-session');
+  if (cacheable) {
+    const render = () => renderBlob(c, resolved, parsed.ref, parsed.rest, null, false);
+    return cachedView(c, resolved, parsed.ref, render);
+  }
+  const viewerLogin = resolved.viewer?.user.login ?? null;
+  return renderBlob(c, resolved, parsed.ref, parsed.rest, viewerLogin, true);
+});
+
+repoPages.get('/raw/:ref{.+}', async (c) => {
+  const resolved = await resolveRepo(c);
+  if (!resolved) return notFound(c);
+  const parsed = refAndRest(c, 'raw');
+  if (!parsed) return notFound(c);
+  const cacheable =
+    resolved.repo.visibility === 'public' &&
+    !c.req.header('cookie')?.includes('wos-session');
+  const shared = resolved.repo.visibility === 'public' && resolved.viewer === null;
+  const render = async (): Promise<Response> => {
+    try {
+      const blob = cacheable
+        ? await readFileAt(c.env, resolved.repo.artifacts_name, parsed.ref, parsed.rest)
+        : await readFileImmutable(c.env, c.executionCtx, resolved.repo, parsed.ref, parsed.rest);
+      if (!blob) return notFound(c);
+      const headers = new Headers();
+      headers.set('content-type', blob.type || 'application/octet-stream');
+      if (!shared) {
+        headers.set('cache-control', PRIVATE_CACHE_CONTROL);
+      } else if (isCommitRef(parsed.ref)) {
+        headers.set('cache-control', 'public, max-age=31536000, immutable');
+      } else {
+        headers.set('cache-control', 'public, max-age=60');
+      }
+      return finish(c, new Response(blob, { headers }));
+    } catch (err) {
+      if (isWarming(err)) return warmingPage(c, resolved.repo, null);
+      throw err;
+    }
+  };
+  if (cacheable) return cachedView(c, resolved, parsed.ref, render);
+  return render();
+});
+
+// ---------------------------------------------------------------------------
+// Commits
+// ---------------------------------------------------------------------------
+
+repoPages.get('/commits', async (c) => {
+  const resolved = await resolveRepo(c);
+  if (!resolved) return notFound(c);
+  const ref = await defaultRef(c, resolved.repo);
+  const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
+  const LIMIT = 30;
+  let commits: ArtifactsCommitMetadata[];
+  try {
+    commits = await commitAt(c.env, resolved.repo.artifacts_name, ref, LIMIT, (page - 1) * LIMIT);
+  } catch (err) {
+    if (isWarming(err)) return warmingPage(c, resolved.repo, resolved.viewer?.user.login ?? null);
+    throw err;
+  }
+  const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  const rows = commits
+    .map((cm) => {
+      const title = cm.message.split('\n')[0] ?? '';
+      return html`
+        <div class="commit-row">
+          <div>
+            <a href="${base}/commit/${cm.hash}"><strong>${title}</strong></a>
+            <div class="muted">${cm.author.name} committed ${timeAgo(cm.committedAt * 1000)}</div>
+          </div>
+          <code>${cm.hash.slice(0, 10)}</code>
+        </div>
+      `;
+    })
+    .join('');
+  const viewerLogin = resolved.viewer?.user.login ?? null;
+  const body = html`
+    <div class="card">
+      <div class="card-title">Commits on <code>${ref}</code></div>
+      ${raw(rows || '<p class="muted">no commits yet</p>')}
+      <div class="pager">
+        ${page > 1 ? raw(`<a class="btn" href="?ref=${encodeURIComponent(ref)}&page=${page - 1}">Newer</a>`) : ''}
+        ${commits.length === LIMIT ? raw(`<a class="btn" href="?ref=${encodeURIComponent(ref)}&page=${page + 1}">Older</a>`) : ''}
+      </div>
+    </div>
+  `;
+  return finish(
+    c,
+    new Response(
+      repoPage(c.env, { repo: resolved.repo, ref, tab: 'commits' }, viewerLogin, body),
+      { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    ),
+  );
+});
+
+repoPages.get('/commit/:sha', async (c) => {
+  const resolved = await resolveRepo(c);
+  if (!resolved) return notFound(c);
+  const sha = c.req.param('sha');
+  let commit: ArtifactsCommitMetadata | null;
+  try {
+    commit = await readCommit(c.env, resolved.repo.artifacts_name, sha);
+  } catch (err) {
+    if (isWarming(err)) return warmingPage(c, resolved.repo, resolved.viewer?.user.login ?? null);
+    throw err;
+  }
+  if (!commit) return notFound(c);
+  const viewerLogin = resolved.viewer?.user.login ?? null;
+  const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  const body = html`
+    <div class="card">
+      <div class="card-title">
+        <strong>${commit.message.split('\n')[0] ?? ''}</strong>
+      </div>
+      <p class="muted">
+        ${commit.author.name} &lt;${commit.author.email}&gt;
+        committed ${timeAgo(commit.committedAt * 1000)}
+      </p>
+      <pre><code>${commit.message}</code></pre>
+      <p>
+        commit <code>${commit.hash}</code> ·
+        tree <code>${commit.treeHash.slice(0, 10)}</code>
+        ${commit.parents.map((p) => raw(html` · parent <a href="${base}/commit/${p}"><code>${p.slice(0, 10)}</code></a>`))}
+      </p>
+      <p><a class="btn" href="${base}/tree/${commit.hash}">Browse tree at this commit</a></p>
+    </div>
+  `;
+  return finish(
+    c,
+    new Response(
+      repoPage(
+        c.env,
+        {
+          repo: resolved.repo,
+          ref: commit.hash.slice(0, 10),
+          tab: 'commits',
+          title: commit.message.split('\n')[0] ?? '',
+        },
+        viewerLogin,
+        body,
+      ),
+      { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Branches
+// ---------------------------------------------------------------------------
+
+repoPages.get('/branches', async (c) => {
+  const resolved = await resolveRepo(c);
+  if (!resolved) return notFound(c);
+  let refs: Awaited<ReturnType<typeof listRefs>>;
+  try {
+    refs = await listRefs(c.env, resolved.repo);
+  } catch (err) {
+    if (isWarming(err)) return warmingPage(c, resolved.repo, resolved.viewer?.user.login ?? null);
+    throw err;
+  }
+  const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  const rows = refs.branches
+    .map((b) => {
+      const short = b.name.replace('refs/heads/', '');
+      const href = `${base}/tree/${encodeURIComponent(short)}`;
+      return html`<div class="commit-row"><div><a href="${raw(href)}"><strong>${short}</strong></a></div></div>`;
+    })
+    .join('');
+  const viewerLogin = resolved.viewer?.user.login ?? null;
+  const body = html`<div class="card"><div class="card-title">Branches</div>${raw(rows || '<p class="muted">no branches</p>')}</div>`;
+  return finish(
+    c,
+    new Response(
+      repoPage(
+        c.env,
+        {
+          repo: resolved.repo,
+          ref: resolved.repo.default_branch,
+          tab: 'branches',
+          branches: refs.branches,
+        },
+        viewerLogin,
+        body,
+      ),
+      { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Settings (owner only)
+// ---------------------------------------------------------------------------
+
+repoPages.get('/settings', async (c) => {
+  const resolved = await resolveRepo(c, 'admin');
+  if (!resolved) return notFound(c);
+  if (!canAdminister(resolved)) return notFound(c);
+  const repo = resolved.repo;
+  const viewerLogin = resolved.viewer.user.login;
+  const body = html`
+    <div class="card">
+      <div class="card-title">Repository settings</div>
+      <form method="post" action="/${repo.owner_login}/${repo.name}/settings">
+        <label for="description">Description</label>
+        <input id="description" name="description" type="text" value="${repo.description ?? ''}" />
+        <label for="visibility">Visibility</label>
+        <select id="visibility" name="visibility">
+          <option value="private" ${repo.visibility === 'private' ? 'selected' : ''}>private</option>
+          <option value="public" ${repo.visibility === 'public' ? 'selected' : ''}>public</option>
+        </select>
+        <p><button class="btn primary" type="submit">Save</button></p>
+      </form>
+    </div>
+    <div class="card">
+      <div class="card-title">Danger zone</div>
+      <form method="post" action="/${repo.owner_login}/${repo.name}/delete"
+            onsubmit="return confirm('Delete this repository permanently?')">
+        <button class="btn" type="submit">Delete repository</button>
+      </form>
+    </div>
+  `;
+  return finish(
+    c,
+    new Response(
+      repoPage(c.env, { repo, ref: repo.default_branch, tab: 'settings' }, viewerLogin, body),
+      { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    ),
+  );
+});
+
+repoPages.post('/settings', async (c) => {
+  const resolved = await resolveRepo(c, 'admin');
+  if (!resolved) return notFound(c);
+  if (!canAdminister(resolved)) return notFound(c);
+  const form = await c.req.parseBody();
+  const updated = await svc.updateRepo(c.env, resolved.repo, {
+    description: String(form.description ?? ''),
+    visibility: form.visibility === 'public' ? 'public' : 'private',
+  });
+  return finish(c, c.redirect(`/${updated.owner_login}/${updated.name}/settings`));
+});
+
+repoPages.post('/delete', async (c) => {
+  const resolved = await resolveRepo(c, 'admin');
+  if (!resolved) return notFound(c);
+  if (!canAdminister(resolved)) return notFound(c);
+  await svc.deleteRepo(c.env, resolved.repo);
+  return finish(c, c.redirect('/'));
+});

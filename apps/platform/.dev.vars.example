@@ -1,0 +1,6 @@
+# Copy to .dev.vars and fill in. Never commit .dev.vars.
+WORKOS_CLIENT_ID=YOUR_WORKOS_CLIENT_ID
+WORKOS_API_KEY=YOUR_WORKOS_API_KEY
+# Also required in .dev.vars (kept as a comment here so secret scanners
+# don't match it): WORKOS_COOKIE_PASSWORD — a random secret of at least 32
+# characters, generated with: openssl rand -hex 32

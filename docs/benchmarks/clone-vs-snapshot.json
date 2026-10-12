@@ -1,0 +1,221 @@
+{
+  "measuredAt": "2026-10-12T00:49:27.570Z",
+  "runs": 3,
+  "host": {
+    "platform": "darwin 27.0.0",
+    "arch": "arm64",
+    "cpus": 6,
+    "node": "v26.8.2",
+    "git": "git version 2.54.0 (Apple Git-157)"
+  },
+  "targets": [
+    {
+      "target": "fixture",
+      "repo": "<owner>/fixture-1m",
+      "ref": "bench-head",
+      "sha": "08333c79998f410b9c40a84cc430ce9762c29ae8",
+      "snapshot": {
+        "size": 33487360,
+        "gzipBytes": 3140134,
+        "files": 502,
+        "reused": false
+      },
+      "summary": {
+        "clone": {
+          "minMs": 12042.3,
+          "medianMs": 12309.6,
+          "maxMs": 22740.6,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        "shallow": {
+          "minMs": 867.3,
+          "medianMs": 893.8,
+          "maxMs": 1102.9,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        "snapshot": {
+          "minMs": 888.4,
+          "medianMs": 892.8,
+          "maxMs": 963.4,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        }
+      },
+      "speedup": {
+        "vsClone": 13.8,
+        "vsShallow": 1
+      },
+      "runs": [
+        {
+          "run": 1,
+          "variant": "clone",
+          "ms": 22740.6,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 1,
+          "variant": "shallow",
+          "ms": 1102.9,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 1,
+          "variant": "snapshot",
+          "ms": 963.4,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 2,
+          "variant": "snapshot",
+          "ms": 888.4,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 2,
+          "variant": "shallow",
+          "ms": 893.8,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 2,
+          "variant": "clone",
+          "ms": 12309.6,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 3,
+          "variant": "clone",
+          "ms": 12042.3,
+          "transferBytes": 9422616,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 3,
+          "variant": "shallow",
+          "ms": 867.3,
+          "transferBytes": 3753234,
+          "treeBytes": 33032000
+        },
+        {
+          "run": 3,
+          "variant": "snapshot",
+          "ms": 892.8,
+          "transferBytes": 33487360,
+          "treeBytes": 33032000
+        }
+      ]
+    },
+    {
+      "target": "small",
+      "repo": "<owner>/m4-cli-checkout-bench-1791766098069",
+      "ref": "main",
+      "sha": "8a0d68e32960d119fff71540b14634b020a7dc77",
+      "snapshot": {
+        "size": 319488,
+        "gzipBytes": 10998,
+        "files": 61,
+        "reused": false
+      },
+      "summary": {
+        "clone": {
+          "minMs": 532.1,
+          "medianMs": 534.6,
+          "maxMs": 812.2,
+          "transferBytes": 15898,
+          "treeBytes": 268487
+        },
+        "shallow": {
+          "minMs": 444.9,
+          "medianMs": 461.7,
+          "maxMs": 565.1,
+          "transferBytes": 13657,
+          "treeBytes": 268487
+        },
+        "snapshot": {
+          "minMs": 315.1,
+          "medianMs": 328.1,
+          "maxMs": 561.4,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        }
+      },
+      "speedup": {
+        "vsClone": 1.6,
+        "vsShallow": 1.4
+      },
+      "runs": [
+        {
+          "run": 1,
+          "variant": "clone",
+          "ms": 812.2,
+          "transferBytes": 15898,
+          "treeBytes": 268487
+        },
+        {
+          "run": 1,
+          "variant": "shallow",
+          "ms": 565.1,
+          "transferBytes": 13657,
+          "treeBytes": 268487
+        },
+        {
+          "run": 1,
+          "variant": "snapshot",
+          "ms": 561.4,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        },
+        {
+          "run": 2,
+          "variant": "snapshot",
+          "ms": 315.1,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        },
+        {
+          "run": 2,
+          "variant": "shallow",
+          "ms": 461.7,
+          "transferBytes": 13657,
+          "treeBytes": 268487
+        },
+        {
+          "run": 2,
+          "variant": "clone",
+          "ms": 532.1,
+          "transferBytes": 15898,
+          "treeBytes": 268487
+        },
+        {
+          "run": 3,
+          "variant": "clone",
+          "ms": 534.6,
+          "transferBytes": 15898,
+          "treeBytes": 268487
+        },
+        {
+          "run": 3,
+          "variant": "shallow",
+          "ms": 444.9,
+          "transferBytes": 13657,
+          "treeBytes": 268487
+        },
+        {
+          "run": 3,
+          "variant": "snapshot",
+          "ms": 328.1,
+          "transferBytes": 319488,
+          "treeBytes": 268487
+        }
+      ]
+    }
+  ]
+}

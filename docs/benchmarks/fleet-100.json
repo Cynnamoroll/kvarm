@@ -1,0 +1,3631 @@
+{
+  "run": {
+    "repo": "<owner>/scale-staged-campaign-fleet-1791734157",
+    "smoke": false,
+    "startedAt": "2026-10-11T15:55:57.607Z",
+    "head": "777ce61",
+    "worker": "<worker-version>",
+    "finishedAt": "2026-10-11T16:07:34.375Z"
+  },
+  "limits": {
+    "gitChildren": 3,
+    "httpInFlight": 5,
+    "ceiling": 10000,
+    "gitWritesPerMin": 120,
+    "gitHttpPerOp": 4,
+    "pushesPerMinute": 30,
+    "enqueueIntervalMs": 600,
+    "pollIntervalMs": 4000,
+    "maxBurstMs": 2400000,
+    "maxResolutions": 5
+  },
+  "projection": {
+    "total": 3314,
+    "items": [
+      {
+        "stage": "setup",
+        "label": "bootstrap snapshot (user, kvarm-e2e, token list), repo existence check, repo create",
+        "http": 5,
+        "git": 0,
+        "requests": 5
+      },
+      {
+        "stage": "setup",
+        "label": "seed push of main",
+        "http": 0,
+        "git": 1,
+        "requests": 4
+      },
+      {
+        "stage": "fleet",
+        "label": "100 × (create agent, mint write token, create workspace)",
+        "http": 300,
+        "git": 0,
+        "requests": 300
+      },
+      {
+        "stage": "fleet",
+        "label": "100 workspace pushes (one agent token each)",
+        "http": 0,
+        "git": 100,
+        "requests": 400
+      },
+      {
+        "stage": "fleet",
+        "label": "chain pins (2) and their reads (2)",
+        "http": 4,
+        "git": 0,
+        "requests": 4
+      },
+      {
+        "stage": "observe",
+        "label": "forecast polls until all 100 observed (≤ 240 s every 4 s, 2 pages)",
+        "http": 120,
+        "git": 0,
+        "requests": 120
+      },
+      {
+        "stage": "verify-pre",
+        "label": "pre-burst: ls-remote, workspace list pages (limit 30), overlap pages (limit 50), forecast",
+        "http": 10,
+        "git": 1,
+        "requests": 14
+      },
+      {
+        "stage": "burst",
+        "label": "99 change sets",
+        "http": 99,
+        "git": 0,
+        "requests": 99
+      },
+      {
+        "stage": "burst",
+        "label": "99 enqueues + ≤ 100 429 retries (campaign retry budget)",
+        "http": 199,
+        "git": 0,
+        "requests": 199
+      },
+      {
+        "stage": "polls",
+        "label": "burst polls every 4 s for ≤ 40 min (changes pages + queue)",
+        "http": 1800,
+        "git": 0,
+        "requests": 1800
+      },
+      {
+        "stage": "resolve",
+        "label": "≤ 4 conflict resolutions (tasks, claim, complete, change read, enqueue, polls ≤ 180 s)",
+        "http": 200,
+        "git": 8,
+        "requests": 232
+      },
+      {
+        "stage": "verify-final",
+        "label": "final: fresh clone, ls-remote, workspace pages, change details, queue, sentinel, bootstrap",
+        "http": 27,
+        "git": 2,
+        "requests": 35
+      },
+      {
+        "stage": "cleanup",
+        "label": "100 agent revocations, repo delete, 404 readback",
+        "http": 102,
+        "git": 0,
+        "requests": 102
+      }
+    ],
+    "background": [
+      {
+        "label": "push events (fleet pushes, seed, resolutions, one per publication on main)",
+        "count": 208
+      },
+      {
+        "label": "kvarm/guard runs (one per change at creation, one per resolved head)",
+        "count": 103
+      },
+      {
+        "label": "Nexus observed-index reconciliations",
+        "count": 104
+      },
+      {
+        "label": "train kicks (enqueues, publications, pin settlement)",
+        "count": 204
+      },
+      {
+        "label": "train publications (MergeLock acquire + release each)",
+        "count": 99
+      },
+      {
+        "label": "eager default-branch snapshot builds (one per main move, tree-deduped)",
+        "count": 100
+      }
+    ]
+  },
+  "bootstrapBefore": {
+    "user": {
+      "status": 200,
+      "login": "<owner>"
+    },
+    "kvarmE2e": {
+      "status": 200,
+      "digest": "a23417e70d188e65"
+    },
+    "d1": {
+      "pats": 8,
+      "patsDigest": "aba4b1ef809ad42a",
+      "userDigest": "278a93febd6c15fe",
+      "repoDigest": "95f5df76ff5114fe"
+    }
+  },
+  "fleet": {
+    "workspaces": 100,
+    "burst": 99,
+    "createAndPushMs": 200309,
+    "peakGitChildren": 1,
+    "peakHttp": 1,
+    "lastPushToAllObservedMs": 5194,
+    "overlapPairs": 69
+  },
+  "verifyPre": {
+    "lsRemoteRefs": 101,
+    "listPages": [
+      {
+        "size": 30,
+        "cost": "d1=2;rr=97;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none"
+      },
+      {
+        "size": 30,
+        "cost": "d1=2;rr=127;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none"
+      },
+      {
+        "size": 30,
+        "cost": "d1=2;rr=157;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none"
+      },
+      {
+        "size": 10,
+        "cost": "d1=2;rr=124;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none"
+      }
+    ],
+    "overlapPages": [
+      {
+        "size": 50,
+        "cost": "d1=2;rr=1061;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none",
+        "truncated": true,
+        "truncatedReason": "more than 50 pairs; follow nextCursor for the rest",
+        "incomplete": []
+      },
+      {
+        "size": 19,
+        "cost": "d1=2;rr=1061;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none",
+        "truncated": false,
+        "truncatedReason": null,
+        "incomplete": []
+      }
+    ],
+    "overlapPairs": 69,
+    "forecastMatches": 12
+  },
+  "enqueueCosts": [
+    {
+      "key": "w003",
+      "pinned": true,
+      "cost": "d1=2;rr=16;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w002",
+      "pinned": true,
+      "cost": "d1=2;rr=15;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w004",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w005",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w006",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w007",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w008",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w009",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w010",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w011",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w012",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w013",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w014",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w015",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w016",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w017",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w018",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w019",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w020",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w021",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w022",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w023",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w024",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w025",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w026",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w027",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w028",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w029",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w030",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w031",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w032",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w033",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w034",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w035",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w036",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w037",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w038",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w039",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w040",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w041",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w042",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w043",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w044",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w045",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w046",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w047",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w048",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w049",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w050",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w051",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w052",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w053",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w054",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w055",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w056",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w057",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w058",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w059",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w060",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w061",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w062",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w063",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w064",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w065",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w066",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w067",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w068",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w069",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w070",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w071",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w072",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w073",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w074",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w075",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w076",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w077",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w078",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w079",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w080",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w081",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w082",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w083",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w084",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w085",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w086",
+      "pinned": false,
+      "cost": "d1=2;rr=10;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w087",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w088",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w089",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w090",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w091",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w092",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w093",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w094",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w095",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w096",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w097",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w098",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w099",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    },
+    {
+      "key": "w001",
+      "pinned": false,
+      "cost": "d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none"
+    }
+  ],
+  "conflictKinds": {
+    "content conflict on shared/config.txt": 3
+  },
+  "publicationCosts": [
+    {
+      "number": 5,
+      "pinned": true,
+      "cost": "d1=3;rr=12;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 4,
+      "pinned": true,
+      "cost": "d1=3;rr=11;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 3,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=2;do=2;q=0;sub=2"
+    },
+    {
+      "number": 2,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 6,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 10,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 7,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 8,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 9,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 15,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 12,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 13,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 14,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 11,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 20,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 16,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 17,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 18,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 19,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 21,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 22,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 24,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 25,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 23,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 26,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 29,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 31,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 27,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 28,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 30,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 34,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 32,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 33,
+      "pinned": false,
+      "cost": "d1=3;rr=9;rw=1;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 35,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 36,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 37,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 40,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 39,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 41,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 38,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 42,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 44,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 43,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 45,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 46,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 47,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 48,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 50,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 51,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 49,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 52,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 53,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 56,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 54,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 57,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 55,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 58,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 59,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 62,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 60,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 61,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 63,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 64,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 65,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 67,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 66,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 69,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 68,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 71,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 70,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 72,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 73,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 74,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 76,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 75,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 78,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 82,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 80,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 81,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 79,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 84,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 87,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 86,
+      "pinned": false,
+      "cost": "d1=3;rr=9;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 83,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 92,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 91,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 89,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 88,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 93,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 94,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 95,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 96,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 97,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 98,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 99,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 1,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 77,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 85,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    },
+    {
+      "number": 90,
+      "pinned": false,
+      "cost": "d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2"
+    }
+  ],
+  "publicationsOutsideRow": [],
+  "reconciliation": {
+    "created": 103,
+    "ok": true,
+    "byStatus": {
+      "active": 4,
+      "merged": 99
+    },
+    "missing": [],
+    "unexpected": [],
+    "mismatched": []
+  },
+  "bootstrapAfter": {
+    "user": {
+      "status": 200,
+      "login": "<owner>"
+    },
+    "kvarmE2e": {
+      "status": 200,
+      "digest": "a23417e70d188e65"
+    },
+    "d1": {
+      "pats": 8,
+      "patsDigest": "aba4b1ef809ad42a",
+      "userDigest": "278a93febd6c15fe",
+      "repoDigest": "95f5df76ff5114fe"
+    }
+  },
+  "burst": {
+    "accepted": 99,
+    "acceptedInBurstWindow": 96,
+    "resolvedAndPublished": 3,
+    "incomplete": 0,
+    "windowMs": 361946,
+    "throughputPerMin": 15.91,
+    "latencyMs": {
+      "p50": 94045,
+      "p90": 219098,
+      "max": 361946,
+      "samples": 96
+    },
+    "longestIdle": {
+      "ms": 79684,
+      "fromMs": 235061,
+      "toMs": 314745,
+      "endedBy": "#90 ejected MERGE_CONFLICT"
+    },
+    "backlogMax": 64,
+    "backlogSamples": [
+      [
+        230,
+        1,
+        0
+      ],
+      [
+        4557,
+        8,
+        0
+      ],
+      [
+        8948,
+        15,
+        0
+      ],
+      [
+        13366,
+        20,
+        3
+      ],
+      [
+        17780,
+        24,
+        6
+      ],
+      [
+        22172,
+        29,
+        8
+      ],
+      [
+        26590,
+        36,
+        9
+      ],
+      [
+        31030,
+        41,
+        11
+      ],
+      [
+        35401,
+        46,
+        13
+      ],
+      [
+        39895,
+        52,
+        15
+      ],
+      [
+        44294,
+        58,
+        16
+      ],
+      [
+        48728,
+        64,
+        16
+      ],
+      [
+        53081,
+        62,
+        18
+      ],
+      [
+        57414,
+        59,
+        21
+      ],
+      [
+        61848,
+        57,
+        23
+      ],
+      [
+        66128,
+        56,
+        24
+      ],
+      [
+        70547,
+        56,
+        24
+      ],
+      [
+        74953,
+        54,
+        26
+      ],
+      [
+        79170,
+        54,
+        28
+      ],
+      [
+        83487,
+        58,
+        31
+      ],
+      [
+        87740,
+        64,
+        32
+      ],
+      [
+        92007,
+        64,
+        32
+      ],
+      [
+        96312,
+        62,
+        34
+      ],
+      [
+        100678,
+        59,
+        37
+      ],
+      [
+        105030,
+        56,
+        40
+      ],
+      [
+        109388,
+        56,
+        40
+      ],
+      [
+        113733,
+        55,
+        41
+      ],
+      [
+        118183,
+        52,
+        44
+      ],
+      [
+        122551,
+        52,
+        47
+      ],
+      [
+        127171,
+        51,
+        48
+      ],
+      [
+        131718,
+        51,
+        48
+      ],
+      [
+        136506,
+        49,
+        50
+      ],
+      [
+        140964,
+        46,
+        53
+      ],
+      [
+        145295,
+        43,
+        56
+      ],
+      [
+        149852,
+        43,
+        56
+      ],
+      [
+        154241,
+        43,
+        56
+      ],
+      [
+        158534,
+        41,
+        57
+      ],
+      [
+        163952,
+        38,
+        60
+      ],
+      [
+        168262,
+        35,
+        64
+      ],
+      [
+        172766,
+        35,
+        64
+      ],
+      [
+        177093,
+        35,
+        64
+      ],
+      [
+        181572,
+        34,
+        65
+      ],
+      [
+        186043,
+        31,
+        68
+      ],
+      [
+        190655,
+        28,
+        71
+      ],
+      [
+        195023,
+        27,
+        72
+      ],
+      [
+        199332,
+        27,
+        72
+      ],
+      [
+        203972,
+        25,
+        73
+      ],
+      [
+        208279,
+        23,
+        75
+      ],
+      [
+        212935,
+        20,
+        78
+      ],
+      [
+        217170,
+        19,
+        79
+      ],
+      [
+        221440,
+        19,
+        79
+      ],
+      [
+        225994,
+        17,
+        80
+      ],
+      [
+        230344,
+        14,
+        82
+      ],
+      [
+        234638,
+        12,
+        85
+      ],
+      [
+        238977,
+        11,
+        86
+      ],
+      [
+        243264,
+        11,
+        86
+      ],
+      [
+        247732,
+        11,
+        86
+      ],
+      [
+        252271,
+        11,
+        86
+      ],
+      [
+        256737,
+        11,
+        86
+      ],
+      [
+        261215,
+        11,
+        86
+      ],
+      [
+        265740,
+        11,
+        86
+      ],
+      [
+        270022,
+        11,
+        86
+      ],
+      [
+        274349,
+        11,
+        86
+      ],
+      [
+        278672,
+        11,
+        86
+      ],
+      [
+        283103,
+        11,
+        86
+      ],
+      [
+        287368,
+        11,
+        86
+      ],
+      [
+        291663,
+        11,
+        86
+      ],
+      [
+        296012,
+        11,
+        86
+      ],
+      [
+        300303,
+        11,
+        86
+      ],
+      [
+        304705,
+        11,
+        86
+      ],
+      [
+        308969,
+        11,
+        86
+      ],
+      [
+        313425,
+        11,
+        86
+      ],
+      [
+        317763,
+        11,
+        86
+      ],
+      [
+        322391,
+        11,
+        86
+      ],
+      [
+        326802,
+        11,
+        86
+      ],
+      [
+        331282,
+        9,
+        87
+      ],
+      [
+        335765,
+        6,
+        90
+      ],
+      [
+        340329,
+        3,
+        93
+      ],
+      [
+        344745,
+        2,
+        94
+      ],
+      [
+        349020,
+        2,
+        94
+      ],
+      [
+        353332,
+        1,
+        95
+      ],
+      [
+        357931,
+        1,
+        95
+      ],
+      [
+        362566,
+        0,
+        96
+      ]
+    ],
+    "queueFull429": 2,
+    "retries": 2,
+    "fastForwards": 4,
+    "mergeCommits": 95,
+    "admission": "backpressure fired: 2 enqueue(s) answered 429 QUEUE_FULL with Retry-After and were retried after the stated wait"
+  },
+  "conflicts": {
+    "same-file edits on separate lines, landed as clean merges (both edits present)": 6,
+    "identical edit pair, both landed (edit present once)": 2,
+    "same-line variants (genuine conflicts) in the burst": 4,
+    "train ejections MERGE_CONFLICT": 3,
+    "conflicted changes: content conflict on shared/config.txt": 3,
+    "resolve-conflict tasks opened": 3,
+    "resolved through the task flow and published": 3,
+    "incomplete (listed with reasons)": 0
+  },
+  "cleanup": {
+    "agentsRevoked": 100,
+    "agentRevokeFailures": [],
+    "repoDelete": 200,
+    "repoGetAfter": 404
+  },
+  "abortedAt": null,
+  "incomplete": [],
+  "stageMs": {
+    "setup": 5891,
+    "fleet": 204664,
+    "observe": 4474,
+    "verify-pre": 1713,
+    "burst": 378339,
+    "resolve": 66760,
+    "verify-final": 12741,
+    "cleanup": 22186
+  },
+  "requests": {
+    "projected": 3314,
+    "observed": 1261,
+    "byKind": {
+      "http": 817,
+      "git": 444
+    },
+    "byStage": {
+      "setup": {
+        "projected": 9,
+        "observed": 8
+      },
+      "fleet": {
+        "projected": 704,
+        "observed": 702
+      },
+      "observe": {
+        "projected": 120,
+        "observed": 2
+      },
+      "verify-pre": {
+        "projected": 14,
+        "observed": 11
+      },
+      "burst": {
+        "projected": 298,
+        "observed": 200
+      },
+      "polls": {
+        "projected": 1800,
+        "observed": 166
+      },
+      "resolve": {
+        "projected": 232,
+        "observed": 50
+      },
+      "verify-final": {
+        "projected": 35,
+        "observed": 20
+      },
+      "cleanup": {
+        "projected": 102,
+        "observed": 102
+      }
+    },
+    "peakHttpInFlight": 5,
+    "peakGitChildren": 1,
+    "retries": {
+      "http429": 0,
+      "git429": 0,
+      "queueFull": 2,
+      "gitRead": 0,
+      "budget": 100
+    },
+    "outOfBandD1Reads": 3
+  },
+  "counters": {
+    "DELETE /agents/:id": {
+      "count": 100,
+      "statuses": {
+        "200": 100
+      },
+      "sum": {
+        "d1": 200,
+        "rr": 1099,
+        "rw": 400,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "DELETE /repos/:o/:r": {
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "sum": {
+        "d1": 2,
+        "rr": 1536,
+        "rw": 716,
+        "art": 1,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /repos/:o/:r": {
+      "count": 4,
+      "statuses": {
+        "200": 2,
+        "404": 2
+      },
+      "sum": {
+        "d1": 4,
+        "rr": 12,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /repos/:o/:r/changes": {
+      "count": 84,
+      "statuses": {
+        "200": 84
+      },
+      "sum": {
+        "d1": 168,
+        "rr": 27715,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /repos/:o/:r/changes/:n": {
+      "count": 14,
+      "statuses": {
+        "200": 14
+      },
+      "sum": {
+        "d1": 39,
+        "rr": 183,
+        "rw": 15,
+        "art": 290,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 4
+      }
+    },
+    "GET /repos/:o/:r/forecast": {
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "sum": {
+        "d1": 6,
+        "rr": 1656,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /repos/:o/:r/queue": {
+      "count": 85,
+      "statuses": {
+        "200": 85
+      },
+      "sum": {
+        "d1": 170,
+        "rr": 2771,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /repos/:o/:r/tasks": {
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "sum": {
+        "d1": 6,
+        "rr": 27,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /repos/:o/:r/workspaces": {
+      "count": 6,
+      "statuses": {
+        "200": 6
+      },
+      "sum": {
+        "d1": 12,
+        "rr": 1025,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /repos/:o/:r/workspaces/:id": {
+      "count": 1,
+      "statuses": {
+        "200": 1
+      },
+      "sum": {
+        "d1": 2,
+        "rr": 7,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 1
+      }
+    },
+    "GET /repos/:o/:r/workspaces/overlap": {
+      "count": 2,
+      "statuses": {
+        "200": 2
+      },
+      "sum": {
+        "d1": 4,
+        "rr": 2122,
+        "rw": 0,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "GET /user": {
+      "count": 2,
+      "statuses": {
+        "200": 2
+      },
+      "sum": {
+        "d1": 2,
+        "rr": 5,
+        "rw": 1,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "POST /agents": {
+      "count": 100,
+      "statuses": {
+        "201": 100
+      },
+      "sum": {
+        "d1": 200,
+        "rr": 500,
+        "rw": 600,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "POST /agents/:id/tokens": {
+      "count": 100,
+      "statuses": {
+        "201": 100
+      },
+      "sum": {
+        "d1": 400,
+        "rr": 1200,
+        "rw": 700,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "POST /repos": {
+      "count": 1,
+      "statuses": {
+        "201": 1
+      },
+      "sum": {
+        "d1": 3,
+        "rr": 2,
+        "rw": 6,
+        "art": 1,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 0
+      }
+    },
+    "POST /repos/:o/:r/changes/:n/enqueue": {
+      "count": 104,
+      "statuses": {
+        "201": 102,
+        "429": 2
+      },
+      "sum": {
+        "d1": 210,
+        "rr": 1254,
+        "rw": 409,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 102,
+        "sub": 0
+      }
+    },
+    "POST /repos/:o/:r/tasks/:id/claim": {
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "sum": {
+        "d1": 15,
+        "rr": 78,
+        "rw": 42,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 3
+      }
+    },
+    "POST /repos/:o/:r/tasks/:id/complete": {
+      "count": 3,
+      "statuses": {
+        "200": 3
+      },
+      "sum": {
+        "d1": 18,
+        "rr": 411,
+        "rw": 39,
+        "art": 24,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 15
+      }
+    },
+    "POST /repos/:o/:r/workspaces": {
+      "count": 100,
+      "statuses": {
+        "201": 100
+      },
+      "sum": {
+        "d1": 300,
+        "rr": 1200,
+        "rw": 1000,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 200
+      }
+    },
+    "POST /repos/:o/:r/workspaces/:id/change-set": {
+      "count": 99,
+      "statuses": {
+        "201": 99
+      },
+      "sum": {
+        "d1": 396,
+        "rr": 2470,
+        "rw": 1584,
+        "art": 1178,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 99
+      }
+    },
+    "POST /repos/:o/:r/workspaces/:id/dependencies": {
+      "count": 2,
+      "statuses": {
+        "201": 2
+      },
+      "sum": {
+        "d1": 6,
+        "rr": 25,
+        "rw": 6,
+        "art": 0,
+        "do": 0,
+        "r2a": 0,
+        "r2b": 0,
+        "q": 0,
+        "sub": 2
+      }
+    }
+  },
+  "background": {
+    "push events (D1 push_events)": 407,
+    "push event deliveries": 407,
+    "push event arrival after the Artifacts event, avg / max ms": "6151 / 54046",
+    "push event effects completion after arrival, avg / max ms": "287 / 2086",
+    "queue entries (published / other)": "99 / 3",
+    "summed stored per-publication counters (merge_queue.cost)": {
+      "d1": 297,
+      "rr": 991,
+      "rw": 295,
+      "art": 2,
+      "do": 198,
+      "q": 0,
+      "sub": 198
+    },
+    "check runs recorded": 104,
+    "snapshot commits (by state)": "ready 95",
+    "snapshot tree builds, summed build counters": "95: steps=285;d1=285;rr=1425;rw=760;art=5455;r2a=95;r2b=0;sub=0;treeReads=379;blobReads=4791;parts=0;objects=95;bytes=5197312;largestBlob=65744;peakBuffer=5197312;peakHeld=71427"
+  },
+  "d1": {
+    "queue": [
+      {
+        "change_number": 5,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "50b6bd6123d1e1e90987179d5e5d2e46057e2f89",
+        "previous_sha": "a68f50745b85509f9ba63122521778cf054886a9",
+        "cost": "{\"d1\":3,\"rr\":12,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734390117,
+        "updated_at": 1791734752063,
+        "attempts": 1,
+        "generation": 1
+      },
+      {
+        "change_number": 4,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "a68f50745b85509f9ba63122521778cf054886a9",
+        "previous_sha": "864da5ed78d5fe924aa8059a6538a2852581d9f6",
+        "cost": "{\"d1\":3,\"rr\":11,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734390729,
+        "updated_at": 1791734743133,
+        "attempts": 1,
+        "generation": 1
+      },
+      {
+        "change_number": 3,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "818df4cd96900f0c010649c9bd727294d349ba24",
+        "previous_sha": "0fb51255c626c8431b8726968101b3b5d6442dee",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":2,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734391389,
+        "updated_at": 1791734399939,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 2,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "91124f0a51ce00c0c3d29acf5a1b5736495609a8",
+        "previous_sha": "818df4cd96900f0c010649c9bd727294d349ba24",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734391922,
+        "updated_at": 1791734400802,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 6,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "988713ea491d1ba01c71fb47d24c6dc8c269f842",
+        "previous_sha": "91124f0a51ce00c0c3d29acf5a1b5736495609a8",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734392531,
+        "updated_at": 1791734402249,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 10,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "42365fe0ea6f6aa2f08d9ddfec3f521d8312e555",
+        "previous_sha": "988713ea491d1ba01c71fb47d24c6dc8c269f842",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734393127,
+        "updated_at": 1791734403818,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 7,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "1d9394df1a9dd23ec0afe3f2da5d921549f5aed1",
+        "previous_sha": "42365fe0ea6f6aa2f08d9ddfec3f521d8312e555",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734393718,
+        "updated_at": 1791734405347,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 8,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "26ec31f038fa7ac826b5415ad6df1d0ee99a5f5f",
+        "previous_sha": "1d9394df1a9dd23ec0afe3f2da5d921549f5aed1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734394332,
+        "updated_at": 1791734406955,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 9,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "07ecb1a9fc33ad340ff698a417b13fb95943321a",
+        "previous_sha": "26ec31f038fa7ac826b5415ad6df1d0ee99a5f5f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734394918,
+        "updated_at": 1791734408388,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 15,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "38a73cc36a2976ed937286e31309767e4f9237ae",
+        "previous_sha": "07ecb1a9fc33ad340ff698a417b13fb95943321a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734395512,
+        "updated_at": 1791734409829,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 12,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "cbb878c23a9feb2b163770e0d87cba483dbce53a",
+        "previous_sha": "38a73cc36a2976ed937286e31309767e4f9237ae",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734396127,
+        "updated_at": 1791734416108,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 13,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "14e4bb2f56c61329f4b9dc30d5aa15688feb2085",
+        "previous_sha": "cbb878c23a9feb2b163770e0d87cba483dbce53a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734396717,
+        "updated_at": 1791734418331,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 14,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "500b623fb1d11e86139cd9a7e352f55b486db1a4",
+        "previous_sha": "14e4bb2f56c61329f4b9dc30d5aa15688feb2085",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734397318,
+        "updated_at": 1791734419837,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 11,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "4b1f7329fd1796e2c14a4d824be3134585f29901",
+        "previous_sha": "500b623fb1d11e86139cd9a7e352f55b486db1a4",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734398043,
+        "updated_at": 1791734422311,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 20,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "e81c6047b0b908910002fcb3f6faeaa94ef8c5cc",
+        "previous_sha": "4b1f7329fd1796e2c14a4d824be3134585f29901",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734398515,
+        "updated_at": 1791734424230,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 16,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f4e28c111731194fd44cfd9b2892989fd51a8cbf",
+        "previous_sha": "e81c6047b0b908910002fcb3f6faeaa94ef8c5cc",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734399117,
+        "updated_at": 1791734425836,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 17,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "86e09d7ab1330627f2a90701c289a508add7e155",
+        "previous_sha": "f4e28c111731194fd44cfd9b2892989fd51a8cbf",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734399820,
+        "updated_at": 1791734428309,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 18,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "d5d6ac79ac7c17d23c54780b3efdf96821114988",
+        "previous_sha": "86e09d7ab1330627f2a90701c289a508add7e155",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734400325,
+        "updated_at": 1791734430589,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 19,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "499e4ea715eb1fb40c7d7d67b3a52da2fc0a6a1a",
+        "previous_sha": "d5d6ac79ac7c17d23c54780b3efdf96821114988",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734401085,
+        "updated_at": 1791734439257,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 21,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "a742c9c9e7d45bf8efd0509b207b14934510ccda",
+        "previous_sha": "499e4ea715eb1fb40c7d7d67b3a52da2fc0a6a1a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734401528,
+        "updated_at": 1791734440834,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 22,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f7a1a4f602fd4844b6cdbbd0e38013ec077d9dc1",
+        "previous_sha": "a742c9c9e7d45bf8efd0509b207b14934510ccda",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734402131,
+        "updated_at": 1791734443276,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 24,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "337c0e73f59a61e522d809b7097bbec49fab95bc",
+        "previous_sha": "f7a1a4f602fd4844b6cdbbd0e38013ec077d9dc1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734402798,
+        "updated_at": 1791734444988,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 25,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "ca9dc14e0ab97712d5e4e7702f64ceff6c898fa2",
+        "previous_sha": "337c0e73f59a61e522d809b7097bbec49fab95bc",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734403336,
+        "updated_at": 1791734446872,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 23,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "58ee35a1e6ef82388aecb6ec9f4786584bb0dc25",
+        "previous_sha": "ca9dc14e0ab97712d5e4e7702f64ceff6c898fa2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734403938,
+        "updated_at": 1791734449104,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 26,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "ae6888c90b4e5aea6cea40db678504144cadb7a7",
+        "previous_sha": "58ee35a1e6ef82388aecb6ec9f4786584bb0dc25",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734404526,
+        "updated_at": 1791734451100,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 29,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "1ddb6f43aff114bf26138ce88f32cb449840c3e2",
+        "previous_sha": "ae6888c90b4e5aea6cea40db678504144cadb7a7",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734405125,
+        "updated_at": 1791734452935,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 31,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "c0b21b90266539e5316d74d92b383ff904ee9dce",
+        "previous_sha": "1ddb6f43aff114bf26138ce88f32cb449840c3e2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734405737,
+        "updated_at": 1791734462603,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 27,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "c38195783d122f00d08ce62f7f3d8a7ba375a076",
+        "previous_sha": "c0b21b90266539e5316d74d92b383ff904ee9dce",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734406445,
+        "updated_at": 1791734464483,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 28,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "3358932f7f7f4fbdecaa4464e729747812f311d0",
+        "previous_sha": "c38195783d122f00d08ce62f7f3d8a7ba375a076",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734406927,
+        "updated_at": 1791734465933,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 30,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "5c7a31093348124c91ad1c3bfe0b37b9c974870e",
+        "previous_sha": "3358932f7f7f4fbdecaa4464e729747812f311d0",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734407528,
+        "updated_at": 1791734467527,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 34,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "23cf10234354828baee17f220b6bcd994a339e7e",
+        "previous_sha": "5c7a31093348124c91ad1c3bfe0b37b9c974870e",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734408128,
+        "updated_at": 1791734469174,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 32,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "a7167bade8cc17120ab74d4aaa6f18a07f4875c1",
+        "previous_sha": "23cf10234354828baee17f220b6bcd994a339e7e",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734408790,
+        "updated_at": 1791734470716,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 33,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "0f275b4003d330dafc4408cea36ba236bd502ccb",
+        "previous_sha": "a7167bade8cc17120ab74d4aaa6f18a07f4875c1",
+        "cost": "{\"d1\":3,\"rr\":9,\"rw\":1,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734409392,
+        "updated_at": 1791734472260,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 35,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "95f408a2cdbb94e26ebd269e5df46eb5a40311ef",
+        "previous_sha": "0f275b4003d330dafc4408cea36ba236bd502ccb",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734409951,
+        "updated_at": 1791734474320,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 36,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "362ffda1491cbd3f663164efd024e2f8207a10dc",
+        "previous_sha": "95f408a2cdbb94e26ebd269e5df46eb5a40311ef",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734410546,
+        "updated_at": 1791734483019,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 37,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "59bcaaef39ae65b5c2c6fc25b174e25c17316ef8",
+        "previous_sha": "362ffda1491cbd3f663164efd024e2f8207a10dc",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734411200,
+        "updated_at": 1791734484670,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 40,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "3d609cf556daafd31744e1f72fcbefa238c3ba66",
+        "previous_sha": "59bcaaef39ae65b5c2c6fc25b174e25c17316ef8",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734411796,
+        "updated_at": 1791734486359,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 39,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "faf30528964f69f812ce2a5d01f7ebac46370b0a",
+        "previous_sha": "3d609cf556daafd31744e1f72fcbefa238c3ba66",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734412314,
+        "updated_at": 1791734487856,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 41,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f72f54c930908841a2acbed90b02607b9290c6d8",
+        "previous_sha": "faf30528964f69f812ce2a5d01f7ebac46370b0a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734412938,
+        "updated_at": 1791734489468,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 38,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "258612c43c0e594d0c0a6a8133e906ffb6c6282b",
+        "previous_sha": "f72f54c930908841a2acbed90b02607b9290c6d8",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734413528,
+        "updated_at": 1791734490944,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 42,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "22adea602504079381ff1ce62667e3ecab715039",
+        "previous_sha": "258612c43c0e594d0c0a6a8133e906ffb6c6282b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734414121,
+        "updated_at": 1791734492600,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 44,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "8cb1727e89cc0b6adefa589c431ae14b89b93189",
+        "previous_sha": "22adea602504079381ff1ce62667e3ecab715039",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734414837,
+        "updated_at": 1791734494145,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 43,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "61525ad7a7e38f4ea3a7cbb1797174b2d733039d",
+        "previous_sha": "8cb1727e89cc0b6adefa589c431ae14b89b93189",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734415318,
+        "updated_at": 1791734502732,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 45,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "390d32de42ec136db16506275029385f4d57bdd5",
+        "previous_sha": "61525ad7a7e38f4ea3a7cbb1797174b2d733039d",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734416007,
+        "updated_at": 1791734504310,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 46,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "2ad09c5738426d168d6b4c82650bf3cda1afd3b6",
+        "previous_sha": "390d32de42ec136db16506275029385f4d57bdd5",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734416510,
+        "updated_at": 1791734505844,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 47,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "eab3d47f5568d9a01f52638cc4fd2350e332a47f",
+        "previous_sha": "2ad09c5738426d168d6b4c82650bf3cda1afd3b6",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734417140,
+        "updated_at": 1791734507267,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 48,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f988f34a6acadce7e4c0684f5deb254ff871ae8b",
+        "previous_sha": "eab3d47f5568d9a01f52638cc4fd2350e332a47f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734417732,
+        "updated_at": 1791734509000,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 50,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "760bbd3754bb38ff7b1559e636e6e236bfe11870",
+        "previous_sha": "f988f34a6acadce7e4c0684f5deb254ff871ae8b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734418312,
+        "updated_at": 1791734510547,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 51,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "75bb8a5dee9e9c6a27172612772667dc1b0c0339",
+        "previous_sha": "760bbd3754bb38ff7b1559e636e6e236bfe11870",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734419046,
+        "updated_at": 1791734512064,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 49,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "ad7a260092f1ea6ed09e1ee1354a855fb957174d",
+        "previous_sha": "75bb8a5dee9e9c6a27172612772667dc1b0c0339",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734419524,
+        "updated_at": 1791734513569,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 52,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "c39e67752bb13780bf25111fdf54c29fd649228c",
+        "previous_sha": "ad7a260092f1ea6ed09e1ee1354a855fb957174d",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734420115,
+        "updated_at": 1791734524112,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 53,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "34a4bca11e9644a7e2ccd51fb05597497e75a79a",
+        "previous_sha": "c39e67752bb13780bf25111fdf54c29fd649228c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734420737,
+        "updated_at": 1791734525682,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 56,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "5cc039d928da4fb1db5ce68589e4c50d3835ad13",
+        "previous_sha": "34a4bca11e9644a7e2ccd51fb05597497e75a79a",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734421335,
+        "updated_at": 1791734527510,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 54,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f89ce4501298f031b97edd5f74d668695e71dcea",
+        "previous_sha": "5cc039d928da4fb1db5ce68589e4c50d3835ad13",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734422029,
+        "updated_at": 1791734528953,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 57,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "e26ff5766e9e737f9914342710f37726166ad32b",
+        "previous_sha": "f89ce4501298f031b97edd5f74d668695e71dcea",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734422535,
+        "updated_at": 1791734530320,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 55,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "cc189c9526157b5444f2a8832981226644574bba",
+        "previous_sha": "e26ff5766e9e737f9914342710f37726166ad32b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734423146,
+        "updated_at": 1791734531678,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 58,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "7b71e1e9c7f709049204ea1b5fb52bea7feb43e3",
+        "previous_sha": "cc189c9526157b5444f2a8832981226644574bba",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734423731,
+        "updated_at": 1791734533103,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 59,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "7388e551086a3fc3e24124cfc9fb6e9c275862b9",
+        "previous_sha": "7b71e1e9c7f709049204ea1b5fb52bea7feb43e3",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734424391,
+        "updated_at": 1791734534538,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 62,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "0d9f53bc880a787626a59b104f8e2b093c677934",
+        "previous_sha": "7388e551086a3fc3e24124cfc9fb6e9c275862b9",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734424927,
+        "updated_at": 1791734547084,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 60,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "60b4ba6a42865a1c7107134e36370ae93fef911f",
+        "previous_sha": "0d9f53bc880a787626a59b104f8e2b093c677934",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734425530,
+        "updated_at": 1791734548482,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 61,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "4555a8749ab0fad21218cf5dc7ec7e9080895084",
+        "previous_sha": "60b4ba6a42865a1c7107134e36370ae93fef911f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734426166,
+        "updated_at": 1791734549935,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 63,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "89ff73b3c90a8387805fc4e25671b8dff6383fb7",
+        "previous_sha": "4555a8749ab0fad21218cf5dc7ec7e9080895084",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734426797,
+        "updated_at": 1791734551355,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 64,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "212dfd26f0f629a5696eb9d17fcdaa56b801731c",
+        "previous_sha": "89ff73b3c90a8387805fc4e25671b8dff6383fb7",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734427320,
+        "updated_at": 1791734553046,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 65,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "34e4d3ec0a0fce859ef021534e8c3bc42bfc8c75",
+        "previous_sha": "212dfd26f0f629a5696eb9d17fcdaa56b801731c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734427992,
+        "updated_at": 1791734554653,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 67,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "ffd14600d7f7c2bd451d1d39e802ff3207fbe31b",
+        "previous_sha": "34e4d3ec0a0fce859ef021534e8c3bc42bfc8c75",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734428517,
+        "updated_at": 1791734556370,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 66,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "889cb0e1ad4c1c0a6381d0daa6a79a792b96b142",
+        "previous_sha": "ffd14600d7f7c2bd451d1d39e802ff3207fbe31b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734429132,
+        "updated_at": 1791734557831,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 69,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "02ae555dfc9ade23837bd0d0b57c4d18bf9446f1",
+        "previous_sha": "889cb0e1ad4c1c0a6381d0daa6a79a792b96b142",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734429757,
+        "updated_at": 1791734570087,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 68,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "1676f04fafcd36227ab1e254dc54168d606712eb",
+        "previous_sha": "02ae555dfc9ade23837bd0d0b57c4d18bf9446f1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734430440,
+        "updated_at": 1791734571614,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 71,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "2a18d1572b57639bca70e45d9e1d47fd13fe4f59",
+        "previous_sha": "1676f04fafcd36227ab1e254dc54168d606712eb",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734431032,
+        "updated_at": 1791734573208,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 70,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "e7f1fb0ba99a510cd2e84f75aadf836869cb3f5b",
+        "previous_sha": "2a18d1572b57639bca70e45d9e1d47fd13fe4f59",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734431537,
+        "updated_at": 1791734574646,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 72,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "653992a045314861cc022b585d4854b268eee3d1",
+        "previous_sha": "e7f1fb0ba99a510cd2e84f75aadf836869cb3f5b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734432114,
+        "updated_at": 1791734576319,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 73,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "453e5e9466812ccb1479332d150000fd5995c917",
+        "previous_sha": "653992a045314861cc022b585d4854b268eee3d1",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734432715,
+        "updated_at": 1791734577816,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 74,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "6a997fb2dfa7d9ab81e3d68329fea734e7483f03",
+        "previous_sha": "453e5e9466812ccb1479332d150000fd5995c917",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734433336,
+        "updated_at": 1791734579351,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 76,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "868727e4b668368234ec3cf738eee2bc0a9bbd15",
+        "previous_sha": "6a997fb2dfa7d9ab81e3d68329fea734e7483f03",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734433913,
+        "updated_at": 1791734581279,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 77,
+        "state": "ejected",
+        "reason_code": "MERGE_CONFLICT",
+        "merge_commit": null,
+        "previous_sha": null,
+        "cost": null,
+        "enqueued_at": 1791734434526,
+        "updated_at": 1791734582194,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 75,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "30f42b84fa2e950dedd1f62d58326fa6f9b89c90",
+        "previous_sha": "868727e4b668368234ec3cf738eee2bc0a9bbd15",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734435141,
+        "updated_at": 1791734593796,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 78,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "fefc939bcd3eb528479e11f6e4eaa78898baa71b",
+        "previous_sha": "30f42b84fa2e950dedd1f62d58326fa6f9b89c90",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734435842,
+        "updated_at": 1791734595334,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 82,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "430b2f1361ab38774fedfecefbf860cdbff7847c",
+        "previous_sha": "fefc939bcd3eb528479e11f6e4eaa78898baa71b",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734436453,
+        "updated_at": 1791734596761,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 80,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "cca27e8beb3f77bfaa8dce4a747f133692c1d2b2",
+        "previous_sha": "430b2f1361ab38774fedfecefbf860cdbff7847c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734437001,
+        "updated_at": 1791734598398,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 81,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "726360278fc71a7184db8e4df7b21124f5a0b45f",
+        "previous_sha": "cca27e8beb3f77bfaa8dce4a747f133692c1d2b2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734437511,
+        "updated_at": 1791734599921,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 79,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f5ea3c2274a0468d8dc47bddd51df8aca39c37d2",
+        "previous_sha": "726360278fc71a7184db8e4df7b21124f5a0b45f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734468323,
+        "updated_at": 1791734601383,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 84,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f2a8a6a9101ffc0b4becd779e2d6ac42c9fa937c",
+        "previous_sha": "f5ea3c2274a0468d8dc47bddd51df8aca39c37d2",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734468736,
+        "updated_at": 1791734603275,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 85,
+        "state": "ejected",
+        "reason_code": "MERGE_CONFLICT",
+        "merge_commit": null,
+        "previous_sha": null,
+        "cost": null,
+        "enqueued_at": 1791734469355,
+        "updated_at": 1791734604066,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 87,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "a9d18efe2388d384ee91bffcc85294f6b11fca0b",
+        "previous_sha": "f2a8a6a9101ffc0b4becd779e2d6ac42c9fa937c",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734469926,
+        "updated_at": 1791734615229,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 86,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "01a330365ea75a94527432b845949be2d6693e06",
+        "previous_sha": "a9d18efe2388d384ee91bffcc85294f6b11fca0b",
+        "cost": "{\"d1\":3,\"rr\":9,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734470538,
+        "updated_at": 1791734617295,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 83,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "8159d57640de8a3df78ef07a313e72177136388d",
+        "previous_sha": "01a330365ea75a94527432b845949be2d6693e06",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734471140,
+        "updated_at": 1791734618747,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 92,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "f811454f292b3f42747571dee1b2e87f497f6779",
+        "previous_sha": "8159d57640de8a3df78ef07a313e72177136388d",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734471841,
+        "updated_at": 1791734620294,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 91,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "6ef89ca51b5ea1d4a722422efd757311b9af6480",
+        "previous_sha": "f811454f292b3f42747571dee1b2e87f497f6779",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734472358,
+        "updated_at": 1791734621686,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 89,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "52b9a63a1e73ce6547ade84624c2d8d0937be9de",
+        "previous_sha": "6ef89ca51b5ea1d4a722422efd757311b9af6480",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734473165,
+        "updated_at": 1791734623765,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 88,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "00cda3665f40200b14b071bd92779d5540943bc7",
+        "previous_sha": "52b9a63a1e73ce6547ade84624c2d8d0937be9de",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734473714,
+        "updated_at": 1791734625178,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 90,
+        "state": "ejected",
+        "reason_code": "MERGE_CONFLICT",
+        "merge_commit": null,
+        "previous_sha": null,
+        "cost": null,
+        "enqueued_at": 1791734474446,
+        "updated_at": 1791734704862,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 93,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "c5bf9c4f36e88eeff3304c4d47c855357c7ffb08",
+        "previous_sha": "00cda3665f40200b14b071bd92779d5540943bc7",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734475095,
+        "updated_at": 1791734719860,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 94,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "c18bb22276ad118d211f0e2e3f5fde678810b697",
+        "previous_sha": "c5bf9c4f36e88eeff3304c4d47c855357c7ffb08",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734475521,
+        "updated_at": 1791734721405,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 95,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "0102f20eaa29c29ef8cf761fd55e4a2367b51a5f",
+        "previous_sha": "c18bb22276ad118d211f0e2e3f5fde678810b697",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734476124,
+        "updated_at": 1791734722769,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 96,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "02dd0b2d4a5ab077564d2591070e88473e675216",
+        "previous_sha": "0102f20eaa29c29ef8cf761fd55e4a2367b51a5f",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734476834,
+        "updated_at": 1791734724442,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 97,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "7ed9ef85bb8b4bf57d7c7a8ab4e5360b1c22e115",
+        "previous_sha": "02dd0b2d4a5ab077564d2591070e88473e675216",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734477321,
+        "updated_at": 1791734725938,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 98,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "9fc78d95df27c8bc845c47ef53a8dd4d93743ddf",
+        "previous_sha": "7ed9ef85bb8b4bf57d7c7a8ab4e5360b1c22e115",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734508270,
+        "updated_at": 1791734727368,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 99,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "cd23ad608842b9bff1dbb1469d59000320a04378",
+        "previous_sha": "9fc78d95df27c8bc845c47ef53a8dd4d93743ddf",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734508596,
+        "updated_at": 1791734729113,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 1,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "864da5ed78d5fe924aa8059a6538a2852581d9f6",
+        "previous_sha": "cd23ad608842b9bff1dbb1469d59000320a04378",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734509197,
+        "updated_at": 1791734730634,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 77,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "32427b26c4e2c0474a5cc53ea6a7f92b4ac71969",
+        "previous_sha": "50b6bd6123d1e1e90987179d5e5d2e46057e2f89",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734760475,
+        "updated_at": 1791734783449,
+        "attempts": 6,
+        "generation": 1
+      },
+      {
+        "change_number": 85,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "0a7ca8caafd3138ad82f84bba9d98631f320d6ed",
+        "previous_sha": "32427b26c4e2c0474a5cc53ea6a7f92b4ac71969",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734790886,
+        "updated_at": 1791734798373,
+        "attempts": 0,
+        "generation": 1
+      },
+      {
+        "change_number": 90,
+        "state": "published",
+        "reason_code": null,
+        "merge_commit": "fe66398eb667ab306e4722ccda444f1fc94a4c23",
+        "previous_sha": "0a7ca8caafd3138ad82f84bba9d98631f320d6ed",
+        "cost": "{\"d1\":3,\"rr\":10,\"rw\":3,\"art\":0,\"do\":2,\"q\":0,\"sub\":2}",
+        "enqueued_at": 1791734805407,
+        "updated_at": 1791734815184,
+        "attempts": 1,
+        "generation": 1
+      }
+    ],
+    "pushEvents": {
+      "events": 407,
+      "deliveries": 407,
+      "incomplete": 0,
+      "avgEffectMs": 287,
+      "maxEffectMs": 2086,
+      "avgArrivalMs": 6151,
+      "maxArrivalMs": 54046
+    },
+    "snapshots": {
+      "commits": [
+        {
+          "state": "ready",
+          "n": 95
+        }
+      ],
+      "trees": 95,
+      "treeBuildCost": {
+        "steps": 285,
+        "d1": 285,
+        "rr": 1425,
+        "rw": 760,
+        "art": 5455,
+        "r2a": 95,
+        "r2b": 0,
+        "sub": 0,
+        "treeReads": 379,
+        "blobReads": 4791,
+        "parts": 0,
+        "objects": 95,
+        "bytes": 5197312,
+        "largestBlob": 65744,
+        "peakBuffer": 5197312,
+        "peakHeld": 71427
+      }
+    },
+    "checkRuns": [
+      {
+        "name": "kvarm/guard",
+        "status": "success",
+        "conclusion": "success",
+        "n": 104
+      }
+    ],
+    "tasks": [
+      {
+        "kind": "resolve-conflict",
+        "status": "completed",
+        "n": 3
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "setup",
+      "label": "bootstrap readable: user <owner> and <owner>/kvarm-e2e",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "setup",
+      "label": "<owner>/scale-staged-campaign-fleet-1791734157 does not exist yet",
+      "ok": true,
+      "detail": "GET 404"
+    },
+    {
+      "id": "setup",
+      "label": "created <owner>/scale-staged-campaign-fleet-1791734157",
+      "ok": true,
+      "detail": "POST 201"
+    },
+    {
+      "id": "VAL-SCALE-002",
+      "label": "100 workspaces created by 100 distinct agent principals and pushed",
+      "ok": true,
+      "detail": "200309 ms"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "pinned chain A <- B <- C created (active, depths 2 and 3)",
+      "ok": true,
+      "detail": "B 201/2, C 201/3"
+    },
+    {
+      "id": "VAL-SCALE-002",
+      "label": "the Nexus index observed all 100 pushed heads",
+      "ok": true,
+      "detail": "5194 ms after the last push (poll granularity 4000 ms)"
+    },
+    {
+      "id": "VAL-SCALE-002a",
+      "label": "git ls-remote equals the driver ledger (101 refs: main + 100 workspace refs)",
+      "ok": true,
+      "detail": "ls-remote 101 refs, diff empty"
+    },
+    {
+      "id": "VAL-SCALE-002b",
+      "label": "paginated workspace list stitches to exactly the 100 campaign workspaces (no duplicates, no omissions, page <= 30)",
+      "ok": true,
+      "detail": "4 pages, 100 ids, 100 distinct"
+    },
+    {
+      "id": "VAL-SCALE-002b",
+      "label": "workspace list pages within d1<=2;art=0;do=0;sub=0",
+      "ok": true,
+      "detail": "d1=2;rr=97;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none | d1=2;rr=127;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none | d1=2;rr=157;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none | d1=2;rr=124;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none"
+    },
+    {
+      "id": "VAL-SCALE-002c",
+      "label": "overlap query returns exactly the 69 crafted pairs and none of the 85 independent members",
+      "ok": true,
+      "detail": "69 pairs; missing 0, extra 0"
+    },
+    {
+      "id": "VAL-SCALE-002c",
+      "label": "overlap truncation is explicit: every truncated page names its reason",
+      "ok": true,
+      "detail": "truncated with reasons"
+    },
+    {
+      "id": "VAL-SCALE-002c",
+      "label": "overlap pages within the cost.md row d1<=2;art=0;do=0;sub=0",
+      "ok": true,
+      "detail": "d1=2;rr=1061;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none | d1=2;rr=1061;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none"
+    },
+    {
+      "id": "VAL-SCALE-002c",
+      "label": "forecast for shared/config.txt names exactly the 12 shared-file members",
+      "ok": true,
+      "detail": "12 matches [d1=2;rr=150;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none]"
+    },
+    {
+      "id": "VAL-SCALE-002c",
+      "label": "forecast within d1<=2;art=0;do=0;sub=0",
+      "ok": true,
+      "detail": "d1=2;rr=150;rw=0;art=0;do=0;r2a=0;r2b=0;q=0;sub=0;cache=none"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "99 change sets opened at their pushed heads",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "every admitted enqueue of an unpinned change within the cost.md workspace-backed row d1<=2;rr<=12;rw<=4;art=0;do<=1;q<=1",
+      "ok": true,
+      "detail": "d1 2..2, rr 10..12, rw 4..4, art 0..0, do 0..0, r2a 0..0, r2b 0..0, q 1..1, sub 0..0 (n=97)"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "final eligible queue is empty",
+      "ok": true,
+      "detail": "0 active entries"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "every burst change reached a terminal state (published, or listed incomplete with a reason)",
+      "ok": true,
+      "detail": "99 published, 0 incomplete"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "one published queue entry per accepted change and none for any other change (no lost or double publication records)",
+      "ok": true,
+      "detail": "99 published rows for 99 accepted changes"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "every accepted change has a distinct publication identity (merge commit)",
+      "ok": true,
+      "detail": "99 distinct"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "fresh clone: each accepted change's unique marker present exactly once, none for unaccepted changes or the sentinel (111 markers over 105 files)",
+      "ok": true,
+      "detail": "main fe66398eb667ab306e4722ccda444f1fc94a4c23"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "graph: main's first-parent history is exactly one step per accepted publication (99 steps)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "every accepted head is reachable from main",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "pinned chain published in dependency order although enqueued C, B, ..., A",
+      "ok": true,
+      "detail": "first-parent positions A 93, B 94, C 95 of 99"
+    },
+    {
+      "id": "VAL-SCALE-004d",
+      "label": "every per-publication stored counter set within the applicable cost.md publication row",
+      "ok": true,
+      "detail": "unpinned 97/97 within d1<=3;rr<=12;rw<=8;art<=4;do=2;sub<=2; with incoming pins 2/2 within d1<=3;rr<=12;rw<=8;art<=4;do=2;sub<=2"
+    },
+    {
+      "id": "VAL-SCALE-004a",
+      "label": "early sentinel workspace w000 still active at its recorded sha (GET + ls-remote)",
+      "ok": true,
+      "detail": "status active, GET head 23bfdf1c234906a6bcc26048acdba1af9015b743, ls-remote 23bfdf1c234906a6bcc26048acdba1af9015b743, recorded 23bfdf1c234906a6bcc26048acdba1af9015b743"
+    },
+    {
+      "id": "VAL-SCALE-004c",
+      "label": "refs/notes/kvarm-attribution notes exactly the 98 Kvarm merge commits and resolution commits, once each",
+      "ok": true,
+      "detail": "98 noted at 2a2d15e69d45092021ee72452f002a2f8899b0b0; missing none; unexpected none"
+    },
+    {
+      "id": "VAL-SCALE-004c",
+      "label": "final ls-remote equals the ledger (105 refs; no ref deleted or moved unexpectedly)",
+      "ok": true,
+      "detail": "diff empty"
+    },
+    {
+      "id": "VAL-SCALE-004c",
+      "label": "ledger reconciliation: 103 created (100 fleet + 3 task-claim), 0 abandoned/deleted, every one listed with its expected status",
+      "ok": true,
+      "detail": "listed {\"active\":4,\"merged\":99}; missing 0, unexpected 0, mismatched 0"
+    },
+    {
+      "id": "VAL-SCALE-004b",
+      "label": "bootstrap data untouched (user <owner>, <owner>/kvarm-e2e, PAT rows)",
+      "ok": true,
+      "detail": "pats 8, digests equal"
+    },
+    {
+      "id": "VAL-SCALE-003",
+      "label": "admission/backpressure statement recorded (429 honored or capacity not reached)",
+      "ok": true,
+      "detail": "backpressure fired: 2 enqueue(s) answered 429 QUEUE_FULL with Retry-After and were retried after the stated wait"
+    },
+    {
+      "id": "VAL-SCALE-004b",
+      "label": "revoked every agent this run created (100)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "id": "VAL-SCALE-004b",
+      "label": "deleted only the repo this run created (<owner>/scale-staged-campaign-fleet-1791734157): DELETE then owner GET 404",
+      "ok": true,
+      "detail": "DELETE 200, GET 404"
+    },
+    {
+      "id": "VAL-SCALE-004d-monetary",
+      "label": "campaign report has no monetary amount or pricing derivation",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "passed": 34,
+  "failed": 0,
+  "notes": [
+    "Pinned dependent w003 enqueue counters `d1=2;rr=16;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes).",
+    "Pinned dependent w002 enqueue counters `d1=2;rr=15;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` (the cost.md workspace-backed enqueue row was measured on unpinned changes)."
+  ]
+}
