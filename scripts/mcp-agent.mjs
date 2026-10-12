@@ -35,12 +35,22 @@
  * Git runs with `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a
  * secret-free GIT_ASKPASS helper. Exit 0 only when every check held.
  *
+ * refs/heads/agents/** is reserved against human pushes, so every push to a
+ * workspace ref uses a scratch agent's short-lived (900 s) write token for
+ * refs/heads/agents/*, minted per scenario repo and held only in memory. Each
+ * token is revoked when its scenario ends and the scratch agent when the run
+ * ends, failed runs included.
+ *
  * The attribution scenario mints (and afterwards revokes) a short-lived agent
  * token for KVARM_USER to drive one merge as an agent session.
  *
  * The two-agent scenario (VAL-CROSS-001) lands the winner with
  * enqueue_change and polls get_change until the integration train merged
  * it.
+ *
+ * The arena scenario (VAL-CROSS-012) has KVARM_USER resolve the winner's
+ * final-selection escalation over REST before the explicit merge_change; the
+ * three candidates refactor distant functions, so the losers stay open.
  *
  * The registry section checks VAL-MCP-003: the 15 original tool names, a
  * description and input schema on every tool and, with --api-doc, that
@@ -182,7 +192,78 @@ async function runCall(tool, rawArgs) {
 // e2e
 // ---------------------------------------------------------------------------
 
+/**
+ * A scratch agent of KVARM_USER whose write tokens (refs/heads/agents/*, one
+ * per repo, 900 s) push workspace refs. Token values never leave this closure
+ * except as the git askpass environment of a push.
+ */
+function scratchWorkspaceAgent(pat, ts) {
+  let agentId = null;
+  const tokens = new Map();
+  async function api(path, method, json) {
+    const init = { method, headers: { Authorization: `Bearer ${pat}` } };
+    if (json !== undefined) {
+      init.headers['content-type'] = 'application/json';
+      init.body = JSON.stringify(json);
+    }
+    const res = await fetch(`${BASE}/api/v1${path}`, init);
+    let body = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    return { status: res.status, json: body };
+  }
+  return {
+    async tokenFor(repo) {
+      const held = tokens.get(repo);
+      if (held) return held.token;
+      if (!agentId) {
+        const agent = await api('/agents', 'POST', { name: `mcp-agent-ws-${ts}`, description: 'mcp-agent e2e workspace pushes' });
+        if (agent.status !== 201) throw new Error(`create scratch workspace agent -> ${agent.status} ${agent.json?.code ?? ''}`);
+        agentId = agent.json.agent.id;
+      }
+      const minted = await api(`/agents/${agentId}/tokens`, 'POST', { repo, role: 'write', refs: ['refs/heads/agents/*'], expiresIn: 900 });
+      if (minted.status !== 201) throw new Error(`mint scratch workspace token for ${repo} -> ${minted.status} ${minted.json?.code ?? ''}`);
+      tokens.set(repo, { id: minted.json.id, token: minted.json.token });
+      return minted.json.token;
+    },
+    /** Revokes `repo`'s token; null when none was minted, else whether the platform reports it revoked. */
+    async revoke(repo) {
+      const held = tokens.get(repo);
+      if (!held) return null;
+      tokens.delete(repo);
+      const r = await api(`/agents/${agentId}/tokens/${held.id}`, 'DELETE');
+      return r.status === 200 && r.json?.token?.status === 'revoked';
+    },
+    /** Revokes any remaining tokens and the agent; null when no agent was created. */
+    async revokeAll() {
+      if (!agentId) return null;
+      let ok = true;
+      for (const repo of tokens.keys()) ok = (await this.revoke(repo)) && ok;
+      const r = await api(`/agents/${agentId}`, 'DELETE');
+      return ok && r.status === 200 && r.json?.agent?.status === 'revoked';
+    },
+  };
+}
+
 async function runE2e(argv) {
+  const scratch = scratchWorkspaceAgent(process.env.KVARM_PAT || die('KVARM_PAT is not set'), Math.floor(Date.now() / 1000));
+  let code = 1;
+  try {
+    code = await e2eChecks(argv, scratch);
+  } finally {
+    const revoked = await scratch.revokeAll();
+    if (revoked !== null) {
+      console.log(`${revoked ? 'PASS' : 'FAIL'}  [cleanup] scratch workspace agent and its tokens revoked`);
+      if (!revoked) code = 1;
+    }
+  }
+  return code;
+}
+
+async function e2eChecks(argv, scratch) {
   const { values: opts } = parseArgs({ args: argv, options: { keep: { type: 'boolean', default: false }, only: { type: 'string' }, 'api-doc': { type: 'string' } } });
   const PAT = process.env.KVARM_PAT || die('KVARM_PAT is not set');
   const BOT = process.env.KVARM_PAT_BOT || '';
@@ -245,9 +326,13 @@ async function runE2e(argv) {
     mustGit(['commit', '-q', '-m', msg], dir);
     return mustGit(['rev-parse', 'HEAD'], dir);
   }
-  async function pushRetry(dir, url, refspec) {
+  /** Pushes as KVARM_USER, or with the scratch workspace token when the destination is a workspace ref. */
+  async function pushRetry(dir, url, refspec, token) {
+    const dst = refspec.slice(refspec.lastIndexOf(':') + 1);
+    const repo = new URL(url).pathname.replace(/^\//, '').replace(/\.git$/, '');
+    const as = token ?? (dst.startsWith('refs/heads/agents/') ? await scratch.tokenFor(repo) : PAT);
     for (let i = 0; i < 8; i++) {
-      if (git(['push', '-q', url, refspec], dir).code === 0) return;
+      if (git(['push', '-q', url, refspec], dir, as).code === 0) return;
       await sleep(3000);
     }
     throw new Error(`push ${refspec} kept failing`);
@@ -296,6 +381,9 @@ async function runE2e(argv) {
           await body(repo);
         } catch (err) {
           check(purpose, `scenario ${purpose} ran to completion`, false, String(err?.stack ?? err).slice(0, 400));
+        } finally {
+          const revoked = await scratch.revoke(`${OWNER}/${repo}`);
+          if (revoked !== null) check(purpose, 'scratch workspace token revoked', revoked);
         }
       },
     );
@@ -769,6 +857,15 @@ async function runE2e(argv) {
   // VAL-CROSS-012
   await scenario('arena', 'public', async (repo) => {
     const env = await seeded(repo);
+    // Each candidate refactors a different, distant function, so the losers still merge cleanly (and stay open) after the winner lands.
+    const fns = [
+      ['util', 'return x + 1;'],
+      ['double', 'return x * 2;'],
+      ['triple', 'return x * 3;'],
+    ];
+    const utilWith = (i, body) => fns.map(([n, b], j) => (j === i ? body : `export function ${n}(x: number) {\n  ${b}\n}\n`)).join('\n// --\n// --\n// --\n\n');
+    const base = commitOn(env.dir, env.main, { 'src/lib/util.ts': utilWith(-1) }, 'util helpers');
+    await pushRetry(env.dir, env.url, `${base}:refs/heads/main`);
     const made = await call(owner, 'create_arena', { repo: env.repo, brief: 'Refactor util', candidates: 3, base: 'main' });
     const arena = made.data ?? {};
     console.log(`create_arena -> id=${arena.id} state=${arena.state} workspaces=${arena.workspaces?.map((w) => w.id).join(',')} (x-kvarm-cost ${made.cost})`);
@@ -776,12 +873,12 @@ async function runE2e(argv) {
     check('VAL-CROSS-012', 'arena of 3 created through MCP equals the REST readback', !made.isError && arena.workspaces?.length === 3 && eq(restArena.json, arena));
     const bodies = [
       'export function util(x: number) {\n  return 1 + x;\n}\n',
-      'export const util = (x: number): number => x + 1;\n',
-      'export function util(value: number) {\n  const next = value + 1;\n  return next;\n}\n',
+      'export const double = (x: number): number => x * 2;\n',
+      'export function triple(value: number) {\n  const next = value * 3;\n  return next;\n}\n',
     ];
     const changes = {};
     for (const [i, w] of arena.workspaces.entries()) {
-      const sha = commitOn(env.dir, env.main, { 'src/lib/util.ts': bodies[i], [`notes/${i}.md`]: `candidate ${i}\n` }, `refactor ${i}`);
+      const sha = commitOn(env.dir, base, { 'src/lib/util.ts': utilWith(i, bodies[i]), [`notes/${i}.md`]: `candidate ${i}\n` }, `refactor ${i}`);
       await pushRetry(env.dir, env.url, `${sha}:${w.ref}`);
       changes[w.id] = (await call(owner, 'create_change_set', { repo: env.repo, workspace: w.id, title: `candidate ${i}`, mergePolicy: 'review' })).data?.number;
     }
@@ -800,9 +897,14 @@ async function runE2e(argv) {
     const sel = await call(owner, 'select_arena_winner', { repo: env.repo, id: arena.id, workspace: winner });
     const openAfterSelect = await Promise.all(Object.values(changes).map((n) => call(owner, 'get_change', { repo: env.repo, number: n })));
     check('VAL-CROSS-012', 'selection recorded; no change set merged or closed by selecting', !sel.isError && sel.data?.selection?.selectedWorkspace === winner && openAfterSelect.every((c) => c.data?.state === 'open'));
+    // The selection opens a final-selection escalation on the winner's change set; the normal review path has a human confirm it.
+    const esc = ((await http(`${env.api}/changes/${changes[winner]}/reviews`)).json?.escalations ?? []).find((e) => e.reason === 'final-selection' && e.state === 'open');
+    const confirm = await http(`${env.api}/changes/${changes[winner]}/escalations/${esc?.id}/resolve`, { method: 'POST', json: { resolution: 'resolve', note: 'selection confirmed' } });
+    console.log(`final-selection escalation ${esc?.id} -> human resolve ${confirm.status} state=${confirm.json?.escalation?.state}`);
     const mg = await call(owner, 'merge_change', { repo: env.repo, number: changes[winner] });
     mustGit(['fetch', '-q', env.url, '+refs/heads/main:refs/remotes/origin/main'], env.dir);
     const log = mustGit(['log', 'origin/main', '-1', '--format=%H'], env.dir);
+    console.log(`merge_change #${changes[winner]} -> isError=${mg.isError} state=${mg.data?.state}${mg.isError ? ` ${mg.text.slice(0, 300)}` : ''}; origin/main ${log}`);
     check('VAL-CROSS-012', 'winner merged through explicit merge_change under review policy; merge commit on main', !mg.isError && mg.data?.state === 'merged' && log === mg.data?.mergeCommit);
     const loserState = await Promise.all(losers.map((id) => call(owner, 'get_change', { repo: env.repo, number: changes[id] })));
     check('VAL-CROSS-012', 'losers stay open after the winner merged', loserState.every((c) => c.data?.state === 'open'), loserState.map((c) => c.data?.state).join(','));
@@ -859,11 +961,12 @@ async function runE2e(argv) {
     check('VAL-ATTR-006', 'MCP set_attribution is read back identically by MCP get_attribution and REST', !mset.isError && !mget.isError && eq(mget.data, mset.data) && eq(rget.json, mset.data) && mset.data?.agent === 'mcp-agent-1');
 
     // VAL-ATTR-004: a two-parent merge driven through MCP by the owner, then one by an agent token.
-    const mergeWith = async (conn, label, files, attribution) => {
+    // `wsToken` is the agent token that created the workspace: an agent's own workspace is not pushable by the scratch token.
+    const mergeWith = async (conn, label, files, attribution, wsToken) => {
       const ws = (await call(conn, 'create_workspace', { repo: env.repo, task: `attr ${label}`, agent: 'mcp-agent-1' })).data;
       mustGit(['fetch', '-q', env.url, '+refs/heads/main:refs/remotes/origin/main'], dir);
       const base = mustGit(['rev-parse', 'origin/main'], dir);
-      await pushRetry(dir, env.url, `${commitOn(dir, base, files, `ws ${label}`)}:${ws.ref}`);
+      await pushRetry(dir, env.url, `${commitOn(dir, base, files, `ws ${label}`)}:${ws.ref}`, wsToken);
       await pushRetry(dir, env.url, `${commitOn(dir, base, { [`main-${label}.txt`]: `${label}\n` }, `main ${label}`)}:refs/heads/main`);
       const cs = (await call(conn, 'create_change_set', { repo: env.repo, workspace: ws.id, title: `attr ${label}`, mergePolicy: 'review' })).data;
       const mg = await call(conn, 'merge_change', { repo: env.repo, number: cs?.number, ...(attribution ? { attribution } : {}) });
@@ -882,7 +985,7 @@ async function runE2e(argv) {
     if (minted.status === 201) {
       const agentConn = await connect(minted.json.token, 'mcp-agent-token');
       try {
-        const byAgent = await mergeWith(agentConn, 'agent', { 'src/agent.ts': 'export const agent = 1;\n' }, null);
+        const byAgent = await mergeWith(agentConn, 'agent', { 'src/agent.ts': 'export const agent = 1;\n' }, null, minted.json.token);
         check('VAL-ATTR-004', 'a merge driven by an agent-token MCP session names the agent identity', byAgent.mg.data?.merge?.kind === 'merge' && byAgent.a.json?.agent === agentName && byAgent.a.json?.actor === OWNER && eq(byAgent.a.json, byAgent.n.json));
       } finally {
         await agentConn.close();
