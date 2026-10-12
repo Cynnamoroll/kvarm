@@ -217,6 +217,38 @@ export class CeilingExceeded extends Error {
   }
 }
 
+export class CampaignAbort extends Error {}
+
+/**
+ * The driver's invariant results: `check` records one and continues, `gate`
+ * records it and throws CampaignAbort when it fails, so no later stage (the
+ * live burst included) starts after a failed gate.
+ * @param {{ log: (line: string) => void, stage: () => string }} o
+ */
+export function createInvariants({ log, stage }) {
+  /** @type {{ id: string, label: string, ok: boolean, detail: string }[]} */
+  const results = [];
+  const check = (id, label, ok, detail = '') => {
+    results.push({ id, label, ok: Boolean(ok), detail });
+    log(`${ok ? 'PASS' : 'FAIL'}  [${id}] ${label}${detail ? `  -> ${detail}` : ''}`);
+    return Boolean(ok);
+  };
+  const gate = (id, label, ok, detail = '') => {
+    if (!check(id, label, ok, detail)) throw new CampaignAbort(`invariant failed at ${stage()}: ${label}${detail ? ` (${detail})` : ''}`);
+  };
+  return { results, check, gate };
+}
+
+/**
+ * The pre-burst forecast invariant: a 200 answer whose matches are exactly
+ * the shared-file members, no more and no fewer.
+ * @param {{ status: number, matches: { workspace: string }[] | undefined, idToKey: Map<string, string>, overlapKeys: string[] }} o
+ */
+export function forecastMemberSet({ status, matches, idToKey, overlapKeys }) {
+  const keys = new Set((matches ?? []).map((m) => idToKey.get(m.workspace)));
+  return { ok: status === 200 && keys.size === overlapKeys.length && overlapKeys.every((k) => keys.has(k)), size: keys.size };
+}
+
 /** Counts every harness-issued request and refuses the one that would pass the ceiling. */
 export class RequestLedger {
   constructor(ceiling) {
@@ -514,6 +546,8 @@ function checksSection(checks) {
 
 export function renderBenchmarkMarkdown(r) {
   const b = r.burst;
+  // Window, throughput and latency cover only the initial burst; publications after a conflict resolution land later.
+  const split = Number.isInteger(b.acceptedInBurstWindow) && Number.isInteger(b.resolvedAndPublished);
   const lines = [
     '# Fleet run: 100 active workspaces and a paced change burst',
     '',
@@ -535,11 +569,21 @@ export function renderBenchmarkMarkdown(r) {
     '',
     `| Metric | Value |`,
     `|---|---|`,
-    `| Accepted publications | ${b.accepted} |`,
-    `| Incomplete cases (listed with reasons in the JSON report) | ${b.incomplete} |`,
-    `| Burst window (first enqueue → last publication) | ${fmtMs(b.windowMs)} |`,
-    `| Throughput (accepted publications per minute over the window) | ${b.throughputPerMin} |`,
-    `| Latency enqueue → published, server clock (p50 / p90 / max) | ${fmtMs(b.latencyMs.p50)} / ${fmtMs(b.latencyMs.p90)} / ${fmtMs(b.latencyMs.max)} |`,
+    ...(split
+      ? [
+          `| Accepted publications | ${b.accepted} (${b.acceptedInBurstWindow} in the initial burst + ${b.resolvedAndPublished} after conflict resolution) |`,
+          `| Incomplete cases (listed with reasons in the JSON report) | ${b.incomplete} |`,
+          `| Initial burst window (first enqueue → last of the ${b.acceptedInBurstWindow} initial-burst publications) | ${fmtMs(b.windowMs)} |`,
+          `| Throughput (the ${b.acceptedInBurstWindow} initial-burst publications per minute over that window) | ${b.throughputPerMin} |`,
+          `| Latency enqueue → published of the ${b.acceptedInBurstWindow} initial-burst publications, server clock (p50 / p90 / max) | ${fmtMs(b.latencyMs.p50)} / ${fmtMs(b.latencyMs.p90)} / ${fmtMs(b.latencyMs.max)} |`,
+        ]
+      : [
+          `| Accepted publications | ${b.accepted} |`,
+          `| Incomplete cases (listed with reasons in the JSON report) | ${b.incomplete} |`,
+          `| Burst window (first enqueue → last publication) | ${fmtMs(b.windowMs)} |`,
+          `| Throughput (accepted publications per minute over the window) | ${b.throughputPerMin} |`,
+          `| Latency enqueue → published, server clock (p50 / p90 / max) | ${fmtMs(b.latencyMs.p50)} / ${fmtMs(b.latencyMs.p90)} / ${fmtMs(b.latencyMs.max)} |`,
+        ]),
     `| Max queue backlog observed (active entries) | ${b.backlogMax} |`,
     ...(b.longestIdle
       ? [

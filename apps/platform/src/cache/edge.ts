@@ -16,14 +16,27 @@ export function cacheableViewer<S extends AnyApp>(c: Context<S>): boolean {
 }
 
 /**
+ * Namespace of commit-pinned page keys. Their content never changes, but the
+ * rendered chrome and headers can: advance this whenever cached page output
+ * changes, so no immutable entry rendered by older code is adopted.
+ */
+export const PINNED_PAGE_VERSION = 'pin-v1';
+
+/**
  * Cache key for a page. `generation` is null for views pinned to a commit
- * SHA, which never change.
+ * SHA, which never change and are keyed by `PINNED_PAGE_VERSION` instead.
  */
 export function pageCacheKey(request: Request, generation: string | null): Request {
-  if (generation === null) return request;
   const url = new URL(request.url);
-  url.searchParams.set('kvarm-gen', generation);
+  url.searchParams.set('kvarm-gen', generation ?? PINNED_PAGE_VERSION);
   return new Request(url.toString(), { method: 'GET' });
+}
+
+/** Response headers retired by the Kvarm cutover; a cached entry never re-serves them. */
+function dropRetiredHeaders(headers: Headers): void {
+  // Collected first: deleting while iterating a Headers object skips entries.
+  const retired = Array.from(headers.keys()).filter((name) => name.startsWith('x-forge-'));
+  for (const name of retired) headers.delete(name);
 }
 
 /**
@@ -44,6 +57,7 @@ export async function edgeCachedPage<S extends AnyApp>(
   if (cached) {
     markCache('hit');
     const res = new Response(cached.body, cached);
+    dropRetiredHeaders(res.headers);
     res.headers.set('x-kvarm-cache', 'hit');
     return res;
   }

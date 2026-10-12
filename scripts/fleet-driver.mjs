@@ -53,15 +53,18 @@ import {
   CAMPAIGN_LIMITS,
   CHECK_IDS,
   CONFIG_PATH,
+  CampaignAbort,
   CeilingExceeded,
   RequestLedger,
   checkProjection,
   comparePublications,
   countMarkers,
+  createInvariants,
   createLimiter,
   editLine,
   endpointClass,
   findMonetary,
+  forecastMemberSet,
   longestQueueIdle,
   memberFiles,
   parseCost,
@@ -213,16 +216,7 @@ const log = (line) => {
   transcript.push(line);
   console.log(line);
 };
-const results = [];
-function check(id, label, ok, detail = '') {
-  results.push({ id, label, ok: Boolean(ok), detail });
-  log(`${ok ? 'PASS' : 'FAIL'}  [${id}] ${label}${detail ? `  -> ${detail}` : ''}`);
-  return Boolean(ok);
-}
-class CampaignAbort extends Error {}
-function gate(id, label, ok, detail = '') {
-  if (!check(id, label, ok, detail)) throw new CampaignAbort(`invariant failed at ${stage}: ${label}${detail ? ` (${detail})` : ''}`);
-}
+const { results, check, gate } = createInvariants({ log, stage: () => stage });
 
 const ledger = new RequestLedger(limits.ceiling);
 const httpLim = createLimiter(limits.httpInFlight);
@@ -585,15 +579,15 @@ async function main() {
   );
   check('VAL-SCALE-002c', `overlap pages within the cost.md row ${BUDGETS.overlap}`, overlapPages.every((p) => withinBudget(parseCost(p.cost), BUDGETS.overlap).ok), overlapPages.map((p) => p.cost).join(' | '));
   const fc = await api(`${API}/forecast?paths=${encodeURIComponent(CONFIG_PATH)}&limit=100`);
-  const fcKeys = new Set((fc.json?.matches ?? []).map((mm) => idToKey.get(mm.workspace)));
-  check(
+  const fcMembers = forecastMemberSet({ status: fc.status, matches: fc.json?.matches, idToKey, overlapKeys: plan.overlapKeys });
+  report.verifyPre = { lsRemoteRefs: lsPre.size, listPages: pages, overlapPages, overlapPairs: pairs.length, forecastMatches: fcMembers.size };
+  check('VAL-SCALE-002c', `forecast within ${BUDGETS.forecast}`, withinBudget(parseCost(fc.cost), BUDGETS.forecast).ok, fc.cost ?? '');
+  gate(
     'VAL-SCALE-002c',
     `forecast for ${CONFIG_PATH} names exactly the ${plan.overlapKeys.length} shared-file members`,
-    fc.status === 200 && fcKeys.size === plan.overlapKeys.length && plan.overlapKeys.every((k) => fcKeys.has(k)),
-    `${fcKeys.size} matches [${fc.cost}]`,
+    fcMembers.ok,
+    `${fcMembers.size} matches, status ${fc.status} [${fc.cost}]`,
   );
-  check('VAL-SCALE-002c', `forecast within ${BUDGETS.forecast}`, withinBudget(parseCost(fc.cost), BUDGETS.forecast).ok, fc.cost ?? '');
-  report.verifyPre = { lsRemoteRefs: lsPre.size, listPages: pages, overlapPages, overlapPairs: pairs.length, forecastMatches: fcKeys.size };
 
   // -------------------------------------------------------------- change sets
   enter('burst');

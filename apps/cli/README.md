@@ -132,16 +132,25 @@ Jobs run in a persistent working directory per repository
 process locks its slot (`slot-<n>.lock`, owner pid and host) for its whole
 lifetime; a concurrent runner for the same repository takes the next free
 slot, and a lock whose process has died is reclaimed. The first job in a slot
-is a full snapshot checkout. Later jobs, including later `--once` processes,
-check the new commit out into a staging directory and sync it in: every
-tracked file is moved in from the new snapshot, files of the previous tree
-that the new tree lacks are deleted, and any other untracked path is removed
-unless it is inside a dependency cache directory (`node_modules`, `.venv`,
-`venv`, `target`, `.cache`, `.gradle`, `.turbo`, `__pycache__`,
-`.pytest_cache`, `.mypy_cache`, `.tox`, matched by name at any depth). The
-tracked tree therefore equals a fresh snapshot checkout while installs are
-reused. Any error on the warm path falls back to a full checkout into an
-emptied directory, so the job never fails because of the fast path. `--fresh`
+is a full snapshot checkout, and the slot records the exact tree it produced
+(every tracked path with its git blob hash and mode). Later jobs, including
+later `--once` processes, sync the delta instead of downloading the tree:
+the runner asks the compare API which paths changed between the recorded
+commit and the new head and fetches only those files. Deleted paths
+disappear, changed and added paths are written with their exact bytes and
+modes, and any tracked file a previous job dirtied is restored from the
+recorded hashes even when the delta does not touch it. Parent directories
+are made real directories before a tracked file is inspected or written, so a
+symlink left in the workdir never redirects a read, mode change or delete
+outside it. Any other untracked path is removed unless it is a dependency
+cache directory (`node_modules`, `.venv`, `venv`, `target`, `.cache`,
+`.gradle`, `.turbo`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.tox`,
+matched by name at any depth, including below untracked or deleted
+directories); pruning never follows a symlink. The tracked tree therefore
+equals a fresh snapshot checkout while installs are reused. Any error on the
+warm path, including an unreadable or invalid recorded state, falls back to a
+full checkout into an emptied directory, so the job never fails because of
+the fast path. `--fresh`
 rematerializes every job from an empty directory (caches included). The
 runner prints `workdir: warm` or `workdir: fresh` per job and
 `reported <conclusion> for <job> (<id>) in <ms> ms` (claim to report).

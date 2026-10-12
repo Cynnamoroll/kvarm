@@ -62,6 +62,25 @@ export function projectCampaign(plan: FleetPlan, opts?: Record<string, number>):
 export function checkProjection(projection: Projection, limits: CampaignLimits): { fits: boolean; problems: string[] };
 
 export class CeilingExceeded extends Error {}
+export class CampaignAbort extends Error {}
+
+export interface InvariantResult {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+export function createInvariants(o: { log: (line: string) => void; stage: () => string }): {
+  results: InvariantResult[];
+  check(id: string, label: string, ok: unknown, detail?: string): boolean;
+  gate(id: string, label: string, ok: unknown, detail?: string): void;
+};
+export function forecastMemberSet(o: {
+  status: number;
+  matches: { workspace: string }[] | undefined;
+  idToKey: Map<string, string>;
+  overlapKeys: string[];
+}): { ok: boolean; size: number };
 
 export class RequestLedger {
   constructor(ceiling: number);

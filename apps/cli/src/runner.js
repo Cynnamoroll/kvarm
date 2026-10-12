@@ -347,6 +347,9 @@ async function fetchDelta(o) {
  * @property {string} [workRoot] root of the persistent workdirs (defaults below tempRoot)
  * @property {boolean} [fresh] fully rematerialize every job instead of syncing warm
  * @property {(previous: import('./workdir.js').RecordedState, sha: string) => Promise<import('./workdir.js').DeltaManifest>} [deltaFn] fetches a warm delta (defaults to the compare-based fetcher)
+ * @property {(info: { job: { id: string, name: string, sha: string }, work: string, workdir: 'warm' | 'fresh', source: string }) => Promise<void>} [prepared]
+ *   awaited after the job's workspace is materialized and before its command runs, while the lease heartbeat keeps running;
+ *   a rejection reports the job as failed without running the command
  */
 
 /**
@@ -410,6 +413,9 @@ export async function runRunner(options) {
             }),
         });
         options.stdout(`workdir: ${materialized.workdir}`);
+        if (options.prepared) {
+          await options.prepared({ job: { id: job.id, name: job.name, sha: job.sha }, work: slot.work, workdir: materialized.workdir, source: materialized.source });
+        }
         const result = await execute(job.command, slot.work, job.timeoutSeconds);
         const conclusion = result.code === 0 && !result.timedOut ? 'success' : 'failure';
         const summary = boundedSummary({

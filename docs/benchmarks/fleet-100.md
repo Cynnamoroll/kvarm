@@ -18,11 +18,11 @@ One driver process; ≤ 3 git children and ≤ 5 in-flight HTTP requests; campai
 
 | Metric | Value |
 |---|---|
-| Accepted publications | 99 |
+| Accepted publications | 99 (96 in the initial burst + 3 after conflict resolution) |
 | Incomplete cases (listed with reasons in the JSON report) | 0 |
-| Burst window (first enqueue → last publication) | 361.9 s |
-| Throughput (accepted publications per minute over the window) | 15.91 |
-| Latency enqueue → published, server clock (p50 / p90 / max) | 94.0 s / 219.1 s / 361.9 s |
+| Initial burst window (first enqueue → last of the 96 initial-burst publications) | 361.9 s |
+| Throughput (the 96 initial-burst publications per minute over that window) | 15.91 |
+| Latency enqueue → published of the 96 initial-burst publications, server clock (p50 / p90 / max) | 94.0 s / 219.1 s / 361.9 s |
 | Max queue backlog observed (active entries) | 64 |
 | Longest interval with no queue entry reaching a terminal state | 79.7 s (+235.1 s → +314.7 s after the first enqueue; ended by #90 ejected MERGE_CONFLICT) |
 | 429 QUEUE_FULL answers / retries | 2 / 2 |

@@ -619,3 +619,176 @@ describe('kvarm runner warm workdir', () => {
     expect(() => slotPaths(join(root, 'escape'), '../demo', 0)).toThrow(/invalid repository/);
   });
 });
+
+describe('kvarm runner warm workdir edge cases', () => {
+  /** c2 adds `node_modules/linked/file.txt`; job 1 points that parent at a populated outside directory. */
+  async function linkedParentCase(name: string, outsideBytes: string, outsideMode: number) {
+    const workRoot = join(root, `linked-${name}`);
+    const outside = join(root, `outside-linked-${name}`);
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'file.txt'), outsideBytes);
+    chmodSync(join(outside, 'file.txt'), outsideMode);
+    writeFileSync(join(outside, 'sibling.txt'), 'external sibling\n');
+    await runOnce(workRoot, [job(`${name}1`, history.c1)], async (_command, cwd) => {
+      mkdirSync(join(cwd, 'node_modules'));
+      symlinkSync(outside, join(cwd, 'node_modules', 'linked'));
+      return ok;
+    });
+    let observed: Record<string, string> = {};
+    const second = await runOnce(workRoot, [job(`${name}2`, history.c2)], async (_command, cwd) => {
+      observed = treeState(cwd);
+      return ok;
+    });
+    expect(second.reports[0]).toMatchObject({ conclusion: 'success', summary: { sha: history.c2 } });
+    expect(second.stdout).toContain('workdir: warm');
+    expect(observed).toEqual(treeState(await freshCheckout(history.c2)));
+    const work = slotPaths(workRoot, 'cynthia/demo', 0).work;
+    expect(lstatSync(join(work, 'node_modules', 'linked')).isSymbolicLink()).toBe(false);
+    // The external destination keeps its exact files, bytes and modes.
+    expect(readdirSync(outside).sort()).toEqual(['file.txt', 'sibling.txt']);
+    expect(readFileSync(join(outside, 'file.txt'), 'utf8')).toBe(outsideBytes);
+    expect(lstatSync(join(outside, 'file.txt')).mode & 0o777).toBe(outsideMode);
+    expect(readFileSync(join(outside, 'sibling.txt'), 'utf8')).toBe('external sibling\n');
+  }
+
+  it('never deletes an external file through a symlinked parent of a tracked leaf', async () => {
+    await linkedParentCase('differs', 'external bytes that differ\n', 0o644);
+  });
+
+  it('never adopts a matching external file through a symlinked parent instead of repairing the parent', async () => {
+    await linkedParentCase('matches', 'tracked file under an untracked cache symlink\n', 0o644);
+  });
+
+  it('never chmods an external file through a symlinked parent when only the mode differs', async () => {
+    await linkedParentCase('mode', 'tracked file under an untracked cache symlink\n', 0o755);
+  });
+
+  /** Caches nested below untracked ancestors, plus a cache-bearing directory outside reached only through a symlink. */
+  function nestedCaches(outside: string): Execute {
+    return async (_command, cwd) => {
+      mkdirSync(join(cwd, 'environments', 'python', '.venv', 'bin'), { recursive: true });
+      writeFileSync(join(cwd, 'environments', 'python', '.venv', 'bin', 'python'), 'venv\n');
+      writeFileSync(join(cwd, 'environments', 'python', 'stray.txt'), 'stray\n');
+      mkdirSync(join(cwd, 'tools', 'node_modules', 'x'), { recursive: true });
+      writeFileSync(join(cwd, 'tools', 'node_modules', 'x', 'index.js'), 'tool cache\n');
+      mkdirSync(join(cwd, 'tools', 'build'));
+      writeFileSync(join(cwd, 'tools', 'build', 'out.o'), 'stale\n');
+      symlinkSync(outside, join(cwd, 'environments', 'escape'));
+      if (existsSync(join(cwd, 'gone', 'deep'))) {
+        mkdirSync(join(cwd, 'gone', 'deep', 'node_modules', 'pkg'), { recursive: true });
+        writeFileSync(join(cwd, 'gone', 'deep', 'node_modules', 'pkg', 'index.js'), 'package-local cache\n');
+      }
+      return ok;
+    };
+  }
+
+  const cacheFiles = {
+    'environments/python/.venv/bin/python': 'venv\n',
+    'tools/node_modules/x/index.js': 'tool cache\n',
+  };
+
+  function expectNestedCachesKept(work: string, observed: Record<string, string>, fresh: Record<string, string>, extraDirs: string[]) {
+    for (const [path, bytes] of Object.entries(cacheFiles)) expect(readFileSync(join(work, ...path.split('/')), 'utf8')).toBe(bytes);
+    // Only the ancestors of kept caches remain beside the tracked tree.
+    const ancestors = Object.fromEntries(['environments', 'environments/python', 'tools', ...extraDirs].map((d) => [d, 'dir']));
+    expect(observed).toEqual({ ...fresh, ...ancestors });
+  }
+
+  it('keeps dependency caches nested below untracked ancestors, including a deleted package, without following symlinks', async () => {
+    const workRoot = join(root, 'nested');
+    const outside = join(root, 'outside-nested');
+    mkdirSync(join(outside, 'node_modules', 'ext'), { recursive: true });
+    writeFileSync(join(outside, 'node_modules', 'ext', 'index.js'), 'external cache\n');
+    writeFileSync(join(outside, 'loose.txt'), 'external loose file\n');
+    await runOnce(workRoot, [job('n1', history.c1)], nestedCaches(outside));
+    const work = slotPaths(workRoot, 'cynthia/demo', 0).work;
+    expect(existsSync(join(work, 'gone', 'deep', 'node_modules', 'pkg', 'index.js'))).toBe(true);
+
+    const ignore = ['environments/python/.venv', 'tools/node_modules', 'gone/deep/node_modules'];
+    let observed: Record<string, string> = {};
+    const second = await runOnce(workRoot, [job('n2', history.c2)], async (_command, cwd) => {
+      observed = treeState(cwd, ignore);
+      return ok;
+    });
+    expect(second.stdout).toContain('workdir: warm');
+    expect(second.reports[0]).toMatchObject({ conclusion: 'success', summary: { sha: history.c2, source: 'delta' } });
+    const fresh2 = treeState(await freshCheckout(history.c2));
+    expectNestedCachesKept(work, observed, fresh2, ['gone', 'gone/deep']);
+    // The package's tracked file went with its commit; its local cache stayed.
+    expect(readFileSync(join(work, 'gone', 'deep', 'node_modules', 'pkg', 'index.js'), 'utf8')).toBe('package-local cache\n');
+    expect(existsSync(join(work, 'gone', 'deep', 'file.txt'))).toBe(false);
+    expect(readFileSync(join(outside, 'node_modules', 'ext', 'index.js'), 'utf8')).toBe('external cache\n');
+    expect(readFileSync(join(outside, 'loose.txt'), 'utf8')).toBe('external loose file\n');
+
+    // A same-head job keeps the nested caches too and prunes the new strays.
+    const third = await runOnce(workRoot, [job('n3', history.c2)], async (_command, cwd) => {
+      writeFileSync(join(cwd, 'environments', 'python', 'stray.txt'), 'stray again\n');
+      writeFileSync(join(cwd, 'tools', 'scratch.txt'), 'scratch\n');
+      return ok;
+    });
+    expect(third.stdout).toContain('workdir: warm');
+    const fourth = await runOnce(workRoot, [job('n4', history.c2)], async (_command, cwd) => {
+      observed = treeState(cwd, ignore);
+      return ok;
+    });
+    expect(fourth.stdout).toContain('workdir: warm');
+    expectNestedCachesKept(work, observed, fresh2, ['gone', 'gone/deep']);
+    expect(readFileSync(join(work, 'gone', 'deep', 'node_modules', 'pkg', 'index.js'), 'utf8')).toBe('package-local cache\n');
+  });
+
+  it('keeps nested caches on a same-head job that follows the cold checkout', async () => {
+    const workRoot = join(root, 'nested-same');
+    const outside = join(root, 'outside-nested-same');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'keep.txt'), 'external\n');
+    await runOnce(workRoot, [job('s1', history.c2)], nestedCaches(outside));
+    let observed: Record<string, string> = {};
+    const second = await runOnce(workRoot, [job('s2', history.c2)], async (_command, cwd) => {
+      observed = treeState(cwd, ['environments/python/.venv', 'tools/node_modules']);
+      return ok;
+    });
+    expect(second.stdout).toContain('workdir: warm');
+    expectNestedCachesKept(slotPaths(workRoot, 'cynthia/demo', 0).work, observed, treeState(await freshCheckout(history.c2)), []);
+    expect(readdirSync(outside)).toEqual(['keep.txt']);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('falls back to a full snapshot checkout when the recorded state is unreadable, and the job still completes', async () => {
+    const workRoot = join(root, 'unreadable-state');
+    await runOnce(workRoot, [job('u1', history.c1)], async () => ok);
+    const slot = slotPaths(workRoot, 'cynthia/demo', 0);
+    chmodSync(slot.state, 0o000);
+    const before = snapshotDownloads.count;
+    let observed: Record<string, string> = {};
+    const second = await runOnce(workRoot, [job('u2', history.c2)], async (_command, cwd) => {
+      observed = treeState(cwd);
+      return ok;
+    });
+    expect(second.result).toEqual({ claimed: 1, reported: 1 });
+    expect(second.reports[0]).toMatchObject({ conclusion: 'success', summary: { sha: history.c2, source: 'snapshot' } });
+    expect(second.stderr.join('\n')).toMatch(/warm sync failed: .*EACCES.*; falling back to a full snapshot checkout/);
+    expect(second.stdout).toContain('workdir: fresh');
+    expect(snapshotDownloads.count).toBe(before + 1);
+    expect(observed).toEqual(treeState(await freshCheckout(history.c2)));
+
+    // The bad file was replaced, so the next job warms through the delta again.
+    const third = await runOnce(workRoot, [job('u3', history.c1)], async () => ok);
+    expect(third.stdout).toContain('workdir: warm');
+  });
+
+  it('falls back when the recorded state path is a directory, and the job still completes', async () => {
+    const workRoot = join(root, 'dir-state');
+    await runOnce(workRoot, [job('v1', history.c1)], async () => ok);
+    const slot = slotPaths(workRoot, 'cynthia/demo', 0);
+    rmSync(slot.state);
+    mkdirSync(join(slot.state, 'nested'), { recursive: true });
+    let observed: Record<string, string> = {};
+    const second = await runOnce(workRoot, [job('v2', history.c2)], async (_command, cwd) => {
+      observed = treeState(cwd);
+      return ok;
+    });
+    expect(second.reports[0]).toMatchObject({ conclusion: 'success', summary: { sha: history.c2 } });
+    expect(second.stderr.join('\n')).toMatch(/warm sync failed: .*EISDIR.*; falling back to a full snapshot checkout/);
+    expect(observed).toEqual(treeState(await freshCheckout(history.c2)));
+    expect(lstatSync(slot.state).isFile()).toBe(true);
+  });
+});

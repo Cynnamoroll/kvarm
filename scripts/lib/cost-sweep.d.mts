@@ -9,8 +9,12 @@ export interface CostRow {
 
 export type Cost = Record<string, number | string>;
 
+/** `http`: one response's x-kvarm-cost; `stored`/`log`/`build`: recorded or logged counters with no HTTP status. */
+export type SampleFormat = 'http' | 'stored' | 'log' | 'build';
+
 export interface Sample {
   status?: number;
+  format?: SampleFormat;
   cost: Cost;
   extra?: any;
   label?: string;
@@ -26,7 +30,8 @@ export interface CatalogEntry {
   kind?: 'live' | 'nonlive';
   probe?: string;
   budget?: string | ((s: any) => string);
-  status?: number | number[];
+  status?: number | number[] | ((s: any) => number | number[]);
+  format?: SampleFormat;
   minSamples?: number;
   aggregate?: (samples: any[]) => string[];
   category?: string;
@@ -52,7 +57,10 @@ export function matchCatalog<E extends { id: string; section?: string; row?: str
   catalog: E[],
 ): { matched: Map<CostRow, E>; unmatched: CostRow[]; ambiguous: { row: CostRow; entries: E[] }[]; unused: E[] };
 export function checkBudget(cost: Cost | null | undefined, spec: string): { ok: boolean; violations: string[] };
+export const COUNTER_SETS: Record<SampleFormat, readonly string[]>;
 export function medianCounters(costs: Cost[]): Cost;
+export function requireKinds(samples: Sample[], kinds: string[]): string[];
+export function smallVsMany(samples: Sample[], kinds: string[], rrTolerance?: number): string[];
 export function evaluateEntry(entry: CatalogEntry, samplesByProbe: Map<string, Sample[]>): Verdict;
 export function summarizeVerdicts(
   verdicts: { status: string }[],

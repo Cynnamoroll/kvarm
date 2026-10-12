@@ -429,12 +429,50 @@ describe('generation-keyed caches', () => {
     expect(infoRefsCacheKey(remote, search, null, 'g1').url).toBe(infoRefsCacheKey(remote, search, null, 'g1').url);
   });
 
-  it('varies mutable page keys by generation and leaves commit-SHA pages unversioned', () => {
+  it('varies mutable page keys by generation and keys commit-SHA pages in a versioned namespace', () => {
     const branch = new Request(`${ORIGIN}/${OWNER}/keys/tree/main/src`);
     expect(pageCacheKey(branch, 'g1').url).not.toBe(pageCacheKey(branch, 'g2').url);
     expect(pageCacheKey(branch, 'g1').url).toContain('/keys/tree/main/src');
     const pinned = new Request(`${ORIGIN}/${OWNER}/keys/tree/${'d'.repeat(40)}/src`);
-    expect(pageCacheKey(pinned, null).url).toBe(pinned.url);
+    // The pre-cutover key was the bare request URL; the versioned key never equals it.
+    expect(pageCacheKey(pinned, null).url).not.toBe(pinned.url);
+    expect(pageCacheKey(pinned, null).url).toContain(`/keys/tree/${'d'.repeat(40)}/src`);
+    expect(pageCacheKey(pinned, null).url).toBe(pageCacheKey(new Request(pinned.url), null).url);
+    expect(pageCacheKey(pinned, null).url).not.toBe(pageCacheKey(branch, 'g1').url);
+  });
+
+  async function fetchPage(path: string): Promise<Response> {
+    const ctx = createExecutionContext();
+    const res = await worker.fetch!(new Request(`${ORIGIN}${path}`) as Request<unknown, IncomingRequestCfProperties>, env, ctx);
+    await waitOnExecutionContext(ctx);
+    return res;
+  }
+
+  it('never serves a retained pre-cutover commit-pinned page or its retired cache header', async () => {
+    const path = `/${OWNER}/fresh/tree/${'e'.repeat(40)}`;
+    await caches.default.put(
+      new Request(`${ORIGIN}${path}`),
+      new Response('<html><title>Forge</title>RETAINED-PRE-CUTOVER-CHROME</html>', {
+        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=31536000', 'x-forge-cache': 'miss' },
+      }),
+    );
+    const res = await fetchPage(path);
+    const text = await res.text();
+    expect(text).not.toContain('RETAINED-PRE-CUTOVER-CHROME');
+    expect(res.headers.get('x-forge-cache')).toBeNull();
+
+    // An entry already in the versioned namespace that still carries a retired header loses it on the hit path.
+    const pinned = `/${OWNER}/fresh/tree/${'f'.repeat(40)}`;
+    await caches.default.put(
+      pageCacheKey(new Request(`${ORIGIN}${pinned}`), null),
+      new Response('<html>VERSIONED-ENTRY</html>', {
+        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=31536000', 'x-forge-cache': 'miss', 'x-forge-cost': 'd1=0' },
+      }),
+    );
+    const hit = await fetchPage(pinned);
+    expect(await hit.text()).toContain('VERSIONED-ENTRY');
+    expect(hit.headers.get('x-kvarm-cache')).toBe('hit');
+    expect([...hit.headers.keys()].filter((k) => k.startsWith('x-forge-'))).toEqual([]);
   });
 
   it('derives the view generation from both pushed_at and the colo ref generation', async () => {

@@ -176,7 +176,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
     echo "KVARM_BASE_URL=https://forge-platform.<your-subdomain>.workers.dev" >> apps/platform/.dev.vars.validation
     ```
 
-    Load it with `set -a; . apps/platform/.dev.vars.validation; set +a`. Further tokens: `POST /api/v1/user/tokens`, or `mint-pat.mjs` with another `--login`/`--key`.
+    Load it with `set -a; . apps/platform/.dev.vars.validation; set +a`. Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
 
 11. **First repository and the Artifacts namespace.** The Worker's `ARTIFACTS` binding uses the namespace `default`. Wrangler 4.148 has no namespace create command (only `artifacts namespaces list|get`); the namespace appears with the first repository created in it.
 
@@ -301,7 +301,7 @@ node scripts/demo-harness.mjs --keep       # keep the repository afterwards
 
 The seven steps: workspaces and declared intents, the overlap forecast, pushes and change sets, agent reviews with one escalation answered by the human, a composed outcome published through the merge queue, a textual conflict dispatched as a task and resolved by an agent, and a decision record read back with `get_context`. Each step prints its tool calls with timings. The script exits non-zero when any step fails and deletes its repository, agents and tokens at exit.
 
-`--container` adds the Container CI runner showcase: an instance-admin route runs one `kvarm runner --once` job inside a `cloudflare/debian-trixie` container through the native `ctx.container` API. Run 1 prepares the container and saves it with `snapshotContainer`; run 2 starts from that snapshot and skips setup. Both check runs record through the standard CI endpoints. The user-owned `kvarm runner` remains the primary runner.
+`--container` adds the Container CI runner showcase: an instance-admin route runs one `kvarm runner --once` job inside a `cloudflare/debian-trixie` container through the native `ctx.container` API. Run 1 installs the runner and toolchain, lets the runner claim the job and check out its workspace, and only then saves the container with `snapshotContainer` before the command runs. Run 2, an ordinary check run of a second change at the same head, starts from that snapshot, skips setup and finds the workspace already prepared (a warm sync with no checkout). Both check runs record through the standard CI endpoints. The user-owned `kvarm runner` remains the primary runner.
 
 ## Benchmarks and measured limits
 

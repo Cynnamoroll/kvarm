@@ -105,6 +105,13 @@ function rec(tags, res, extra = {}, costOverride) {
   }
   return res;
 }
+/** Recorded or logged counters (format stored | log | build): no HTTP status of their own. */
+function recCounters(tags, format, cost, extra = {}) {
+  for (const t of [].concat(tags)) {
+    if (!samples.has(t)) samples.set(t, []);
+    samples.get(t).push({ format, cost, extra: { ...extra, ms: extra.ms ?? 0 } });
+  }
+}
 const created = [];
 const agents = [];
 const notes = [];
@@ -242,7 +249,7 @@ async function snapReady(name, ref, ms = 240_000) {
 }
 const buildSample = (tag, meta) => {
   const bc = meta.json.buildCost ?? {};
-  rec([tag, 'snapbuild.any'], meta, { files: meta.json.files, reused: meta.json.reused }, { ...bc });
+  recCounters([tag, 'snapbuild.any'], 'build', { ...bc }, { files: meta.json.files, reused: meta.json.reused, ms: meta.ms });
 };
 
 const phases = [];
@@ -284,7 +291,7 @@ await phase('repo basics, git gate, pages, tokens', async () => {
   await la.push(gitUrl(A), ['main', 'feature']);
 
   const gp = `/${OWNER}/${A}.git`;
-  rec(['git.anonWrite', 'git.any'], await http(`${gp}/info/refs?service=git-receive-pack`, { token: null }));
+  rec(['git.anonWrite', 'git.any'], await http(`${gp}/info/refs?service=git-receive-pack`, { token: null }), { denied: true });
   rec(['git.pat', 'git.any'], await http(`${gp}/info/refs?service=git-receive-pack`, { auth: basic(PAT) }));
   rec(['git.inforefs.anon.cold', 'git.any'], await http(`${gp}/info/refs?service=git-upload-pack`, { token: null }));
   for (let i = 0; i < 3; i++) rec(['git.inforefs.anon.warm', 'git.any', 'auth.component'], await http(`${gp}/info/refs?service=git-upload-pack`, { token: null }));
@@ -388,7 +395,7 @@ await phase('repo basics, git gate, pages, tokens', async () => {
   rec('agent.revoked', await http(R(P), { token: ag.token }));
 
   // branch rules on the public repo
-  const rule = rec('rules.write', await http(`${R(A)}/branch-rules`, { method: 'POST', json: { pattern: 'protected' } }));
+  const rule = rec('rules.write', await http(`${R(A)}/branch-rules`, { method: 'POST', json: { pattern: 'protected' } }), { created: true });
   expect(rule.status === 201, `rule create -> ${rule.status}`);
   rec('rules.read', await http(`${R(A)}/branch-rules`));
   rec('rules.write', await http(`${R(A)}/branch-rules/${rule.json.rule.id}`, { method: 'PATCH', json: { requiredApprovals: 0 } }));
@@ -752,7 +759,7 @@ await phase('merge queue, train, reviews, dependencies, CI', async () => {
   rec('review.policy.put', await http(`${R(Q)}/review-policy`, { method: 'PUT', json: { requiredReviews: 1 } }));
   rec('review.policy.get', await http(`${R(Q)}/review-policy`));
   // the rule exists before the human approval: an approval only closes a protected-path escalation opened before it
-  const rule = rec('rules.write', await http(`${R(Q)}/branch-rules`, { method: 'POST', json: { pattern: 'main', requiredApprovals: 1 } }));
+  const rule = rec('rules.write', await http(`${R(Q)}/branch-rules`, { method: 'POST', json: { pattern: 'main', requiredApprovals: 1 } }), { created: true });
   expect(rule.status === 201, `main rule -> ${rule.status}`);
   const r1 = await create('r1');
   const r2 = await create('r2');
@@ -817,6 +824,103 @@ await phase('merge queue, train, reviews, dependencies, CI', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// VAL-COST-026 dependency classes: the same depth-4 chain in a fresh repo and in
+// one with 12 unrelated workspaces (6 pinned to each other), its depth-5 and
+// cycle refusals, a cross-repo probe, and the warm list. Refusals and reads are
+// repeated in the same session (and the depth-4 edge detached and re-created),
+// so the small-vs-many comparison judges medians at the documented ±3.
+await phase('dependency classes (depth 4, depth 5, cycle, cross-repo, many workspaces)', async () => {
+  const REPEATS = 3;
+  const env = {};
+  for (const side of ['small', 'many']) {
+    const name = await createRepo(`deps-${side}`);
+    const l = local(`deps-${side}`);
+    await l.init();
+    const base = await l.commit({ 'deps.txt': `${side}\n` }, 'seed');
+    await l.push(gitUrl(name), ['main']);
+    env[side] = { name, l, base, agent: await agentFor(name, ['refs/heads/agents/*']) };
+  }
+  const wsCreate = async (side, task) => {
+    const w = await http(`${R(env[side].name)}/workspaces`, { method: 'POST', token: env[side].agent.token, json: { task } });
+    expect(w.status === 201, `${side} workspace "${task}" -> ${w.status} ${w.text.slice(0, 160)}`);
+    return w.json;
+  };
+  const pin = (side, from, on, revision) => http(`${R(env[side].name)}/workspaces/${from}/dependencies`, { method: 'POST', json: { onWorkspace: on, revision } });
+
+  const noise = [];
+  for (let i = 0; i < 12; i++) noise.push(await wsCreate('many', `noise ${i}`));
+  let noisePins = 0;
+  for (let i = 1; i < noise.length; i += 2) if ((await pin('many', noise[i].id, noise[i - 1].id, noise[i - 1].headSha)).status === 201) noisePins++;
+  say(`  many-workspace repo: ${noise.length} unrelated workspaces, ${noisePins} of 6 pins among them created`);
+
+  const chain = {};
+  for (const side of ['small', 'many']) {
+    const { l, name, agent, base } = env[side];
+    chain[side] = [];
+    for (let i = 1; i <= 5; i++) {
+      const w = await wsCreate(side, `chain ${i}`);
+      await l.g(['checkout', '-q', '--detach', w.baseSha ?? base]);
+      const head = await l.commit({ [`chain/${i}.txt`]: `${i}\n` }, `chain ${i}`);
+      await l.push(gitUrl(name), [`${head}:${w.ref}`], agent.token);
+      chain[side].push({ id: w.id, head });
+    }
+  }
+  // A pin's source read joins the push-event ref row: measure once GET workspaces lists every pushed head.
+  for (const side of ['small', 'many']) {
+    await until(
+      `${side} chain heads recorded`,
+      async () => {
+        const r = await http(`${R(env[side].name)}/workspaces?status=active&limit=100`);
+        const seen = new Map((r.json?.workspaces ?? []).map((w) => [w.id, w.headSha]));
+        return chain[side].every((w) => seen.get(w.id) === w.head) ? true : null;
+      },
+      90_000,
+      2000,
+    );
+  }
+
+  for (const side of ['small', 'many']) {
+    const x = chain[side];
+    let top = null;
+    for (let i = 1; i < 4; i++) {
+      const r = rec('deps.create', await pin(side, x[i].id, x[i - 1].id, x[i - 1].head), { kind: `depth${i + 1}`, side });
+      expect(r.status === 201 && r.json?.depth === i + 1, `${side} pin depth ${i + 1} -> ${r.status} depth ${r.json?.depth} ${r.text.slice(0, 160)}`);
+      top = r.json.id;
+    }
+    for (let k = 1; k < REPEATS; k++) {
+      const off = rec('deps.delete', await http(`${R(env[side].name)}/workspaces/${x[3].id}/dependencies/${top}`, { method: 'DELETE' }));
+      expect(off.status === 200, `${side} detach depth-4 edge -> ${off.status}`);
+      const again = rec('deps.create', await pin(side, x[3].id, x[2].id, x[2].head), { kind: 'depth4', side });
+      expect(again.status === 201 && again.json?.depth === 4, `${side} re-pin depth 4 -> ${again.status} depth ${again.json?.depth}`);
+      top = again.json.id;
+    }
+    await http(`${R(env[side].name)}/workspaces/${x[3].id}/dependencies`);
+    for (let k = 0; k < REPEATS; k++) {
+      const deep = rec('deps.refused', await pin(side, x[4].id, x[3].id, x[3].head), { kind: 'depth5', side });
+      expect(deep.status === 422 && deep.json?.code === 'DEPENDENCY_DEPTH_EXCEEDED', `${side} depth 5 -> ${deep.status} ${deep.json?.code}`);
+      const cyc = rec('deps.refused', await pin(side, x[0].id, x[1].id, x[1].head), { kind: 'cycle', side });
+      expect(cyc.status === 422 && cyc.json?.code === 'DEPENDENCY_CYCLE', `${side} cycle -> ${cyc.status} ${cyc.json?.code}`);
+      const list = rec('deps.list', await http(`${R(env[side].name)}/workspaces/${x[3].id}/dependencies`), { kind: 'warm', side });
+      expect(list.status === 200 && list.json?.dependencies?.[0]?.depth === 4, `${side} warm list -> ${list.status} depth ${list.json?.dependencies?.[0]?.depth}`);
+    }
+  }
+  for (const [side, other] of [['small', 'many'], ['many', 'small']]) {
+    const foreign = chain[other][0];
+    const cross = rec('deps.refused', await pin(side, chain[side][4].id, foreign.id, foreign.head), { kind: 'crossRepo', side });
+    expect(cross.status === 404 && cross.json?.code === 'SOURCE_NOT_FOUND', `cross-repo ${side} -> ${other}: ${cross.status} ${cross.json?.code}`);
+  }
+  const show = (tag, kind) => {
+    const line = (side) =>
+      (samples.get(tag) ?? [])
+        .filter((s) => s.extra?.kind === kind && s.extra?.side === side)
+        .map((s) => `d1=${s.cost.d1};rr=${s.cost.rr}`)
+        .join(', ');
+    say(`  ${kind.padEnd(9)} small repo ${line('small')} | many-workspace repo ${line('many')}`);
+  };
+  for (const [tag, kind] of [['deps.create', 'depth2'], ['deps.create', 'depth4'], ['deps.refused', 'depth5'], ['deps.refused', 'cycle'], ['deps.refused', 'crossRepo'], ['deps.list', 'warm']]) show(tag, kind);
+});
+
+// ---------------------------------------------------------------------------
 await phase('container CI runner route', async () => {
   if (args['skip-container']) {
     say('  skipped (--skip-container)');
@@ -872,12 +976,12 @@ for (const l of lines) {
   const j = l.json;
   if (j.trainPublished) {
     const tp = j.trainPublished;
-    if (repoIds.get(tp.repo) === repos.Q && tp.number === repos.branchChange) rec('pub.completed.branch', { status: 200, cost: tp.cost, ms: 0 });
+    if (repoIds.get(tp.repo) === repos.Q && tp.number === repos.branchChange) recCounters('pub.completed.branch', 'stored', tp.cost);
     continue;
   }
   if (j.outcome === 'train' && j.train) {
-    rec('train.run', { status: 200, cost: { ...j.cost, passes: j.train.passes }, ms: 0 }, { reason: j.train.reason });
-    for (const pc of j.train.passCosts ?? []) rec('train.passes', { status: 200, cost: pc, ms: 0 });
+    recCounters('train.run', 'log', { ...j.cost, passes: j.train.passes }, { reason: j.train.reason });
+    for (const pc of j.train.passCosts ?? []) recCounters('train.passes', 'stored', pc);
     continue;
   }
   if (!j.eventId || !ourEvent(j.eventId)) continue;
@@ -888,16 +992,16 @@ for (const l of lines) {
   if (j.outcome !== 'processed' || j.attempts > 1) continue;
   // a done change-hooks effect is a head push of a live change ("heads #n", a composed workspace's change set included)
   // or a base push re-evaluating conflicted auto changes ("base: …")
-  if (hooks?.state === 'done') rec('consumer.changeHooks', { status: 200, cost, ms: 0 }, { detail: hooks.detail, ref: ev.ref });
-  else if (ev.ref.startsWith('refs/heads/agents/')) rec('consumer.push.workspace', { status: 200, cost, ms: 0 }, { ref: ev.ref });
-  else rec('consumer.push.initial', { status: 200, cost, ms: 0 }, { ref: ev.ref });
+  if (hooks?.state === 'done') recCounters('consumer.changeHooks', 'log', cost, { detail: hooks.detail, ref: ev.ref });
+  else if (ev.ref.startsWith('refs/heads/agents/')) recCounters('consumer.push.workspace', 'log', cost, { ref: ev.ref });
+  else recCounters('consumer.push.initial', 'log', cost, { ref: ev.ref });
 }
 say(`  consumer lines for this run's push events: ${consumerSeen} of ${eventsById.size} events`);
 
 const qn = repos.queueNumbers ?? {};
 const byNumber = new Map(queueRows.filter((r) => r.state === 'published' && r.cost).map((r) => [r.change_number, JSON.parse(r.cost)]));
-const stored = (tags, n) => byNumber.has(n) && rec(tags, { status: 200, cost: byNumber.get(n), ms: 0 }, { number: n });
-for (const n of byNumber.keys()) rec('pub.stored.any', { status: 200, cost: byNumber.get(n), ms: 0 }, { number: n });
+const stored = (tags, n) => byNumber.has(n) && recCounters(tags, 'stored', byNumber.get(n), { number: n });
+for (const n of byNumber.keys()) recCounters('pub.stored.any', 'stored', byNumber.get(n), { number: n });
 stored('pub.stored.branch', repos.branchChange);
 // keyed on incoming pins (the publishing dependent's own pins), as scripts/lib/fleet.mjs keys them: w3 pins w1 and w4, w2 and w5 one source each
 stored('pub.stored.twoPin', qn.w3);
@@ -948,7 +1052,7 @@ if (args.out) {
         documentRows,
         phases,
         verdicts: verdicts.map(({ row, v }) => ({ line: row.line, section: row.section, endpoint: row.endpoint, state: row.state, ...v })),
-        samples: Object.fromEntries([...samples.entries()].map(([k, xs]) => [k, xs.map((s) => ({ status: s.status, cost: s.cost, extra: s.extra }))])),
+        samples: Object.fromEntries([...samples.entries()].map(([k, xs]) => [k, xs.map((s) => ({ status: s.status, format: s.format ?? 'http', cost: s.cost, extra: s.extra }))])),
       },
       null,
       2,

@@ -5,15 +5,21 @@
  *
  * On a fresh private repository with one required `typecheck` job:
  *   run 1 (cold)  POST ci/container-runs {mode:cold}: a fresh
- *                 cloudflare/debian-trixie container is prepared once
- *                 (runner + toolchain), saved with snapshotContainer, then
- *                 claims, snapshot-checks-out, runs and reports the job at head 1
- *   run 2 (warm)  after a head push, POST {mode:warm}: the container starts from
- *                 the saved snapshot, skips setup, and runs the job at head 2
- * Both check runs then appear in GET changes/1/checks with distinct ids and
- * the same summary shape. Prints the Durable Object's per-phase timings for
- * both runs. The repository and the saved snapshot handle are removed at the
- * end (unless keep).
+ *                 cloudflare/debian-trixie container gets the runner and the
+ *                 toolchain; the runner claims change #1's job at the head and
+ *                 snapshot-checks-out its workspace; the controller then saves
+ *                 the prepared container with snapshotContainer, and the runner
+ *                 runs and reports
+ *   run 2 (warm)  a second change at the SAME head queues an ordinary typecheck
+ *                 run; POST {mode:warm} starts from the saved snapshot, skips
+ *                 setup, finds the prepared workspace (warm delta sync, no
+ *                 checkout) and runs and reports
+ * Check runs are idempotent per (change, head, name), so the second run at
+ * the same head belongs to a second change. Both runs must have distinct ids,
+ * the same head sha, the same check name and command, the same summary shape,
+ * success, and the same typecheck state in each change's checks-gate answer.
+ * Prints the Durable Object's per-phase timings for both runs. The repository
+ * and the saved snapshot handle are removed at the end (unless keep).
  */
 
 import { spawnSync } from 'node:child_process';
@@ -87,8 +93,10 @@ export async function runContainerShowcase(o) {
     }
     throw new Error(`${label} did not happen within ${ms / 1000} s`);
   }
-  const checks = async () => (await rest(`${R()}/changes/1/checks`)).json?.checks ?? [];
-  const typecheckAt = (sha, status) => async () => (await checks()).find((k) => k.name === 'typecheck' && k.headSha === sha && (!status || status.includes(k.status)));
+  const checks = async (n) => (await rest(`${R()}/changes/${n}/checks`)).json?.checks ?? [];
+  const typecheckAt = (n, sha, status) => async () => (await checks(n)).find((k) => k.name === 'typecheck' && k.headSha === sha && (!status || status.includes(k.status)));
+  /** The typecheck entry of the change's checks-gate answer (GET mergeability). */
+  const gateTypecheck = async (n) => (await rest(`${R()}/changes/${n}/mergeability`)).json?.mergeability?.checks?.required?.find((k) => k.name === 'typecheck') ?? null;
 
   /** The runner's checkout is snapshot-first; demand the build and wait so neither run measures it. */
   async function snapshotReady(sha) {
@@ -97,7 +105,7 @@ export async function runContainerShowcase(o) {
     log(`  human  ${'POST snapshots/:sha'.padEnd(19)} -> snapshot of ${short(sha)} ready (${fmt(Date.now() - t0)})`);
   }
 
-  async function containerRun(mode, sha) {
+  async function containerRun(mode, n, sha) {
     const t0 = Date.now();
     const r = await rest(`${R()}/ci/container-runs`, { method: 'POST', json: { mode } });
     const wall = Date.now() - t0;
@@ -110,8 +118,8 @@ export async function runContainerShowcase(o) {
       for (const line of rep.runner.stderr.split('\n').filter(Boolean).slice(-10)) log(`           container ! ${line}`);
       throw new Error(`the ${mode} container runner exited ${rep.runner.exitCode}`);
     }
-    const run = await waitFor(`typecheck result at ${short(sha)}`, typecheckAt(sha, ['success', 'failure']), 30_000);
-    log(`  human  ${'GET changes/1/checks'.padEnd(19)} -> typecheck ${run.id} ${run.status} at ${short(run.headSha)} (source ${run.summary?.source}, command ${run.summary?.durationMs} ms)`);
+    const run = await waitFor(`typecheck result of #${n} at ${short(sha)}`, typecheckAt(n, sha, ['success', 'failure']), 30_000);
+    log(`  human  ${`GET changes/${n}/checks`.padEnd(19)} -> typecheck ${run.id} ${run.status} at ${short(run.headSha)} (source ${run.summary?.source}, command ${run.summary?.durationMs} ms)`);
     runs[mode] = { totalMs: rep.totalMs, wall, readyMs: rep.phases.boot + (rep.phases.setup ?? 0), phases: rep.phases, cost: r.cost };
     return { report: rep, wall, run };
   }
@@ -136,43 +144,56 @@ export async function runContainerShowcase(o) {
     log(`  human  ${'git push'.padEnd(19)} -> main ${short(base)}, feature ${short(head1)}`);
     const change = await rest(`${R()}/changes`, { method: 'POST', json: { title: 'Raise the steady limit', base: 'main', head: 'feature', mergePolicy: 'review' } });
     if (change.status !== 201) throw new Error(`change create -> ${change.status} ${change.json?.code ?? ''}`);
-    const queued1 = await waitFor('typecheck queued at head 1', typecheckAt(head1, ['queued']), 60_000);
+    const queued1 = await waitFor('typecheck queued at the head', typecheckAt(1, head1, ['queued']), 60_000);
     log(`  human  ${'REST POST changes'.padEnd(19)} -> #${change.json.number}; typecheck ${queued1.id} queued at ${short(head1)}`);
     await snapshotReady(head1);
 
-    log('  -- run 1 (cold): fresh image, prepare once, snapshotContainer, claim -> checkout -> run -> report');
-    const cold = await containerRun('cold', head1);
+    log('  -- run 1 (cold): fresh image, runner + toolchain, claim -> checkout, snapshotContainer of the prepared workspace, run -> report');
+    const cold = await containerRun('cold', 1, head1);
     if (cold.report.phases.setup === null || !cold.report.snapshot) throw new Error('the cold run did not prepare and save the workspace');
-    log(`           saved containerSnapshot ${cold.report.snapshot.id} (${cold.report.snapshot.name}, ${(cold.report.snapshot.size / 1048576).toFixed(1)} MiB)`);
+    if (!/^workdir: fresh$/m.test(cold.report.runner.stdout)) throw new Error('the cold run did not check the workspace out');
+    log(`           saved containerSnapshot ${cold.report.snapshot.id} (${cold.report.snapshot.name}, ${(cold.report.snapshot.size / 1048576).toFixed(1)} MiB) after the workspace was prepared`);
 
-    const head2 = commit({ 'src/limits.ts': LIMITS(15) }, 'Raise the steady limit to 15');
-    git(['push', '-q', url, 'feature']);
-    const queued2 = await waitFor('typecheck queued at head 2', typecheckAt(head2, ['queued']), 60_000);
-    log(`  human  ${'git push'.padEnd(19)} -> feature ${short(head2)}; typecheck ${queued2.id} queued`);
-    await snapshotReady(head2);
+    git(['push', '-q', url, 'feature:feature-recheck']);
+    const change2 = await rest(`${R()}/changes`, { method: 'POST', json: { title: 'Re-check the same head', base: 'main', head: 'feature-recheck', mergePolicy: 'review' } });
+    if (change2.status !== 201) throw new Error(`second change create -> ${change2.status} ${change2.json?.code ?? ''}`);
+    const n2 = change2.json.number;
+    const queued2 = await waitFor('typecheck queued at the same head', typecheckAt(n2, head1, ['queued']), 60_000);
+    log(`  human  ${'git push + POST'.padEnd(19)} -> feature-recheck ${short(head1)} (same head); #${n2}; typecheck ${queued2.id} queued`);
 
-    log('  -- run 2 (warm): restore the saved containerSnapshot, skip setup, claim -> checkout -> run -> report');
-    const warm = await containerRun('warm', head2);
+    log('  -- run 2 (warm): restore the saved containerSnapshot, skip setup, claim -> warm sync (no checkout) -> run -> report');
+    const warm = await containerRun('warm', n2, head1);
     if (warm.report.phases.setup !== null || !('snapshot' in warm.report.startedFrom) || warm.report.startedFrom.snapshot !== cold.report.snapshot.id) {
       throw new Error('the warm run did not start from the saved snapshot');
     }
+    if (!/^workdir: warm$/m.test(warm.report.runner.stdout) || /warm sync failed|checkout:/.test(warm.report.runner.stderr)) {
+      throw new Error('the warm run did not reuse the prepared workspace');
+    }
 
-    const all = (await checks()).filter((k) => k.name === 'typecheck' && (k.id === cold.run.id || k.id === warm.run.id));
-    const same = (a, b) => JSON.stringify(Object.keys(a.summary ?? {}).sort()) === JSON.stringify(Object.keys(b.summary ?? {}).sort()) && a.summary?.command === b.summary?.command && a.summary?.source === b.summary?.source;
-    log(`  human  ${'GET changes/1/checks'.padEnd(19)} -> ${all.map((k) => `${k.name} ${k.id} ${k.status} at ${short(k.headSha)}`).join('; ')}`);
-    if (all.length !== 2 || cold.run.id === warm.run.id || !all.every((k) => k.status === 'success') || !same(all[0], all[1])) {
-      throw new Error('both container check runs should be listed with distinct ids, success and the same summary shape');
+    const a = (await checks(1)).find((k) => k.id === cold.run.id);
+    const b = (await checks(n2)).find((k) => k.id === warm.run.id);
+    const ga = await gateTypecheck(1);
+    const gb = await gateTypecheck(n2);
+    log(`  human  ${'GET changes/:n/checks'.padEnd(19)} -> #1 ${a ? `${a.name} ${a.id} ${a.status} at ${a.headSha}` : 'missing'}; #${n2} ${b ? `${b.name} ${b.id} ${b.status} at ${b.headSha}` : 'missing'}`);
+    log(`  human  ${'GET :n/mergeability'.padEnd(19)} -> checks-gate typecheck #1 ${ga?.state ?? 'missing'}, #${n2} ${gb?.state ?? 'missing'}`);
+    const keys = (k) => JSON.stringify(Object.keys(k.summary ?? {}).sort());
+    if (!a || !b || a.id === b.id || a.headSha !== head1 || b.headSha !== head1 || a.name !== b.name || a.summary?.command !== b.summary?.command || keys(a) !== keys(b)) {
+      throw new Error('both container check runs should be listed with distinct ids, the same head sha, name, command and summary shape');
+    }
+    if (a.status !== 'success' || b.status !== 'success' || ga?.state !== 'success' || gb?.state !== 'success') {
+      throw new Error('both container check runs should succeed and count identically in the checks-gate');
     }
 
     const c = cold.report.phases;
     const w = warm.report.phases;
     log('\n  container runner timings (measured inside the Durable Object; wall = harness round trip)');
     log(`    ${'phase'.padEnd(34)} ${'run 1 cold'.padStart(12)} ${'run 2 warm'.padStart(12)}`);
-    const row = (label, a, b) => log(`    ${label.padEnd(34)} ${fmt(a).padStart(12)} ${fmt(b).padStart(12)}`);
+    const row = (label, x, y) => log(`    ${label.padEnd(34)} ${fmt(x).padStart(12)} ${fmt(y).padStart(12)}`);
     row('boot (start -> first exec)', c.boot, w.boot);
     row('setup (runner + toolchain)', c.setup, w.setup);
+    row('workspace (claim + checkout/sync)', c.workspace, w.workspace);
     row('snapshotContainer', c.snapshot, w.snapshot);
-    row('job (claim/checkout/run/report)', c.run, w.run);
+    row('job (run + report)', c.run, w.run);
     row('stop (destroy)', c.stop, w.stop);
     row('ready to run the job', c.boot + (c.setup ?? 0), w.boot + (w.setup ?? 0));
     row('total in the Durable Object', cold.report.totalMs, warm.report.totalMs);

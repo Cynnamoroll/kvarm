@@ -359,11 +359,31 @@ function prune(work, rel, keep, dirs) {
     const full = join(work, ...path.split('/'));
     if (entry.isDirectory()) {
       if (dirs.has(path)) prune(work, path, keep, dirs);
-      else rmSync(full, { recursive: true, force: true });
+      else pruneUntracked(full);
     } else if (!keep.has(path)) {
       unlinkSync(full);
     }
   }
+}
+
+/**
+ * Empties an untracked directory except for dependency caches nested at any
+ * depth below it, and removes it when nothing was kept. Directory entries
+ * come from `readdir` file types (lstat semantics), so a symlink is unlinked
+ * and never followed.
+ * @param {string} dir
+ * @returns {boolean} whether a cache was kept below `dir`
+ */
+function pruneUntracked(dir) {
+  let kept = false;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (CACHE_DIRS.has(entry.name)) kept = true;
+    else if (entry.isDirectory()) kept = pruneUntracked(full) || kept;
+    else unlinkSync(full);
+  }
+  if (!kept) rmdirSync(dir);
+  return kept;
 }
 
 /**
@@ -440,12 +460,15 @@ function inspectLocal(work, path) {
  * @param {(path: string) => Promise<Uint8Array>} read
  */
 async function materializeEntry(work, path, entry, read) {
+  const parts = path.split('/');
+  // Parents are repaired before the leaf is inspected, chmodded or removed:
+  // through a symlinked parent those calls would act outside the workdir.
+  prepareParents(work, parts);
   const local = inspectLocal(work, path);
   const wantSymlink = entry.mode === '120000';
   const sameKind = local !== null && local.kind === (wantSymlink ? 'symlink' : 'file');
   const sameBytes = sameKind && local !== null && local.hash === entry.hash;
   if (wantSymlink ? sameBytes : sameBytes && (entry.mode === '100755') === Boolean(local?.executable)) return;
-  const parts = path.split('/');
   const dest = join(work, ...parts);
   if (sameBytes) {
     chmodSync(dest, entry.mode === '100755' ? 0o755 : 0o644);
@@ -455,7 +478,6 @@ async function materializeEntry(work, path, entry, read) {
   const got = blobHash(bytes);
   if (got !== entry.hash) throw new Error(`delta content for ${JSON.stringify(path)} hashed ${got}, expected ${entry.hash}`);
   if (local !== null) rmSync(dest, { recursive: true, force: true });
-  prepareParents(work, parts);
   if (wantSymlink) symlinkSync(new TextDecoder().decode(bytes), dest);
   else {
     writeFileSync(dest, bytes);
@@ -559,6 +581,28 @@ async function applyDelta(work, previous, manifest) {
 }
 
 /**
+ * The warm delta sync, or null when the slot has no recorded tree. Reading
+ * the state is part of the warm path, so an unreadable state throws into the
+ * caller's full-checkout fallback like any other warm failure.
+ * @param {Slot} slot
+ * @param {{ sha: string, delta: (previous: RecordedState, sha: string) => Promise<DeltaManifest> }} o
+ * @returns {Promise<Materialized | null>}
+ */
+async function syncWarm(slot, o) {
+  const recorded = readOrNull(slot.state);
+  if (recorded === null) return null;
+  const previous = parseState(recorded);
+  rmSync(slot.state, { force: true });
+  if (!lstatOrNull(slot.work)?.isDirectory()) throw new Error('workdir is missing');
+  discard(slot.staging);
+  const manifest = await o.delta(previous, o.sha);
+  if (manifest.sha !== o.sha) throw new Error(`delta was computed for ${manifest.sha}, expected ${o.sha}`);
+  const tree = await applyDelta(slot.work, previous, manifest);
+  writeState(slot.state, o.sha, tree.files, tree.blobs, tree.modes);
+  return { source: manifest.source, sha: o.sha, files: tree.files.length, workdir: 'warm' };
+}
+
+/**
  * Materializes `sha` in the slot's work directory: a warm delta sync when
  * the slot holds a recorded previous tree, otherwise (or with `fresh`, or
  * after any warm failure) a full checkout into an emptied directory.
@@ -567,18 +611,10 @@ async function applyDelta(work, previous, manifest) {
  * @returns {Promise<Materialized>}
  */
 export async function materialize(slot, o) {
-  const recorded = o.fresh ? null : readOrNull(slot.state);
-  if (recorded !== null) {
+  if (!o.fresh) {
     try {
-      const previous = parseState(recorded);
-      rmSync(slot.state, { force: true });
-      if (!lstatOrNull(slot.work)?.isDirectory()) throw new Error('workdir is missing');
-      discard(slot.staging);
-      const manifest = await o.delta(previous, o.sha);
-      if (manifest.sha !== o.sha) throw new Error(`delta was computed for ${manifest.sha}, expected ${o.sha}`);
-      const tree = await applyDelta(slot.work, previous, manifest);
-      writeState(slot.state, o.sha, tree.files, tree.blobs, tree.modes);
-      return { source: manifest.source, sha: o.sha, files: tree.files.length, workdir: 'warm' };
+      const warm = await syncWarm(slot, o);
+      if (warm !== null) return warm;
     } catch (err) {
       o.stderr(`warm sync failed: ${err instanceof Error ? err.message : String(err)}; falling back to a full snapshot checkout`);
     } finally {
@@ -587,7 +623,9 @@ export async function materialize(slot, o) {
       } catch {}
     }
   }
-  rmSync(slot.state, { force: true });
+  // Recursive, so a state path that became a directory is cleared too; rm
+  // never follows a symlink.
+  rmSync(slot.state, { recursive: true, force: true });
   discard(slot.work);
   discard(slot.staging);
   const got = await o.checkout(slot.work);

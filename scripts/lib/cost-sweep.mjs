@@ -102,7 +102,7 @@ export function matchCatalog(rows, catalog) {
   return { matched, unmatched, ambiguous, unused: catalog.filter((e) => !used.has(e)) };
 }
 
-/** `d1<=1;art=0;cache=hit|miss` against parsed counters; absent numeric counters read 0. */
+/** `d1<=1;art=0;cache=hit|miss` against parsed counters; a budgeted counter the sample lacks is a violation. */
 export function checkBudget(cost, spec) {
   const violations = [];
   for (const raw of spec.split(';')) {
@@ -111,17 +111,68 @@ export function checkBudget(cost, spec) {
     const m = /^([a-z0-9]+)\s*(<=|=)\s*([a-z0-9|]+)$/i.exec(part);
     if (!m) throw new Error(`malformed budget part "${part}" in "${spec}"`);
     const [, k, op, lim] = m;
+    if (cost?.[k] === undefined) {
+      violations.push(`${k} absent`);
+      continue;
+    }
     if (/^\d+$/.test(lim)) {
       const n = Number(lim);
-      const v = typeof cost?.[k] === 'number' ? cost[k] : 0;
-      if (op === '<=' && v > n) violations.push(`${k}=${v} > ${n}`);
-      if (op === '=' && v !== n) violations.push(`${k}=${v} != ${n}`);
+      const v = cost[k];
+      if (typeof v !== 'number') violations.push(`${k}=${v} is not a number`);
+      else if (op === '<=' && v > n) violations.push(`${k}=${v} > ${n}`);
+      else if (op === '=' && v !== n) violations.push(`${k}=${v} != ${n}`);
     } else {
-      const v = cost?.[k] ?? 'absent';
+      const v = cost[k];
       if (!lim.split('|').includes(String(v))) violations.push(`${k}=${v} != ${lim}`);
     }
   }
   return { ok: violations.length === 0, violations };
+}
+
+/**
+ * The counters each sample format must carry. `http` is the x-kvarm-cost
+ * header every metered response sets (src/cost/meter.ts); `log` is the same
+ * meter total logged by a queue consumer or train run; `stored` is a
+ * publication cost (merge_queue.cost, a logged pass or completed-request
+ * publication); `build` is a snapshot build's recorded buildCost.
+ */
+export const COUNTER_SETS = {
+  http: ['d1', 'rr', 'rw', 'art', 'do', 'r2a', 'r2b', 'q', 'sub', 'cache'],
+  log: ['d1', 'rr', 'rw', 'art', 'do', 'r2a', 'r2b', 'q', 'sub', 'cache'],
+  stored: ['d1', 'rr', 'rw', 'art', 'do', 'q', 'sub'],
+  build: ['steps', 'd1', 'rr', 'rw', 'art', 'r2a', 'r2b', 'sub'],
+};
+const CACHE_STATES = ['hit', 'miss', 'none', 'bypass'];
+
+/** Problems with one sample's own shape: its format, HTTP status and counter set. */
+function sampleProblems(entry, s) {
+  const want = entry.format ?? 'http';
+  const got = s.format ?? 'http';
+  if (got !== want) return [`sample format ${got} != ${want}`];
+  const problems = [];
+  if (want === 'http') {
+    if (typeof s.status !== 'number' || s.status < 100) problems.push('transport failure (no HTTP status)');
+    const intended = typeof entry.status === 'function' ? entry.status(s) : entry.status;
+    if (intended === undefined) problems.push('no intended HTTP status in the catalog entry');
+    else if (typeof s.status === 'number' && s.status >= 100) {
+      if (Array.isArray(intended)) {
+        if (!intended.includes(s.status)) problems.push(`status ${s.status} not in ${intended.join('|')}`);
+      } else if (s.status !== intended) problems.push(`status ${s.status} != ${intended}`);
+    }
+  }
+  const cost = s.cost;
+  if (cost === null || typeof cost !== 'object' || Object.keys(cost).length === 0) {
+    problems.push(want === 'http' ? 'no x-kvarm-cost counter set' : `no ${want} counter set`);
+    return problems;
+  }
+  for (const k of COUNTER_SETS[want] ?? []) {
+    const v = cost[k];
+    if (v === undefined) problems.push(`counter ${k} absent`);
+    else if (k === 'cache') {
+      if (!CACHE_STATES.includes(v)) problems.push(`counter cache=${v} is not ${CACHE_STATES.join('|')}`);
+    } else if (!Number.isInteger(v) || v < 0) problems.push(`counter ${k}=${v} is not a non-negative integer`);
+  }
+  return problems;
 }
 
 /** Nearest-rank median per numeric counter; the most frequent value for string counters (cache). */
@@ -141,6 +192,39 @@ export function medianCounters(costs) {
   return out;
 }
 
+/** One problem per named `extra.kind` that has no sample. */
+export function requireKinds(samples, kinds) {
+  return kinds.filter((kind) => !samples.some((s) => s.extra?.kind === kind)).map((kind) => `no ${kind} sample`);
+}
+
+/**
+ * The small-vs-many-workspace comparison (VAL-COST-026): for each kind, the
+ * samples tagged `side: 'small'` and `side: 'many'` must both exist; their
+ * medians (same-session repeats absorb the documented variance) must have
+ * equal d1 and rr within `rrTolerance`.
+ */
+export function smallVsMany(samples, kinds, rrTolerance = 3) {
+  const problems = [];
+  for (const kind of kinds) {
+    const side = (name) => samples.filter((s) => s.extra?.kind === kind && s.extra?.side === name).map((s) => s.cost);
+    const small = side('small');
+    const many = side('many');
+    if (!small.length || !many.length) {
+      problems.push(`${kind}: ${small.length} small / ${many.length} many-workspace samples`);
+      continue;
+    }
+    const a = medianCounters(small);
+    const b = medianCounters(many);
+    if (![a.d1, a.rr, b.d1, b.rr].every((v) => typeof v === 'number')) {
+      problems.push(`${kind}: d1 or rr missing`);
+      continue;
+    }
+    if (a.d1 !== b.d1) problems.push(`${kind}: d1 ${a.d1} small != ${b.d1} many`);
+    if (Math.abs(a.rr - b.rr) > rrTolerance) problems.push(`${kind}: rr ${a.rr} small vs ${b.rr} many differs by more than ${rrTolerance}`);
+  }
+  return problems;
+}
+
 /**
  * One catalog entry against the samples collected under its probe tag.
  * Live: pass | fail | missing. Non-live: n/a with its category and reason.
@@ -154,9 +238,11 @@ export function evaluateEntry(entry, samplesByProbe) {
   if (samples.length === 0) return { id: entry.id, status: 'missing', n: 0, problems: [`no samples for probe ${entry.probe}`] };
   const problems = [];
   for (const s of samples) {
-    if (Array.isArray(entry.status)) {
-      if (!entry.status.includes(s.status)) problems.push(`status ${s.status} not in ${entry.status.join('|')}`);
-    } else if (entry.status !== undefined && s.status !== entry.status) problems.push(`status ${s.status} != ${entry.status}`);
+    if ((s.format ?? 'http') !== (entry.format ?? 'http')) {
+      problems.push(...sampleProblems(entry, s));
+      continue;
+    }
+    problems.push(...sampleProblems(entry, s));
     const spec = typeof entry.budget === 'function' ? entry.budget(s) : entry.budget;
     for (const v of checkBudget(s.cost, spec).violations) problems.push(v);
   }

@@ -522,4 +522,101 @@ describe('kvarm runner', () => {
     const work = join(root, 'delta-budget-work', 'cynthia', 'demo', 'slot-0', 'work');
     expect(readFileSync(join(work, 'seed.txt'), 'utf8')).toBe(`seed ${c}\n`);
   });
+
+  /** One queued job; records every call path and report body. */
+  function preparedPlatform(sha: string) {
+    const calls: string[] = [];
+    const reports: any[] = [];
+    let queued = true;
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push(path.slice('/api/v1/repos/cynthia/demo/'.length));
+      if (path.endsWith('/claim')) {
+        if (!queued) return new Response(null, { status: 204 });
+        queued = false;
+        return Response.json({ job: { id: 'job-p', name: 'build', command: 'build', sha, generation: 2, timeoutSeconds: 30 } });
+      }
+      if (path.endsWith('/heartbeat')) return Response.json({ job: {} });
+      if (path.endsWith('/report')) return reports.push(body), Response.json({ run: { status: body.conclusion } });
+      return Response.json({ error: 'not found' }, { status: 404 });
+    };
+    return { apiFetch, calls, reports };
+  }
+
+  it('awaits the prepared hook after the workspace is materialized and before the command runs, heartbeating meanwhile', async () => {
+    const sha = 'd'.repeat(40);
+    const platform = preparedPlatform(sha);
+    const order: string[] = [];
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const result = await runRunner({
+        baseUrl: 'https://kvarm.test',
+        pat: 'kvarm_pat_test',
+        repo: 'cynthia/demo',
+        once: true,
+        runnerId: 'runner-prepared',
+        apiFetch: platform.apiFetch,
+        checkoutFn: async (o: any) => {
+          order.push('checkout');
+          mkdirSync(o.dir, { recursive: true });
+          writeFileSync(join(o.dir, 'seed.txt'), 'seed\n');
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        prepared: async (info) => {
+          order.push(`prepared ${info.job.id} ${info.job.sha === sha} ${info.workdir} ${info.source}`);
+          expect(readFileSync(join(info.work, 'seed.txt'), 'utf8')).toBe('seed\n');
+          // The lease stays alive while the caller holds the job at the prepared point.
+          vi.advanceTimersByTime(40_000);
+          await new Promise((r) => setTimeout(r, 0));
+          order.push('released');
+        },
+        execute: async () => {
+          order.push('execute');
+          return { code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 };
+        },
+        stdout: () => {},
+        stderr: () => {},
+        tempRoot: root,
+        workRoot: join(root, 'prepared-work'),
+      });
+      expect(result).toEqual({ claimed: 1, reported: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(order).toEqual(['checkout', `prepared job-p true fresh snapshot`, 'released', 'execute']);
+    expect(platform.calls).toEqual(['ci/jobs/claim', 'ci/jobs/job-p/heartbeat', 'ci/jobs/job-p/report']);
+    expect(platform.reports[0]).toMatchObject({ conclusion: 'success', generation: 2 });
+  });
+
+  it('reports failure without running the command when the prepared hook fails', async () => {
+    const sha = 'e'.repeat(40);
+    const platform = preparedPlatform(sha);
+    let executed = false;
+    const result = await runRunner({
+      baseUrl: 'https://kvarm.test',
+      pat: 'kvarm_pat_test',
+      repo: 'cynthia/demo',
+      once: true,
+      apiFetch: platform.apiFetch,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha: o.ref };
+      },
+      prepared: async () => {
+        throw new Error('no go signal after the workspace was prepared');
+      },
+      execute: async () => {
+        executed = true;
+        return { code: 0, stdout: '', stderr: '', timedOut: false, durationMs: 1 };
+      },
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'prepared-fail-work'),
+    });
+    expect(result).toEqual({ claimed: 1, reported: 1 });
+    expect(executed).toBe(false);
+    expect(platform.reports[0]).toMatchObject({ conclusion: 'failure', summary: { stderr: 'no go signal after the workspace was prepared' } });
+  });
 });

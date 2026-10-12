@@ -6,12 +6,16 @@
  * that decide "no lost or double publications".
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   BUDGET_ROWS,
   CAMPAIGN_LIMITS,
   CHECK_IDS,
+  CampaignAbort,
   CeilingExceeded,
+  createInvariants,
+  forecastMemberSet,
   checkProjection,
   comparePublications,
   configText,
@@ -514,5 +518,85 @@ describe('renderBenchmarkMarkdown', () => {
       background: {},
     });
     expect(md).toMatch(/\| Longest interval with no queue entry reaching a terminal state \| 306\.0 s \(\+164\.0 s → \+470\.0 s after the first enqueue; ended by #93 ejected MERGE_CONFLICT\) \|/);
+  });
+});
+
+describe('pre-burst forecast invariant', () => {
+  const idToKey = new Map([
+    ['id-1', 'w001'],
+    ['id-2', 'w002'],
+    ['id-3', 'w003'],
+  ]);
+  const overlapKeys = ['w001', 'w002'];
+  const m = (...ids: string[]) => ids.map((workspace) => ({ workspace }));
+
+  it('holds only for a 200 answer naming exactly the shared-file members', () => {
+    expect(forecastMemberSet({ status: 200, matches: m('id-1', 'id-2'), idToKey, overlapKeys })).toEqual({ ok: true, size: 2 });
+    expect(forecastMemberSet({ status: 200, matches: m('id-1'), idToKey, overlapKeys }).ok).toBe(false);
+    expect(forecastMemberSet({ status: 200, matches: m('id-1', 'id-2', 'id-3'), idToKey, overlapKeys }).ok).toBe(false);
+    expect(forecastMemberSet({ status: 200, matches: m('id-1', 'unknown'), idToKey, overlapKeys }).ok).toBe(false);
+    expect(forecastMemberSet({ status: 503, matches: undefined, idToKey, overlapKeys }).ok).toBe(false);
+  });
+
+  it('a failed gate records the failure and aborts, so nothing after it runs', () => {
+    const lines: string[] = [];
+    let stage = 'verify-pre';
+    const inv = createInvariants({ log: (l: string) => lines.push(l), stage: () => stage });
+    const burst: string[] = [];
+    const run = () => {
+      inv.check('VAL-SCALE-002c', 'forecast within budget', true);
+      inv.gate('VAL-SCALE-002c', 'forecast names exactly the members', forecastMemberSet({ status: 503, matches: undefined, idToKey, overlapKeys }).ok, '0 matches');
+      stage = 'burst';
+      burst.push('change sets created');
+    };
+    expect(run).toThrow(CampaignAbort);
+    expect(() => run()).toThrow(/invariant failed at verify-pre: forecast names exactly the members \(0 matches\)/);
+    expect(stage).toBe('verify-pre');
+    expect(burst).toEqual([]);
+    expect(inv.results.filter((r) => !r.ok)).toEqual([{ id: 'VAL-SCALE-002c', label: 'forecast names exactly the members', ok: false, detail: '0 matches' }, expect.objectContaining({ ok: false })]);
+    expect(lines.some((l) => l.startsWith('FAIL  [VAL-SCALE-002c] forecast names exactly the members'))).toBe(true);
+    // A non-aborting check records a failure and continues.
+    expect(inv.check('VAL-SCALE-002c', 'soft', false)).toBe(false);
+  });
+
+  it('the driver gates the forecast member set before it enters the burst and creates change sets', () => {
+    const src = readFileSync(new URL('../fleet-driver.mjs', import.meta.url), 'utf8');
+    const preStart = src.indexOf("enter('verify-pre')");
+    const burstStart = src.indexOf("enter('burst')");
+    const changeSets = src.indexOf('/change-set`');
+    expect(preStart).toBeGreaterThan(0);
+    expect(burstStart).toBeGreaterThan(preStart);
+    expect(changeSets).toBeGreaterThan(burstStart);
+    const pre = src.slice(preStart, burstStart);
+    const call = pre.search(/gate\(\s*'VAL-SCALE-002c',\s*`forecast for \$\{CONFIG_PATH\} names exactly/);
+    expect(call).toBeGreaterThan(0);
+    expect(pre.slice(call)).toMatch(/^gate\([^;]*fcMembers\.ok/);
+    expect(pre.slice(0, call)).toMatch(/const fcMembers = forecastMemberSet\(/);
+    expect(pre).not.toMatch(/check\(\s*'VAL-SCALE-002c',\s*`forecast for \$\{CONFIG_PATH\} names exactly/);
+    // The driver uses the shared recorder, so its gate is the aborting one tested above.
+    expect(src).toMatch(/createInvariants\(\{/);
+    expect(src).not.toMatch(/^function gate\(/m);
+  });
+});
+
+describe('fleet timing labels', () => {
+  it('labels throughput, window and latency as the initial-burst population, distinct from all accepted publications', () => {
+    const md = renderBenchmarkMarkdown({
+      run: { repo: 'cynthia/x', startedAt: 'a', finishedAt: 'b', head: 'abc' },
+      limits: { gitChildren: 3, httpInFlight: 5, ceiling: 10000, gitWritesPerMin: 120, pushesPerMinute: 30, enqueueIntervalMs: 600 },
+      fleet: { workspaces: 100, burst: 99, overlapPairs: 69 },
+      burst: {
+        accepted: 99, acceptedInBurstWindow: 96, resolvedAndPublished: 3, incomplete: 0, windowMs: 361946, throughputPerMin: 15.91,
+        latencyMs: { p50: 1, p90: 1, max: 1, samples: 96 }, backlogMax: 1, queueFull429: 0, retries: 0,
+      },
+      conflicts: {},
+      requests: { projected: 1, observed: 1 },
+      counters: {},
+      background: {},
+    });
+    expect(md).toMatch(/\| Accepted publications \| 99 \(96 in the initial burst \+ 3 after conflict resolution\) \|/);
+    expect(md).toMatch(/\| Initial burst window \(first enqueue → last of the 96 initial-burst publications\) \| 361\.9 s \|/);
+    expect(md).toMatch(/\| Throughput \(the 96 initial-burst publications per minute over that window\) \| 15\.91 \|/);
+    expect(md).toMatch(/\| Latency enqueue → published of the 96 initial-burst publications, server clock \(p50 \/ p90 \/ max\) \|/);
   });
 });
