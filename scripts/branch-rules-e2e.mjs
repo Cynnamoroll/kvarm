@@ -2,8 +2,8 @@
 /**
  * Live driver for opt-in branch rules (VAL-PROTECT-001).
  *
- * As the non-admin human `forge-bot` (KVARM_PAT_BOT) it creates a private repo,
- * grants `forge-org-maint` (KVARM_PAT_MAINT) write, seeds `main` and `scratch`,
+ * As the non-admin human `kvarm-bot` (KVARM_PAT_BOT) it creates a private repo,
+ * grants `kvarm-org-maint` (KVARM_PAT_MAINT) write, seeds `main` and `scratch`,
  * protects `main` with a required check and one separate approval, then checks:
  *  - rule management is repo-admin only (collaborator 403) and the effective
  *    policy is readable;

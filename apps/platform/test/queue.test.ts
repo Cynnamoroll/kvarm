@@ -65,7 +65,7 @@ const userIds: Record<string, string> = {};
 async function seedUser(login: string): Promise<string> {
   const id = crypto.randomUUID();
   await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, Date.now())
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
     .run();
   userIds[login] = id;
   return id;
@@ -914,7 +914,7 @@ describe('integration train', () => {
     const { repo, main, numbers } = await setup('consumer', 1);
     await enqueue('consumer', numbers[0]!);
     const kick = sent.find((m) => m.body.type === 'kvarm.train')!;
-    const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body: kick.body }]);
+    const batch = createMessageBatch('kvarm-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body: kick.body }]);
     const ctx = createExecutionContext();
     await worker.queue!(batch, env, ctx);
     const result = await getQueueResult(batch, ctx);
@@ -1165,7 +1165,7 @@ function pushBody(repo: string, ref: string, before: string, after: string, at: 
 }
 
 async function deliver(body: unknown) {
-  const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
+  const batch = createMessageBatch('kvarm-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
   const ctx = createExecutionContext();
   await worker.queue!(batch, env, ctx);
   const result = await getQueueResult(batch, ctx);

@@ -66,7 +66,7 @@ export const defaultDependencyDeps: DependencyDeps = {
 };
 
 // ---------------------------------------------------------------------------
-// Landing settlement continuation (forge-events consumer)
+// Landing settlement continuation (kvarm-events consumer)
 // ---------------------------------------------------------------------------
 
 /**

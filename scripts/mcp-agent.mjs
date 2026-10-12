@@ -584,7 +584,7 @@ async function e2eChecks(argv, scratch) {
         try {
           const bd = await call(bot, 'delete_repo', { repo: `${OWNER}/${forkName}` });
           const still = await http(`/api/v1/repos/${OWNER}/${forkName}`);
-          console.log(`forge-bot delete_repo -> isError=${bd.isError} ${bd.text}; owner REST GET -> ${still.status}`);
+          console.log(`kvarm-bot delete_repo -> isError=${bd.isError} ${bd.text}; owner REST GET -> ${still.status}`);
           check('lifecycle', 'delete_repo by an outsider is refused and the repository stays', bd.isError && [403, 404].includes(bd.data?.status) && still.status === 200);
         } finally {
           await bot.close();
@@ -1060,8 +1060,8 @@ async function e2eChecks(argv, scratch) {
         const bt = await call(bot, 'get_context', { repo: env.repo, task: d1.task });
         const ba = await call(bot, 'get_attribution', { repo: env.repo, sha: main });
         const br = await http(`${api}/context?task=${encodeURIComponent(d1.task)}`, { token: BOT });
-        console.log(`forge-bot get_context -> isError=${bt.isError} ${bt.text}; get_attribution -> isError=${ba.isError} ${ba.text}; REST GET context -> ${br.status} ${br.text}`);
-        check('VAL-DECISION-003', 'forge-bot get_context/get_attribution → isError without data; REST denies; owner succeeds', bt.isError && ba.isError && !bt.text.includes('ws-b') && [401, 403, 404].includes(br.status) && !br.text.includes('ws-b') && !ct.isError);
+        console.log(`kvarm-bot get_context -> isError=${bt.isError} ${bt.text}; get_attribution -> isError=${ba.isError} ${ba.text}; REST GET context -> ${br.status} ${br.text}`);
+        check('VAL-DECISION-003', 'kvarm-bot get_context/get_attribution → isError without data; REST denies; owner succeeds', bt.isError && ba.isError && !bt.text.includes('ws-b') && [401, 403, 404].includes(br.status) && !br.text.includes('ws-b') && !ct.isError);
       } finally {
         await bot.close();
       }

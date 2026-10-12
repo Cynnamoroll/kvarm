@@ -1,7 +1,7 @@
 /**
  * Push event dispatcher (architecture §11.5).
  *
- * Artifacts push events reach the `forge-events` queue through the
+ * Artifacts push events reach the `kvarm-events` queue through the
  * account-level event subscription. Each message is handled on its own:
  *
  *  1. One ingest D1 batch records the event (insert or ignore, delivery
@@ -461,7 +461,7 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
 }
 
 /**
- * Queue consumer for `forge-events`. Messages are handled in order, each under
+ * Queue consumer for `kvarm-events`. Messages are handled in order, each under
  * its own cost meter, and each logs one `{cost: …}` line. A message whose
  * effects did not all complete is retried with backoff; everything else
  * (including malformed messages and unknown repos) is acked.

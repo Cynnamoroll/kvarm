@@ -14,7 +14,7 @@
 
 Working name: **TBD** (name deferred; the codebase uses a single `SITE_NAME` config constant so renaming is trivial). A git platform for the agentic era, built for the Cloudflare "next Git platform" competition. Deadline: **October 14, 2026** (one week). Submission: 5-10 min video, permissively licensed source, run instructions.
 
-Mission: take the proven learnings from GitHub, Cursor Continuity, and Namespace, apply them on top of Cloudflare Artifacts, and ship the fastest, most agent-native git forge possible.
+Mission: take the proven learnings from GitHub, Cursor Continuity, and Namespace, apply them on top of Cloudflare Artifacts, and ship the fastest, most agent-native git platform possible.
 
 ---
 

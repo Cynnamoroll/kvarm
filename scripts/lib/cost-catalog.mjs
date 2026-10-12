@@ -166,7 +166,7 @@ export const CATALOG = [
   L('cmp-receive-pack', CMP, 'git-receive-pack POST (any)', 'git.receivepack.ng', 'd1<=1;rw=0;art=0;do=0;sub<=1', { status: 200 }),
 
   // Push event consumer and events API
-  L('evt-initial', EVT, 'forge-events consumer, per message, known repo', 'consumer.push.initial', 'd1=2;do=0;art=0;wf<=1', { state: 'first', format: 'log' }),
+  L('evt-initial', EVT, 'kvarm-events consumer, per message, known repo', 'consumer.push.initial', 'd1=2;do=0;art=0;wf<=1', { state: 'first', format: 'log' }),
   N('evt-duplicate', EVT, 'same', 'workerd-only', 'a redelivery of a completed message cannot be requested from the live queue; workerd consumer tests pin d1=1', { state: 'duplicate' }),
   N('evt-unknown', EVT, 'same', 'not-triggerable', 'needs an Artifacts repo outside the registry or another namespace; the sweep creates only registered repos (workerd tests pin unknown-repo d1=1, other namespace d1=0)', { state: 'unknown' }),
   L('evt-list', EVT, 'REST GET /api/v1/repos/:o/:r/events', 'events.list', 'd1<=2;art=0;do=0;sub=0', { status: 200 }),
@@ -342,7 +342,7 @@ export const CATALOG = [
   // Integration-train scrutiny repairs
   L('r2-complete', R2, 'POST …/tasks/:id/complete (draft/review), VAL-COST-027', 'task.complete', 'd1<=6;do=0;sub<=5', { status: 200 }),
   L('r2-landing', R2, 'Landing settlement', 'pub.stored.any', 'do=2', { format: 'stored' }),
-  N('r2-settle-message', R2, 'forge-events consumer, kvarm.dependency-settle message', 'workerd-only', 'sent only on the exceptional landing path (more than 1,024 pins, a failed wake effect); needs fault injection or more than 1,024 live workspaces'),
+  N('r2-settle-message', R2, 'kvarm-events consumer, kvarm.dependency-settle message', 'workerd-only', 'sent only on the exceptional landing path (more than 1,024 pins, a failed wake effect); needs fault injection or more than 1,024 live workspaces'),
   N('r3-alarm', R3, 'MergeLock alarm, settlement intent wakeup', 'workerd-only', 'a settlement intent exists only on the exceptional landing path; covered by workerd mergeLock/dependencies tests'),
 
   // CI runner

@@ -35,9 +35,6 @@ const pct = (hits, n) => (n ? `${Math.round((hits / n) * 100)}%` : '-');
 const statCells = (s) => `${s?.n ?? 0} | ${ms(s?.min)} | ${ms(s?.p50)} | ${ms(s?.max)}`;
 const mib = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`);
 const counter = (m, k) => (m?.[k] === undefined ? '0' : String(m[k]));
-// Metric labels recorded in bench.json before the Kvarm cutover name the guard check by its retired
-// `forge/` spelling; the committed measurements stay byte-identical, only the rendered label is current.
-const metricLabel = (m) => String(m).replace(/\bforge\/guard\b/g, 'kvarm/guard');
 
 export function renderBenchReadme(r) {
   const out = [];
@@ -137,7 +134,7 @@ export function renderBenchReadme(r) {
     '',
     '| metric | n | min | p50 | max | methodology |',
     '| --- | ---: | ---: | ---: | ---: | --- |',
-    ...r.loop.map((x) => `| ${metricLabel(x.metric)} | ${statCells(x.stats)} | ${x.method} |`),
+    ...r.loop.map((x) => `| ${x.metric} | ${statCells(x.stats)} | ${x.method} |`),
     '',
   );
 

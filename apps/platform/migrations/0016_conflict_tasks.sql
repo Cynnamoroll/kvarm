@@ -6,7 +6,7 @@
 -- at; NULL otherwise.
 ALTER TABLE change_sets ADD COLUMN conflicts TEXT;
 
--- Work for agents, created by Forge (a conflict the deterministic rules could
+-- Work for agents, created by Kvarm (a conflict the deterministic rules could
 -- not resolve dispatches a `resolve-conflict` task). Claims are fenced
 -- through fenced_claims (kind 'task', subject = id); status mirrors the
 -- task's lifecycle: open -> claimed -> completed, or obsolete when what it

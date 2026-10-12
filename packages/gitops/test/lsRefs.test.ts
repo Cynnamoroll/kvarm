@@ -22,9 +22,9 @@ function git(cwd: string, ...args: string[]): string {
       ...process.env,
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_AUTHOR_NAME: 'fixture',
-      GIT_AUTHOR_EMAIL: 'fixture@forge.invalid',
+      GIT_AUTHOR_EMAIL: 'fixture@kvarm.invalid',
       GIT_COMMITTER_NAME: 'fixture',
-      GIT_COMMITTER_EMAIL: 'fixture@forge.invalid',
+      GIT_COMMITTER_EMAIL: 'fixture@kvarm.invalid',
     },
   }).trim();
 }

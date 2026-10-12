@@ -8,7 +8,7 @@
   // locally. For full-fidelity dev, use `wrangler dev -c wrangler.jsonc`
   // with a token in the environment.
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "forge-platform",
+  "name": "kvarm-platform",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -20,7 +20,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "forge",
+      "database_name": "kvarm",
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
@@ -28,23 +28,23 @@
   "r2_buckets": [
     {
       "binding": "SNAPSHOTS",
-      "bucket_name": "forge-snapshots"
+      "bucket_name": "kvarm-snapshots"
     }
   ],
   "queues": {
     "producers": [
       {
         "binding": "EVENTS",
-        "queue": "forge-events"
+        "queue": "kvarm-events"
       }
     ],
     "consumers": [
       {
-        "queue": "forge-events",
+        "queue": "kvarm-events",
         "max_batch_size": 10,
         "max_batch_timeout": 5,
         "max_retries": 3,
-        "dead_letter_queue": "forge-events-dlq"
+        "dead_letter_queue": "kvarm-events-dlq"
       }
     ]
   },

@@ -240,7 +240,7 @@ export async function handleGitRequest(
   upstream.search = url.search;
 
   const headers = new Headers();
-  headers.set('Authorization', `Basic ${btoa(`forge:${artifactsToken}`)}`);
+  headers.set('Authorization', `Basic ${btoa(`kvarm:${artifactsToken}`)}`);
   for (const h of ['content-type', 'accept', 'git-protocol', 'user-agent']) {
     const v = c.req.raw.headers.get(h);
     if (v) headers.set(h, v);

@@ -59,7 +59,7 @@ let clock = Date.now();
 async function seedUser(login: string): Promise<string> {
   const id = crypto.randomUUID();
   await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, Date.now())
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
     .run();
   return id;
 }
@@ -109,7 +109,7 @@ async function deliverPush(name: string, ref: string, after: string): Promise<vo
     payload: { ref, before: '0'.repeat(40), after, commits: [], totalCommitsCount: 0, commitsTruncated: false },
     metadata: { accountId: 'acct', eventSubscriptionId: 'sub', eventSchemaVersion: 1, eventTimestamp: new Date(clock).toISOString() },
   };
-  const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
+  const batch = createMessageBatch('kvarm-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
   const ctx = createExecutionContext();
   await worker.queue!(batch, env, ctx);
   const result = await getQueueResult(batch, ctx);

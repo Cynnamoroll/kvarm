@@ -140,7 +140,7 @@ export async function listRefs(
 ): Promise<{ branches: GitRef[]; tags: GitRef[]; head: GitRef | null }> {
   const token = await getGitToken(env, repo.artifacts_name, 'read');
   const res = await fetch(`${repo.artifacts_remote}/info/refs?service=git-upload-pack`, {
-    headers: { Authorization: `Basic ${btoa(`forge:${token}`)}` },
+    headers: { Authorization: `Basic ${btoa(`kvarm:${token}`)}` },
   });
   if (!res.ok) throw new Error(`info/refs failed (${res.status})`);
   const body = new Uint8Array(await res.arrayBuffer());

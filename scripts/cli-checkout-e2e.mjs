@@ -84,7 +84,7 @@ const snapPath = (repo, ref) => `/api/v1/repos/${OWNER}/${repo}/snapshots/${ref}
 
 const work = mkdtempSync(join(tmpdir(), 'cli-checkout-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo kvarm ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(dir, gitArgs) {

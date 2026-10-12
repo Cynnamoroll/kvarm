@@ -32,8 +32,7 @@ export const PROTECTED_REF_REASON = 'protected branch: direct pushes are not all
 export const RESERVED_REF_REASON = 'platform-reserved branch: direct pushes are not allowed';
 export const INVALID_REF_REASON = 'invalid ref name';
 
-// The retired CI staging prefix stays closed to human pushes after the Kvarm cutover.
-const RESERVED_BRANCH_NAMESPACES = ['refs/heads/kvarm-ci', 'refs/heads/forge-ci', 'refs/heads/agents'] as const;
+const RESERVED_BRANCH_NAMESPACES = ['refs/heads/kvarm-ci', 'refs/heads/agents'] as const;
 
 export interface BranchRule {
   id: string;

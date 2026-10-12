@@ -1,6 +1,6 @@
 /**
  * Wake-up messages for the integration train (services/queue.ts). A kick is
- * one message on the `forge-events` queue naming a repository + target-ref
+ * one message on the `kvarm-events` queue naming a repository + target-ref
  * partition; the queue consumer runs one train pass for it. Kicks come from
  * enqueue, dequeue, a head push of a queued change, an expired publication
  * lease (do/mergeLock.ts alarm) and the train's own bounded backoff. Nothing

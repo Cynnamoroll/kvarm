@@ -83,7 +83,7 @@ CREATE TRIGGER merge_queue_admit AFTER INSERT ON merge_queue WHEN NEW.active = 1
 BEGIN
   INSERT INTO merge_admission (repo_id, active, updated_at) VALUES (NEW.repo_id, 1, NEW.updated_at)
   ON CONFLICT (repo_id) DO UPDATE
-    SET active = IIF(active < NEW.admission_capacity, active + 1, RAISE(ABORT, 'FORGE_QUEUE_FULL')), updated_at = excluded.updated_at;
+    SET active = IIF(active < NEW.admission_capacity, active + 1, RAISE(ABORT, 'KVARM_QUEUE_FULL')), updated_at = excluded.updated_at;
 END;
 
 -- Every way out of the train (published, ejected, stale, dequeued) frees

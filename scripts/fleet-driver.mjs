@@ -403,13 +403,13 @@ function gitHead() {
 
 async function bootstrapSnapshot() {
   const user = await api('/api/v1/user');
-  const e2e = await api(`/api/v1/repos/${OWNER}/forge-e2e`);
+  const e2e = await api(`/api/v1/repos/${OWNER}/kvarm-e2e`);
   const [pats, users, repos] = wrangler(
-    `SELECT id, user_id, name, prefix, scopes, created_at, expires_at FROM pat ORDER BY id; SELECT id, login FROM users WHERE login = '${OWNER}'; SELECT id, owner_login, name, visibility, default_branch, artifacts_name, created_at, pushed_at FROM repos WHERE owner_login = '${OWNER}' AND name = 'forge-e2e'`,
+    `SELECT id, user_id, name, prefix, scopes, created_at, expires_at FROM pat ORDER BY id; SELECT id, login FROM users WHERE login = '${OWNER}'; SELECT id, owner_login, name, visibility, default_branch, artifacts_name, created_at, pushed_at FROM repos WHERE owner_login = '${OWNER}' AND name = 'kvarm-e2e'`,
   );
   return {
     user: { status: user.status, login: user.json?.user?.login ?? null },
-    forgeE2e: { status: e2e.status, digest: digest(e2e.json) },
+    kvarmE2e: { status: e2e.status, digest: digest(e2e.json) },
     d1: { pats: pats.length, patsDigest: digest(pats), userDigest: digest(users), repoDigest: digest(repos) },
   };
 }
@@ -418,7 +418,7 @@ async function main() {
   // -------------------------------------------------------------- setup
   log(`\n## setup  repo ${OWNER}/${REPO}, work dir ${work}`);
   report.bootstrapBefore = await bootstrapSnapshot();
-  gate('setup', `bootstrap readable: user ${OWNER} and ${OWNER}/forge-e2e`, report.bootstrapBefore.user.login === OWNER && report.bootstrapBefore.forgeE2e.status === 200);
+  gate('setup', `bootstrap readable: user ${OWNER} and ${OWNER}/kvarm-e2e`, report.bootstrapBefore.user.login === OWNER && report.bootstrapBefore.kvarmE2e.status === 200);
   const exists = await api(API);
   gate('setup', `${OWNER}/${REPO} does not exist yet`, exists.status === 404, `GET ${exists.status}`);
   const made = await api('/api/v1/repos', { method: 'POST', json: { name: REPO, visibility: 'public' } });
@@ -847,7 +847,7 @@ async function main() {
   report.reconciliation = { created: created.length, ...recon };
 
   report.bootstrapAfter = await bootstrapSnapshot();
-  check('VAL-SCALE-004b', `bootstrap data untouched (user ${OWNER}, ${OWNER}/forge-e2e, PAT rows)`, JSON.stringify(report.bootstrapAfter) === JSON.stringify(report.bootstrapBefore), `pats ${report.bootstrapAfter.d1.pats}, digests equal`);
+  check('VAL-SCALE-004b', `bootstrap data untouched (user ${OWNER}, ${OWNER}/kvarm-e2e, PAT rows)`, JSON.stringify(report.bootstrapAfter) === JSON.stringify(report.bootstrapBefore), `pats ${report.bootstrapAfter.d1.pats}, digests equal`);
 
   // Measured burst results.
   const lat = [...burst.enqueue.entries()]

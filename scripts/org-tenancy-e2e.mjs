@@ -26,7 +26,7 @@ const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const KEEP = process.argv.includes('--keep');
 const P = { owner: 'KVARM_PAT_BOT', maint: 'KVARM_PAT_MAINT', member: 'KVARM_PAT_MEMBER', outsider: 'KVARM_PAT_OUTSIDER' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);
-const LOGIN = { owner: 'forge-bot', maint: 'forge-org-maint', member: 'forge-org-member', outsider: 'forge-outsider' };
+const LOGIN = { owner: 'kvarm-bot', maint: 'kvarm-org-maint', member: 'kvarm-org-member', outsider: 'kvarm-outsider' };
 
 const ts = Date.now();
 const ORG = `org-tenancy-e2e-${ts}`;
@@ -310,7 +310,7 @@ try {
   console.log(`# cost git denial after revoke:         ${gitAfterRevoke.cost}`);
 
   // --- Owner self-removal cleans grants; rejoining revives nothing (VAL-ORG-003) ---
-  // forge-bot and forge-org-member co-own SELF_ORG; forge-org-member holds an explicit
+  // kvarm-bot and kvarm-org-member co-own SELF_ORG; kvarm-org-member holds an explicit
   // admin grant on its private repo and removes themselves.
   console.log(`# self-removal org ${SELF_ORG}; repo ${SELF_ORG}/${SELF_REPO}`);
   const selfRepo = `${SELF_ORG}/${SELF_REPO}`;

@@ -5,7 +5,7 @@
  * Enqueue records an immutable candidate for one change in its repository +
  * target-ref partition (FIFO by enqueue sequence) and approves the change's
  * current head; it never touches git. A train run, started by a kick on the
- * `forge-events` queue (services/trainKick.ts), then works the partition:
+ * `kvarm-events` queue (services/trainKick.ts), then works the partition:
  *
  *   1. It takes the partition's D1 run claim (one run at a time; a kick that
  *      arrives meanwhile marks the claim dirty so the holder makes another
@@ -467,7 +467,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
           .all<EntryRow>();
         return res.results?.[0];
       } catch (err) {
-        if (!String(err).includes('FORGE_QUEUE_FULL')) throw err;
+        if (!String(err).includes('KVARM_QUEUE_FULL')) throw err;
         return 'full';
       }
     };

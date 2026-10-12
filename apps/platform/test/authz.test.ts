@@ -30,7 +30,7 @@ async function seedUser(login: string, isAdmin: boolean): Promise<UserRow> {
     id: crypto.randomUUID(),
     workos_user_id: `test:${login}`,
     login,
-    email: `${login}@forge.invalid`,
+    email: `${login}@kvarm.invalid`,
     name: login,
     avatar_url: null,
     is_admin: isAdmin,

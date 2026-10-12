@@ -65,7 +65,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const work = mkdtempSync(join(tmpdir(), 'bench-clone-vs-snapshot-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) printenv BENCH_GIT_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo kvarm ;; *) printenv BENCH_GIT_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', BENCH_GIT_TOKEN: process.env.KVARM_PAT };
 

@@ -388,7 +388,7 @@ export function headWorkspacePins(rows: readonly HeadWorkspacePinRow[] | undefin
 //     until that claim expires;
 //   - pins or marks left past the budget, or effects that failed, are handed
 //     to two independent owners (handOffSettlement): a `kvarm.dependency-settle`
-//     message on the forge-events queue and a settlement intent in the
+//     message on the kvarm-events queue and a settlement intent in the
 //     MergeLock of the landing's repo + target ref, whose alarm runs the same
 //     settlement until nothing fenced to the landing remains.
 //
@@ -640,7 +640,7 @@ export const SETTLE_LIMITS = {
 };
 
 /**
- * Continuation of a landing's pin settlement, on the `forge-events` queue.
+ * Continuation of a landing's pin settlement, on the `kvarm-events` queue.
  * It names the landing exactly (source change, recorded merge time and merge
  * commit) and the target ref whose MergeLock holds the intent; every read
  * and write it causes is fenced by that identity, so a replay finds nothing

@@ -4,7 +4,7 @@
  * (VAL-ACCESS-003) and the authority-lookup budgets (VAL-COST-002,
  * VAL-COST-021).
  *
- * As forge-bot it creates a tiny public repo, pushes a marker file, and warms
+ * As kvarm-bot it creates a tiny public repo, pushes a marker file, and warms
  * every existing read surface while it is public: REST metadata, the tree page
  * and raw file (edge-cached), info/refs (v0 and v2, edge-cached) and an
  * upload-pack POST that returns the pack. It then flips the repo private with
@@ -56,8 +56,8 @@ const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const KEEP = process.argv.includes('--keep');
 const P = { owner: 'KVARM_PAT_BOT', outsider: 'KVARM_PAT_OUTSIDER', member: 'KVARM_PAT_MEMBER', admin: 'KVARM_PAT' };
 for (const k of Object.values(P)) if (!process.env[k]) throw new Error(`env ${k} is not set`);
-const OWNER = 'forge-bot';
-const MEMBER = 'forge-org-member';
+const OWNER = 'kvarm-bot';
+const MEMBER = 'kvarm-org-member';
 
 const ts = Date.now();
 const PREFIX = 'access-visibility-content-authority';

@@ -172,7 +172,7 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
 
   function startTail(file = join(work, 'tail.jsonl')) {
     const stream = createWriteStream(file);
-    const child = spawn('wrangler', ['tail', 'forge-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('wrangler', ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(stream);
     let err = '';
     child.stderr.on('data', (d) => (err += d));

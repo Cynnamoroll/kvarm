@@ -144,7 +144,7 @@ export function projectCampaign(plan, opts = {}) {
   const pairs = plan.expectedPairs.size;
   const changePages = Math.ceil((B + 1) / 100) + 1;
   const items = [
-    { stage: 'setup', label: 'bootstrap snapshot (user, forge-e2e, token list), repo existence check, repo create', http: 5, git: 0 },
+    { stage: 'setup', label: 'bootstrap snapshot (user, kvarm-e2e, token list), repo existence check, repo create', http: 5, git: 0 },
     { stage: 'setup', label: 'seed push of main', http: 0, git: 1 },
     { stage: 'fleet', label: `${N} × (create agent, mint write token, create workspace)`, http: 3 * N, git: 0 },
     { stage: 'fleet', label: `${N} workspace pushes (one agent token each)`, http: 0, git: N },

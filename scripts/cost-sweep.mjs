@@ -83,7 +83,7 @@ for (const [k, v] of Object.entries({ KVARM_BASE_URL: BASE, KVARM_PAT: PAT, KVAR
     process.exit(2);
   }
 }
-const LOGINS = { bot: 'forge-bot', maint: 'forge-org-maint', member: 'forge-org-member' };
+const LOGINS = { bot: 'kvarm-bot', maint: 'kvarm-org-maint', member: 'kvarm-org-member' };
 const FIXTURE = process.env.KVARM_FIXTURE_REPO ?? `${OWNER}/fixture-1m`;
 
 const live = createLive({ base: BASE, pat: PAT, log: (l) => console.log(l) });

@@ -428,7 +428,7 @@
       "method": "the same read repeated: plan served from the content-addressed cache (`art=0`), gate asked fresh"
     },
     {
-      "metric": "push -> forge/guard verdict recorded",
+      "metric": "push -> kvarm/guard verdict recorded",
       "stats": {
         "n": 10,
         "min": 6394,
@@ -438,7 +438,7 @@
       "method": "Date.now() before `git push` to the server-recorded `finishedAt` of the guard run at the pushed head (host clock NTP-synchronized); 10 pushes of a one-file change to an open change's head branch; `git push` itself took p50 603 ms"
     },
     {
-      "metric": "push -> forge/guard verdict visible to the client",
+      "metric": "push -> kvarm/guard verdict visible to the client",
       "stats": {
         "n": 10,
         "min": 6637,

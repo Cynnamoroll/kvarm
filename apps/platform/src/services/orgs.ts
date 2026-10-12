@@ -57,7 +57,6 @@ export const RESERVED_LOGINS: ReadonlySet<string> = new Set([
   'system',
   'user',
   'users',
-  'veyr-9',
 ]);
 
 export const MEMBER_PAGE_MAX = 200;

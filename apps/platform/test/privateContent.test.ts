@@ -51,7 +51,7 @@ function handle(name: string): ArtifactsRepo {
     },
     async log({ ref }: { ref?: string } = {}) {
       if (ref !== SHA || !files.has(name)) return [];
-      const who = { name: 'pc', email: 'pc@forge.invalid' };
+      const who = { name: 'pc', email: 'pc@kvarm.invalid' };
       return [
         { hash: SHA, treeHash: TREE, message: 'm', author: who, committer: who, parents: [], authoredAt: 0, committedAt: 0 },
       ];
@@ -99,7 +99,7 @@ async function seedUser(login: string): Promise<string> {
   await env.DB.prepare(
     'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
   )
-    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, Date.now())
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
     .run();
   return id;
 }

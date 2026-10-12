@@ -2,7 +2,7 @@
 /**
  * Live driver for agent credentials (VAL-AGENT-001, VAL-AGENT-002).
  *
- * Creates two private repos owned by the non-admin human `forge-bot`, two
+ * Creates two private repos owned by the non-admin human `kvarm-bot`, two
  * workspaces (ws1, ws2) through the workspaces API, a durable agent and
  * repo/ref-scoped tokens for ws1's namespace, then checks:
  *  - the granted workspace ref push succeeds (git CLI + owner readback);
@@ -291,8 +291,8 @@ try {
     ['mint another token', 'POST', `/agents/${agentId}/tokens`, { repo: mainRepo, role: 'write', refs: ['refs/heads/*'] }],
     ['create agent', 'POST', '/agents', { name: `child-${ts}` }],
     ['mint human PAT', 'POST', '/user/tokens', { scopes: ['read', 'write', 'api'] }],
-    ['change grants', 'PUT', `/repos/${mainRepo}/grants/forge-outsider`, { role: 'admin' }],
-    ['manage org membership', 'PUT', `/orgs/${orgLogin}/members/forge-outsider`, { role: 'owner' }],
+    ['change grants', 'PUT', `/repos/${mainRepo}/grants/kvarm-outsider`, { role: 'admin' }],
+    ['manage org membership', 'PUT', `/orgs/${orgLogin}/members/kvarm-outsider`, { role: 'owner' }],
     ['make repo public', 'PATCH', `/repos/${mainRepo}`, { visibility: 'public' }],
     ['create repo', 'POST', '/repos', { name: `escape-${ts}` }],
   ];
@@ -307,7 +307,7 @@ try {
   check(
     'no grant, member, token or visibility change happened',
     grants.json?.grants?.length === 0 &&
-      !members.json.members.some((m) => m.login === 'forge-outsider') &&
+      !members.json.members.some((m) => m.login === 'kvarm-outsider') &&
       toks.json?.tokens?.length === 1 &&
       vis.json?.repo?.visibility === 'private',
     `grants=${grants.json?.grants?.length} tokens=${toks.json?.tokens?.length} visibility=${vis.json?.repo?.visibility}`,

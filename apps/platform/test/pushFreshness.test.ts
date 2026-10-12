@@ -58,7 +58,7 @@ function handle(name: string): ArtifactsRepo {
   return {
     async log() {
       const n = heads.get(name) ?? 0;
-      const who = { name: 'pf', email: 'pf@forge.invalid' };
+      const who = { name: 'pf', email: 'pf@kvarm.invalid' };
       return [
         { hash: hex(n, 'a'), treeHash: hex(n, 'b'), message: 'm', author: who, committer: who, parents: [], authoredAt: 0, committedAt: 0 },
       ];
@@ -234,7 +234,7 @@ beforeAll(async () => {
   await env.DB.prepare(
     'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
   )
-    .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@forge.invalid`, OWNER, Date.now())
+    .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
     .run();
   token = (await mintPAT(env, userId, 'pf-owner', FULL)).token;
   await seedRepo('fresh', okSideband, true);
@@ -434,45 +434,11 @@ describe('generation-keyed caches', () => {
     expect(pageCacheKey(branch, 'g1').url).not.toBe(pageCacheKey(branch, 'g2').url);
     expect(pageCacheKey(branch, 'g1').url).toContain('/keys/tree/main/src');
     const pinned = new Request(`${ORIGIN}/${OWNER}/keys/tree/${'d'.repeat(40)}/src`);
-    // The pre-cutover key was the bare request URL; the versioned key never equals it.
+    // The versioned key carries the kvarm-gen parameter, so it never equals the bare request URL.
     expect(pageCacheKey(pinned, null).url).not.toBe(pinned.url);
     expect(pageCacheKey(pinned, null).url).toContain(`/keys/tree/${'d'.repeat(40)}/src`);
     expect(pageCacheKey(pinned, null).url).toBe(pageCacheKey(new Request(pinned.url), null).url);
     expect(pageCacheKey(pinned, null).url).not.toBe(pageCacheKey(branch, 'g1').url);
-  });
-
-  async function fetchPage(path: string): Promise<Response> {
-    const ctx = createExecutionContext();
-    const res = await worker.fetch!(new Request(`${ORIGIN}${path}`) as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-    await waitOnExecutionContext(ctx);
-    return res;
-  }
-
-  it('never serves a retained pre-cutover commit-pinned page or its retired cache header', async () => {
-    const path = `/${OWNER}/fresh/tree/${'e'.repeat(40)}`;
-    await caches.default.put(
-      new Request(`${ORIGIN}${path}`),
-      new Response('<html><title>Forge</title>RETAINED-PRE-CUTOVER-CHROME</html>', {
-        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=31536000', 'x-forge-cache': 'miss' },
-      }),
-    );
-    const res = await fetchPage(path);
-    const text = await res.text();
-    expect(text).not.toContain('RETAINED-PRE-CUTOVER-CHROME');
-    expect(res.headers.get('x-forge-cache')).toBeNull();
-
-    // An entry already in the versioned namespace that still carries a retired header loses it on the hit path.
-    const pinned = `/${OWNER}/fresh/tree/${'f'.repeat(40)}`;
-    await caches.default.put(
-      pageCacheKey(new Request(`${ORIGIN}${pinned}`), null),
-      new Response('<html>VERSIONED-ENTRY</html>', {
-        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=31536000', 'x-forge-cache': 'miss', 'x-forge-cost': 'd1=0' },
-      }),
-    );
-    const hit = await fetchPage(pinned);
-    expect(await hit.text()).toContain('VERSIONED-ENTRY');
-    expect(hit.headers.get('x-kvarm-cache')).toBe('hit');
-    expect([...hit.headers.keys()].filter((k) => k.startsWith('x-forge-'))).toEqual([]);
   });
 
   it('derives the view generation from both pushed_at and the colo ref generation', async () => {

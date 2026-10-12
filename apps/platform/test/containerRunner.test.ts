@@ -23,7 +23,7 @@ const tok = { admin: '', adminNoCi: '', owner: '', outsider: '' };
 async function seedUser(login: string, admin = false): Promise<string> {
   const id = crypto.randomUUID();
   await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, admin ? 1 : 0, Date.now())
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, Date.now())
     .run();
   return id;
 }

@@ -445,7 +445,7 @@ async function changesExplain() {
 function startTail() {
   const file = join(outDir, 'tail.jsonl');
   const stream = createWriteStream(file);
-  const child = spawn(join(ROOT, 'node_modules/.bin/wrangler'), ['tail', 'forge-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(join(ROOT, 'node_modules/.bin/wrangler'), ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.pipe(stream);
   let err = '';
   child.stderr.on('data', (d) => (err += d));

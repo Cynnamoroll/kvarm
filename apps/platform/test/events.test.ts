@@ -1,7 +1,7 @@
 /**
  * Push event dispatcher (architecture §11.5).
  *
- * Artifacts push events arrive on the forge-events queue. Each message is
+ * Artifacts push events arrive on the kvarm-events queue. Each message is
  * ingested in one D1 batch (event row insert-or-ignore, delivery count,
  * monotonic pushed_at, guarded ref position, read-back); its effects then run
  * independently and each completion is recorded, so a redelivery runs only
@@ -77,7 +77,7 @@ interface Delivery {
 
 async function deliver(env: Env, messages: Delivery[]) {
   const batch = createMessageBatch(
-    'forge-events',
+    'kvarm-events',
     messages.map((m) => ({ id: m.id ?? msgId(), timestamp: new Date(), attempts: m.attempts ?? 1, body: m.body })),
   );
   // getQueueResult does not report retry delays, so they are observed here.
@@ -495,7 +495,7 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     await baseEnv.DB.prepare(
       'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
     )
-      .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@forge.invalid`, OWNER, Date.now())
+      .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
       .run();
     token = (await mintPAT(baseEnv, userId, 'events', ['read', 'write', 'api'])).token;
     pub = await seedRepo('api-public');

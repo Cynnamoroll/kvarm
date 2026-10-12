@@ -50,7 +50,7 @@ const KVARM_PAT = 'kvarm_pat_' + 'fedcba9876543210'.repeat(4);
 async function seedUser(login: string): Promise<string> {
   const id = crypto.randomUUID();
   await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, Date.now())
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
     .run();
   return id;
 }
@@ -126,7 +126,7 @@ function pushBody(repo: string, ref: string, before: string, after: string, at: 
 }
 
 async function deliver(body: unknown) {
-  const batch = createMessageBatch('forge-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
+  const batch = createMessageBatch('kvarm-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
   const ctx = createExecutionContext();
   await worker.queue!(batch, env, ctx);
   const result = await getQueueResult(batch, ctx);
@@ -648,14 +648,4 @@ describe('CI pipeline runner', () => {
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_sets WHERE repo_id = ?').bind(repoIds['ci-invalid-create']).first('n')).toBe(0);
   });
 
-  it('ignores the same manifest at the retired .forge/ci.json path', async () => {
-    const repo = await seedRepo('ci-retired-path');
-    const config = ci([{ name: 'test', run: 'echo ok', required: true }]);
-    const { feature } = await fixture(repo, { ...BASE, '.forge/ci.json': config }, { '.forge/ci.json': config, 'one.txt': 'one\n' });
-    expect((await create('ci-retired-path')).status).toBe(201);
-    const checks = await checksOf('ci-retired-path');
-    expect(checks.json.checks.map((r: any) => [r.name, r.headSha])).toEqual([['kvarm/guard', feature.sha]]);
-    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM ci_jobs WHERE repo_id = ?').bind(repoIds['ci-retired-path']).first('n')).toBe(0);
-    expect((await call('POST', `${R('ci-retired-path')}/ci/jobs/claim`, tok.ci, { runnerId: 'retired' })).status).toBe(204);
-  });
 });

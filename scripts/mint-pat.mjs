@@ -63,7 +63,7 @@ const name = args.name ?? fail('--name is required');
 if (!/^[\w .:-]{1,64}$/.test(name)) fail('--name must be 1-64 word characters, spaces, dots, colons or dashes');
 const key = args.key ?? fail('--key is required');
 if (!/^[A-Z][A-Z0-9_]*$/.test(key)) fail('--key must be an UPPER_SNAKE env var name');
-const email = args.email ?? `${login}@forge.invalid`;
+const email = args.email ?? `${login}@kvarm.invalid`;
 const envFile = resolve(args['env-file'] ?? fail('--env-file is required'));
 
 const ignored = spawnSync('git', ['-C', repoRoot, 'check-ignore', '-q', envFile]);

@@ -65,7 +65,7 @@ function parseCommit(content: Uint8Array, hash: string): ArtifactsCommitMetadata
   const head = text.slice(0, text.indexOf('\n\n'));
   const tree = /^tree ([0-9a-f]{40})$/m.exec(head)![1]!;
   const parents = [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!);
-  const who = { name: 't', email: 't@forge.invalid' };
+  const who = { name: 't', email: 't@kvarm.invalid' };
   return { hash, treeHash: tree, message: 'm', author: who, committer: who, parents, authoredAt: 0, committedAt: 0 };
 }
 
@@ -165,7 +165,7 @@ async function writeTree(repo: FakeRepo, files: Files): Promise<string> {
 let clock = 1_700_000_000;
 async function commit(repo: FakeRepo, files: Files, parents: string[] = []): Promise<{ sha: string; tree: string }> {
   const tree = await writeTree(repo, files);
-  const who = { name: 't', email: 't@forge.invalid', time: clock++ };
+  const who = { name: 't', email: 't@kvarm.invalid', time: clock++ };
   const c = await buildCommit({ tree, parents, author: who, committer: who, message: `c${clock}` });
   repo.objects.set(c.hash, { type: 'commit', content: c.raw.subarray(c.raw.indexOf(0) + 1) });
   return { sha: c.hash, tree };
@@ -184,7 +184,7 @@ async function seedUser(login: string, admin = false): Promise<string> {
   await env.DB.prepare(
     'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   )
-    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, admin ? 1 : 0, Date.now())
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, Date.now())
     .run();
   return id;
 }

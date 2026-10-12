@@ -90,7 +90,7 @@ const api = (method, path, json) =>
 
 const work = mkdtempSync(join(tmpdir(), 'push-events-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo kvarm ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(dir, gitArgs, token = process.env.KVARM_PAT) {
@@ -193,7 +193,7 @@ let tail = null;
 let tailOut = '';
 if (args.tail) {
   // Spawn the binary itself (not npx) so killing it does not orphan a child tail.
-  tail = spawn(join(PLATFORM_DIR, '..', '..', 'node_modules', '.bin', 'wrangler'), ['tail', 'forge-platform', '--format', 'json'], { cwd: PLATFORM_DIR });
+  tail = spawn(join(PLATFORM_DIR, '..', '..', 'node_modules', '.bin', 'wrangler'), ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM_DIR });
   tail.stdout.on('data', (d) => (tailOut += d));
   tail.stderr.on('data', () => {});
   await sleep(8000);

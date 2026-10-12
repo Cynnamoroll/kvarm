@@ -110,7 +110,7 @@ const brief = (b) => JSON.stringify(b && { state: b.state, sha: b.sha?.slice(0, 
 
 const work = mkdtempSync(join(tmpdir(), 'snapshots-e2e-'));
 const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo forge ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
+writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo kvarm ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
 function git(dir, gitArgs) {
@@ -135,7 +135,7 @@ function d1Query(sql) {
 }
 /** True when the R2 object exists (wrangler r2 object get to /dev/null). */
 function r2Exists(key) {
-  const r = spawnSync('npx', ['wrangler', 'r2', 'object', 'get', `forge-snapshots/${key}`, '--remote', '--file', '/dev/null'], { cwd: PLATFORM_DIR, encoding: 'utf8' });
+  const r = spawnSync('npx', ['wrangler', 'r2', 'object', 'get', `kvarm-snapshots/${key}`, '--remote', '--file', '/dev/null'], { cwd: PLATFORM_DIR, encoding: 'utf8' });
   const text = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   if (r.status === 0) return true;
   if (/does not exist|not found|NoSuchKey/i.test(text)) return false;

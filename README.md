@@ -2,17 +2,11 @@
 
 Kvarm is a git platform for teams of people and coding agents, built on [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) for the Cloudflare [next Git platform](https://blog.cloudflare.com/next-git-platform-on-cloudflare/) competition. One Cloudflare Worker serves git smart-HTTP, a versioned REST API (`/api/v1`), an MCP server (`/mcp`) and server-rendered repository pages. Agents run wherever their users run them (Claude Code, Devin, a laptop) and coordinate through git refs, MCP tools, declared intents, the merge queue and task dispatch. Kvarm calls no hosted model.
 
-> **Breaking cutover to Kvarm.** The project was previously published under the names Forge and Veyr-9. Those identifiers are retired and no longer work: no aliases, no compatibility window.
-> - The CLI is `kvarm` with `KVARM_BASE_URL`/`KVARM_PAT`; `forge` and `FORGE_*` are gone.
-> - CI reads only `.kvarm/ci.json`. A repository that still has `.forge/ci.json` gets no CI until the file moves to `.kvarm/ci.json`.
-> - Tokens are `kvarm_pat_…` (personal) and `kvarm_agt_…` (agent). Tokens minted with the old prefix are rejected on REST, git and MCP; mint new ones (`POST /api/v1/user/tokens`, `scripts/mint-pat.mjs` or `create_agent_token`).
-> - Check names are `kvarm/guard`, `kvarm/ci-config` and `kvarm/checks-window`; response headers are `x-kvarm-*`.
-
 ## Contents
 
 - [Architecture](#architecture)
 - [Capabilities](#capabilities)
-- [Interfaces: renamed and unchanged](#interfaces-renamed-and-unchanged)
+- [Interfaces](#interfaces)
 - [Deploy from zero](#deploy-from-zero)
 - [Redeploy an existing deployment](#redeploy-an-existing-deployment)
 - [Local development and tests](#local-development-and-tests)
@@ -33,7 +27,7 @@ git client  --smart-HTTP-->  git gate (routes/git.ts) ------------------------> 
 REST client --/api/v1/*-->   Hono routers (thin) --> services/* (all logic) --> Artifacts reads (binding)
 MCP client  --/mcp------->   MCP tools (thin) ----/                         \-> Artifacts writes (receive-pack client)
                                   D1 (registry and state)   Cache API (content-addressed)   R2 (snapshots)
-Artifacts push event --> queue forge-events --> queue() consumer --> cache purge, snapshot build, kvarm/guard,
+Artifacts push event --> queue kvarm-events --> queue() consumer --> cache purge, snapshot build, kvarm/guard,
                                                                     CI dispatch, change head refresh, train kicks
 CI pipeline workflow --> ci_jobs (D1) <-- claim/report -- `kvarm runner` on the user's machine
 merge queue --> parallel preparation and checks --> short MergeLock publication lease --> receive-pack with expected old value
@@ -70,11 +64,9 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 **Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
 
-## Interfaces: renamed and unchanged
+## Interfaces
 
-Renamed in the Kvarm cutover (the retired spellings no longer work):
-
-| surface | current name |
+| surface | name |
 | --- | --- |
 | npm workspaces | `@kvarm/platform`, `@kvarm/cli`, `@kvarm/ops`, `@kvarm/gitops`, `@kvarm/diffcore`, `@kvarm/review`, `@kvarm/ui` |
 | CLI and its environment | `kvarm` (`apps/cli/bin/kvarm.js`), `KVARM_BASE_URL`, `KVARM_PAT` |
@@ -87,7 +79,7 @@ Renamed in the Kvarm cutover (the retired spellings no longer work):
 | outbound event type | `kvarm.task.created` |
 | MCP server identity, site name | `Kvarm` |
 
-Deliberately unchanged:
+Stable surfaces that never carry the brand:
 
 | surface | value |
 | --- | --- |
@@ -95,10 +87,8 @@ Deliberately unchanged:
 | MCP endpoint | `/mcp` |
 | MCP tool names | every tool name in `packages/ops/src/index.js` (`list_repos`, `merge_change`, `enqueue_change`, …) |
 | agent workspace refs (platform-reserved) | `refs/heads/agents/**` |
-| provisioned Cloudflare resources | worker `forge-platform`, D1 `forge`, R2 `forge-snapshots`, queues `forge-events` and `forge-events-dlq`, Artifacts namespace `default`, event subscription `forge-artifacts-pushed` |
+| provisioned Cloudflare resources | worker `kvarm-platform`, D1 `kvarm`, R2 `kvarm-snapshots`, queues `kvarm-events` and `kvarm-events-dlq`, Artifacts namespace `default`, event subscription `kvarm-artifacts-pushed` |
 | live worker URL | your `KVARM_APP_ORIGIN` setting (see [Deploy from zero](#deploy-from-zero)) |
-
-Moving the platform onto Kvarm-named Cloudflare resources is a separate, later operations migration. Until then the commands below use the existing resource names.
 
 ## Deploy from zero
 
@@ -121,24 +111,24 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 2. **D1 database and deployment target.** The committed `wrangler.jsonc` pins no deployment: its `database_id` and `APP_ORIGIN` are neutral placeholders. Your own values go in `apps/platform/.env.deploy` (gitignored), which `npm run deploy`, `npm run db:migrate:remote` and the scripts that query remote D1 read through `scripts/wrangler-target.mjs`. Environment variables of the same name take precedence over the file. Create the database, then copy the example and put the printed `database_id` into `KVARM_D1_DATABASE_ID`.
 
    ```sh
-   npx wrangler d1 create forge
+   npx wrangler d1 create kvarm
    cp .env.deploy.example .env.deploy   # set KVARM_D1_DATABASE_ID
    ```
 
 3. **R2 bucket for snapshots.**
 
    ```sh
-   npx wrangler r2 bucket create forge-snapshots
+   npx wrangler r2 bucket create kvarm-snapshots
    ```
 
-4. **Queues.** `forge-events` carries Artifacts push events and internal train kicks; `forge-events-dlq` is its dead-letter queue (3 retries, see `queues.consumers` in `wrangler.jsonc`).
+4. **Queues.** `kvarm-events` carries Artifacts push events and internal train kicks; `kvarm-events-dlq` is its dead-letter queue (3 retries, see `queues.consumers` in `wrangler.jsonc`).
 
    ```sh
-   npx wrangler queues create forge-events
-   npx wrangler queues create forge-events-dlq
+   npx wrangler queues create kvarm-events
+   npx wrangler queues create kvarm-events-dlq
    ```
 
-5. **Origin.** In `apps/platform/.env.deploy` set `KVARM_APP_ORIGIN` to your worker's origin (`https://forge-platform.<your-subdomain>.workers.dev`, or a custom domain); the deploy writes it into `vars.APP_ORIGIN`. Set `CLOUDFLARE_ACCOUNT_ID` there too if your login can see more than one account. Clone URLs and links are built from it. `ARTIFACTS_NAMESPACE` stays `default`.
+5. **Origin.** In `apps/platform/.env.deploy` set `KVARM_APP_ORIGIN` to your worker's origin (`https://kvarm-platform.<your-subdomain>.workers.dev`, or a custom domain); the deploy writes it into `vars.APP_ORIGIN`. Set `CLOUDFLARE_ACCOUNT_ID` there too if your login can see more than one account. Clone URLs and links are built from it. `ARTIFACTS_NAMESPACE` stays `default`.
 
 6. **Rate limiting binding.** `READ_LIMITER` (600 requests per 60 s) and `WRITE_LIMITER` (120 per 60 s) are declared in the `ratelimits` block of `wrangler.jsonc`. Workers Rate Limiting has no create command: the binding is created by the deploy in step 8. If the `namespace_id` values (`4601`, `4602`) collide with another Worker in your account, pick other unique integers.
 
@@ -153,7 +143,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 
    ```sh
    npm run deploy            # runs `wrangler deploy` with your target (scripts/wrangler-target.mjs)
-   curl -s https://forge-platform.<your-subdomain>.workers.dev/healthz   # ok
+   curl -s https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # ok
    ```
 
 9. **Secrets.** None are required. WorkOS sign-in is deferred: without its secrets `/auth/*` answers 503 and personal access tokens are the way in. To enable it later:
@@ -174,7 +164,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
       --name bootstrap --env-file .env.local --key KVARM_PAT
     node scripts/wrangler-target.mjs d1 execute DB --remote \
       --command "UPDATE users SET is_admin = 1 WHERE login = '<admin-login>'"
-    printf 'KVARM_BASE_URL=%s\nKVARM_USER=%s\n' https://forge-platform.<your-subdomain>.workers.dev <admin-login> >> .env.local
+    printf 'KVARM_BASE_URL=%s\nKVARM_USER=%s\n' https://kvarm-platform.<your-subdomain>.workers.dev <admin-login> >> .env.local
     ```
 
     `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
@@ -188,11 +178,11 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
     npx wrangler artifacts namespaces get default
     ```
 
-12. **Artifacts push-event subscription.** One account-level subscription delivers `repo.pushed` events from Artifacts to `forge-events`. The consumer acknowledges events for Artifacts repositories that have no Kvarm row.
+12. **Artifacts push-event subscription.** One account-level subscription delivers `repo.pushed` events from Artifacts to `kvarm-events`. The consumer acknowledges events for Artifacts repositories that have no Kvarm row.
 
     ```sh
-    npx wrangler queues subscription create forge-events --source artifacts --events repo.pushed --name forge-artifacts-pushed
-    npx wrangler queues subscription list forge-events     # Source artifacts, Events repo.pushed, Enabled Yes
+    npx wrangler queues subscription create kvarm-events --source artifacts --events repo.pushed --name kvarm-artifacts-pushed
+    npx wrangler queues subscription list kvarm-events     # Source artifacts, Events repo.pushed, Enabled Yes
     ```
 
     Wrangler 4.148 has no `--namespace` flag for this command. The per-repository form (`--source artifacts.repo --source-namespace default --source-repo-name <name> --events pushed`) exists but is not used.
@@ -211,7 +201,7 @@ cd apps/platform && npx wrangler whoami && cd ../..          # wrangler must be 
 cp apps/platform/.env.deploy.example apps/platform/.env.deploy   # once: KVARM_D1_DATABASE_ID, KVARM_APP_ORIGIN
 npm run db:migrate:remote --workspace apps/platform           # applies only migrations not yet applied
 npm run deploy                                                # wrangler deploy with your target settings
-curl -s -o /dev/null -w '%{http_code}\n' https://forge-platform.<your-subdomain>.workers.dev/healthz   # 200 (the APP_ORIGIN host)
+curl -s -o /dev/null -w '%{http_code}\n' https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # 200 (the APP_ORIGIN host)
 ```
 
 `wrangler deploy` prints the uploaded version id; `/healthz` answers `200 ok`. A deploy reuses the D1 database, bucket, queues, Artifacts namespace and subscription, and rotates no secrets.
@@ -233,7 +223,7 @@ The `platform` project runs the Worker in workerd with real D1 (every migration 
 
 ```sh
 npm install                                           # links the `kvarm` bin
-export KVARM_BASE_URL=https://forge-platform.<your-subdomain>.workers.dev
+export KVARM_BASE_URL=https://kvarm-platform.<your-subdomain>.workers.dev
 export KVARM_PAT=kvarm_pat_...                        # or an agent token kvarm_agt_...
 npx kvarm checkout <owner>/<repo> main ./work         # snapshot checkout, git clone fallback
 npx kvarm runner --repo <owner>/<repo> --once         # claim and run one CI job (PAT with the ci scope)
@@ -338,7 +328,6 @@ Not built in this version, recorded for after the submission:
 
 - The collaborative UI pass (new pages and the visual direction); the existing pages are unchanged.
 - WorkOS sign-in (configured by the secrets above; personal access tokens are the supported path today).
-- Moving the deployment onto Kvarm-named Cloudflare resources (a separate operations migration that keeps D1 records and all Artifacts history).
 - Flaky-test retry and quarantine, revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
 - Contract capsules, semantic packets, hotspot suggestions, priority credits, resource lifecycle and crash reconciliation after a ref move.
 - Advisory low-signal test flags, snapshot compression and an auto-updating repository wiki.

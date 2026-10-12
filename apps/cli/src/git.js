@@ -17,7 +17,7 @@ export function gitEnv(env, { baseUrl, pat }) {
   /** @type {Array<[string, string]>} */
   const entries = [['credential.helper', '']];
   if (pat) {
-    const basic = Buffer.from(`forge:${pat}`).toString('base64');
+    const basic = Buffer.from(`kvarm:${pat}`).toString('base64');
     entries.push([`http.${baseUrl.replace(/\/+$/, '')}/.extraHeader`, `Authorization: Basic ${basic}`]);
   }
   let n = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;

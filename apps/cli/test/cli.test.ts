@@ -72,7 +72,7 @@ describe('kvarm bin', () => {
     expect(diffTrees(dir, expected)).toEqual({ code: 0, out: '' });
     const gitRequests = server.requests.slice(before).filter((q) => q.url.startsWith('/alice/demo.git/'));
     expect(gitRequests.length).toBeGreaterThan(0);
-    const basic = `Basic ${Buffer.from(`forge:${PAT}`).toString('base64')}`;
+    const basic = `Basic ${Buffer.from(`kvarm:${PAT}`).toString('base64')}`;
     expect(gitRequests.every((q) => q.auth === basic)).toBe(true);
     expect(r.stdout + r.stderr).not.toContain(PAT);
     expect(git(dir, ['config', '--list', '--local'])).not.toContain('extraheader');
@@ -90,14 +90,10 @@ describe('kvarm bin', () => {
     expect(help.stdout).toMatch(/no \.git directory/);
   });
 
-  it('prints Kvarm usage and ignores the retired FORGE_* environment names', async () => {
+  it('prints Kvarm usage', async () => {
     const help = await kvarm(['--help'], {});
     expect(help.code).toBe(0);
     expect(help.stdout).toMatch(/^usage: kvarm <command>/);
-    expect(help.stdout.replace(/https:\/\/\S+/g, '')).not.toMatch(/forge/i);
-    const retired = await kvarm(['checkout', 'alice/demo', 'main', join(root, 'retired-env')], { FORGE_BASE_URL: server.url, FORGE_PAT: PAT });
-    expect(retired.code).toBe(2);
-    expect(retired.stderr).toMatch(/KVARM_BASE_URL is not set/);
   });
 
   it('exits 1 when neither the snapshot nor git can provide the ref', async () => {

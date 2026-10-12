@@ -1,6 +1,6 @@
 /**
  * The live fixture drivers must never delete a repository they did not
- * create in the same run (protected bootstrap data such as the forge-e2e repository
+ * create in the same run (protected bootstrap data such as the kvarm-e2e repository
  * included). Exercised against a fake REST API that records every call.
  */
 
@@ -38,7 +38,7 @@ const deletes = (calls: Call[]) => calls.filter((c) => c.method === 'DELETE');
 describe('checkIsolatedName', () => {
   it('accepts only <prefix>-<purpose>-<timestamp> names and never protected repos', () => {
     expect(checkIsolatedName('m3-risk-engine-fixture-1791400000000', 'm3-risk-engine')).toBeNull();
-    for (const bad of ['forge-e2e', 'fixture-1m', 'm3-risk-engine-fixture', 'm3-risk-engine-1791400000000', 'other-fixture-1791400000000', '../forge-e2e']) {
+    for (const bad of ['kvarm-e2e', 'fixture-1m', 'm3-risk-engine-fixture', 'm3-risk-engine-1791400000000', 'other-fixture-1791400000000', '../kvarm-e2e']) {
       expect(checkIsolatedName(bad, 'm3-risk-engine'), bad).toMatch(/\S/);
     }
   });
@@ -46,9 +46,9 @@ describe('checkIsolatedName', () => {
 
 describe('withFixtureRepo', () => {
   it('rejects a protected --repo target before any request, push or delete', async () => {
-    const { http, calls } = fakeApi(new Set(['forge-e2e']));
+    const { http, calls } = fakeApi(new Set(['kvarm-e2e']));
     let ran = false;
-    const out = await withFixtureRepo({ ...OPTS, repo: 'forge-e2e', http }, async () => {
+    const out = await withFixtureRepo({ ...OPTS, repo: 'kvarm-e2e', http }, async () => {
       ran = true;
     });
     expect(out.ok).toBe(false);
@@ -84,7 +84,7 @@ describe('withFixtureRepo', () => {
 
   it('deletes the repo it created when the run fails, and only that repo', async () => {
     const name = 'm3-risk-engine-fixture-1791400000002';
-    const existing = new Set(['forge-e2e']);
+    const existing = new Set(['kvarm-e2e']);
     const { http, calls } = fakeApi(existing);
     await expect(
       withFixtureRepo({ ...OPTS, repo: name, http }, async () => {
@@ -92,7 +92,7 @@ describe('withFixtureRepo', () => {
       }),
     ).rejects.toThrow('push failed');
     expect(deletes(calls)).toEqual([{ method: 'DELETE', path: `/api/v1/repos/alice/${name}` }]);
-    expect(existing.has('forge-e2e')).toBe(true);
+    expect(existing.has('kvarm-e2e')).toBe(true);
   });
 
   it('deletes the created repo after success unless kept', async () => {
@@ -132,10 +132,10 @@ describe('scripts/risk-fixture.mjs against a fake worker', () => {
     }
   }
 
-  it('refuses the protected forge-e2e repo without any request, push or delete', async () => {
-    const { code, calls, out } = await runDriver('forge-e2e');
+  it('refuses the protected kvarm-e2e repo without any request, push or delete', async () => {
+    const { code, calls, out } = await runDriver('kvarm-e2e');
     expect(code).toBe(1);
-    expect(out).toMatch(/refusing to run: forge-e2e is protected/);
+    expect(out).toMatch(/refusing to run: kvarm-e2e is protected/);
     expect(calls).toEqual([]);
   });
 

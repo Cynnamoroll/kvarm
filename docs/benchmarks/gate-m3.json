@@ -286,7 +286,7 @@
   "checks": [
     {
       "ok": true,
-      "label": "VAL-DIFF-022 10 cold compares all 200 + x-forge-cache: bypass",
+      "label": "VAL-DIFF-022 10 cold compares all 200 + x-kvarm-cache: bypass",
       "detail": ""
     },
     {

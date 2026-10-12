@@ -77,7 +77,7 @@ export function artifactsPusher(env: Env, repo: PushTarget, opts: GitPusherOptio
     }
     return {
       url: repo.artifacts_remote,
-      authorization: `Basic ${btoa(`forge:${token}`)}`,
+      authorization: `Basic ${btoa(`kvarm:${token}`)}`,
       ...(opts.fetch ? { fetch: opts.fetch } : {}),
     };
   };

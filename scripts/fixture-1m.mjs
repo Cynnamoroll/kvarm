@@ -55,7 +55,7 @@ export const SHAPE = {
   interleaved: { path: 'large/interleaved.txt', lines: 60_000, rewriteEvery: 5, moveFrom: 30_000, moveCount: 5_000 },
   wide: { top: 50, perTop: 100, filesPerLeaf: 5 },
 };
-const IDENT = 'fixture-1m <fixture-1m@forge.invalid> 1790000000 +0000';
+const IDENT = 'fixture-1m <fixture-1m@kvarm.invalid> 1790000000 +0000';
 const pad = (n, w) => String(n).padStart(w, '0');
 
 // ---------------------------------------------------------------------------

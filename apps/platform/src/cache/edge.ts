@@ -32,13 +32,6 @@ export function pageCacheKey(request: Request, generation: string | null): Reque
   return new Request(url.toString(), { method: 'GET' });
 }
 
-/** Response headers retired by the Kvarm cutover; a cached entry never re-serves them. */
-function dropRetiredHeaders(headers: Headers): void {
-  // Collected first: deleting while iterating a Headers object skips entries.
-  const retired = Array.from(headers.keys()).filter((name) => name.startsWith('x-forge-'));
-  for (const name of retired) headers.delete(name);
-}
-
 /**
  * Serve a public page from cache when possible; otherwise render and store.
  * `render` is only called on misses.
@@ -57,7 +50,6 @@ export async function edgeCachedPage<S extends AnyApp>(
   if (cached) {
     markCache('hit');
     const res = new Response(cached.body, cached);
-    dropRetiredHeaders(res.headers);
     res.headers.set('x-kvarm-cache', 'hit');
     return res;
   }

@@ -33,7 +33,7 @@ import {
   type ReceivePackRemote,
 } from '../src/index';
 
-const AUTH = 'Basic ' + Buffer.from('forge:test-token').toString('base64');
+const AUTH = 'Basic ' + Buffer.from('kvarm:test-token').toString('base64');
 
 let root = '';
 
@@ -82,7 +82,7 @@ function httpBackend(requests?: { url: string; init: RequestInit; body: Uint8Arr
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_PROJECT_ROOT: root,
         GIT_HTTP_EXPORT_ALL: '1',
-        REMOTE_USER: 'forge',
+        REMOTE_USER: 'kvarm',
         REQUEST_METHOD: init.method ?? 'GET',
         PATH_INFO: url.pathname,
         QUERY_STRING: url.search.slice(1),

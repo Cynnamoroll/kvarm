@@ -242,7 +242,7 @@ await scenario('crud', async (repo) => {
   const botMerge = await http(`${api}/changes/1/merge`, { method: 'POST', token: PAT_BOT });
   check(
     'VAL-CHANGE-011',
-    'forge-bot: GET changes 200 (public), POST 403 {error}, PATCH/merge 403, owner list unchanged',
+    'kvarm-bot: GET changes 200 (public), POST 403 {error}, PATCH/merge 403, owner list unchanged',
     botList.status === 200 && botPost.status === 403 && botPost.json?.error && botPatch.status === 403 && botMerge.status === 403 && (await count()) === before,
     `GET ${botList.status} | POST ${botPost.status} ${botPost.text} | PATCH ${botPatch.status} | merge ${botMerge.status} | cost ${botPost.cost}`,
   );

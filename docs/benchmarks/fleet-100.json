@@ -24,7 +24,7 @@
     "items": [
       {
         "stage": "setup",
-        "label": "bootstrap snapshot (user, forge-e2e, token list), repo existence check, repo create",
+        "label": "bootstrap snapshot (user, kvarm-e2e, token list), repo existence check, repo create",
         "http": 5,
         "git": 0,
         "requests": 5
@@ -120,7 +120,7 @@
         "count": 208
       },
       {
-        "label": "forge/guard runs (one per change at creation, one per resolved head)",
+        "label": "kvarm/guard runs (one per change at creation, one per resolved head)",
         "count": 103
       },
       {
@@ -146,7 +146,7 @@
       "status": 200,
       "login": "<owner>"
     },
-    "forgeE2e": {
+    "kvarmE2e": {
       "status": 200,
       "digest": "a23417e70d188e65"
     },
@@ -1219,7 +1219,7 @@
       "status": 200,
       "login": "<owner>"
     },
-    "forgeE2e": {
+    "kvarmE2e": {
       "status": 200,
       "digest": "a23417e70d188e65"
     },
@@ -3402,7 +3402,7 @@
     },
     "checkRuns": [
       {
-        "name": "forge/guard",
+        "name": "kvarm/guard",
         "status": "success",
         "conclusion": "success",
         "n": 104
@@ -3419,7 +3419,7 @@
   "checks": [
     {
       "id": "setup",
-      "label": "bootstrap readable: user <owner> and <owner>/forge-e2e",
+      "label": "bootstrap readable: user <owner> and <owner>/kvarm-e2e",
       "ok": true,
       "detail": ""
     },
@@ -3575,7 +3575,7 @@
     },
     {
       "id": "VAL-SCALE-004c",
-      "label": "refs/notes/forge-attribution notes exactly the 98 Forge merge commits and resolution commits, once each",
+      "label": "refs/notes/kvarm-attribution notes exactly the 98 Kvarm merge commits and resolution commits, once each",
       "ok": true,
       "detail": "98 noted at 2a2d15e69d45092021ee72452f002a2f8899b0b0; missing none; unexpected none"
     },
@@ -3593,7 +3593,7 @@
     },
     {
       "id": "VAL-SCALE-004b",
-      "label": "bootstrap data untouched (user <owner>, <owner>/forge-e2e, PAT rows)",
+      "label": "bootstrap data untouched (user <owner>, <owner>/kvarm-e2e, PAT rows)",
       "ok": true,
       "detail": "pats 8, digests equal"
     },

@@ -48,7 +48,7 @@ git client  --smart-HTTP-->  git gate (routes/git.ts) ------------------------> 
 REST client --/api/v1/*-->   Hono routers (thin) --> services/* (all logic) --> Artifacts reads (binding)
 MCP client  --/mcp------->   MCP tools (thin) ----/                         \-> Artifacts writes (receive-pack client)
                                   D1 (registry and state)   Cache API (content-addressed)   R2 (snapshots)
-Artifacts push event --> queue forge-events --> queue() consumer --> cache purge, snapshot build, kvarm/guard,
+Artifacts push event --> queue kvarm-events --> queue() consumer --> cache purge, snapshot build, kvarm/guard,
                                                                     CI dispatch, change head refresh, train kicks
 CI pipeline workflow --> ci_jobs (D1) <-- claim/report -- `kvarm runner` on the user's machine
 merge queue --> parallel preparation and checks --> short MergeLock publication lease --> receive-pack with expected old value
@@ -57,7 +57,7 @@ workspace intents and pushes --> Nexus path index --> advisory forecast --> opt-
 
 **Layering.** Routers (`routes/**`) and MCP tools (`mcp/server.ts`) are thin adapters. All behavior lives in `apps/platform/src/services/*.ts`; service functions return `ServiceResult<T>` (`{ok: true, value}` or `{ok: false, status, error}`). Pure algorithms live in `packages/*` and are tested in Node.
 
-**Bindings.** D1 `DB` (registry and state), Artifacts `ARTIFACTS` (git storage, namespace `default`), R2 `SNAPSHOTS`, the `EVENTS` queue (`forge-events`, with `forge-events-dlq`), the Workers Rate Limiting bindings `READ_LIMITER` and `WRITE_LIMITER`, the Durable Objects `MergeLock` and `CiRunnerSandbox` (plus `TokenCache` and `RateLimiter`, which stay exported to keep the Durable Object migration history intact but are no longer used), and the Workflows `snapshot-builder`, `ci-pipeline`, `merge` and `repo-import`. The Cloudflare resource names keep their original `forge-*` spelling; renaming them is a separate operations migration.
+**Bindings.** D1 `DB` (registry and state), Artifacts `ARTIFACTS` (git storage, namespace `default`), R2 `SNAPSHOTS`, the `EVENTS` queue (`kvarm-events`, with `kvarm-events-dlq`), the Workers Rate Limiting bindings `READ_LIMITER` and `WRITE_LIMITER`, the Durable Objects `MergeLock` and `CiRunnerSandbox` (plus `TokenCache` and `RateLimiter`, which stay exported to keep the Durable Object migration history intact but are no longer used), and the Workflows `snapshot-builder`, `ci-pipeline`, `merge` and `repo-import`.
 
 ### 1.1 Git gate
 
@@ -190,7 +190,6 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0019_dependencies` | pinned draft dependencies (§11.3) |
 | `0020_check_runs_identity` | check-run tree, attempt, required, quarantined and summary (§0.3) |
 | `0021_ci_jobs` | user-owned CI runner jobs with generation and owner fencing |
-| `0023_kvarm_rename` | rewrites the reserved check names to `kvarm/*` in place; no rows deleted, no DDL changed |
 
 ## 7. Testing
 
@@ -257,7 +256,7 @@ The README's "Deploy from zero" and "Redeploy an existing deployment" sections a
 
 ### 11.5 Events and snapshots
 
-- Artifacts `repo.pushed` events reach the `forge-events` queue through one account-level subscription. For each message, one ingest D1 batch records the event, advances `pushed_at` monotonically, moves the ref position only for a newer event and refreshes the heads of open changes on that branch. Each downstream effect (cache invalidation, snapshot build, `kvarm/guard`, CI dispatch, Nexus index, train kicks) runs and is recorded independently, so a redelivery runs only what is missing. Out-of-order pushes cannot roll state back; a genuine repeated transition (A→B→A→B) is still processed.
+- Artifacts `repo.pushed` events reach the `kvarm-events` queue through one account-level subscription. For each message, one ingest D1 batch records the event, advances `pushed_at` monotonically, moves the ref position only for a newer event and refreshes the heads of open changes on that branch. Each downstream effect (cache invalidation, snapshot build, `kvarm/guard`, CI dispatch, Nexus index, train kicks) runs and is recorded independently, so a redelivery runs only what is missing. Out-of-order pushes cannot roll state back; a genuine repeated transition (A→B→A→B) is still processed.
 - Snapshots are addressed by commit: per-commit metadata points at an immutable per-tree tarball in R2, so commits with identical trees share bytes. `SnapshotBuilder` walks the tree in bounded Workflow steps. Reading metadata never starts a build.
 - Kvarm never deletes repository refs, user code or history automatically; an explicit abandon deletes only its workspace ref. Growing lists are paginated, comparisons and output are bounded, and runners poll with backoff.
 

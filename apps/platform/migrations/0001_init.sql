@@ -1,4 +1,4 @@
--- Forge platform schema v1
+-- Kvarm platform schema v1
 -- Metadata lives in D1; git objects live in Cloudflare Artifacts;
 -- working-tree snapshots live in R2.
 

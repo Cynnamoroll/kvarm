@@ -5,7 +5,7 @@
  *
  * Every scenario runs in a fresh public repo owned by KVARM_USER, named
  * `m5-review-<purpose>-<timestamp>`, seeded with real git pushes and deleted
- * afterwards (unless --keep). `forge-org-maint` (KVARM_PAT_MAINT) gets a write
+ * afterwards (unless --keep). `kvarm-org-maint` (KVARM_PAT_MAINT) gets a write
  * grant and is the second human; three agents of KVARM_USER (two `claude`, one
  * `gpt`) get write tokens per repo and are revoked at the end.
  *   unset      no review policy: explicit merge with no approval; enqueue alone lands
@@ -44,7 +44,7 @@ const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const MAINT = process.env.KVARM_PAT_MAINT ?? die('KVARM_PAT_MAINT is not set');
-const MAINT_LOGIN = 'forge-org-maint';
+const MAINT_LOGIN = 'kvarm-org-maint';
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'm5-review';
 const only = opts.only ? new Set(opts.only.split(',')) : null;

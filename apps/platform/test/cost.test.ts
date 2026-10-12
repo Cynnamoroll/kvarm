@@ -56,7 +56,7 @@ beforeAll(async () => {
   await env.DB.prepare(
     'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
   )
-    .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@forge.invalid`, OWNER, Date.now())
+    .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
     .run();
   openRemote = await seedRepo('open', 'public');
   await seedRepo('secret', 'private');

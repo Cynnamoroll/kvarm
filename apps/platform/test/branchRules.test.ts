@@ -98,7 +98,7 @@ async function seedUser(login: string, admin = false): Promise<string> {
   await env.DB.prepare(
     'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   )
-    .bind(id, `test:${login}`, login, `${login}@forge.invalid`, login, admin ? 1 : 0, Date.now())
+    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, Date.now())
     .run();
   return id;
 }
@@ -204,7 +204,7 @@ describe('branch rule evaluation', () => {
   });
 
   it('reserves platform branch namespaces from human pushes without branch rules', () => {
-    for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+    for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
       expect(directHumanPushDenial([], ref)).toBe(RESERVED_REF_REASON);
     }
     expect(directHumanPushDenial([], 'refs/heads/feature/x')).toBeNull();
@@ -384,7 +384,7 @@ describe('protected direct pushes', () => {
       `${A} ${ZERO_OID}`,
     ];
     for (const who of ['owner', 'writer', 'admin'] as const) {
-      for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/forge-ci', 'refs/heads/forge-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+      for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
         for (const command of commands) {
           const res = await push(pat[who], PLAIN, pushBody([`${command} ${ref}`]));
           expect(res.status, `${who} ${command} ${ref}`).toBe(200);
@@ -395,7 +395,7 @@ describe('protected direct pushes', () => {
   });
 
   it('rejects reserved refs locally without extra upstream work', async () => {
-    for (const ref of ['refs/heads/kvarm-ci/x', 'refs/heads/forge-ci/x']) {
+    for (const ref of ['refs/heads/kvarm-ci/x']) {
       const res = await push(pat.owner, PLAIN, pushBody([`${ZERO_OID} ${B} ${ref}`]));
       const cost = parseCostHeader(res.headers.get(COST_HEADER));
       await res.body?.cancel();
