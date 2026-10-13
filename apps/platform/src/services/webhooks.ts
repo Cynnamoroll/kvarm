@@ -3,7 +3,7 @@
  *
  * Recording. Platform events are CloudEvents 1.0 envelopes in the `events`
  * ledger (type `kvarm.*`, `processed_at` NULL, `source`
- * `/repos/<owner>/<name>`). Migration 0028's triggers fan each one out into a
+ * `/repos/<owner>/<name>`). Migration 0033's triggers fan each one out into a
  * `webhook_deliveries` row per active hook of the repository subscribed to
  * the type, inside the statement that wrote the event, and emit the
  * envelopes for merges, merge-queue ejections, completed check runs and

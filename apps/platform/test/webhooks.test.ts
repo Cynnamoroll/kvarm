@@ -1,6 +1,6 @@
 /**
  * Outbound webhooks (services/webhooks.ts, services/webhookSafety.ts,
- * migration 0028). Management goes through the Worker's routes; delivery
+ * migration 0033). Management goes through the Worker's routes; delivery
  * attempts run with an injected fetch and clock, so no test touches the
  * network and retries need no real waiting.
  */

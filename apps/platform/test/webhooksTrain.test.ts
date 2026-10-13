@@ -1,6 +1,6 @@
 /**
  * Outbound webhooks and the integration train (services/queue.ts,
- * migration 0028): merges and ejections of a train run are recorded for
+ * migration 0033): merges and ejections of a train run are recorded for
  * delivery inside the train's own writes, the train never calls an
  * endpoint, and a failing endpoint changes nothing about later runs.
  */
