@@ -565,6 +565,10 @@ report.fleet = {
   measuredAt: fleetJson.run.finishedAt,
   workspaces: fleetJson.fleet.workspaces,
   published: fleetJson.burst.accepted,
+  // The window, throughput and latency rows describe the initial burst only, not
+  // the 99 accepted publications: the 3 resolved after the burst are outside it.
+  publishedInBurst: fleetJson.burst.acceptedInBurstWindow,
+  resolvedAfterConflicts: fleetJson.burst.resolvedAndPublished,
   windowMs: fleetJson.burst.windowMs,
   throughputPerMin: fleetJson.burst.throughputPerMin,
   latency: fleetJson.burst.latencyMs,

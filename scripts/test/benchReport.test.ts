@@ -39,7 +39,9 @@ function sampleReport() {
     compose: { stats: stats(1500), method: '5 runs, 2 workspaces, fresh compositions' },
     fleet: {
       workspaces: 100,
-      published: 97,
+      published: 99,
+      publishedInBurst: 96,
+      resolvedAfterConflicts: 3,
       enqueue: 'd1=2;rr=10..12',
       publication: 'd1=3;rr=9..10;do=2',
       idleMs: 79_700,
@@ -92,10 +94,11 @@ describe('renderBenchReadme', () => {
     expect(md).toContain('| info/refs | 6 | 5 | 83% |');
   });
 
-  it('renders the fleet burst window, throughput and server-clock latency', () => {
-    expect(md).toContain('| burst window (first enqueue -> last publication) | 361.9 s |');
-    expect(md).toContain('| throughput (publications per minute over the burst window) | 15.91 |');
-    expect(md).toContain('| enqueue -> published latency, server clock (p50 / p90) | 94.0 s / 219.1 s |');
+  it('names the burst population, then renders its window, throughput and server-clock latency', () => {
+    expect(md).toContain('| changes published through the train | 99 (96 in the initial burst + 3 after conflict resolution) |');
+    expect(md).toContain('| initial burst window (first enqueue -> last of the 96 initial-burst publications) | 361.9 s |');
+    expect(md).toContain('| throughput (the 96 initial-burst publications per minute over that window) | 15.91 |');
+    expect(md).toContain('| enqueue -> published latency of the 96 initial-burst publications, server clock (p50 / p90) | 94.0 s / 219.1 s |');
   });
 
   it('renders the per-endpoint cost medians with their budgets', () => {
