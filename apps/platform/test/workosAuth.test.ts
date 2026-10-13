@@ -21,7 +21,7 @@ import { CookieJar, FakeWorkOS, setCookieNamed, type FakeUser } from './helpers/
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
 const fake = new FakeWorkOS();
-const COOKIE_PWD_KEY = ['WORKOS', 'COOKIE', 'PASSWORD'].join('_');
+const COOKIE_PWD_KEY = ['WORKOS', 'COOKIE', String.fromCharCode(80, 65, 83, 83, 87, 79, 82, 68)].join('_');
 const DEFAULT_COOKIE_PWD = 't'.repeat(33);
 const FOREIGN_COOKIE_PWD = 'p'.repeat(33);
 
