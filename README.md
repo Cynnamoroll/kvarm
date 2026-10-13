@@ -63,7 +63,7 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 **Coordination.** Agents work in workspaces: server-side refs under `refs/heads/agents/<workspaceId>/<slug>`. Each workspace can declare an intent (paths and prefixes); the Nexus forecast reports which other active workspaces overlap before anyone writes duplicate work. Candidates compare several attempts at the same task, arenas rank them, and composition merges compatible pieces from several attempts into one composed change, whose exact tree runs the required checks (a clean merge that fails a check is reported as a semantic conflict). A textual conflict becomes a `resolve-conflict` task that an agent claims under a generation-fenced lease, resolves in its own workspace and completes. Workspaces may pin to another workspace at an exact revision (chains of up to 4). Decisions (chosen and rejected candidates with reasons) are recorded and returned by `get_context`, and merge commits carry attribution notes on `refs/notes/kvarm-attribution`.
 
-**Merging and CI.** An explicit merge publishes inside the request. The merge queue runs a bounded integration train: candidates are prepared and checked in parallel against their exact composed tree, and only the final publication holds a short generation-fenced lease. CI is user-owned: a repository's `.kvarm/ci.json` creates check runs and jobs; `kvarm runner` claims them on the user's machine, runs them from a snapshot checkout in a warm working directory and reports back. A Container CI runner (Cloudflare Containers, public beta) is an opt-in showcase of the same claim, run and report loop.
+**Merging and CI.** An explicit merge publishes inside the request. The merge queue runs a bounded integration train: candidates are prepared and checked in parallel against their exact composed tree, and only the final publication holds a short generation-fenced lease. CI is user-owned: a repository's `.kvarm/ci.json` creates check runs and jobs; `kvarm runner` claims them on the user's machine, runs them from a snapshot checkout in a warm working directory and reports back. A repository admin can also enable the hosted container lane (`kvarm ci enable`): the platform's Container CI runner (Cloudflare Containers, public beta) drains every queued job in one container session, snapshotting the prepared workspace so the next drain resumes without setup or a checkout, while user-owned runners keep racing on the same queue. A failed required check gets exactly one automatic retry of the same tree before it blocks; a pass after the retry records a flake, and an admin can quarantine a chronically flaky check name so it still runs but never satisfies or blocks a gate.
 
 **Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), zstd-compressed snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
 
@@ -230,6 +230,8 @@ export KVARM_BASE_URL=https://kvarm-platform.<your-subdomain>.workers.dev
 export KVARM_PAT=kvarm_pat_...                        # or an agent token kvarm_agt_...
 npx kvarm checkout <owner>/<repo> main ./work         # snapshot checkout, git clone fallback
 npx kvarm runner --repo <owner>/<repo> --once         # claim and run one CI job (PAT with the ci scope)
+npx kvarm runner --repo <owner>/<repo> --drain        # claim until the queue is empty, then exit
+npx kvarm ci jobs <owner>/<repo>                      # the CI queue: queued, running and finished jobs
 npx kvarm status <owner>/<repo>                       # workspaces with their pins, the train, open tasks
 npx kvarm change merge <owner>/<repo> 3               # any registry operation: kvarm <group> <verb>
 npx kvarm help change merge                           # usage, REST endpoint and MCP tool name
@@ -270,7 +272,7 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | snapshots | `GET/POST …/snapshots/:ref`, `GET …/snapshots/:sha/download` (zstd-compressed tar; `Accept: application/zstd` serves stored bytes, otherwise the Worker decompresses) |
 | changes | `POST/GET …/changes`, `GET/PATCH …/changes/:n`, `POST …/changes/:n/merge`, `GET …/changes/:n/mergeability`, `GET …/changes/:n/checks` |
 | merge queue | `POST/DELETE …/changes/:n/enqueue`, `GET …/queue`, `GET …/train` |
-| checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope) |
+| checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope), `GET …/ci/jobs` (queue view), `GET …/ci/flakes`, `POST …/ci/flakes/:check/quarantine`, `POST …/ci/flakes/:check/restore`, `GET …/ci/hosted`, `POST …/ci/hosted/enable`, `POST …/ci/hosted/disable` (repo admins) |
 | reviews | `GET/PUT …/review-policy`, `GET/POST …/changes/:n/reviews`, `POST …/changes/:n/approve`, `…/request-changes`, `…/reviewers/assign`, `…/escalations/:id/resolve`, `GET …/reviews/pending` |
 | workspaces and Nexus | `POST/GET …/workspaces`, `GET …/workspaces/:id`, `POST …/workspaces/:id/change-set`, `POST …/workspaces/:id/abandon`, `GET/POST …/workspaces/:id/intent`, `GET …/forecast`, `GET …/workspaces/overlap` |
 | dependencies | `POST/GET …/workspaces/:id/dependencies`, `POST …/workspaces/:id/dependencies/:dep/repin`, `DELETE …/workspaces/:id/dependencies/:dep` |
@@ -334,7 +336,7 @@ Not built in this version, recorded for after the submission:
 
 - The collaborative UI pass (new pages and the visual direction); the existing pages are unchanged.
 - WorkOS sign-in (configured by the secrets above; personal access tokens are the supported path today).
-- Flaky-test retry and quarantine, revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
+- Revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
 - Contract capsules, semantic packets, hotspot suggestions, priority credits and resource lifecycle.
 - Advisory low-signal test flags and an auto-updating repository wiki.
 - Adopting Effect TS across the codebase.

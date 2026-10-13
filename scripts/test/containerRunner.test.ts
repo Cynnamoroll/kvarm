@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterAll, describe, expect, it } from 'vitest';
 import { OUTPUT, renderRunnerSource } from '../gen-container-runner-source.mjs';
-import { type ContainerLike, prepareAndRunJob } from '../../apps/platform/src/containers/ciRunnerJob';
+import { type ContainerLike, drainAndRunJobs, prepareAndRunJob } from '../../apps/platform/src/containers/ciRunnerJob';
 import { PREPARED_LINE, WRITE_FILES_SCRIPT, containerRunnerFiles, runnerExecEnv } from '../../apps/platform/src/containers/runnerFiles';
 import { git, startServer, tarFromCommit, tempDir } from '../../apps/cli/test/helpers';
 
@@ -229,6 +229,147 @@ describe('container runner prepared-workspace snapshot', () => {
       expect(compares).toEqual([`${sha}...${sha}`]);
       expect(existsSync(join(workRoot, 'o', 'r', 'slot-1'))).toBe(false);
       expect(reports[1]).toMatchObject({ runnerId: 'warm-runner', conclusion: 'success', summary: { source: 'delta', sha, stdout: 'steady 10\n', command: 'cat limits.txt' } });
+    } finally {
+      api.server.close();
+    }
+  });
+});
+
+describe('container runner hosted drain', () => {
+  it('drains the whole queue in one container session with two workers, snapshots once at the first prepared workspace, and resumes warm without setup or a checkout', async () => {
+    const base = join(root, 'drain');
+    const runnerDir = join(base, 'opt', 'kvarm-runner');
+    const workRoot = join(base, 'var', 'lib', 'kvarm-runner');
+    const snapshots = join(base, 'snapshot-fs');
+    const goFile = join(base, 'tmp', 'kvarm-runner-go');
+    mkdirSync(join(base, 'tmp'), { recursive: true });
+
+    const src = join(base, 'repo');
+    mkdirSync(src, { recursive: true });
+    git(src, ['init', '-q', '-b', 'main']);
+    writeFileSync(join(src, 'drain.txt'), 'drain-ok\n');
+    git(src, ['add', '-A']);
+    git(src, ['commit', '-q', '-m', 'head']);
+    const sha = git(src, ['rev-parse', 'HEAD']);
+    const tar = tarFromCommit(src, sha);
+
+    const reports: any[] = [];
+    const jobs: string[] = [];
+    let downloads = 0;
+    const api = await startServer(root, async (req, res, body) => {
+      const url = new URL(req.url ?? '/', 'http://x');
+      const path = url.pathname;
+      const json = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+      if (path === '/api/v1/repos/o/r/ci/jobs/claim') {
+        const id = jobs.shift();
+        if (!id) return res.writeHead(204).end(), true;
+        return json(200, { job: { id, name: 'drain-test', command: 'cat drain.txt', sha, generation: 1, timeoutSeconds: 30 } }), true;
+      }
+      if (path === `/api/v1/repos/o/r/snapshots/${sha}` && req.method === 'POST') return json(200, { state: 'ready', sha, size: tar.length }), true;
+      if (path === `/api/v1/repos/o/r/snapshots/${sha}/download`) return downloads++, res.writeHead(200, { 'x-kvarm-snapshot-sha': sha }).end(Buffer.from(tar)), true;
+      if (path.startsWith('/api/v1/repos/o/r/compare/')) return json(200, { files: [], truncated: false }), true;
+      if (/\/ci\/jobs\/[^/]+\/report$/.test(path)) return reports.push(JSON.parse(body.toString())), json(200, { run: { id: `run-${reports.length}` } }), true;
+      if (/\/ci\/jobs\/[^/]+\/heartbeat$/.test(path)) return json(200, { job: {} }), true;
+      return json(404, { error: 'not found' }), true;
+    });
+    const drain = (cold: boolean, container: ContainerLike, workers: number) =>
+      drainAndRunJobs(container, {
+        cold,
+        started: Date.now(),
+        workers,
+        exec: { baseUrl: api.url, token: 'kvarm_pat_container_secret', repo: 'o/r', runnerId: 'hosted-ab12cd34', workRoot },
+        runnerDir,
+        goFile,
+        toolchain: ['node', '-e', '0'],
+        snapshotName: 'kvarm-ci-workspace',
+      });
+
+    try {
+      jobs.push('job-1', 'job-2', 'job-3');
+      const coldEvents: string[] = [];
+      const cold = await drain(true, fakeContainer(workRoot, snapshots, coldEvents), 2);
+      expect(cold.phases.setup).not.toBeNull();
+      expect(cold.phases.snapshot).not.toBeNull();
+      expect(coldEvents).toEqual([
+        'exec node --version',
+        'exec node -e <write files>',
+        'exec node -e 0',
+        `exec rm -f ${goFile}`,
+        `exec node ${runnerDir}/drain.mjs`,
+        `exec node ${runnerDir}/drain.mjs`,
+        'snapshot',
+        `exec touch ${goFile}`,
+      ]);
+      expect(cold.snapshot).toEqual({ id: 'snap-1', size: 1, name: 'kvarm-ci-workspace' });
+      expect(cold.workers).toHaveLength(2);
+      expect(cold.workers.every((w) => w.exitCode === 0)).toBe(true);
+      expect(new Set(cold.workers.map((w) => w.runnerId))).toEqual(new Set(['hosted-ab12cd34-w0', 'hosted-ab12cd34-w1']));
+      // All three jobs drained and reported, each runner id present, one checkout per worker slot.
+      expect(reports).toHaveLength(3);
+      expect(reports.every((r: any) => r.conclusion === 'success' && r.summary.sha === sha && r.summary.stdout === 'drain-ok\n')).toBe(true);
+      expect(new Set(reports.map((r: any) => r.runnerId)).size).toBe(2);
+      expect(downloads).toBe(2);
+      expect(JSON.stringify(cold)).not.toContain('kvarm_pat_container_secret');
+
+      // Restore: the container filesystem is the snapshot, on a host with another name.
+      rmSync(workRoot, { recursive: true, force: true });
+      cpSync(snapshots, workRoot, { recursive: true, verbatimSymlinks: true });
+      for (const lock of ['slot-0.lock', 'slot-1.lock']) {
+        const p = join(workRoot, 'o', 'r', lock);
+        writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), host: 'the-snapshotted-container' }));
+      }
+      // One worker: the snapshot provably holds the first worker's completed
+      // slot (its prepared point), while the second worker's slot may have
+      // been caught mid-checkout, which on resume would fall back to a full
+      // checkout instead of the warm sync this phase asserts.
+      jobs.push('job-4', 'job-5');
+      const warmEvents: string[] = [];
+      const warm = await drain(false, fakeContainer(workRoot, snapshots, warmEvents), 1);
+      expect(warm.phases).toMatchObject({ setup: null, snapshot: null });
+      expect(warmEvents.slice(0, 3)).toEqual(['exec node --version', `exec touch ${goFile}`, `exec find ${join(workRoot, 'o', 'r')} -maxdepth 1 -name *.lock -delete`]);
+      expect(warmEvents.filter((e) => e === 'snapshot')).toHaveLength(0);
+      expect(warm.workers).toHaveLength(1);
+      expect(warm.workers.every((w) => w.exitCode === 0)).toBe(true);
+      expect(reports).toHaveLength(5);
+      // No new checkout: the restored slot warm-syncs its same-sha delta.
+      expect(downloads).toBe(2);
+      expect(JSON.stringify(warm)).not.toContain('kvarm_pat_container_secret');
+    } finally {
+      api.server.close();
+    }
+  });
+
+  it('a drain whose queue is emptied by another runner exits without a snapshot', async () => {
+    const base = join(root, 'drain-empty');
+    const runnerDir = join(base, 'opt', 'kvarm-runner');
+    const workRoot = join(base, 'var', 'lib', 'kvarm-runner');
+    const goFile = join(base, 'tmp', 'kvarm-runner-go');
+    mkdirSync(join(base, 'tmp'), { recursive: true });
+    let snapshots = 0;
+    const api = await startServer(root, async (req, res) => {
+      res.writeHead(204).end();
+      return true;
+    });
+    try {
+      const events: string[] = [];
+      const outcome = await drainAndRunJobs(fakeContainer(workRoot, join(base, 'snapshot-fs'), events), {
+        cold: true,
+        started: Date.now(),
+        workers: 2,
+        exec: { baseUrl: api.url, token: 'kvarm_pat_container_secret', repo: 'o/r', runnerId: 'hosted-empty' },
+        runnerDir,
+        goFile,
+        toolchain: ['node', '-e', '0'],
+        snapshotName: 'kvarm-ci-workspace',
+        saveSnapshot: () => {
+          snapshots++;
+          return Promise.resolve();
+        },
+      });
+      expect(outcome.snapshot).toBeNull();
+      expect(snapshots).toBe(0);
+      expect(outcome.workers.every((w) => w.exitCode === 3)).toBe(true);
+      expect(events).not.toContain('snapshot');
     } finally {
       api.server.close();
     }

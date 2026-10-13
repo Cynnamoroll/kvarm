@@ -69,8 +69,55 @@ process.exitCode = result.claimed === 0 ? 3 : result.reported === result.claimed
 `;
 
 export function containerRunnerFiles(): Record<string, string> {
-  return { ...RUNNER_MODULES, 'run.mjs': RUN_ENTRY, 'package.json': '{ "type": "module" }\n' };
+  return { ...RUNNER_MODULES, 'run.mjs': RUN_ENTRY, 'drain.mjs': DRAIN_ENTRY, 'package.json': '{ "type": "module" }\n' };
 }
+
+/**
+ * The hosted drain entry: claim and run jobs until the repository's queue is
+ * empty, then exit. Only the first claimed job waits at the prepared point,
+ * where the Durable Object saves the container snapshot that makes the next
+ * drain resume without the runner install, toolchain or a checkout; later
+ * jobs run straight on. The Durable Object, not this entry, owns the go file
+ * and the stale slot locks of a restored workspace, so two workers of one
+ * drain never race over them.
+ */
+export const DRAIN_ENTRY_FILE = 'drain.mjs';
+const DRAIN_ENTRY = `import { existsSync } from 'node:fs';
+import { runRunner } from './runner.js';
+
+const env = process.env;
+const go = env.KVARM_GO_FILE;
+let first = true;
+const result = await runRunner({
+  baseUrl: env.KVARM_BASE_URL,
+  pat: env.KVARM_PAT,
+  repo: env.KVARM_REPO,
+  runnerId: env.KVARM_RUNNER_ID,
+  workRoot: env.KVARM_WORK_ROOT,
+  drainUntilEmpty: true,
+  // Same stance as run.mjs: this throwaway container is the isolation
+  // boundary (SECURITY.md, CI runner threat model), so every claimed job
+  // runs here regardless of its provenance.
+  trust: 'all',
+  executor: 'host',
+  hostWarning: false,
+  stdout: (line) => process.stdout.write(line + '\\n'),
+  stderr: (line) => process.stderr.write(line + '\\n'),
+  prepared: go
+    ? async () => {
+        if (!first) return;
+        first = false;
+        process.stdout.write(${JSON.stringify(PREPARED_LINE)} + '\\n');
+        const deadline = Date.now() + ${GO_TIMEOUT_MS};
+        while (!existsSync(go)) {
+          if (Date.now() > deadline) throw new Error('no go signal within ${GO_TIMEOUT_MS / 1000} s after the workspace was prepared');
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+    : undefined,
+});
+process.exitCode = result.claimed === 0 ? 3 : result.reported === result.claimed ? 0 : 1;
+`;
 
 /** `node -e` program that writes stdin `{dir, files}` below `dir`. */
 export const WRITE_FILES_SCRIPT = `const fs = require('node:fs');

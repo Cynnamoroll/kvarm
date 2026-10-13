@@ -1265,6 +1265,33 @@ export const OPERATIONS = Object.freeze([
     path: '/repos/{repo}/ci/flakes/{check}/restore',
     params: [REPO, pathArg('check', 'Check name to restore')],
   }),
+  define({
+    name: 'get_ci_hosted',
+    command: ['ci', 'hosted'],
+    family: 'ci',
+    description: 'Hosted CI status: the enabled flag, claimable and running jobs, the live drain state and the last drain report of the platform container runner.',
+    method: 'GET',
+    path: '/repos/{repo}/ci/hosted',
+    params: [REPO],
+  }),
+  define({
+    name: 'enable_ci_hosted',
+    command: ['ci', 'enable'],
+    family: 'ci',
+    description: 'Enable hosted CI execution for the repository (repo admins only): the platform container runner drains queued jobs, starting with any backlog; the user-owned runner keeps racing on the same queue.',
+    method: 'POST',
+    path: '/repos/{repo}/ci/hosted/enable',
+    params: [REPO],
+  }),
+  define({
+    name: 'disable_ci_hosted',
+    command: ['ci', 'disable'],
+    family: 'ci',
+    description: 'Disable hosted CI execution for the repository (repo admins only). Queued jobs stay claimable by user-owned runners.',
+    method: 'POST',
+    path: '/repos/{repo}/ci/hosted/disable',
+    params: [REPO],
+  }),
 ]);
 
 const BY_NAME = new Map(OPERATIONS.map((op) => [op.name, op]));

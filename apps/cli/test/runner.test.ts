@@ -395,6 +395,50 @@ describe('kvarm runner', () => {
     }
   });
 
+  it('drainUntilEmpty exits as soon as a claim finds no job, reporting every job it claimed', async () => {
+    const jobs = [
+      { id: 'j1', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 },
+      { id: 'j2', name: 'test', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 },
+    ];
+    const claims: number[] = [];
+    const reports: any[] = [];
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (path.endsWith('/claim')) {
+        claims.push(Date.now());
+        const job = jobs.shift();
+        return job ? Response.json({ job }) : new Response(null, { status: 204 });
+      }
+      if (path.endsWith('/report')) {
+        reports.push(body);
+        return Response.json({ run: { status: 'success' } });
+      }
+      return Response.json({});
+    };
+    const result = await runRunner({
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo',
+      apiFetch,
+      drainUntilEmpty: true,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha: o.ref };
+      },
+      execute: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false, durationMs: 1 }),
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'drain-work'),
+    });
+    expect(result).toEqual({ claimed: 2, reported: 2 });
+    // Two jobs claimed, then one empty claim that ends the drain; no idle backoff in between.
+    expect(claims).toHaveLength(3);
+    expect(claims[1]! - claims[0]!).toBeLessThan(2_000);
+    expect(reports.map((r: any) => r.runnerId)).toHaveLength(2);
+  });
+
   it('materializes a warm job through the compare delta without a checkout and reports source delta', async () => {
     const a = 'a'.repeat(40);
     const b = 'b'.repeat(40);
