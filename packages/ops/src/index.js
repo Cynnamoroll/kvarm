@@ -780,7 +780,7 @@ export const OPERATIONS = Object.freeze([
     path: '/repos/{repo}/forecast',
     params: [
       REPO,
-      query('paths', 'string[]', 'Paths to forecast (at most 20; a trailing / marks a prefix)', { required: true }),
+      query('paths', 'string[]', 'Paths to forecast (at most 20; a trailing / marks a prefix)', { required: true, literal: true }),
       query('base', 'string', 'Only workspaces on this base branch'),
       query('exclude', 'string', 'Workspace id to leave out (usually your own); its own import edges are also matched semantically'),
       query('semantic', 'boolean', 'Include the advisory semantic dependency layer on the first page (default true)'),
@@ -1114,13 +1114,15 @@ export const OPERATIONS = Object.freeze([
       body('session', 'string', 'Agent session id', { required: true }),
       body('promptHash', 'string', 'Hash of the prompt that produced the commit', { required: true }),
       body('model', 'string', 'Model name'),
+      body('evidence', 'json', 'Signed execution evidence {keyId, runId, signature} from a trusted execution service; verified on write'),
     ],
   }),
   define({
     name: 'get_attribution',
     command: ['attribution', 'get'],
     family: 'attribution',
-    description: "A commit's attribution note (agent, session, promptHash, model, actor, at); not found when it has none.",
+    description:
+      "A commit's attribution note (agent, session, promptHash, model, actor, at) with its evidence level (declared, authenticated or verified); not found when it has none.",
     method: 'GET',
     path: '/repos/{repo}/commits/{sha}/attribution',
     params: [REPO, pathArg('sha', 'Full 40-character commit sha')],
@@ -1156,6 +1158,57 @@ export const OPERATIONS = Object.freeze([
       LIMIT(50),
       CURSOR,
     ],
+  }),
+
+  // --- provenance: audit export and trusted execution keys -------------------
+  define({
+    name: 'get_audit',
+    command: ['audit', 'export'],
+    family: 'provenance',
+    description:
+      'Audit export (repo admins): one record per commit with agent, session, promptHash, model, evidence level, token prefix, pushes and merges, in first-recorded order. Bounded pages with nextCursor.',
+    method: 'GET',
+    path: '/repos/{repo}/audit',
+    params: [
+      REPO,
+      query('since', 'string', 'Earliest first-seen time, ISO 8601 (inclusive)'),
+      query('until', 'string', 'Latest first-seen time, ISO 8601 (exclusive)'),
+      query('format', 'string', 'json (default) or ndjson: one record per line, then a {page} line', { enum: ['json', 'ndjson'] }),
+      LIMIT(200),
+      CURSOR,
+    ],
+  }),
+  define({
+    name: 'list_provenance_keys',
+    command: ['provenance-key', 'list'],
+    family: 'provenance',
+    description: 'Trusted execution-service public keys for verified attribution: the repository keys and the instance keys (repo admins).',
+    method: 'GET',
+    path: '/repos/{repo}/provenance-keys',
+    params: [REPO],
+  }),
+  define({
+    name: 'add_provenance_key',
+    command: ['provenance-key', 'add'],
+    family: 'provenance',
+    description: 'Trust an execution service: add its raw Ed25519 public key (base64url); its id is the key fingerprint (repo admins).',
+    method: 'POST',
+    path: '/repos/{repo}/provenance-keys',
+    params: [
+      REPO,
+      body('name', 'string', 'Label of the execution service', { required: true }),
+      body('publicKey', 'string', 'Raw 32-byte Ed25519 public key, base64url', { required: true }),
+    ],
+  }),
+  define({
+    name: 'revoke_provenance_key',
+    command: ['provenance-key', 'revoke'],
+    family: 'provenance',
+    description: 'Stop trusting a provenance key for new attribution writes; levels already recorded stay as they were (repo admins).',
+    method: 'DELETE',
+    path: '/repos/{repo}/provenance-keys/{id}',
+    params: [REPO, pathArg('id', 'Key id (fingerprint) from list_provenance_keys')],
+    destructive: true,
   }),
 
   // --- branch rules ---------------------------------------------------------

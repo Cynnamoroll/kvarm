@@ -8,6 +8,7 @@
 
 import { OPERATIONS, OperationInputError, buildRequest, requestTarget } from '@kvarm/ops';
 import { CliError } from './checkout.js';
+import { text } from './http.js';
 
 /** @typedef {import('@kvarm/ops').Operation} Operation */
 /** @typedef {import('@kvarm/ops').Param} Param */
@@ -120,7 +121,11 @@ export function parseOperationArgs(op, argv) {
         }
         return;
       case 'boolean':
-        args[p.name] = raw !== 'false';
+        // Only the two spellings mean anything; "0", "no" or any other value
+        // is a usage error, not a truthy coercion that silently flips a flag.
+        if (raw === 'true') args[p.name] = true;
+        else if (raw === 'false') args[p.name] = false;
+        else throw usage(`argument "${p.name}" must be true or false, got "${raw}"`);
         return;
       default:
         args[p.name] = raw;
@@ -276,15 +281,15 @@ export async function callOperation(op, args, io) {
     const cause = /** @type {{ cause?: { code?: string, message?: string } }} */ (err).cause;
     throw new CliError(`could not reach ${url.origin}: ${cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err))}`, 1);
   }
-  const text = await res.text();
+  const raw = await text(res);
   /** @type {unknown} */
-  let data = text;
+  let data = raw;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(raw);
   } catch {
     // non-JSON reply
   }
-  return { ok: res.ok, status: res.status, data, text, retryAfter: res.headers.get('retry-after') };
+  return { ok: res.ok, status: res.status, data, text: raw, retryAfter: res.headers.get('retry-after') };
 }
 
 /**

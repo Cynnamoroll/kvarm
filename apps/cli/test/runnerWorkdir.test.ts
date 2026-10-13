@@ -199,7 +199,8 @@ function fakePlatform(jobs: Job[], opts: { failCompare?: number; truncateCompare
     if (path.endsWith('/claim')) {
       const next = jobs.shift();
       if (next) return Response.json({ job: next });
-      return opts.stopWhenEmpty ? Response.json({ error: 'runner stopped' }, { status: 500 }) : new Response(null, { status: 204 });
+      // A refused claim ends the loop; a retriable failure never would.
+      return opts.stopWhenEmpty ? Response.json({ error: 'runner stopped' }, { status: 401 }) : new Response(null, { status: 204 });
     }
     if (path.endsWith('/report')) {
       reports.push({ path, ...body });

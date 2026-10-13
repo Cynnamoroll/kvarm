@@ -275,7 +275,8 @@ export async function reconcileObserved(env: Env, t: ObservedTarget): Promise<{ 
 // ---------------------------------------------------------------------------
 
 export interface ForecastQuery {
-  paths?: string;
+  /** Repeated `paths` query parameters; one path each (commas are part of a path). */
+  paths?: string[];
   base?: string;
   limit?: string;
   cursor?: string;
@@ -431,9 +432,12 @@ function parseLimit(raw: string | undefined, def: number, max: number): number |
   return n;
 }
 
-function parseQueryPaths(raw: string | undefined): string[] | Fail {
-  const parts = (raw ?? '').split(',').filter((p) => p.length > 0);
-  if (parts.length === 0) return fail(422, 'paths is required: comma-separated repo-relative paths or prefixes (trailing /)', 'INVALID_PATHS');
+function parseQueryPaths(raw: string[] | undefined): string[] | Fail {
+  // One repeated parameter per path (the registry marks `paths` literal, like
+  // every Git-path list): a comma inside a path is part of the path, never a
+  // separator.
+  const parts = (raw ?? []).filter((p) => p.length > 0);
+  if (parts.length === 0) return fail(422, 'paths is required: one repo-relative path or prefix (trailing /) per repeated paths parameter', 'INVALID_PATHS');
   if (parts.length > INTENT_LIMITS.forecastPathsMax) {
     return fail(422, `at most ${INTENT_LIMITS.forecastPathsMax} paths per forecast request (got ${parts.length})`, 'TOO_MANY_PATHS', {
       limit: INTENT_LIMITS.forecastPathsMax,
@@ -451,8 +455,10 @@ function parseQueryPaths(raw: string | undefined): string[] | Fail {
 const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === false;
 
 /**
- * GET forecast?paths=a,b/&base=&limit=&cursor=&exclude=&semantic=: the active
- * workspaces whose declared or observed entries intersect the query paths.
+ * GET forecast?paths=a&paths=b/&base=&limit=&cursor=&exclude=&semantic=:
+ * the active workspaces whose declared or observed entries intersect the
+ * query paths (one repeated `paths` parameter per path; a comma inside a
+ * path is part of the path).
  * Index probes per query path: the path itself and its ancestor prefixes
  * (a declared `src/` matches `src/a.ts`), plus the range below a query
  * prefix. One page of workspaces, ordered by id; the cursor is the last id.

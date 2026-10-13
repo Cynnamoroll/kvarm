@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { executeShell, runRunner } from '../src/runner.js';
+import { budgetDeltaReader, executeShell, runRunner } from '../src/runner.js';
 import { tempDir } from './helpers';
 
 /** These tests exercise host execution mechanics; the trust policy has its own tests. */
@@ -12,6 +12,17 @@ const root = tempDir('kvarm-cli-runner-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe('kvarm runner', () => {
+  it('caps the aggregate content fetched by one warm delta', async () => {
+    let reads = 0;
+    const read = budgetDeltaReader(async () => {
+      reads++;
+      return new Uint8Array(2);
+    }, 3);
+    await expect(read('first')).resolves.toHaveLength(2);
+    await expect(read('second')).rejects.toThrow(/warm read budget of 3 bytes/);
+    expect(reads).toBe(2);
+  });
+
   it('kills a timed-out command and its descendant process group', async () => {
     const command = `${JSON.stringify(process.execPath)} -e "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});setInterval(()=>{},1000)"`;
     const result = await executeShell(command, root, 0.1);
@@ -132,6 +143,35 @@ describe('kvarm runner', () => {
     });
     expect(stdout.join('\n')).toMatch(/claimed build.*reported success/s);
     expect(stderr).toEqual([]);
+  });
+
+  it('uses the normalized encoded repository path for every runner API request', async () => {
+    const paths: string[] = [];
+    const apiFetch = async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      if (path.endsWith('/claim')) return new Response(null, { status: 204 });
+      return Response.json({});
+    };
+    await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo.git',
+      once: true,
+      apiFetch,
+      checkoutFn: async () => {
+        throw new Error('never claimed');
+      },
+      execute: async () => {
+        throw new Error('never ran');
+      },
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'repo-path-work'),
+    });
+    expect(paths).toEqual(['/api/v1/repos/alice/demo/ci/jobs/claim']);
   });
 
   it('reports a failed or timed-out command as failure and exits cleanly when no job is queued', async () => {
@@ -337,6 +377,91 @@ describe('kvarm runner', () => {
     expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
   });
 
+  it('trims a summary whose command alone exceeds the budget, before any output', async () => {
+    const sha = 'c'.repeat(40);
+    const command = `echo ${'x'.repeat(70_000)}`;
+    let report: any;
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/claim')) {
+        return Response.json({ job: { id: 'job-cmd', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 } });
+      }
+      if (path.endsWith('/report')) {
+        report = init?.body ? JSON.parse(String(init.body)) : {};
+        return Response.json({ run: { status: report.conclusion } });
+      }
+      return Response.json({});
+    };
+
+    const result = await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha };
+      },
+      execute: async () => ({ code: 0, stdout: 'out\n', stderr: '', timedOut: false, durationMs: 3 }),
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'command-trim-work'),
+    });
+
+    expect(result).toEqual({ claimed: 1, reported: 1 });
+    expect(report.summary.command).not.toBe(command);
+    expect(report.summary.command).toMatch(/…\[truncated\]$/);
+    // The command is display metadata: it is cut first, leaving the output whole.
+    expect(report.summary.stdout).toBe('out\n');
+    expect(report.summary.stderr).toBe('');
+    expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
+  });
+
+  it('still fits the report when neither an oversized command nor its output fits alone', async () => {
+    const sha = '4'.repeat(40);
+    const command = `echo ${'y'.repeat(70_000)}`;
+    let report: any;
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/claim')) {
+        return Response.json({ job: { id: 'job-both', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 } });
+      }
+      if (path.endsWith('/report')) {
+        report = init?.body ? JSON.parse(String(init.body)) : {};
+        return Response.json({ run: { status: report.conclusion } });
+      }
+      return Response.json({});
+    };
+
+    const result = await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha };
+      },
+      execute: async () => ({ code: 0, stdout: '😀'.repeat(16_500), stderr: '', timedOut: false, durationMs: 3 }),
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'command-both-work'),
+    });
+
+    expect(result).toEqual({ claimed: 1, reported: 1 });
+    expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
+    // The command is display metadata: it is the one cut to the bare marker
+    // so the oversized output keeps the largest share of the budget.
+    expect(report.summary.command).toBe('…[truncated]');
+    expect(report.summary.stdout).toMatch(/^(?:😀)*\n\[output truncated\]\n$/u);
+  });
+
   it('grows the idle claim delay from 2 s to a 10 s cap', async () => {
     const { idleDelayMs } = await import('../src/runner.js');
     expect([0, 1, 2, 3, 4, 5, 12].map((consecutive) => idleDelayMs(consecutive))).toEqual([
@@ -358,7 +483,8 @@ describe('kvarm runner', () => {
           if (claims.length === 4) {
             return Response.json({ job: { id: 'j', name: 'build', command: 'true', sha: 'b'.repeat(40), generation: 1, timeoutSeconds: 30 } });
           }
-          if (claims.length >= 7) return Response.json({ error: 'runner stopped' }, { status: 500 });
+          // A refused claim (bad credentials) ends the loop; a retriable one never would.
+          if (claims.length >= 7) return Response.json({ error: 'runner stopped' }, { status: 401 });
           return new Response(null, { status: 204 });
         }
         if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
@@ -439,6 +565,274 @@ describe('kvarm runner', () => {
     expect(claims).toHaveLength(3);
     expect(claims[1]! - claims[0]!).toBeLessThan(2_000);
     expect(reports.map((r: any) => r.runnerId)).toHaveLength(2);
+  });
+
+  it('retries a claim on a 429, a network error and a 5xx, honoring Retry-After, and keeps serving', async () => {
+    vi.useFakeTimers();
+    try {
+      const claims: number[] = [];
+      const stderr: string[] = [];
+      let claim = 0;
+      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (path.endsWith('/claim')) {
+          claims.push(Date.now());
+          claim++;
+          if (claim === 1) return Response.json({ error: 'slow down' }, { status: 429, headers: { 'retry-after': '3' } });
+          if (claim === 2) throw new TypeError('fetch failed');
+          if (claim === 3) return Response.json({ error: 'storage unavailable' }, { status: 503 });
+          return Response.json({ job: { id: 'j-r', name: 'build', command: 'true', sha: 'b'.repeat(40), generation: 1, timeoutSeconds: 30 } });
+        }
+        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
+        return Response.json({});
+      };
+      const run = runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        once: true,
+        apiFetch,
+        checkoutFn: async (o: any) => {
+          mkdirSync(o.dir, { recursive: true });
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+        stdout: () => {},
+        stderr: (l) => stderr.push(l),
+        tempRoot: root,
+        workRoot: join(root, 'claim-retry-work'),
+      });
+      // Retry-After 3 s is honored exactly; the doubling ramp for the network
+      // error and the 503 stays within 4 s and 8 s even with jitter.
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = await run;
+      expect(result).toEqual({ claimed: 1, reported: 1 });
+      expect(claims).toHaveLength(4);
+      expect(claims[1]! - claims[0]!).toBe(3_000);
+      expect(claims[2]! - claims[1]!).toBeGreaterThanOrEqual(2_000);
+      expect(claims[2]! - claims[1]!).toBeLessThan(4_000);
+      expect(claims[3]! - claims[2]!).toBeGreaterThanOrEqual(4_000);
+      expect(claims[3]! - claims[2]!).toBeLessThan(8_000);
+      expect(stderr[0]).toBe('claim failed: ci/jobs/claim: slow down; retrying in 3.0 s');
+      expect(stderr[1]).toMatch(/^claim failed: fetch failed; retrying in ([23]\.\d|4\.0) s$/);
+      expect(stderr[2]).toMatch(/^claim failed: ci\/jobs\/claim: storage unavailable; retrying in ([4-7]\.\d|8\.0) s$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stays fatal on a refused claim: bad credentials are actionable, not retriable', async () => {
+    let claims = 0;
+    const apiFetch = async () => {
+      claims++;
+      return Response.json({ error: 'unauthorized', code: 'INVALID_TOKEN' }, { status: 401 });
+    };
+    await expect(
+      runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        once: true,
+        apiFetch,
+        checkoutFn: async () => {
+          throw new Error('never claimed');
+        },
+        execute: async () => {
+          throw new Error('never ran');
+        },
+        stdout: () => {},
+        stderr: () => {},
+        tempRoot: root,
+        workRoot: join(root, 'claim-fatal-work'),
+      }),
+    ).rejects.toThrow(/unauthorized \(INVALID_TOKEN\)/);
+    expect(claims).toBe(1);
+  });
+
+  it('treats a malformed claim as a failed claim and retries it, never a crash', async () => {
+    vi.useFakeTimers();
+    try {
+      const claims: string[] = [];
+      const stderr: string[] = [];
+      const replies = [
+        { job: { id: 'm1', name: 'build', command: 'true', sha: 'a'.repeat(40), timeoutSeconds: 30, generation: 0 } },
+        { job: { id: 'm2', name: 'build', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 } },
+        { job: { id: '../m3', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
+        { job: { id: 'm4', name: 'build', command: 'true', sha: '../bad', generation: 2, timeoutSeconds: 30 } },
+        { job: { id: 'm5', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
+      ];
+      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (path.endsWith('/claim')) {
+          const next = replies.shift();
+          claims.push(next ? String(next.job.id) : 'gone');
+          return next ? Response.json(next) : new Response(null, { status: 204 });
+        }
+        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
+        return Response.json({});
+      };
+      const run = runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        once: true,
+        apiFetch,
+        checkoutFn: async (o: any) => {
+          mkdirSync(o.dir, { recursive: true });
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+        stdout: () => {},
+        stderr: (l) => stderr.push(l),
+        tempRoot: root,
+        workRoot: join(root, 'claim-malformed-work'),
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await run;
+      expect(result).toEqual({ claimed: 1, reported: 1 });
+      expect(claims).toEqual(['m1', 'm2', '../m3', 'm4', 'm5']);
+      expect(stderr.filter((l) => l.startsWith('claim failed:'))).toHaveLength(4);
+      expect(stderr[0]).toMatch(/^claim failed: claim returned an invalid job; retrying in (1\.\d|2\.0) s$/);
+      expect(stderr[1]).toMatch(/^claim failed: claim returned an invalid job; retrying in ([23]\.\d|4\.0) s$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runs a claimed job whose timeoutSeconds is out of range at the platform default', async () => {
+    const timeouts: number[] = [];
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (path.endsWith('/claim')) {
+        return Response.json({ job: { id: 'j-t', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 'fast' } });
+      }
+      if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
+      return Response.json({});
+    };
+    const result = await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha: o.ref };
+      },
+      execute: async (_command, _cwd, timeoutSeconds) => {
+        timeouts.push(timeoutSeconds);
+        return { code: 0, stdout: '', stderr: '', timedOut: false, durationMs: 1 };
+      },
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'claim-timeout-work'),
+    });
+    expect(result).toEqual({ claimed: 1, reported: 1 });
+    expect(timeouts).toEqual([900]);
+  });
+
+  it('refuses a repo that could retarget its authenticated requests, before any fetch', async () => {
+    const calls: string[] = [];
+    const apiFetch = async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response(null, { status: 204 });
+    };
+    for (const repo of ['../demo', 'a%b/c', 'a#b/c', 'a?b/c', 'owner/..', 'owner/./demo']) {
+      await expect(
+        runRunner({
+          ...HOST_TRUSTED,
+          baseUrl: 'https://kvarm.test',
+          pat: 'p',
+          repo,
+          once: true,
+          apiFetch,
+          checkoutFn: async () => {
+            throw new Error('never claimed');
+          },
+          execute: async () => {
+            throw new Error('never ran');
+          },
+          stdout: () => {},
+          stderr: () => {},
+          tempRoot: root,
+          workRoot: join(root, 'repo-guard-work'),
+        }),
+      ).rejects.toThrow(/invalid repository/);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('derives the claim retry delay from Retry-After, else a doubling ramp to a 60 s cap', async () => {
+    const { claimRetryMs } = await import('../src/runner.js');
+    expect(claimRetryMs('7', 0)).toBe(7_000);
+    expect(claimRetryMs('120', 0)).toBe(60_000);
+    expect(claimRetryMs('soon', 0)).toBe(2_000);
+    expect(claimRetryMs(null, 0)).toBe(2_000);
+    expect(claimRetryMs(null, 1)).toBe(4_000);
+    expect(claimRetryMs(null, 2)).toBe(8_000);
+    expect(claimRetryMs(null, 12)).toBe(60_000);
+  });
+
+  it('keeps claiming after a fenced-away report (409 STALE_GENERATION) instead of dying with it', async () => {
+    vi.useFakeTimers();
+    try {
+      let reports = 0;
+      const claims: string[] = [];
+      let jobClaimed = false;
+      const stderr: string[] = [];
+      const apiFetch = async (input: string | URL | Request) => {
+        const path = new URL(String(input)).pathname;
+        if (path.endsWith('/claim')) {
+          if (!jobClaimed) {
+            jobClaimed = true;
+            claims.push('job');
+            return Response.json({ job: { id: 'job-x', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 5, timeoutSeconds: 30 } });
+          }
+          claims.push('after-report');
+          return Response.json({ error: 'unauthorized' }, { status: 401 });
+        }
+        if (path.endsWith('/report')) {
+          reports++;
+          return Response.json({ error: 'the CI job claim is stale', code: 'STALE_GENERATION' }, { status: 409 });
+        }
+        return Response.json({});
+      };
+      const run = runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        apiFetch,
+        checkoutFn: async (o: any) => {
+          mkdirSync(o.dir, { recursive: true });
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+        stdout: () => {},
+        stderr: (l) => stderr.push(l),
+        tempRoot: root,
+        workRoot: join(root, 'report-fenced-work'),
+      });
+      const done = expect(run).rejects.toThrow(/unauthorized/);
+      // Three report attempts (250 ms and 500 ms between them), then the loop claims again.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await done;
+      expect(reports).toBe(3);
+      expect(claims).toEqual(['job', 'after-report']);
+      expect(stderr.filter((l) => l.startsWith('warning:'))).toEqual([
+        'warning: could not report build (job-x) after 3 attempts: ci/jobs/job-x/report: the CI job claim is stale (STALE_GENERATION); the platform requeues the job when the lease expires',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('materializes a warm job through the compare delta without a checkout and reports source delta', async () => {

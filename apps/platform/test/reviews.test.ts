@@ -298,7 +298,8 @@ describe('model families and assignment', () => {
     const assigned = await call('POST', api('family', '/changes/1/reviewers/assign'), tok.owner, {});
     expect(assigned.status).toBe(200);
     expect(assigned.json.author).toMatchObject({ kind: 'agent', principal: `agent:${author.id}`, modelFamily: 'claude' });
-    expect(assigned.json.preference).toEqual({ rule: 'different-model-family', authorModelFamily: 'claude', met: true });
+    // Agent model families are self-declared, so the cross-model claim is labeled declared.
+    expect(assigned.json.preference).toEqual({ rule: 'different-model-family', authorModelFamily: 'claude', met: true, evidence: 'declared' });
     expect(assigned.json.assigned).toMatchObject({ principal: `agent:${other.id}`, modelFamily: 'gpt', differentFamily: true, eligible: true });
     const byId = Object.fromEntries((assigned.json.candidates as Array<Record<string, any>>).map((c) => [c.agent.id, c]));
     expect(byId[author.id]).toMatchObject({ eligible: false, ineligibleReason: 'author' });

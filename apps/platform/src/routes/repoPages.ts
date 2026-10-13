@@ -140,7 +140,13 @@ async function cachedView(
   ref: string,
   render: () => Promise<Response>,
 ): Promise<Response> {
-  if (isCommitRef(ref)) return edgeCachedPage(c, 31536000, null, render);
+  if (isCommitRef(ref)) {
+    // Pinned views hold year-long colo entries, so their keys must be bounded:
+    // a query string makes one per variant (and on the repo home it even
+    // selects the content via ?ref=). Queried requests render uncached.
+    if (new URL(c.req.url).search === '') return edgeCachedPage(c, 31536000, null, render);
+    return render();
+  }
   return edgeCachedPage(c, 60, await repoViewGeneration(resolved.repo), render);
 }
 
@@ -207,13 +213,18 @@ async function renderTreeView(
     const entry = sorted.find((e) => e.name.toLowerCase() === candidate.toLowerCase());
     if (!entry) continue;
     const cache = caches.default;
-    const mdKey = new Request(`https://kvarm.internal/md/${entry.hash}`, { method: 'GET' });
+    // Versioned like every derived-output cache key (cache/compare.ts), so a
+    // renderer change advances the segment instead of serving year-old HTML.
+    const mdKey = new Request(`https://kvarm.internal/md/v1/${entry.hash}`, { method: 'GET' });
     let rendered = await cache.match(mdKey);
     if (!rendered) {
+      // Read at the commit the tree was read from, never the moving ref: the
+      // key names this entry's blob, and a push landing between the two reads
+      // would otherwise cache the new README under the old blob's hash.
       const blob = await readFileAt(
         c.env,
         resolved.repo.artifacts_name,
-        ref,
+        tree.commit.hash,
         path ? `${path}/${entry.name}` : entry.name,
       );
       if (!blob) continue;

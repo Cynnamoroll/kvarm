@@ -515,6 +515,18 @@ describe('arenas', () => {
     expect((await call('GET', `${R('arena-rank')}/changes/${changeA.number}`, tok.owner)).json.state).toBe('open');
     expect((await call('GET', `${R('arena-rank')}/arenas/${arena.id}`, tok.owner)).json.selection.selectedWorkspace).toBe(a.id);
     expect((await call('POST', `${R('arena-rank')}/arenas/${arena.id}/select`, tok.owner, { workspace: 'feedfeed' })).json.code).toBe('NOT_ARENA_CANDIDATE');
+    // A recorded selection is not replaced by a different winner: the previous
+    // winner's final-selection escalation would be orphaned on a change the
+    // arena no longer names.
+    const second = await call('POST', `${R('arena-rank')}/arenas/${arena.id}/select`, tok.owner, { workspace: b.id });
+    expect([second.status, second.json.code]).toEqual([409, 'ARENA_ALREADY_SELECTED']);
+    expect((await call('GET', `${R('arena-rank')}/arenas/${arena.id}`, tok.owner)).json.selection.selectedWorkspace).toBe(a.id);
+    const bPacket = (await call('GET', `${R('arena-rank')}/changes/${changeB.number}/reviews`, tok.owner)).json;
+    expect(bPacket.escalations ?? []).not.toContainEqual(expect.objectContaining({ reason: 'final-selection' }));
+    // Re-recording the same winner is the supported "ask again" flow.
+    const same = await call('POST', `${R('arena-rank')}/arenas/${arena.id}/select`, tok.owner, { workspace: a.id });
+    expect(same.status).toBe(200);
+    expect(same.json).toMatchObject({ state: 'selected', selection: { selectedWorkspace: a.id } });
 
     // A final selection escalates to a human; the winner's merge waits until one acts.
     const waiting = await call('POST', `${R('arena-rank')}/changes/${changeA.number}/merge`, tok.owner);
@@ -528,6 +540,9 @@ describe('arenas', () => {
     // The winner merges through its change set; losers stay live (B edited the same file, so it now conflicts), then one is abandoned.
     const merged = await call('POST', `${R('arena-rank')}/changes/${changeA.number}/merge`, tok.owner);
     expect(merged.status).toBe(200);
+    // A workspace that already merged can no longer be recorded as the winner.
+    const mergedSel = await call('POST', `${R('arena-rank')}/arenas/${arena.id}/select`, tok.owner, { workspace: a.id });
+    expect([mergedSel.status, mergedSel.json.code]).toEqual([409, 'WORKSPACE_NOT_ACTIVE']);
     expect((await call('GET', `${R('arena-rank')}/changes/${changeB.number}`, tok.owner)).json.state).toBe('conflicted');
     expect((await call('GET', `${R('arena-rank')}/workspaces/${c.id}`, tok.owner)).json.status).toBe('active');
     const ab = await call('POST', `${R('arena-rank')}/workspaces/${b.id}/abandon`, tok.owner);

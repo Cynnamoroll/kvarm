@@ -319,6 +319,82 @@ describe('create, read, list', () => {
     expect((await get('patch', 9)).status).toBe(404);
     expect((await get('patch', 0)).status).toBe(404);
   });
+
+  it('reopening adopts the branch tip that moved while the change was closed and runs the head hooks for it', async () => {
+    const repo = await seedRepo('reopen-adopt');
+    const { feature } = await linear(repo);
+    await create('reopen-adopt', { title: 'x', base: 'main', head: 'feature' });
+    expect((await patch('reopen-adopt', 1, { state: 'closed' })).json.state).toBe('closed');
+
+    // The branch moves while the change is closed: the event's head refresh
+    // covers open changes only, but the ref position is recorded regardless.
+    const next = await commit(repo, { 'README.md': 'readme\n', 'notes.txt': 'v2\n' }, [feature.sha]);
+    repo.refs.set('refs/heads/feature', next.sha);
+    await deliver(pushBody('reopen-adopt', 'refs/heads/feature', feature.sha, next.sha, Date.now()));
+    expect((await get('reopen-adopt', 1)).json).toMatchObject({ state: 'closed', headSha: feature.sha });
+
+    // Reopening adopts the recorded tip instead of refusing every merge with
+    // HEAD_MOVED until another push happens.
+    const reopened = await patch('reopen-adopt', 1, { state: 'open' });
+    expect(reopened.json).toMatchObject({ state: 'open', headSha: next.sha });
+    // The adopted head has its guard verdict, exactly as the push would have recorded.
+    const guard = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM check_runs k JOIN change_sets c ON c.id = k.change_set_id
+        WHERE c.repo_id = ? AND c.number = 1 AND k.name = 'kvarm/guard' AND k.head_sha = ?`,
+    )
+      .bind(repoIds['reopen-adopt'], next.sha)
+      .first<{ n: number }>();
+    expect(guard?.n).toBe(1);
+    // The merge proceeds against the adopted head (a fast-forward here).
+    const merged = await merge('reopen-adopt', 1);
+    expect(merged.status).toBe(200);
+    expect(repo.refs.get('refs/heads/main')).toBe(next.sha);
+  });
+
+  it('a stale CI staging ref is re-pointed at the new preparation instead of failing the merge forever', async () => {
+    const repo = await seedRepo('merge-restage');
+    const ci = `${JSON.stringify({ jobs: [{ name: 'test', run: 'npm test', required: true }] })}\n`;
+    const files = { 'README.md': 'readme\n', '.kvarm/ci.json': ci };
+    // main moves after the head forked, so the merge composes (and stages) a real merge commit.
+    const fork = await commit(repo, files);
+    const head = await commit(repo, { ...files, 'f1.txt': 'x\n' }, [fork.sha]);
+    const main = await commit(repo, { ...files, 'other.txt': 'other\n' }, [fork.sha]);
+    repo.refs.set('refs/heads/main', main.sha);
+    repo.refs.set('refs/heads/b1', head.sha);
+    await create('merge-restage', { title: 'x', base: 'main', head: 'b1' });
+    // main requires the CI job, so the merge stages its exact-tree commit and
+    // waits; a human first clears the rule's protected-target escalation.
+    expect(
+      (
+        await call('POST', `/api/v1/repos/${OWNER}/merge-restage/branch-rules`, tok.owner, { pattern: 'main', requiredChecks: ['test'] })
+      ).status,
+    ).toBe(201);
+    const first = await merge('merge-restage', 1);
+    expect([first.status, first.json.code]).toBeInstanceOf(Array);
+    expect(first.status).toBe(409);
+    expect(['ESCALATION_OPEN', 'REQUIRED_CHECKS_PENDING']).toContain(first.json.code);
+    if (first.json.code === 'ESCALATION_OPEN') {
+      const packet = (await call('GET', path('merge-restage', '/1/reviews'), tok.owner)).json;
+      const escalation = packet.escalations.find((e: { state: string }) => e.state === 'open');
+      expect(escalation).toBeDefined();
+      expect((await call('POST', path('merge-restage', `/1/escalations/${escalation.id}/resolve`), tok.owner, {})).status).toBe(200);
+    }
+
+    const staged = await merge('merge-restage', 1);
+    expect([staged.status, staged.json.code]).toEqual([409, 'REQUIRED_CHECKS_PENDING']);
+    const stagedRef = [...repo.refs.keys()].find((r) => r.startsWith('refs/heads/kvarm-ci/'));
+    expect(stagedRef).toBeDefined();
+
+    // The staged commit goes stale for this preparation (its identity no
+    // longer names this preparation's parents): previously every merge
+    // answered 503 CI_PREPARED_COMMIT_INVALID forever.
+    repo.refs.set(stagedRef!, head.sha);
+    const again = await merge('merge-restage', 1);
+    expect([again.status, again.json.code]).toEqual([409, 'REQUIRED_CHECKS_PENDING']);
+    expect(repo.refs.get(stagedRef!)).not.toBe(head.sha);
+    const stagedCommit = commitOf(repo, repo.refs.get(stagedRef!)!);
+    expect(stagedCommit.parents).toEqual([main.sha, head.sha]);
+  });
 });
 
 describe('authorization', () => {

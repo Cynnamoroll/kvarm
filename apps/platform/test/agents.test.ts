@@ -471,7 +471,7 @@ describe('expiry and revocation', () => {
     await env.DB.prepare('UPDATE agent_tokens SET expires_at = ? WHERE id = ?').bind(Date.now() - 1, t.id).run();
     const res = await call(`/api/v1/repos/${repo}`, bearer(t.token));
     expect(res.status).toBe(401);
-    expect(await json(res)).toEqual({ error: 'unauthorized' });
+    expect(await json(res)).toEqual({ error: 'unauthorized', code: 'UNAUTHENTICATED' });
     expect(await gitStatus(t.token, repo, 'read')).toBe(401);
     const denied = await push(t.token, repo, pushBody([`${A} ${B} refs/heads/agents/ws1/a`]));
     expect(denied.status).toBe(401);

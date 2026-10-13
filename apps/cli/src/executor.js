@@ -303,21 +303,29 @@ export function executeShell(command, cwd, timeoutSeconds) {
     const env = repositoryEnvironment();
     const child = nodeSpawn(command, { cwd, shell: true, detached: grouped, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let timedOut = false;
+    /** @type {NodeJS.Timeout | undefined} */
+    let timer;
+    /** @type {NodeJS.Timeout | undefined} */
+    let killTimer;
     /** @param {NodeJS.Signals} name */
     const signal = (name) => {
       try {
         if (grouped && child.pid) process.kill(-child.pid, name);
         else child.kill(name);
-      } catch (err) {
-        if (!(err && typeof err === 'object' && 'code' in err && err.code === 'ESRCH')) throw err;
+      } catch {
+        // Timeout signals are best-effort; an exited child must not throw from a timer callback.
       }
     };
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
       signal('SIGTERM');
-      setTimeout(() => signal('SIGKILL'), KILL_GRACE_MS).unref();
+      killTimer = setTimeout(() => signal('SIGKILL'), KILL_GRACE_MS);
+      killTimer.unref();
     }, timeoutSeconds * 1000);
-    collect(child, started, () => timedOut, reject, resolve, () => clearTimeout(timer));
+    collect(child, started, () => timedOut, reject, resolve, () => {
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+    });
   });
 }
 

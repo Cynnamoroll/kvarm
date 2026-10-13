@@ -1,6 +1,6 @@
 import { env as cfEnv, exports } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { mintPAT, patCacheKey, patHash, PAT_STAMP_INTERVAL_MS, type Scope } from '../src/auth/pat';
+import { mintPAT, patCacheKey, patHash, revokePAT, PAT_STAMP_INTERVAL_MS, type Scope } from '../src/auth/pat';
 import { CostMeter, COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { resolveRepoAccess } from '../src/services/access';
 import type { RepoRow } from '../src/db/repos';
@@ -173,8 +173,12 @@ describe('PAT revocation', () => {
     expect(gitWarm.status).not.toBe(401);
     await gitWarm.body?.cancel();
 
+    // Token management is session-only: a PAT bearer is refused, and the
+    // revocation itself goes through the same service the route calls.
     const revoke = await call(`/api/v1/user/tokens/${victim.id}`, { method: 'DELETE', headers: bearer(admin.token) });
-    expect(await revoke.json()).toEqual({ revoked: true });
+    expect(revoke.status).toBe(403);
+    expect(await revoke.json()).toEqual({ error: 'manage tokens from the web session', code: 'SESSION_REQUIRED' });
+    expect(await revokePAT(env, victim.id, userId)).toBe(true);
 
     const rest = await call(`/api/v1/repos/${OWNER}/secret`, { headers: bearer(victim.token) });
     expect(rest.status).toBe(401);

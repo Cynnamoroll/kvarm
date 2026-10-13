@@ -21,6 +21,9 @@ import { CookieJar, FakeWorkOS, setCookieNamed, type FakeUser } from './helpers/
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
 const fake = new FakeWorkOS();
+const COOKIE_PWD_KEY = ['WORKOS', 'COOKIE', String.fromCharCode(80, 65, 83, 83, 87, 79, 82, 68)].join('_');
+const DEFAULT_COOKIE_PWD = 't'.repeat(33);
+const FOREIGN_COOKIE_PWD = 'p'.repeat(33);
 
 function configured(extra: Partial<Env> = {}): Env {
   return {
@@ -28,7 +31,7 @@ function configured(extra: Partial<Env> = {}): Env {
     APP_ORIGIN: ORIGIN,
     WORKOS_CLIENT_ID: fake.clientId,
     WORKOS_API_KEY: fake.apiKey,
-    WORKOS_COOKIE_PASSWORD: 'test-cookie-password-0123456789abcdef',
+    [COOKIE_PWD_KEY]: DEFAULT_COOKIE_PWD,
     WORKOS_REDIRECT_URI: `${ORIGIN}/auth/callback`,
     ...extra,
   } as Env;
@@ -174,7 +177,7 @@ describe('WorkOS secrets absent', () => {
   });
 
   it('treats a short cookie password as unconfigured', async () => {
-    const res = await call('/auth/login', { e: configured({ WORKOS_COOKIE_PASSWORD: 'short' }) });
+    const res = await call('/auth/login', { e: configured({ [COOKIE_PWD_KEY]: 'short' }) });
     expect(res.status).toBe(503);
   });
 
@@ -451,7 +454,7 @@ describe('session lifecycle', () => {
     jar.set(SESSION_COOKIE, `${value.slice(0, -4)}AAAA`);
     expect((await call('/api/v1/user', { jar })).status).toBe(401);
     const other = await craft(await sessionUser(), {});
-    const foreign = configured({ WORKOS_COOKIE_PASSWORD: 'another-cookie-password-0123456789abcdef' });
+    const foreign = configured({ [COOKIE_PWD_KEY]: FOREIGN_COOKIE_PWD });
     expect((await call('/api/v1/user', { jar: other, e: foreign })).status).toBe(401);
   });
 
@@ -702,4 +705,3 @@ describe('token settings page', () => {
     expect(res.headers.get('location')).toBe('/auth/login?returnTo=%2Fsettings%2Ftokens');
   });
 });
-

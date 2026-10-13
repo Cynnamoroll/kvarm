@@ -76,10 +76,10 @@ From the committed [fleet-100](fleet-100.md) run (finished 2026-10-11T16:07:34.3
 | measure | value |
 | --- | --- |
 | active workspaces | 100 |
-| changes published through the train | 99 |
-| burst window (first enqueue -> last publication) | 361.9 s |
-| throughput (publications per minute over the burst window) | 15.91 |
-| enqueue -> published latency, server clock (p50 / p90) | 94.0 s / 219.1 s |
+| changes published through the train | 99 (96 in the initial burst + 3 after conflict resolution) |
+| initial burst window (first enqueue -> last of the 96 initial-burst publications) | 361.9 s |
+| throughput (the 96 initial-burst publications per minute over that window) | 15.91 |
+| enqueue -> published latency of the 96 initial-burst publications, server clock (p50 / p90) | 94.0 s / 219.1 s |
 | enqueue `x-kvarm-cost`, median per counter (all published) | `d1=2;rr=12;rw=4;art=0;do=0;r2a=0;r2b=0;q=1;sub=0;cache=none` |
 | stored publication cost, median per counter (all published) | `d1=3;rr=10;rw=3;art=0;do=2;q=0;sub=2` |
 | longest interval with no queue entry reaching a terminal state | 79.7 s |

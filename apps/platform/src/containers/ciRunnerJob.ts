@@ -12,7 +12,7 @@
  * tests drive this with a local stand-in for `ctx.container`.
  */
 
-import { DRAIN_ENTRY_FILE, GO_FILE, PREPARED_LINE, RUNNER_DIR, WORK_ROOT, WRITE_FILES_SCRIPT, containerRunnerFiles, runnerExecEnv, type RunnerExecInput } from './runnerFiles';
+import { DRAIN_ENTRY_FILE, GO_FILE, GO_TIMEOUT_MS, PREPARED_LINE, RUNNER_DIR, WORK_ROOT, WRITE_FILES_SCRIPT, containerRunnerFiles, runnerExecEnv, type RunnerExecInput } from './runnerFiles';
 
 export interface ExecLike {
   readonly stdout: ReadableStream | null;
@@ -132,9 +132,14 @@ export async function prepareAndRunJob(container: ContainerLike, o: JobOptions):
   }
 
   let t = Date.now();
+  // A cold run's snapshot save happens while the runner waits at PREPARED_LINE;
+  // its budget follows the enclosing `timeout` process (minus a run reserve)
+  // so a large save fails the job only at the process bound, not at the
+  // fixed 180 s default the warm path keeps.
+  const goWaitMs = o.cold ? Math.max(GO_TIMEOUT_MS, (o.timeoutSeconds ?? 600) * 1000 - 120_000) : undefined;
   const proc = await container.exec(['timeout', '--kill-after=5', String(o.timeoutSeconds ?? 600), 'node', `${runnerDir}/run.mjs`], {
     cwd: runnerDir,
-    env: runnerExecEnv({ ...o.exec, goFile }),
+    env: runnerExecEnv({ ...o.exec, goFile, ...(goWaitMs !== undefined ? { goWaitMs } : {}) }),
   });
   const stdout = textReader(proc.stdout);
   // Drained concurrently so a chatty runner never blocks on a full stderr pipe.

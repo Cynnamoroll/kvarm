@@ -57,9 +57,14 @@ const result = await runRunner({
   prepared: go
     ? async () => {
         process.stdout.write(${JSON.stringify(PREPARED_LINE)} + '\\n');
-        const deadline = Date.now() + ${GO_TIMEOUT_MS};
+        // The Durable Object snapshots the prepared workspace while this wait
+        // runs, and a large save can outlast a fixed 180 s, so the wait budget
+        // follows the enclosing \`timeout\` process when it provides one.
+        const provided = Number(env.KVARM_GO_WAIT_MS);
+        const budget = Number.isSafeInteger(provided) && provided > 0 ? provided : ${GO_TIMEOUT_MS};
+        const deadline = Date.now() + budget;
         while (!existsSync(go)) {
-          if (Date.now() > deadline) throw new Error('no go signal within ${GO_TIMEOUT_MS / 1000} s after the workspace was prepared');
+          if (Date.now() > deadline) throw new Error(\`no go signal within \${Math.round(budget / 1000)} s after the workspace was prepared\`);
           await new Promise((r) => setTimeout(r, 100));
         }
       }
@@ -142,6 +147,8 @@ export interface RunnerExecInput {
   runnerId: string;
   workRoot?: string;
   goFile?: string;
+  /** Prepared-wait budget for the runner; defaults to GO_TIMEOUT_MS inside it. */
+  goWaitMs?: number;
 }
 
 /**
@@ -157,5 +164,6 @@ export function runnerExecEnv(input: RunnerExecInput): Record<string, string> {
     KVARM_WORK_ROOT: input.workRoot ?? WORK_ROOT,
     HOME: '/root',
     ...(input.goFile ? { KVARM_GO_FILE: input.goFile } : {}),
+    ...(input.goWaitMs !== undefined ? { KVARM_GO_WAIT_MS: String(Math.round(input.goWaitMs)) } : {}),
   };
 }

@@ -13,9 +13,9 @@
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkout } from './checkout.js';
-import { CliError } from './checkout.js';
+import { checkout, CliError, parseRepo } from './checkout.js';
 import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution } from './executor.js';
+import { text } from './http.js';
 import { materialize, openWorkdir } from './workdir.js';
 
 export { executeShell } from './executor.js';
@@ -23,10 +23,20 @@ export { executeShell } from './executor.js';
 const SUMMARY_SERVER_LIMIT = 64 * 1024;
 const SUMMARY_SAFETY_MARGIN = 1024;
 const SUMMARY_LIMIT = SUMMARY_SERVER_LIMIT - SUMMARY_SAFETY_MARGIN;
+/** Marks a command cut to fit the summary budget; a command is display metadata, unlike the output fields. */
+const COMMAND_TRUNCATED = '…[truncated]';
 const IDLE_MIN_MS = 2_000;
 const IDLE_MAX_MS = 10_000;
+/** A claim that failed this way is retried, doubling to this cap: the runner is a long-lived daemon and no claim failure is made better by dying. */
+const CLAIM_RETRY_MIN_MS = 2_000;
+const CLAIM_RETRY_MAX_MS = 60_000;
 /** Past this many changed paths a whole-tree checkout is cheaper than the delta. */
 const MAX_DELTA_CHANGES = 1_000;
+/** Total decoded file content fetched by one warm delta before falling back. */
+const MAX_DELTA_READ_BYTES = 64 * 1024 * 1024;
+/** The platform's own CI bounds (services/ciConfig.ts) that a claimed job's fields are held to. */
+const JOB_TIMEOUT_MAX_SECONDS = 3_600;
+const JOB_TIMEOUT_DEFAULT_SECONDS = 900;
 const utf8 = new TextEncoder();
 
 /** @param {unknown} value */
@@ -35,23 +45,31 @@ function jsonBytes(value) {
 }
 
 /**
- * Trim one output field as far as necessary while retaining a marker.
- * Measuring the complete serialized summary accounts for JSON escaping too.
+ * Trim one field as far as necessary while retaining a marker. Measuring
+ * the complete serialized summary accounts for JSON escaping too. A field
+ * whose whole value cannot bring the summary under the limit is restored
+ * (unless `forced`): cutting it would only lose content, and a later field
+ * may be the one whose cut fits.
  * @param {Record<string, unknown>} summary
- * @param {'stdout'|'stderr'} field
+ * @param {'command'|'stdout'|'stderr'} field
+ * @param {string} marker
+ * @param {boolean} [forced]
  */
-function trimSummaryField(summary, field) {
+function trimSummaryField(summary, field, marker = TRUNCATED, forced = false) {
   const original = typeof summary[field] === 'string' ? summary[field] : '';
   if (!original) return;
   const points = [...original];
-  summary[field] = TRUNCATED;
-  if (jsonBytes(summary) > SUMMARY_LIMIT) return;
+  summary[field] = marker;
+  if (jsonBytes(summary) > SUMMARY_LIMIT) {
+    if (!forced) summary[field] = original;
+    return;
+  }
   let low = 0;
   let high = points.length;
   let best = '';
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = `${points.slice(0, middle).join('')}${TRUNCATED}`;
+    const candidate = `${points.slice(0, middle).join('')}${marker}`;
     summary[field] = candidate;
     if (jsonBytes(summary) <= SUMMARY_LIMIT) {
       best = candidate;
@@ -60,20 +78,77 @@ function trimSummaryField(summary, field) {
       high = middle - 1;
     }
   }
-  summary[field] = best || TRUNCATED;
+  summary[field] = best || marker;
 }
 
-/** @template {Record<string, unknown>} T @param {T} summary @returns {T} */
+/**
+ * Fits a summary under the report budget. The command is display metadata
+ * and is tried first, so an oversized claim can never make the report
+ * unshrinkable; the outputs follow. A second, forced pass guarantees a fit,
+ * because the markers alone sit far under the limit.
+ * @template {Record<string, unknown>} T
+ * @param {T} summary
+ * @returns {T}
+ */
 function boundedSummary(summary) {
   if (jsonBytes(summary) <= SUMMARY_LIMIT) return summary;
   const result = { ...summary };
-  trimSummaryField(result, 'stdout');
-  if (jsonBytes(result) > SUMMARY_LIMIT) trimSummaryField(result, 'stderr');
+  const order = /** @type {Array<['command'|'stdout'|'stderr', string]>} */ ([
+    ['command', COMMAND_TRUNCATED],
+    ['stdout', TRUNCATED],
+    ['stderr', TRUNCATED],
+  ]);
+  for (const forced of [false, true]) {
+    for (const [field, marker] of order) {
+      trimSummaryField(result, field, marker, forced);
+      if (jsonBytes(result) <= SUMMARY_LIMIT) return /** @type {T} */ (result);
+    }
+  }
   return /** @type {T} */ (result);
 }
 
 /** A job the execution-trust policy will not run on this runner. */
 class JobRefused extends Error {}
+
+/**
+ * An API refusal with the status and Retry-After that produced it; plain
+ * CliError (which carries neither) says the reply was not an API answer at
+ * all. The claim loop reads both to decide what is worth retrying.
+ */
+class ApiError extends CliError {
+  /**
+   * @param {string} message
+   * @param {number} status
+   * @param {string | null} retryAfter
+   */
+  constructor(message, status, retryAfter) {
+    super(message);
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
+/**
+ * The job the claim returned, with every field the runner dereferences
+ * validated: id, sha and command must be strings, generation a positive
+ * integer, and an out-of-range timeoutSeconds falls back to the platform's
+ * own default. Anything else is the same malformed claim a bad id always
+ * was — retried, never a crash.
+ * @param {any} body
+ */
+function parseClaim(body) {
+  const job = body?.job;
+  if (!job || typeof job !== 'object' || typeof job.id !== 'string' || typeof job.sha !== 'string' || typeof job.command !== 'string') {
+    throw new CliError('claim returned an invalid job');
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(job.id) || !/^[0-9a-f]{40}$/.test(job.sha)) throw new CliError('claim returned an invalid job');
+  if (!Number.isInteger(job.generation) || job.generation < 1) throw new CliError('claim returned an invalid job');
+  const timeoutSeconds =
+    Number.isInteger(job.timeoutSeconds) && job.timeoutSeconds >= 1 && job.timeoutSeconds <= JOB_TIMEOUT_MAX_SECONDS
+      ? job.timeoutSeconds
+      : JOB_TIMEOUT_DEFAULT_SECONDS;
+  return { ...job, timeoutSeconds };
+}
 
 /** How long a failed container-runtime probe is remembered. */
 const RUNTIME_RETRY_MS = 60_000;
@@ -95,43 +170,85 @@ export function idleDelayMs(consecutive) {
 }
 
 /**
- * @param {string} baseUrl
+ * Milliseconds to wait before the next claim after `fails` retryable
+ * failures: the response's Retry-After when the platform sent a usable one,
+ * otherwise a delay doubling from 2 s to a 60 s cap. An HTTP-date value or
+ * anything unparseable falls to the ramp like a missing header.
+ * @param {string | null} retryAfter
+ * @param {number} fails
+ */
+export function claimRetryMs(retryAfter, fails) {
+  const seconds = Number(retryAfter);
+  if (retryAfter !== null && retryAfter !== '' && Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, CLAIM_RETRY_MAX_MS);
+  return Math.min(CLAIM_RETRY_MIN_MS * 2 ** fails, CLAIM_RETRY_MAX_MS);
+}
+
+/** Half jitter, [50%, 100%) of the ramp delay, so a fleet of runners does not retry in lockstep. @param {number} ms @returns {number} */
+const jittered = (ms) => Math.floor(ms * (0.5 + Math.random() / 2));
+
+/**
+ * `/api/v1/repos/<owner>/<name>` for the runner's repository, validated and
+ * encoded once: a repo that does not parse is a usage error, and rejecting
+ * (rather than interpolating) `..`, `%`, `#` and `?` keeps a hostile value
+ * from retargeting the runner's authenticated requests after URL
+ * normalization.
  * @param {string} repo
+ */
+function repoApiPath(repo) {
+  const { owner, name } = parseRepo(repo);
+  // Like workdir.js slotPaths: a `.`/`..` name would resolve outside the repo.
+  if (name === '.' || name === '..') throw new CliError(`invalid repository "${repo}", expected <owner>/<repo>`, 2);
+  return `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+/**
+ * @param {string} baseUrl
+ * @param {string} reposUrl encoded `/api/v1/repos/<owner>/<name>` prefix
  * @param {string} pat
  * @param {string} path
  * @param {unknown} body
  * @param {typeof fetch} apiFetch
  */
-async function post(baseUrl, repo, pat, path, body, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}/api/v1/repos/${repo}/${path}`, {
+async function post(baseUrl, reposUrl, pat, path, body, apiFetch) {
+  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${pat}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (res.status === 204) return { status: 204, body: null };
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new CliError(`${path}: ${json.error ?? `HTTP ${res.status}`}${json.code ? ` (${json.code})` : ''}`);
+  let json;
+  try {
+    json = JSON.parse(await text(res));
+  } catch {
+    json = {};
+  }
+  if (!res.ok) throw new ApiError(`${path}: ${json.error ?? `HTTP ${res.status}`}${json.code ? ` (${json.code})` : ''}`, res.status, res.headers.get('retry-after'));
   return { status: res.status, body: json };
 }
 
 /**
  * @param {string} baseUrl
- * @param {string} repo
+ * @param {string} reposUrl encoded `/api/v1/repos/<owner>/<name>` prefix
  * @param {string} pat
  * @param {string} path
  * @param {typeof fetch} apiFetch
  * @returns {Promise<Record<string, unknown>>}
  */
-async function getJson(baseUrl, repo, pat, path, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}/api/v1/repos/${repo}/${path}`, {
+async function getJson(baseUrl, reposUrl, pat, path, apiFetch) {
+  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
     headers: { Authorization: `Bearer ${pat}`, accept: 'application/json' },
   });
-  const json = await res.json().catch(() => null);
+  let json;
+  try {
+    json = JSON.parse(await text(res));
+  } catch {
+    json = null;
+  }
   if (!res.ok || json === null || typeof json !== 'object' || Array.isArray(json)) {
     const err = /** @type {{error?: unknown, code?: unknown}} */ (json);
     const detail = err !== null && typeof err === 'object' && typeof err.error === 'string' ? err.error : `HTTP ${res.status}`;
     const code = err !== null && typeof err === 'object' && typeof err.code === 'string' ? ` (${err.code})` : '';
-    throw new CliError(`${path.split('?')[0]}: ${detail}${code}`);
+    throw new ApiError(`${path.split('?')[0]}: ${detail}${code}`, res.status, res.headers.get('retry-after'));
   }
   return /** @type {Record<string, unknown>} */ (json);
 }
@@ -183,6 +300,26 @@ function parseChange(value, what) {
   return change;
 }
 
+/**
+ * Wraps a lazy file reader in one aggregate byte budget. Per-response caps do
+ * not bound a delta that reads hundreds of individually valid files.
+ * @param {(path: string) => Promise<Uint8Array>} read
+ * @param {number} [maxBytes]
+ */
+export function budgetDeltaReader(read, maxBytes = MAX_DELTA_READ_BYTES) {
+  let total = 0;
+  /** @type {(path: string) => Promise<Uint8Array>} */
+  const budgetedRead = async (path) => {
+    const bytes = await read(path);
+    if (bytes.byteLength > maxBytes - total) {
+      throw new Error(`delta content exceeds the warm read budget of ${maxBytes} bytes`);
+    }
+    total += bytes.byteLength;
+    return bytes;
+  };
+  return budgetedRead;
+}
+
 /** Tree modes as the compare API reports them (raw git never pads). @param {string|null} mode */
 const isTreeMode = (mode) => mode === '40000' || mode === '040000';
 
@@ -190,7 +327,7 @@ const isTreeMode = (mode) => mode === '40000' || mode === '040000';
  * The changed paths between the recorded commit and the new head, fetched
  * through the content-addressed compare API, and a lazy reader for one
  * file's exact bytes at the new head.
- * @typedef {{ baseUrl: string, repo: string, pat: string, apiFetch: typeof fetch, previous: import('./workdir.js').RecordedState, sha: string }} DeltaFetch
+ * @typedef {{ baseUrl: string, reposUrl: string, pat: string, apiFetch: typeof fetch, previous: import('./workdir.js').RecordedState, sha: string }} DeltaFetch
  */
 
 /**
@@ -205,7 +342,7 @@ const isTreeMode = (mode) => mode === '40000' || mode === '040000';
  */
 async function collectTreeSide(o, ref, prefix, status, out) {
   if (out.length >= MAX_DELTA_CHANGES) throw new Error(`delta of ${JSON.stringify(prefix)} exceeds the changed-path budget`);
-  const body = expectObject(await getJson(o.baseUrl, o.repo, o.pat, `tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(prefix)}`, o.apiFetch), 'tree');
+  const body = expectObject(await getJson(o.baseUrl, o.reposUrl, o.pat, `tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(prefix)}`, o.apiFetch), 'tree');
   const entries = body.entries;
   if (!Array.isArray(entries)) throw new CliError('tree: malformed response');
   for (const entry of entries) {
@@ -232,13 +369,13 @@ async function collectTreeSide(o, ref, prefix, status, out) {
  * @param {DeltaFetch} o
  * @returns {Promise<import('./workdir.js').DeltaManifest>}
  */
-async function fetchDelta(o) {
+export async function fetchDelta(o) {
   /** @type {import('./workdir.js').DeltaChange[]} */
   const changes = [];
   let cursor;
   for (;;) {
     const path = `compare/${o.previous.sha}...${o.sha}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
-    const body = expectObject(await getJson(o.baseUrl, o.repo, o.pat, path, o.apiFetch), 'compare');
+    const body = expectObject(await getJson(o.baseUrl, o.reposUrl, o.pat, path, o.apiFetch), 'compare');
     if (body.truncated === true) {
       throw new Error(`compare is truncated (${typeof body.truncatedReason === 'string' ? body.truncatedReason : 'budget'}); the delta would be incomplete`);
     }
@@ -264,18 +401,19 @@ async function fetchDelta(o) {
   if (expanded.length > MAX_DELTA_CHANGES) {
     throw new Error(`delta of ${expanded.length} changed paths exceeds the warm budget of ${MAX_DELTA_CHANGES}`);
   }
+  const read = budgetDeltaReader(async (path) => {
+    const body = expectObject(
+      await getJson(o.baseUrl, o.reposUrl, o.pat, `contents?path=${encodeURIComponent(path)}&ref=${encodeURIComponent(o.sha)}`, o.apiFetch),
+      'contents',
+    );
+    if (typeof body.content !== 'string' || (body.encoding !== 'utf-8' && body.encoding !== 'base64')) throw new CliError('contents: malformed response');
+    return body.encoding === 'base64' ? new Uint8Array(Buffer.from(body.content, 'base64')) : utf8.encode(body.content);
+  });
   return {
     sha: o.sha,
     source: 'delta',
     changes: expanded,
-    read: async (path) => {
-      const body = expectObject(
-        await getJson(o.baseUrl, o.repo, o.pat, `contents?path=${encodeURIComponent(path)}&ref=${encodeURIComponent(o.sha)}`, o.apiFetch),
-        'contents',
-      );
-      if (typeof body.content !== 'string' || (body.encoding !== 'utf-8' && body.encoding !== 'base64')) throw new CliError('contents: malformed response');
-      return body.encoding === 'base64' ? new Uint8Array(Buffer.from(body.content, 'base64')) : utf8.encode(body.content);
-    },
+    read,
   };
 }
 
@@ -314,6 +452,7 @@ async function fetchDelta(o) {
 export async function runRunner(options) {
   const apiFetch = options.apiFetch ?? fetch;
   const checkoutFn = options.checkoutFn ?? checkout;
+  const reposUrl = repoApiPath(options.repo);
   const execute = options.execute ?? executeShell;
   const trust = options.trust ?? 'humans';
   const executorMode = options.executor ?? 'auto';
@@ -337,7 +476,7 @@ export async function runRunner(options) {
     return runtimeProbe;
   };
   const deltaFn =
-    options.deltaFn ?? ((previous, sha) => fetchDelta({ baseUrl: options.baseUrl, repo: options.repo, pat: options.pat, apiFetch, previous, sha }));
+    options.deltaFn ?? ((previous, sha) => fetchDelta({ baseUrl: options.baseUrl, reposUrl, pat: options.pat, apiFetch, previous, sha }));
   const runnerId = options.runnerId ?? `kvarm-runner-${crypto.randomUUID()}`;
   const tempRoot = options.tempRoot ?? tmpdir();
   const workRoot = options.workRoot ?? join(tempRoot, 'kvarm-runner');
@@ -351,21 +490,45 @@ export async function runRunner(options) {
   let claimed = 0;
   let reported = 0;
   let idle = 0;
+  /** Consecutive claim failures, for the retry ramp; any successful claim resets it. */
+  let claimFails = 0;
+  /**
+   * Claims until one succeeds. A network failure, a 429/5xx or a malformed
+   * reply backs off and retries, while bad credentials and any other
+   * definite 4xx refusal are actionable and stay fatal like they always
+   * were: retrying a wrong token or a wrong --repo would only spam.
+   * @returns {Promise<any | null>} the claimed job, or null when none is queued
+   */
+  const nextClaim = async () => {
+    for (;;) {
+      try {
+        const got = await post(options.baseUrl, reposUrl, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
+        const job = got.status === 204 ? null : parseClaim(got.body);
+        claimFails = 0;
+        return job;
+      } catch (err) {
+        if (err instanceof ApiError && err.status !== 429 && err.status < 500) throw err;
+        const retryAfter = err instanceof ApiError ? err.retryAfter : null;
+        const wait = claimRetryMs(retryAfter, claimFails++);
+        const sleepMs = retryAfter === null ? jittered(wait) : wait;
+        options.stderr(`claim failed: ${err instanceof Error ? err.message : String(err)}; retrying in ${(sleepMs / 1000).toFixed(1)} s`);
+        await sleep(sleepMs);
+      }
+    }
+  };
   try {
     if (executorMode === 'container' && !(await runtime())) {
       throw new CliError(`--executor container needs a running ${containerConfig.runtime ?? 'docker or podman'}, and none answered`, 2);
     }
     for (;;) {
-      const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
-      if (got.status === 204) {
+      const job = await nextClaim();
+      if (job === null) {
         if (options.once || options.drainUntilEmpty) return { claimed, reported };
         await sleep(idleDelayMs(idle++));
         continue;
       }
       idle = 0;
       const claimedAt = Date.now();
-      const job = got.body?.job;
-      if (!job || typeof job.id !== 'string' || typeof job.sha !== 'string') throw new CliError('claim returned an invalid job');
       claimed++;
       options.stdout(`claimed ${job.name} (${job.id}) at ${job.sha}`);
       let heartbeat;
@@ -376,7 +539,7 @@ export async function runRunner(options) {
         if (plan.run === null) throw new JobRefused(plan.reason);
         const every = Math.max(10_000, Math.floor(120_000 / 3));
         heartbeat = setInterval(() => {
-          void post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
+          void post(options.baseUrl, reposUrl, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
             options.stderr(`heartbeat: ${err instanceof Error ? err.message : String(err)}`),
           );
         }, every);
@@ -451,7 +614,7 @@ export async function runRunner(options) {
         let reportError;
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            await post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/report`, reportBody, apiFetch);
+            await post(options.baseUrl, reposUrl, options.pat, `ci/jobs/${job.id}/report`, reportBody, apiFetch);
             reportError = undefined;
             break;
           } catch (err) {
@@ -459,9 +622,19 @@ export async function runRunner(options) {
             if (attempt < 2) await sleep(250 * 2 ** attempt);
           }
         }
-        if (reportError) throw reportError;
-        reported++;
-        options.stdout(`reported ${reportBody.conclusion} for ${job.name} (${job.id}) in ${Date.now() - claimedAt} ms`);
+        if (reportError) {
+          // The work already ran, so nothing can improve this job's outcome:
+          // a fenced report (409 STALE_GENERATION, 404 CI_JOB_NOT_FOUND)
+          // means the lease expired and the platform requeues the job itself,
+          // and an unreachable platform does the same once the lease runs
+          // out. The daemon keeps claiming instead of dying with one job.
+          options.stderr(
+            `warning: could not report ${job.name} (${job.id}) after 3 attempts: ${reportError instanceof Error ? reportError.message : String(reportError)}; the platform requeues the job when the lease expires`,
+          );
+        } else {
+          reported++;
+          options.stdout(`reported ${reportBody.conclusion} for ${job.name} (${job.id}) in ${Date.now() - claimedAt} ms`);
+        }
       } finally {
         if (heartbeat) clearInterval(heartbeat);
       }
