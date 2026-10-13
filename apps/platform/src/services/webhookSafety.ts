@@ -94,11 +94,13 @@ export function isBlockedIpv6(g: readonly number[]): boolean {
   if (allZeroPrefix(5) && (g[5] === 0xffff || g[5] === 0)) {
     return isBlockedIpv4([g[6]! >> 8, g[6]! & 255, g[7]! >> 8, g[7]! & 255]);
   }
-  // NAT64 (64:ff9b::/96) embeds an IPv4 address too.
-  if (first === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) {
+  // IPv4-translated (::ffff:0:a.b.c.d) embeds an IPv4 address as well.
+  if (allZeroPrefix(4) && g[4] === 0xffff && g[5] === 0) {
     return isBlockedIpv4([g[6]! >> 8, g[6]! & 255, g[7]! >> 8, g[7]! & 255]);
   }
   return (
+    (first === 0x64 && g[1] === 0xff9b) || // NAT64, well-known and local-use (64:ff9b::/96, 64:ff9b:1::/48): any IPv4 inside
+    (first === 0x100 && g[1] === 0 && g[2] === 0 && g[3] === 0) || // discard-only 100::/64
     (first & 0xfe00) === 0xfc00 || // unique local fc00::/7
     (first & 0xffc0) === 0xfe80 || // link-local fe80::/10
     (first & 0xffc0) === 0xfec0 || // site-local fec0::/10

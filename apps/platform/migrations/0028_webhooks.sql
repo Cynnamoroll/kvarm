@@ -105,9 +105,11 @@ BEGIN
     FROM repos r WHERE r.id = NEW.repo_id;
 END;
 
--- Change ejected from the merge queue (the entry leaves the train for good).
+-- Change ejected from the merge queue: the entry left the train for good,
+-- failed (`ejected`) or overtaken (`stale`: head or base moved, already
+-- merged); `data.state` and `data.code` say which.
 CREATE TRIGGER webhook_change_ejected AFTER UPDATE OF state ON merge_queue
-WHEN NEW.state = 'ejected' AND OLD.state != 'ejected'
+WHEN NEW.state IN ('ejected', 'stale') AND OLD.state NOT IN ('ejected', 'stale')
  AND EXISTS (SELECT 1 FROM webhooks h WHERE h.repo_id = NEW.repo_id AND h.active = 1
                 AND EXISTS (SELECT 1 FROM json_each(h.events) j WHERE j.value = 'kvarm.change.ejected'))
 BEGIN
@@ -116,7 +118,7 @@ BEGIN
          json_object('specversion', '1.0', 'id', 'change-ejected-' || NEW.id, 'type', 'kvarm.change.ejected',
                      'source', '/repos/' || r.owner_login || '/' || r.name, 'subject', CAST(NEW.change_number AS TEXT),
                      'time', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'datacontenttype', 'application/json',
-                     'data', json_object('repo', r.owner_login || '/' || r.name, 'change', NEW.change_number, 'target', NEW.target_ref, 'headSha', NEW.head_sha,
+                     'data', json_object('repo', r.owner_login || '/' || r.name, 'change', NEW.change_number, 'state', NEW.state, 'target', NEW.target_ref, 'headSha', NEW.head_sha,
                                          'code', NEW.reason_code, 'reason', substr(NEW.reason, 1, 500))),
          NULL, CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
     FROM repos r WHERE r.id = NEW.repo_id;
@@ -130,8 +132,8 @@ WHEN NEW.status IN ('success', 'failure', 'skipped')
                 AND EXISTS (SELECT 1 FROM json_each(h.events) j WHERE j.value = 'kvarm.check_run.completed'))
 BEGIN
   INSERT OR IGNORE INTO events (id, type, payload, processed_at, created_at)
-  SELECT 'check-run-completed-' || NEW.id || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'kvarm.check_run.completed',
-         json_object('specversion', '1.0', 'id', 'check-run-completed-' || NEW.id || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'type', 'kvarm.check_run.completed',
+  SELECT 'check-run-completed-' || NEW.id || '-' || NEW.attempt || '-' || NEW.status || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'kvarm.check_run.completed',
+         json_object('specversion', '1.0', 'id', 'check-run-completed-' || NEW.id || '-' || NEW.attempt || '-' || NEW.status || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'type', 'kvarm.check_run.completed',
                      'source', '/repos/' || r.owner_login || '/' || r.name, 'subject', NEW.name,
                      'time', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'datacontenttype', 'application/json',
                      'data', json_object('repo', r.owner_login || '/' || r.name, 'checkRun', NEW.id, 'name', NEW.name, 'headSha', NEW.head_sha, 'treeSha', NEW.tree_sha,
@@ -148,8 +150,8 @@ WHEN NEW.status IN ('success', 'failure', 'skipped') AND OLD.status != NEW.statu
                 AND EXISTS (SELECT 1 FROM json_each(h.events) j WHERE j.value = 'kvarm.check_run.completed'))
 BEGIN
   INSERT OR IGNORE INTO events (id, type, payload, processed_at, created_at)
-  SELECT 'check-run-completed-' || NEW.id || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'kvarm.check_run.completed',
-         json_object('specversion', '1.0', 'id', 'check-run-completed-' || NEW.id || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'type', 'kvarm.check_run.completed',
+  SELECT 'check-run-completed-' || NEW.id || '-' || NEW.attempt || '-' || NEW.status || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'kvarm.check_run.completed',
+         json_object('specversion', '1.0', 'id', 'check-run-completed-' || NEW.id || '-' || NEW.attempt || '-' || NEW.status || '-' || CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 'type', 'kvarm.check_run.completed',
                      'source', '/repos/' || r.owner_login || '/' || r.name, 'subject', NEW.name,
                      'time', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'datacontenttype', 'application/json',
                      'data', json_object('repo', r.owner_login || '/' || r.name, 'checkRun', NEW.id, 'name', NEW.name, 'headSha', NEW.head_sha, 'treeSha', NEW.tree_sha,

@@ -373,6 +373,9 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect,
 // Dispatcher
 // ---------------------------------------------------------------------------
 
+/** Webhook attempts one consumer invocation runs at once. */
+export const WEBHOOK_ATTEMPT_LANES = 3;
+
 export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'webhook';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
@@ -478,7 +481,13 @@ export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): 
   // they run concurrently with each other and alongside the in-order work,
   // never in front of it.
   const hooks = batch.messages.filter((m) => isWebhookDeliveryMessage(m.body));
-  const hookRuns = Promise.all(hooks.map((msg) => handleMessage(batch.queue, env, msg)));
+  // A Worker invocation holds at most six outbound connections, and an
+  // attempt's timeout starts when it calls fetch: a few lanes keep every
+  // attempt on an open connection and leave room for the in-order work.
+  const lanes = Array.from({ length: Math.min(WEBHOOK_ATTEMPT_LANES, hooks.length) }, async (_, lane) => {
+    for (let i = lane; i < hooks.length; i += WEBHOOK_ATTEMPT_LANES) await handleMessage(batch.queue, env, hooks[i]!);
+  });
+  const hookRuns = Promise.all(lanes);
   for (const msg of batch.messages) {
     if (!isWebhookDeliveryMessage(msg.body)) await handleMessage(batch.queue, env, msg);
   }

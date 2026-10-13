@@ -212,6 +212,9 @@ describe('webhook URL policy (SSRF)', () => {
     ['https://[::ffff:a9fe:a9fe]/', 'private'], // 169.254.169.254 mapped
     ['https://[64:ff9b::7f00:1]/', 'private'],
     ['https://[ff02::1]/', 'private'],
+    ['https://[::ffff:0:7f00:1]/', 'private'], // IPv4-translated 127.0.0.1
+    ['https://[64:ff9b:1::a00:1]/', 'private'], // local-use NAT64
+    ['https://[100::1]/', 'private'], // discard-only
     ['https://kvarm.test/api/v1/user', 'this Kvarm deployment'],
     ['not a url', 'valid absolute URL'],
     ['', 'non-empty'],
@@ -387,6 +390,14 @@ describe('recording platform events', () => {
        VALUES ('mq-1', ?, 'refs/heads/main', 1, ?, 2, 'queued', 1, ?, 'review', ?, ?)`,
     ).bind(repo, ejected, SHA, now, now).run();
     await env.DB.prepare("UPDATE merge_queue SET state = 'ejected', active = 0, reason_code = 'CHECKS_FAILED', reason = 'ci/test failed' WHERE id = 'mq-1'").run();
+    // Overtaken (stale) also leaves the train for good; a later write to the exited entry emits nothing more.
+    const overtaken = await seedChange('emit', 4);
+    await env.DB.prepare(
+      `INSERT INTO merge_queue (id, repo_id, target_ref, seq, change_set_id, change_number, state, active, head_sha, merge_policy, enqueued_at, updated_at)
+       VALUES ('mq-2', ?, 'refs/heads/main', 2, ?, 4, 'checking', 1, ?, 'review', ?, ?)`,
+    ).bind(repo, overtaken, SHA, now, now).run();
+    await env.DB.prepare("UPDATE merge_queue SET state = 'stale', active = 0, reason_code = 'HEAD_MOVED' WHERE id = 'mq-2'").run();
+    await env.DB.prepare("UPDATE merge_queue SET state = 'ejected' WHERE id = 'mq-2'").run();
     // Check runs: completed at insert, and queued → running → success.
     await env.DB.prepare(
       `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, created_at) VALUES ('cr-1', ?, ?, ?, 'ci/lint', 'failure', 'failure', ?)`,
@@ -417,6 +428,7 @@ describe('recording platform events', () => {
     const rows = await deliveries(all.id);
     expect(rows.map((r) => r.event_type).sort()).toEqual([
       'kvarm.change.ejected',
+      'kvarm.change.ejected',
       'kvarm.change.merged',
       'kvarm.check_run.completed',
       'kvarm.check_run.completed',
@@ -443,7 +455,12 @@ describe('recording platform events', () => {
       expect(env.data.repo).toBe(`${logins.owner}/emit`);
     }
     expect(byType.get('kvarm.change.merged')!.data).toMatchObject({ change: 1, mergeCommit: 'b'.repeat(40), headSha: SHA });
-    expect(byType.get('kvarm.change.ejected')!.data).toMatchObject({ change: 2, code: 'CHECKS_FAILED', target: 'refs/heads/main' });
+    const ejections = (payloads.results ?? []).filter((p) => p.type === 'kvarm.change.ejected').map((p) => JSON.parse(p.payload).data);
+    expect(ejections.map((d: any) => [d.change, d.state, d.code]).sort()).toEqual([
+      [2, 'ejected', 'CHECKS_FAILED'],
+      [4, 'stale', 'HEAD_MOVED'],
+    ]);
+    expect(ejections[0].target).toBe('refs/heads/main');
     expect(byType.get('kvarm.escalation.opened')!.data).toMatchObject({ change: 2, reason: 'review-blocked', escalation: 'esc-1' });
     expect(byType.get('kvarm.task.created')!.data).toMatchObject({ change: 3, kind: 'resolve-conflict' });
     const checks = (payloads.results ?? []).filter((p) => p.type === 'kvarm.check_run.completed').map((p) => JSON.parse(p.payload).data);
@@ -685,6 +702,33 @@ describe('delivering', () => {
     const h = await env.DB.prepare('SELECT consecutive_failures, last_status FROM webhooks WHERE id = ?').bind(hook.id).first();
     expect(h).toEqual({ consecutive_failures: 0, last_status: 200 });
     expect((await deliveries(hook.id))[0]).toMatchObject({ state: 'delivered', attempts: 2 });
+  });
+
+  it('never sends past the attempt bound, even when the last attempt died holding its lease', async () => {
+    const { hook, delivery } = await pendingDelivery();
+    const t = Date.now();
+    await env.DB.prepare('UPDATE webhook_deliveries SET attempts = ?, lease_until = ? WHERE id = ?').bind(WEBHOOK_LIMITS.maxAttempts, t - 1, delivery).run();
+    const ep = endpoint([200]);
+    expect((await deliverWebhook(env, delivery, { fetch: ep.fetch, now: () => t })).outcome).toBe('skipped');
+    expect(ep.calls).toHaveLength(0);
+    expect((await deliveries(hook.id))[0]).toMatchObject({ state: 'failed', attempts: WEBHOOK_LIMITS.maxAttempts });
+  });
+
+  it('a 2xx whose body stalls or breaks is still delivered', async () => {
+    const { hook, delivery } = await pendingDelivery();
+    const broken = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('partial'));
+            controller.error(new Error('connection reset mid-body'));
+          },
+        }),
+        { status: 200 },
+      );
+    const r = await deliverWebhook(env, delivery, { fetch: endpoint([broken]).fetch, now: () => Date.now() });
+    expect(r).toMatchObject({ outcome: 'delivered', status: 200 });
+    expect((await deliveries(hook.id))[0]).toMatchObject({ state: 'delivered' });
   });
 
   it('a missing signing key fails the attempt without sending and never counts against the hook', async () => {

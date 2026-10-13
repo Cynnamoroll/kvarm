@@ -542,8 +542,8 @@ async function enqueueDeliveries(env: Env, ids: string[]): Promise<void> {
 /**
  * Enqueues due deliveries that have no live message: new ones (never
  * enqueued) and ones whose message is overdue by `staleMs` (lost send, or an
- * attempt that died holding its lease). One indexed read, plus one write and
- * one sendBatch when something is due. Rows are marked before the send, so a
+ * attempt that died holding its lease). One indexed D1 statement, plus one
+ * sendBatch when something is due. Rows are marked before the send, so a
  * failed send is retried by a later pump once stale; a duplicate message is
  * absorbed by the claim.
  */
@@ -552,19 +552,14 @@ export async function pumpWebhookDeliveries(env: Env, now = Date.now()): Promise
   // is merely late in a backlog is not sent again on every pump.
   const due = `state = 'pending' AND next_attempt_at <= ?1 AND COALESCE(lease_until, 0) < ?1
     AND (enqueued_at IS NULL OR (next_attempt_at < ?1 - ?2 AND enqueued_at < ?1 - ?2))`;
-  // A read first: the common case (nothing due) writes nothing.
-  const found = await env.DB.prepare(`SELECT id FROM webhook_deliveries WHERE ${due} ORDER BY next_attempt_at LIMIT ?3`)
-    .bind(now, WEBHOOK_LIMITS.staleMs, WEBHOOK_LIMITS.pumpBatch)
-    .all<{ id: string }>();
-  const candidates = (found.results ?? []).map((r) => r.id);
-  if (candidates.length === 0) return { enqueued: 0 };
-  // Re-checked in the write so two concurrent pumps do not both send a row.
+  // One statement: nothing due writes nothing, and a row two concurrent pumps
+  // both see is returned (and sent) by only the one whose write applies.
   const rows = await env.DB.prepare(
     `UPDATE webhook_deliveries SET enqueued_at = ?1
-      WHERE id IN (SELECT value FROM json_each(?3)) AND ${due}
+      WHERE id IN (SELECT id FROM webhook_deliveries WHERE ${due} ORDER BY next_attempt_at LIMIT ?3) AND ${due}
       RETURNING id`,
   )
-    .bind(now, WEBHOOK_LIMITS.staleMs, JSON.stringify(candidates))
+    .bind(now, WEBHOOK_LIMITS.staleMs, WEBHOOK_LIMITS.pumpBatch)
     .all<{ id: string }>();
   const ids = (rows.results ?? []).map((r) => r.id);
   await enqueueDeliveries(env, ids);
@@ -676,11 +671,16 @@ async function settleWithoutAttempt(env: Env, id: string, lease: number, state: 
 export async function deliverWebhook(env: Env, deliveryId: string, deps: DeliveryDeps = defaultDeliveryDeps): Promise<AttemptResult> {
   const now = deps.now();
   const lease = now + WEBHOOK_LIMITS.leaseMs;
-  const [claim, read] = await env.DB.batch([
+  const [, claim, read] = await env.DB.batch([
+    // The last allowed attempt died holding its lease: the delivery is spent, never sent again.
+    env.DB.prepare(
+      `UPDATE webhook_deliveries SET state = 'failed', error = 'the last attempt did not report', lease_until = NULL, completed_at = ?2, updated_at = ?2
+        WHERE id = ?1 AND state = 'pending' AND attempts >= ?3 AND COALESCE(lease_until, 0) < ?2`,
+    ).bind(deliveryId, now, WEBHOOK_LIMITS.maxAttempts),
     env.DB.prepare(
       `UPDATE webhook_deliveries SET attempts = attempts + 1, lease_until = ?2, updated_at = ?3
-        WHERE id = ?1 AND state = 'pending' AND next_attempt_at <= ?3 + ?4 AND COALESCE(lease_until, 0) < ?3`,
-    ).bind(deliveryId, lease, now, WEBHOOK_LIMITS.earlyMs),
+        WHERE id = ?1 AND state = 'pending' AND attempts < ?5 AND next_attempt_at <= ?3 + ?4 AND COALESCE(lease_until, 0) < ?3`,
+    ).bind(deliveryId, lease, now, WEBHOOK_LIMITS.earlyMs, WEBHOOK_LIMITS.maxAttempts),
     env.DB.prepare(
       `SELECT d.id, d.webhook_id, d.repo_id, d.event_id, d.event_type, d.attempts, d.lease_until,
               h.url, h.active, h.secret_ciphertext, h.secret_iv, h.key_version, h.consecutive_failures, e.payload
@@ -749,10 +749,15 @@ export async function deliverWebhook(env: Env, deliveryId: string, deps: Deliver
           body,
         });
         status = res.status;
-        const read = await readBounded(res);
-        excerpt = read.text.length > 0 ? `${read.text}${read.truncated ? '…' : ''}` : null;
         if (status >= 300 && status < 400) error = 'redirect not followed';
         else if (status < 200 || status >= 300) error = `HTTP ${status}`;
+        // The status decides the outcome; a body that stalls or breaks only shortens the excerpt.
+        try {
+          const read = await readBounded(res);
+          excerpt = read.text.length > 0 ? `${read.text}${read.truncated ? '…' : ''}` : null;
+        } catch {
+          excerpt = null;
+        }
       } catch (err) {
         const name = err instanceof Error ? err.name : '';
         error = name === 'TimeoutError' || name === 'AbortError' ? `timeout after ${WEBHOOK_LIMITS.timeoutMs} ms` : `network error: ${String(err)}`;
