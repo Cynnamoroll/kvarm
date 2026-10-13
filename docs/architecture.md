@@ -211,10 +211,10 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0023_snapshot_encoding` | stored-object encoding and compressed size on snapshot trees (§11.5) |
 | `0024_publication_intents` | durable merge-queue publication intents and their reconciled outcomes (§11.4) |
 | `0025_ci_flakes` | the flake registry and per-name check quarantine (retry-then-classify, §0.3) |
-| `0030_provenance_audit` | attribution evidence levels, the `ref_updates` ledger of gate pushes, merges and train publications, the `audit_commits` export index and trusted provenance keys (§9) |
 | `0026_branch_rule_guard_completeness` | per-rule `guardCompleteness` (`advisory` default, `required` blocks an incomplete `kvarm/guard`) (§0.3, §11.1) |
 | `0027_hosted_ci` | the per-repository hosted CI opt-in flag (§0.5) |
 | `0028_train_exits` | the partial index behind the train view's exit history (§11.4, §11.6) |
+| `0030_provenance_audit` | attribution evidence levels, the `ref_updates` ledger of gate pushes, merges and train publications, the `audit_commits` export index and trusted provenance keys (§9) |
 | `0032_session_revocations` | signed-out browser sessions, refused until their cookie would expire (§11.1) |
 | `0033_webhooks` | outbound webhooks, their delivery log, and the triggers that record platform events for delivery (§11.5) |
 
