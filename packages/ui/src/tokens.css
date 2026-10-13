@@ -1,0 +1,56 @@
+/* Dark-only brand. --signal (#0f67f5, 4.13:1 on --void) is for fills, the mark, and large display text; body-size text links use --signal-hi. */
+
+@font-face { font-family: 'Archivo'; src: url(/assets/fonts/archivo-latin-wdth-normal.woff2) format('woff2'); font-weight: 100 900; font-stretch: 62% 125%; font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url(/assets/fonts/jetbrains-mono-latin-wght-normal.woff2) format('woff2'); font-weight: 100 800; font-display: swap; }
+@font-face { font-family: 'Departure Mono'; src: url(/assets/fonts/DepartureMono-Regular.woff2) format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Instrument Serif'; src: url(/assets/fonts/instrument-serif-latin-400-italic.woff2) format('woff2'); font-style: italic; font-weight: 400; font-display: swap; }
+
+:root {
+  color-scheme: dark;
+  /* ink */
+  --void: #050608;
+  --carbon: #0a0c10;
+  --graphite: #11141a;
+  --hairline: #1e232c;
+  --hairline-2: #2c333e;
+  --steel: #7a8390;
+  --silver: #a9b1bc;
+  --bone: #e9edf2;
+  --signal: #0f67f5;         /* SWARM BLUE · RGB 15 103 245 */
+  --signal-hi: #4d8dff;
+  --signal-lo: #0a3d94;
+  --signal-ghost: rgb(15 103 245 / 0.12);
+  /* thermal — reserved for heat: contention, risk, conflict */
+  --heat-0: #1b1f6b;
+  --heat-1: #5b3df5;
+  --heat-2: #d455c9;
+  --heat-3: #ff6b4a;
+  --heat-4: #ffc94d;
+  --thermal: linear-gradient(90deg, var(--heat-0), var(--heat-1) 25%, var(--heat-2) 50%, var(--heat-3) 75%, var(--heat-4));
+  --chrome: linear-gradient(180deg, #f4f6f9 0%, #9aa3ae 38%, #2a2f37 52%, #c9d0d8 64%, #f4f6f9 100%);
+  /* semantic */
+  --ok: var(--signal-hi);
+  --warn: var(--heat-4);
+  --fail: var(--heat-3);
+  --add-bg: rgb(15 103 245 / 0.14);
+  --del-bg: rgb(255 107 74 / 0.12);
+
+  /* type */
+  --f-sans: 'Archivo', ui-sans-serif, system-ui, sans-serif;
+  --f-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --f-hud: 'Departure Mono', 'JetBrains Mono', ui-monospace, monospace;
+  --f-voice: 'Instrument Serif', ui-serif, Georgia, serif;
+  --t-hud: 11px; --t-xs: 12px; --t-sm: 14px; --t-md: 16px; --t-lg: 20px;
+  --t-xl: 28px; --t-2xl: 40px; --t-3xl: 64px; --t-4xl: 112px;
+  --t-5xl: clamp(88px, 15.5vw, 232px);
+
+  /* space · 4px base */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --s7: 48px; --s8: 64px; --s9: 96px; --s10: 128px;
+  --gutter: 24px;
+  --page: 1440px;
+  --margin: clamp(16px, 3.4vw, 48px);
+  --radius: 0px;              /* brutalist: no radii, ever */
+  --ease: cubic-bezier(.2, .7, 0, 1);
+  --step: steps(4, end);      /* telemetry ticks */
+}

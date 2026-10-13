@@ -1,0 +1,14 @@
+{
+  "name": "Kvarm",
+  "short_name": "Kvarm",
+  "description": "Git for people and their agents",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050608",
+  "theme_color": "#050608",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
