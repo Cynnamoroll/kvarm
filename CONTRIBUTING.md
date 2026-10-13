@@ -85,7 +85,7 @@ Pull requests on GitHub do not trigger Kvarm CI automatically yet. Until they do
 
 ### Naming boundaries
 
-Kvarm is the project's only name. Brand-bearing identifiers use it exactly: `@kvarm/*` packages, the `kvarm` CLI and `KVARM_*` variables, `kvarm_pat_`/`kvarm_agt_` tokens, `kvarm/guard`, `kvarm/ci-config` and `kvarm/checks-window` checks, `.kvarm/ci.json`, `x-kvarm-*` headers, `refs/notes/kvarm-attribution`, `refs/heads/kvarm-ci/**`, and the `kvarm-*` Cloudflare resources in `apps/platform/wrangler.jsonc`. Do not introduce another brand or alias.
+Kvarm is the project's only name. Brand-bearing identifiers use it exactly: `@kvarm/*` packages, the `kvarm` CLI and `KVARM_*` variables, `kvarm_pat_`/`kvarm_agt_` tokens, `kvarm/guard`, `kvarm/ci-config` and `kvarm/checks-window` checks, `.kvarm/ci.json`, `x-kvarm-*` headers, `refs/notes/kvarm-attribution`, `refs/heads/kvarm-ci/**`, `refs/heads/kvarm-revert/**`, and the `kvarm-*` Cloudflare resources in `apps/platform/wrangler.jsonc`. Do not introduce another brand or alias.
 
 Some identifiers are stable interfaces and never change in a pull request: the REST prefix `/api/v1`, the MCP endpoint `/mcp`, every MCP tool name, the agent workspace refs `refs/heads/agents/**` and the Artifacts namespace `default`. [AGENTS.md](AGENTS.md#names-kvarm-and-what-never-changes) has the full list.
 
