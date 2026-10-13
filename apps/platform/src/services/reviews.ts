@@ -22,7 +22,7 @@
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
-import { effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
+import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
 import { autoMerge, branchRef, fail, guarded, parseNumber, readChange, type ChangeContext } from './changes';
 import {
   HUMAN_MODEL_FAMILY,
@@ -270,7 +270,7 @@ function packetStatements(db: D1Database, repoId: string, number: number): D1Pre
       .bind(repoId, number),
     db
       .prepare(
-        `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+        `SELECT ${BRANCH_RULE_COLUMNS}
            FROM branch_rules b WHERE b.repo_id = ?1 LIMIT 50`,
       )
       .bind(repoId),

@@ -40,7 +40,7 @@ import { toUserRow, type UserRow } from '../db/users';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, isOrgRole, isRepoNeed, repoRole, type Actor } from './authz';
-import { effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
+import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   HEAD_MOVED_HOOKS,
   MERGE_POLICIES,
@@ -502,7 +502,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
         .bind(cx.repo.id, number),
       db
         .prepare(
-          `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+          `SELECT ${BRANCH_RULE_COLUMNS}
              FROM branch_rules b WHERE b.repo_id = ?1 LIMIT 50`,
         )
         .bind(cx.repo.id),
@@ -851,7 +851,7 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
     db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
     db
       .prepare(
-        `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+        `SELECT ${BRANCH_RULE_COLUMNS}
            FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
       )
       .bind(repoId),
@@ -939,7 +939,7 @@ function enqueuerAuthor(e: EntryRow): { name: string; email: string } | undefine
 }
 
 /** Ejections that stick to the exact head (pins on it break; see ejectedSourceStatement). */
-const EJECTS_PINS: ReadonlySet<string> = new Set(['MERGE_CONFLICT', 'CHECKS_FAILED']);
+const EJECTS_PINS: ReadonlySet<string> = new Set(['MERGE_CONFLICT', 'CHECKS_FAILED', 'GUARD_INCOMPLETE']);
 
 const EXIT_STATES: Partial<Record<string, 'ejected' | 'stale'>> = {
   ALREADY_MERGED: 'stale',
@@ -1211,6 +1211,10 @@ async function trainPass(
       );
     }
     const ruleBlock = branchPolicyBlock(policy, checks);
+    if (ruleBlock?.code === 'GUARD_INCOMPLETE' && checks.state !== 'failure') {
+      exit('GUARD_INCOMPLETE', ruleBlock.error);
+      continue;
+    }
     if (checks.state === 'failure' || ruleBlock?.code === 'REQUIRED_CHECKS_FAILED') {
       exit('CHECKS_FAILED', ruleBlock?.error ?? 'a required check failed on the composed tree');
       continue;
@@ -1460,6 +1464,7 @@ async function publishCandidate(
   deps.observe?.({ type: 'checks', number: e.change_number, treeSha: pv.treeSha, baseSha: pv.targetSha, state: checks.state, leaseHeld: false, phase: 'publish' });
   const checksVerdict = async (policy: BranchPolicy): Promise<PublishResult | null> => {
     const block = branchPolicyBlock(policy, checks);
+    if (block?.code === 'GUARD_INCOMPLETE' && checks.state !== 'failure') return exit('GUARD_INCOMPLETE', block.error);
     if (checks.state === 'failure' || block?.code === 'REQUIRED_CHECKS_FAILED') return exit('CHECKS_FAILED', block?.error ?? 'a required check failed on the composed tree');
     if (checks.state === 'pending' || block) {
       await back('checking');
@@ -1533,7 +1538,7 @@ async function publishCandidate(
         .bind(agentMeta?.tokenId ?? null),
       db
         .prepare(
-          `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+          `SELECT ${BRANCH_RULE_COLUMNS}
              FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
         )
         .bind(repo.id),

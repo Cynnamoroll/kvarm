@@ -169,7 +169,7 @@ describe('kvarm/guard on creation and head refresh', () => {
       required: true,
       quarantined: false,
       attempt: 1,
-      summary: { conclusion: 'success', findings: [], version: 'guard/v1' },
+      summary: { conclusion: 'success', findings: [], version: 'guard/v2' },
     });
 
     const next = await commit(repo, { ...BASE, 'README.md': '# App\n\nEven more words.\n' }, [feature.sha]);

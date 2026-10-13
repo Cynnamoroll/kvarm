@@ -12,7 +12,7 @@
  * answered by one D1 batch of bounded index ranges.
  */
 
-import { guard, guardWants, type GuardChange, type GuardContent, type GuardResult } from '@kvarm/review';
+import { guard, guardWants, type GuardChange, type GuardContent, type GuardResult, type GuardUninspected } from '@kvarm/review';
 import type { LazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -23,7 +23,11 @@ import { resolveCommitish, type ResolveContext } from './refs';
 
 export const GUARD_CHECK = 'kvarm/guard';
 export const CHECKS_WINDOW_CHECK = 'kvarm/checks-window';
-export const GUARD_VERSION = 'guard/v1';
+/**
+ * v2: an added line cut at the per-line scan limit makes the scan
+ * incomplete (neutral, `line-prefix`) where v1 could conclude success.
+ */
+export const GUARD_VERSION = 'guard/v2';
 const PRODUCER = 'check-runs';
 
 export const GUARD_BUDGETS = {
@@ -142,6 +146,11 @@ function stateOf(status: string): CheckState {
 
 export interface GuardSummary extends GuardResult {
   version: typeof GUARD_VERSION;
+  /**
+   * One line for people: what the verdict proves. An incomplete run says so
+   * first, whatever its conclusion, so a neutral never reads as a clean pass.
+   */
+  title: string;
   /** The trees compared: the change's merge base and its head. */
   baseTree: string;
   headTree: string;
@@ -186,19 +195,21 @@ const GITLINK_MODE = '160000';
  */
 export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headTree: string, known?: CompareBody): Promise<GuardSummary> {
   const body = known ?? (await treePairBody(ctx, baseTree, headTree)).body;
+  // The compare body marks a file binary when either side is: only an added one is surely binary on its new
+  // side. For the rest the guard sniffs the new side itself, so text replacing a binary file is still scanned.
   const changes: GuardChange[] = body.files.map((f) => ({
     path: f.path,
     status: f.status,
     ...(f.oldPath !== undefined ? { oldPath: f.oldPath } : {}),
-    ...(f.binary || f.newMode === GITLINK_MODE ? { binary: true } : {}),
+    ...((f.binary && f.status === 'added') || f.newMode === GITLINK_MODE ? { binary: true } : {}),
   }));
   const contents = new Map<string, GuardContent>();
   const wanted: Array<{ i: number; old: boolean }> = [];
   changes.forEach((c, i) => {
     const w = guardWants(c);
     if (!w.new) return;
-    if (wanted.length >= GUARD_BUDGETS.maxFiles) contents.set(c.path, { unavailable: true });
-    else wanted.push({ i, old: w.old && body.files[i]!.oldHash !== null });
+    if (wanted.length >= GUARD_BUDGETS.maxFiles) contents.set(c.path, { unavailable: true, overFileBudget: true });
+    else wanted.push({ i, old: w.old && body.files[i]!.oldHash !== null && !body.files[i]!.binary });
   });
   const counter = { blobReads: 0, bytes: 0 };
   await runPool(wanted, GUARD_BUDGETS.concurrency, async ({ i, old }) => {
@@ -207,7 +218,7 @@ export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headT
       old && f.oldHash ? readSide(ctx.artifacts, f.oldHash, counter) : null,
       f.newHash ? readSide(ctx.artifacts, f.newHash, counter) : ({ unavailable: true } as const),
     ]);
-    if ('binary' in after || (before && 'binary' in before)) {
+    if ('binary' in after) {
       changes[i] = { ...changes[i]!, binary: true };
       return;
     }
@@ -215,20 +226,58 @@ export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headT
       contents.set(f.path, { unavailable: true });
       return;
     }
+    // A binary old side has no lines to subtract: every line of the new text counts as added.
+    const oldText = before && 'text' in before ? before : null;
     contents.set(f.path, {
-      old: before ? before.text : null,
+      old: oldText ? oldText.text : null,
       new: after.text,
-      ...(after.truncated || (before && before.truncated) ? { truncated: true } : {}),
+      ...(after.truncated || oldText?.truncated ? { truncated: true } : {}),
     });
   });
   const result = guard(changes, contents, { listTruncated: body.truncated });
   return {
     version: GUARD_VERSION,
+    title: guardTitle(result),
     ...result,
     baseTree,
     headTree,
     scanned: { files: wanted.length, bytes: counter.bytes, blobReads: counter.blobReads },
   };
+}
+
+function uninspectedPhrase(u: GuardUninspected): string {
+  const files = `${u.count} changed file(s) not fully inspected`;
+  if (!u.listTruncated) return files;
+  const listed = 'the change list was truncated, so files past it were not inspected';
+  return u.count > 0 ? `${listed}, and ${files}` : listed;
+}
+
+export function guardTitle(r: GuardResult): string {
+  const counted = r.findings.length + (r.omitted ?? 0);
+  if (!r.complete && r.uninspected) {
+    return `incomplete: ${uninspectedPhrase(r.uninspected)}; the guard cannot vouch for content it did not read (${r.conclusion})`;
+  }
+  if (r.conclusion === 'failure') return `failed: ${counted} finding(s)`;
+  if (r.conclusion === 'neutral') return `neutral: ${counted} advisory finding(s); every changed text file the guard covers was read in full`;
+  return 'passed: every changed text file the guard covers was read in full and nothing was found';
+}
+
+/**
+ * How much of its change a recorded guard summary did not inspect, or null
+ * when it inspected everything. Runs recorded before `complete` existed
+ * count as incomplete when they carry a guard/incomplete finding or
+ * omitted findings (which could have hidden one).
+ */
+export function guardIncompleteness(summary: unknown): { uninspected: number } | null {
+  if (!summary || typeof summary !== 'object') return null;
+  const s = summary as { complete?: unknown; uninspected?: { count?: unknown }; findings?: unknown; omitted?: unknown; conclusion?: unknown };
+  if (typeof s.complete === 'boolean') {
+    if (s.complete) return null;
+    return { uninspected: typeof s.uninspected?.count === 'number' ? s.uninspected.count : 0 };
+  }
+  const findings = Array.isArray(s.findings) ? (s.findings as Array<{ rule?: unknown }>) : [];
+  const legacy = findings.some((f) => f?.rule === 'guard/incomplete') || (typeof s.omitted === 'number' && s.omitted > 0 && s.conclusion !== 'success');
+  return legacy ? { uninspected: 0 } : null;
 }
 
 function guardStatus(s: GuardSummary): { status: RunStatus; conclusion: string } {
@@ -303,14 +352,12 @@ interface Pending {
   reject(err: unknown): void;
 }
 
-function guardBaseOf(row: GateRow): string | null {
-  if (row.summary === null) return null;
-  try {
-    const parsed = JSON.parse(row.summary) as { baseTree?: unknown };
-    return typeof parsed.baseTree === 'string' ? parsed.baseTree : null;
-  } catch {
-    return null;
-  }
+/** The gate's kvarm/guard entry for a recorded run, or pending when it judged another merge-base tree. */
+function guardAnswer(row: GateRow, guardBaseTree: string): Omit<RequiredCheck, 'producer'> {
+  const summary = parseSummary(row.summary);
+  if ((summary as { baseTree?: unknown } | null)?.baseTree !== guardBaseTree) return { name: GUARD_CHECK, state: 'pending' };
+  const missing = guardIncompleteness(summary);
+  return { name: GUARD_CHECK, state: stateOf(row.status), runId: row.id, ...(missing ? { incomplete: true as const, uninspected: missing.uninspected } : {}) };
 }
 
 function answer(
@@ -324,11 +371,7 @@ function answer(
   for (const r of treeRows) if (r.name !== GUARD_CHECK && !newest.has(r.name)) newest.set(r.name, r);
   const out: Array<Omit<RequiredCheck, 'producer'>> = [...newest.values()].map((r) => ({ name: r.name, state: stateOf(r.status), runId: r.id }));
   const guard = subject ? guardRows[0] : undefined;
-  out.push(
-    guard && guardBaseOf(guard) === subject!.guardBaseTree
-      ? { name: GUARD_CHECK, state: stateOf(guard.status), runId: guard.id }
-      : { name: GUARD_CHECK, state: 'pending' },
-  );
+  out.push(guard ? guardAnswer(guard, subject!.guardBaseTree) : { name: GUARD_CHECK, state: 'pending' });
   if (treeWindowFull) out.push({ name: CHECKS_WINDOW_CHECK, state: 'pending' });
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
@@ -407,6 +450,12 @@ export interface CommitStatus {
   state: CheckState | 'none';
   total: number;
   checks: CheckRunView[];
+  /**
+   * Names of checks whose newest run did not inspect everything it covers
+   * (kvarm/guard past its read budgets), whatever its conclusion: a
+   * success in `state` does not prove those runs saw all of the content.
+   */
+  incomplete: string[];
 }
 
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -428,7 +477,8 @@ export async function commitStatus(env: Env, repo: RepoRow, sha: string): Promis
     checks.push(checkRunView(r));
   }
   const counted = checks.filter((c) => c.required && !c.quarantined).map((c) => ({ state: stateOf(c.status) }));
-  return { ok: true, value: { sha, state: checks.length === 0 ? 'none' : rollupState(counted), total: checks.length, checks } };
+  const incomplete = checks.filter((c) => c.name === GUARD_CHECK && guardIncompleteness(c.summary)).map((c) => c.name);
+  return { ok: true, value: { sha, state: checks.length === 0 ? 'none' : rollupState(counted), total: checks.length, checks, incomplete } };
 }
 
 // ---------------------------------------------------------------------------

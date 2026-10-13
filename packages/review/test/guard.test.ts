@@ -58,7 +58,7 @@ describe('guard: secrets', () => {
   it('only scans added lines: a secret already on the base side is not reported again', () => {
     const before = `aws_key=${AWS_KEY}\nname=a\n`;
     const r = modified('secrets.txt', before, `${before}name=b\n`);
-    expect(r).toEqual({ conclusion: 'success', findings: [] });
+    expect(r).toEqual({ conclusion: 'success', findings: [], complete: true });
   });
 
   it('ignores placeholders and low-entropy assignments', () => {
@@ -69,7 +69,7 @@ describe('guard: secrets', () => {
       'secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxx"',
       'api_key = "<your-api-key-goes-here-123>"',
     ].join('\n');
-    expect(added('README.md', `${text}\n`)).toEqual({ conclusion: 'success', findings: [] });
+    expect(added('README.md', `${text}\n`)).toEqual({ conclusion: 'success', findings: [], complete: true });
   });
 
   it('reports one finding per line even when several rules match it', () => {
@@ -99,7 +99,7 @@ describe('guard: CI gaming', () => {
   it('flags a package.json test script that cannot fail, but not `|| true` in ordinary source', () => {
     const pkg = (test: string) => `{\n  "scripts": {\n    "test": "${test}"\n  }\n}\n`;
     expect(rules(modified('package.json', pkg('vitest run'), pkg('vitest run || true')))).toEqual(['ci-gaming/or-true']);
-    expect(added('src/run.sh', 'rm -f out || true\nexit 0\n')).toEqual({ conclusion: 'success', findings: [] });
+    expect(added('src/run.sh', 'rm -f out || true\nexit 0\n')).toEqual({ conclusion: 'success', findings: [], complete: true });
   });
 
   it('does not flag lines that were already present', () => {
@@ -152,7 +152,7 @@ describe('guard: dependencies', () => {
 
   it('accepts popular packages, their known neighbours and unrelated new names', () => {
     const r = modified('package.json', pkg({}), pkg({ react: '^18.0.0', preact: '^10.0.0', zod: '^3.0.0', 'my-internal-tool': '^1.0.0' }));
-    expect(r).toEqual({ conclusion: 'success', findings: [] });
+    expect(r).toEqual({ conclusion: 'success', findings: [], complete: true });
   });
 
   it('typosquatOf measures transpositions and separator games', () => {
@@ -167,7 +167,7 @@ describe('guard: dependencies', () => {
 
 describe('guard: shape and bounds', () => {
   it('a README-only edit is a clean success', () => {
-    expect(modified('README.md', '# App\n', '# App\n\nNow with more words.\n')).toEqual({ conclusion: 'success', findings: [] });
+    expect(modified('README.md', '# App\n', '# App\n\nNow with more words.\n')).toEqual({ conclusion: 'success', findings: [], complete: true });
   });
 
   it('wants contents only for text it scans', () => {
@@ -216,5 +216,85 @@ describe('guard: shape and bounds', () => {
       { line: 1, text: 'x' },
       { line: 2, text: 'y' },
     ]);
+  });
+});
+
+describe('guard completeness', () => {
+  it('guard completeness: a fully scanned change is complete and lists nothing uninspected', () => {
+    const r = added('README.md', 'hello\n');
+    expect(r.complete).toBe(true);
+    expect(r.uninspected).toBeUndefined();
+  });
+
+  it('guard completeness: an oversized file scanned only up to its prefix is incomplete (prefix-only)', () => {
+    const r = run([{ path: 'big.txt', status: 'added' }], { 'big.txt': { new: 'hello\n', truncated: true } });
+    expect(r.conclusion).toBe('neutral');
+    expect(r.complete).toBe(false);
+    expect(r.uninspected).toEqual({ count: 1, listTruncated: false, paths: [{ path: 'big.txt', reason: 'prefix-only' }] });
+  });
+
+  it('guard completeness: an unreadable blob or a missing read is incomplete (unavailable)', () => {
+    const r = run(
+      [
+        { path: 'gone.txt', status: 'modified' },
+        { path: 'never-read.txt', status: 'added' },
+      ],
+      { 'gone.txt': { unavailable: true } },
+    );
+    expect(r.complete).toBe(false);
+    expect(r.uninspected).toEqual({
+      count: 2,
+      listTruncated: false,
+      paths: [
+        { path: 'gone.txt', reason: 'unavailable' },
+        { path: 'never-read.txt', reason: 'unavailable' },
+      ],
+    });
+  });
+
+  it('guard completeness: files beyond the per-change file budget are incomplete (over-file-budget) and the list is bounded', () => {
+    const n = GUARD_LIMITS.maxUninspectedPaths + 5;
+    const changes: GuardChange[] = Array.from({ length: n + 1 }, (_, i) => ({ path: `f${String(i).padStart(3, '0')}.txt`, status: 'added' as const }));
+    const contents: Record<string, GuardContent> = { 'f000.txt': { new: 'ok\n' } };
+    for (const c of changes.slice(1)) contents[c.path] = { unavailable: true, overFileBudget: true };
+    const r = run(changes, contents);
+    expect(r.conclusion).toBe('neutral');
+    expect(r.complete).toBe(false);
+    expect(r.uninspected!.count).toBe(n);
+    expect(r.uninspected!.paths).toHaveLength(GUARD_LIMITS.maxUninspectedPaths);
+    expect(r.uninspected!.paths[0]).toEqual({ path: 'f001.txt', reason: 'over-file-budget' });
+  });
+
+  it('guard completeness: a truncated change list is incomplete even when every listed file was scanned', () => {
+    const r = guard([{ path: 'a.txt', status: 'added' }], new Map([['a.txt', { new: 'ok\n' }]]), { listTruncated: true });
+    expect(r.conclusion).toBe('neutral');
+    expect(r.complete).toBe(false);
+    expect(r.uninspected).toEqual({ count: 0, listTruncated: true, paths: [] });
+  });
+
+  it('guard completeness: a change with only advisory neutral findings stays complete', () => {
+    const pkg = (extra: Record<string, string>) => JSON.stringify({ name: 'app', dependencies: { express: '^4.0.0', ...extra } }, null, 2) + '\n';
+    const r = modified('package.json', pkg({}), pkg({ mylib: 'github:someone/mylib' }));
+    expect(r.conclusion).toBe('neutral');
+    expect(rules(r)).toEqual(['dependency/non-registry']);
+    expect(r.complete).toBe(true);
+    expect(r.uninspected).toBeUndefined();
+  });
+
+  it('guard completeness: an added line cut at the per-line scan limit makes the file incomplete (line-prefix)', () => {
+    const long = 'x'.repeat(GUARD_LIMITS.maxLineChars + 100) + ` token=${KVARM_PAT}`;
+    const r = added('bundle.js', `${long}\nshort\n`);
+    expect(r.conclusion).toBe('neutral');
+    expect(r.complete).toBe(false);
+    expect(r.uninspected).toEqual({ count: 1, listTruncated: false, paths: [{ path: 'bundle.js', reason: 'line-prefix' }] });
+    const exact = added('edge.js', 'y'.repeat(GUARD_LIMITS.maxLineChars) + '\n');
+    expect(exact.complete).toBe(true);
+  });
+
+  it('guard completeness: a failure on a partially scanned change still reports what went uninspected', () => {
+    const r = run([{ path: 'big.txt', status: 'added' }], { 'big.txt': { new: `aws=${AWS_KEY}\n`, truncated: true } });
+    expect(r.conclusion).toBe('failure');
+    expect(r.complete).toBe(false);
+    expect(r.uninspected!.paths).toEqual([{ path: 'big.txt', reason: 'prefix-only' }]);
   });
 });

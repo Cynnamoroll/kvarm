@@ -11,8 +11,10 @@
  * Protected refs move only through the platform's publication path, which
  * must satisfy the union of the matching rules' `requiredChecks` and the
  * largest `requiredApprovals` (distinct human approvals of the current head,
- * never the change author's). Refs that match no rule keep the ordinary
- * push workflow unchanged.
+ * never the change author's), and, when any matching rule sets
+ * `guardCompleteness: 'required'`, a kvarm/guard verdict that inspected
+ * every changed file (architecture §0.3). Refs that match no rule keep the
+ * ordinary push workflow unchanged.
  *
  * Rules are managed by repo admins through the shared policy; every change
  * appends an `events` audit row in the same batch.
@@ -28,6 +30,10 @@ export const REQUIRED_CHECKS_MAX = 32;
 export const CHECK_NAME_MAX = 100;
 export const REQUIRED_APPROVALS_MAX = 10;
 
+/** `advisory`: an incomplete guard is reported only. `required`: it blocks publication like a failure. */
+export const GUARD_COMPLETENESS = ['advisory', 'required'] as const;
+export type GuardCompleteness = (typeof GUARD_COMPLETENESS)[number];
+
 export const PROTECTED_REF_REASON = 'protected branch: direct pushes are not allowed';
 export const RESERVED_REF_REASON = 'platform-reserved branch: direct pushes are not allowed';
 export const INVALID_REF_REASON = 'invalid ref name';
@@ -39,6 +45,7 @@ export interface BranchRule {
   pattern: string;
   requiredChecks: string[];
   requiredApprovals: number;
+  guardCompleteness: GuardCompleteness;
   createdBy: string | null;
   createdAt: number;
   updatedBy: string | null;
@@ -50,6 +57,8 @@ export interface BranchRuleRow {
   pattern: string;
   required_checks: string;
   required_approvals: number;
+  /** Migration 0023; read through BRANCH_RULE_COLUMNS. */
+  guard_completeness: string | null;
   created_by_login?: string | null;
   created_at: number;
   updated_by_login?: string | null;
@@ -62,6 +71,7 @@ export interface BranchPolicy {
   directPush: 'allowed' | 'denied';
   requiredChecks: string[];
   requiredApprovals: number;
+  guardCompleteness: GuardCompleteness;
   rules: string[];
 }
 
@@ -107,6 +117,10 @@ export function parseRequiredApprovals(input: unknown): number | null {
   return input >= 0 && input <= REQUIRED_APPROVALS_MAX ? input : null;
 }
 
+export function parseGuardCompleteness(input: unknown): GuardCompleteness | null {
+  return typeof input === 'string' && (GUARD_COMPLETENESS as readonly string[]).includes(input) ? (input as GuardCompleteness) : null;
+}
+
 function parseStoredChecks(json: string): string[] {
   try {
     const parsed: unknown = JSON.parse(json);
@@ -122,6 +136,8 @@ export function ruleFromRow(row: BranchRuleRow): BranchRule {
     pattern: row.pattern,
     requiredChecks: parseStoredChecks(row.required_checks),
     requiredApprovals: Number(row.required_approvals) || 0,
+    // Fails closed: a statement that forgot the column must not relax a required rule.
+    guardCompleteness: row.guard_completeness === 'advisory' ? 'advisory' : 'required',
     createdBy: row.created_by_login ?? null,
     createdAt: row.created_at,
     updatedBy: row.updated_by_login ?? null,
@@ -142,9 +158,11 @@ export function effectivePolicy(rules: readonly BranchRule[], ref: string): Bran
   const matched = matchingRules(rules, ref);
   const checks = new Set<string>();
   let approvals = 0;
+  let completeness: GuardCompleteness = 'advisory';
   for (const r of matched) {
     for (const c of r.requiredChecks) checks.add(c);
     approvals = Math.max(approvals, r.requiredApprovals);
+    if (r.guardCompleteness === 'required') completeness = 'required';
   }
   return {
     ref,
@@ -152,6 +170,7 @@ export function effectivePolicy(rules: readonly BranchRule[], ref: string): Bran
     directPush: matched.length > 0 ? 'denied' : 'allowed',
     requiredChecks: [...checks].sort(),
     requiredApprovals: approvals,
+    guardCompleteness: completeness,
     rules: matched.map((r) => r.id),
   };
 }
@@ -177,7 +196,14 @@ export function directHumanPushDenial(rules: readonly BranchRule[], ref: string)
 // Storage
 // ---------------------------------------------------------------------------
 
-const RULE_SELECT = `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at,
+/**
+ * The columns ruleFromRow reads, for every statement that loads rules to
+ * judge a publication: a select that omitted guard_completeness would
+ * silently relax a `required` rule to advisory.
+ */
+export const BRANCH_RULE_COLUMNS = 'b.id, b.pattern, b.required_checks, b.required_approvals, b.guard_completeness, b.created_at, b.updated_at';
+
+const RULE_SELECT = `SELECT ${BRANCH_RULE_COLUMNS},
        cu.login AS created_by_login, uu.login AS updated_by_login
   FROM branch_rules b LEFT JOIN users cu ON cu.id = b.created_by LEFT JOIN users uu ON uu.id = b.updated_by`;
 
@@ -188,7 +214,7 @@ const RULE_SELECT = `SELECT b.id, b.pattern, b.required_checks, b.required_appro
 export function branchRulesSelect(db: D1Database, owner: string, name: string): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+      `SELECT ${BRANCH_RULE_COLUMNS}
          FROM branch_rules b JOIN repos r ON r.id = b.repo_id
         WHERE r.owner_login = ?1 AND r.name = ?2
         LIMIT ${BRANCH_RULES_MAX}`,
@@ -200,7 +226,7 @@ export function branchRulesSelect(db: D1Database, owner: string, name: string): 
 export function repoBranchRulesSelect(db: D1Database, repoId: string): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+      `SELECT ${BRANCH_RULE_COLUMNS}
          FROM branch_rules b WHERE b.repo_id = ? LIMIT ${BRANCH_RULES_MAX}`,
     )
     .bind(repoId);
@@ -227,24 +253,30 @@ function auditRule(db: D1Database, type: string, ruleId: string, repo: RepoRow, 
       `INSERT INTO events (id, type, payload, processed_at, created_at)
        SELECT ?1, ?2, json_object('repoId', b.repo_id, 'repo', ?5, 'ruleId', b.id, 'pattern', b.pattern,
                                   'requiredChecks', json(b.required_checks),
-                                  'requiredApprovals', b.required_approvals, 'actor', ?6),
+                                  'requiredApprovals', b.required_approvals,
+                                  'guardCompleteness', b.guard_completeness, 'actor', ?6),
               ?7, ?7
          FROM branch_rules b WHERE b.id = ?3 AND b.repo_id = ?4`,
     )
     .bind(crypto.randomUUID(), type, ruleId, repo.id, `${repo.owner_login}/${repo.name}`, actor.user.login, now);
 }
 
-export interface RuleInput {
-  pattern: unknown;
+export interface RuleSettingsInput {
   requiredChecks?: unknown;
   requiredApprovals?: unknown;
+  guardCompleteness?: unknown;
+}
+
+export interface RuleInput extends RuleSettingsInput {
+  pattern: unknown;
 }
 
 function validateSettings(
-  input: { requiredChecks?: unknown; requiredApprovals?: unknown },
-): ServiceResult<{ checks: string[] | undefined; approvals: number | undefined }> {
+  input: RuleSettingsInput,
+): ServiceResult<{ checks: string[] | undefined; approvals: number | undefined; completeness: GuardCompleteness | undefined }> {
   let checks: string[] | undefined;
   let approvals: number | undefined;
+  let completeness: GuardCompleteness | undefined;
   if (input.requiredChecks !== undefined) {
     const parsed = parseRequiredChecks(input.requiredChecks);
     if (!parsed) {
@@ -263,7 +295,12 @@ function validateSettings(
     }
     approvals = parsed;
   }
-  return { ok: true, value: { checks, approvals } };
+  if (input.guardCompleteness !== undefined) {
+    const parsed = parseGuardCompleteness(input.guardCompleteness);
+    if (!parsed) return fail(400, `guardCompleteness must be one of ${GUARD_COMPLETENESS.join(', ')}`, 'INVALID_GUARD_COMPLETENESS');
+    completeness = parsed;
+  }
+  return { ok: true, value: { checks, approvals, completeness } };
 }
 
 export async function createRule(
@@ -286,9 +323,9 @@ export async function createRule(
   const now = Date.now();
   const results = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals,
+      `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals, guard_completeness,
                                  created_by, created_at, updated_by, updated_at)
-       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?7
+       SELECT ?1, ?2, ?3, ?4, ?5, ?9, ?6, ?7, ?6, ?7
         WHERE (SELECT COUNT(*) FROM branch_rules WHERE repo_id = ?2) < ?8
        ON CONFLICT (repo_id, pattern) DO NOTHING`,
     ).bind(
@@ -300,6 +337,7 @@ export async function createRule(
       actor.user.id,
       now,
       BRANCH_RULES_MAX,
+      settings.value.completeness ?? 'advisory',
     ),
     auditRule(env.DB, 'branch_rule.created', id, repo, actor, now),
     env.DB.prepare(`${RULE_SELECT} WHERE b.id = ?`).bind(id),
@@ -319,20 +357,21 @@ export async function updateRule(
   repo: RepoRow,
   actor: Actor,
   id: string,
-  input: { requiredChecks?: unknown; requiredApprovals?: unknown },
+  input: RuleSettingsInput,
 ): Promise<ServiceResult<BranchRule>> {
   const settings = validateSettings(input);
   if (!settings.ok) return settings;
-  const { checks, approvals } = settings.value;
+  const { checks, approvals, completeness } = settings.value;
   const now = Date.now();
   const results = await env.DB.batch([
     env.DB.prepare(
       `UPDATE branch_rules
           SET required_checks = COALESCE(?3, required_checks),
               required_approvals = COALESCE(?4, required_approvals),
+              guard_completeness = COALESCE(?7, guard_completeness),
               updated_by = ?5, updated_at = ?6
         WHERE id = ?1 AND repo_id = ?2`,
-    ).bind(id, repo.id, checks === undefined ? null : JSON.stringify(checks), approvals ?? null, actor.user.id, now),
+    ).bind(id, repo.id, checks === undefined ? null : JSON.stringify(checks), approvals ?? null, actor.user.id, now, completeness ?? null),
     auditRule(env.DB, 'branch_rule.updated', id, repo, actor, now),
     env.DB.prepare(`${RULE_SELECT} WHERE b.id = ? AND b.repo_id = ?`).bind(id, repo.id),
   ]);
