@@ -23,7 +23,11 @@ import { resolveCommitish, type ResolveContext } from './refs';
 
 export const GUARD_CHECK = 'kvarm/guard';
 export const CHECKS_WINDOW_CHECK = 'kvarm/checks-window';
-export const GUARD_VERSION = 'guard/v1';
+/**
+ * v2: an added line cut at the per-line scan limit makes the scan
+ * incomplete (neutral, `line-prefix`) where v1 could conclude success.
+ */
+export const GUARD_VERSION = 'guard/v2';
 const PRODUCER = 'check-runs';
 
 export const GUARD_BUDGETS = {
@@ -248,8 +252,8 @@ export function guardTitle(r: GuardResult): string {
     return `incomplete: ${uninspectedPhrase(r.uninspected)}; the guard cannot vouch for content it did not read (${r.conclusion})`;
   }
   if (r.conclusion === 'failure') return `failed: ${counted} finding(s)`;
-  if (r.conclusion === 'neutral') return `neutral: ${counted} advisory finding(s); every changed file was inspected`;
-  return 'passed: every changed file was inspected and nothing was found';
+  if (r.conclusion === 'neutral') return `neutral: ${counted} advisory finding(s); every changed text file the guard covers was read in full`;
+  return 'passed: every changed text file the guard covers was read in full and nothing was found';
 }
 
 /**
@@ -342,18 +346,10 @@ interface Pending {
   reject(err: unknown): void;
 }
 
-function guardSummaryOf(row: GateRow): { baseTree?: unknown } | null {
-  if (row.summary === null) return null;
-  try {
-    const parsed = JSON.parse(row.summary) as unknown;
-    return parsed && typeof parsed === 'object' ? (parsed as { baseTree?: unknown }) : null;
-  } catch {
-    return null;
-  }
-}
-
-function guardAnswer(row: GateRow): Omit<RequiredCheck, 'producer'> {
-  const summary = guardSummaryOf(row);
+/** The gate's kvarm/guard entry for a recorded run, or pending when it judged another merge-base tree. */
+function guardAnswer(row: GateRow, guardBaseTree: string): Omit<RequiredCheck, 'producer'> {
+  const summary = parseSummary(row.summary);
+  if ((summary as { baseTree?: unknown } | null)?.baseTree !== guardBaseTree) return { name: GUARD_CHECK, state: 'pending' };
   const missing = guardIncompleteness(summary);
   return { name: GUARD_CHECK, state: stateOf(row.status), runId: row.id, ...(missing ? { incomplete: true as const, uninspected: missing.uninspected } : {}) };
 }
@@ -369,9 +365,7 @@ function answer(
   for (const r of treeRows) if (r.name !== GUARD_CHECK && !newest.has(r.name)) newest.set(r.name, r);
   const out: Array<Omit<RequiredCheck, 'producer'>> = [...newest.values()].map((r) => ({ name: r.name, state: stateOf(r.status), runId: r.id }));
   const guard = subject ? guardRows[0] : undefined;
-  out.push(
-    guard && guardSummaryOf(guard)?.baseTree === subject!.guardBaseTree ? guardAnswer(guard) : { name: GUARD_CHECK, state: 'pending' },
-  );
+  out.push(guard ? guardAnswer(guard, subject!.guardBaseTree) : { name: GUARD_CHECK, state: 'pending' });
   if (treeWindowFull) out.push({ name: CHECKS_WINDOW_CHECK, state: 'pending' });
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
@@ -451,9 +445,9 @@ export interface CommitStatus {
   total: number;
   checks: CheckRunView[];
   /**
-   * Names of checks whose newest run passed without inspecting everything
-   * (kvarm/guard past its read budgets): `state` alone does not prove
-   * those runs saw all of the content.
+   * Names of checks whose newest run did not inspect everything it covers
+   * (kvarm/guard past its read budgets), whatever its conclusion: a
+   * success in `state` does not prove those runs saw all of the content.
    */
   incomplete: string[];
 }

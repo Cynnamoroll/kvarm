@@ -13,7 +13,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import worker from '../src/index';
-import { effectivePolicy, type BranchRule } from '../src/services/branchRules';
+import { effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from '../src/services/branchRules';
+import { branchPolicyBlock } from '../src/services/changes';
 import { GUARD_BUDGETS } from '../src/services/checks';
 import { defaultTrainDeps, runTrain } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
@@ -155,7 +156,7 @@ describe('guard completeness: the check shows what it did not inspect', () => {
     const run = (await call('GET', `${R('gc-surface')}/changes/1/checks`, tok.owner)).json.checks[0];
     expect(run).toMatchObject({ name: 'kvarm/guard', status: 'success', conclusion: 'neutral' });
     expect(run.summary).toMatchObject({
-      version: 'guard/v1',
+      version: 'guard/v2',
       complete: false,
       uninspected: { count: 1, listTruncated: false, paths: [{ path: 'big.txt', reason: 'prefix-only' }] },
     });
@@ -223,6 +224,33 @@ describe('guard completeness: branch rules', () => {
     expect(effectivePolicy(rules, 'refs/heads/main').guardCompleteness).toBe('required');
     expect(effectivePolicy([rules[0]!], 'refs/heads/main').guardCompleteness).toBe('advisory');
     expect(effectivePolicy(rules, 'refs/tags/v1').guardCompleteness).toBe('advisory');
+  });
+
+  it('guard completeness: a rule row read without the column fails closed to required', () => {
+    const row = { id: 'r', pattern: 'refs/heads/main', required_checks: '[]', required_approvals: 0, created_at: 0, updated_at: 0 } as unknown as BranchRuleRow;
+    expect(ruleFromRow(row).guardCompleteness).toBe('required');
+    expect(ruleFromRow({ ...row, guard_completeness: 'advisory' }).guardCompleteness).toBe('advisory');
+  });
+
+  it('guard completeness: the refusal comes before pending required checks and names an unknown count plainly', () => {
+    const policy = effectivePolicy(
+      [{ id: 'r', pattern: 'refs/heads/main', requiredChecks: ['ci/test'], requiredApprovals: 0, guardCompleteness: 'required', createdBy: null, createdAt: 0, updatedBy: null, updatedAt: 0 }],
+      MAIN,
+    );
+    const checks = {
+      treeSha: 't',
+      configId: null,
+      state: 'pending' as const,
+      required: [
+        { name: 'ci/test', state: 'pending' as const, producer: 'ci' },
+        { name: 'kvarm/guard', state: 'success' as const, producer: 'check-runs', incomplete: true as const, uninspected: 0 },
+      ],
+    };
+    const block = branchPolicyBlock(policy, checks);
+    expect(block?.code).toBe('GUARD_INCOMPLETE');
+    expect(block?.error).toContain('part of the change was not fully inspected');
+    const advisory = branchPolicyBlock({ ...policy, guardCompleteness: 'advisory' }, checks);
+    expect(advisory?.code).toBe('REQUIRED_CHECKS_PENDING');
   });
 
   it('guard completeness: incomplete guard + advisory rule merges', async () => {

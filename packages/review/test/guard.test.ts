@@ -281,6 +281,16 @@ describe('guard completeness', () => {
     expect(r.uninspected).toBeUndefined();
   });
 
+  it('guard completeness: an added line cut at the per-line scan limit makes the file incomplete (line-prefix)', () => {
+    const long = 'x'.repeat(GUARD_LIMITS.maxLineChars + 100) + ` token=${KVARM_PAT}`;
+    const r = added('bundle.js', `${long}\nshort\n`);
+    expect(r.conclusion).toBe('neutral');
+    expect(r.complete).toBe(false);
+    expect(r.uninspected).toEqual({ count: 1, listTruncated: false, paths: [{ path: 'bundle.js', reason: 'line-prefix' }] });
+    const exact = added('edge.js', 'y'.repeat(GUARD_LIMITS.maxLineChars) + '\n');
+    expect(exact.complete).toBe(true);
+  });
+
   it('guard completeness: a failure on a partially scanned change still reports what went uninspected', () => {
     const r = run([{ path: 'big.txt', status: 'added' }], { 'big.txt': { new: `aws=${AWS_KEY}\n`, truncated: true } });
     expect(r.conclusion).toBe('failure');

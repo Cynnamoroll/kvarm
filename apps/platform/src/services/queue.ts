@@ -939,7 +939,7 @@ function enqueuerAuthor(e: EntryRow): { name: string; email: string } | undefine
 }
 
 /** Ejections that stick to the exact head (pins on it break; see ejectedSourceStatement). */
-const EJECTS_PINS: ReadonlySet<string> = new Set(['MERGE_CONFLICT', 'CHECKS_FAILED']);
+const EJECTS_PINS: ReadonlySet<string> = new Set(['MERGE_CONFLICT', 'CHECKS_FAILED', 'GUARD_INCOMPLETE']);
 
 const EXIT_STATES: Partial<Record<string, 'ejected' | 'stale'>> = {
   ALREADY_MERGED: 'stale',

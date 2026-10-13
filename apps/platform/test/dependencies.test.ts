@@ -1926,18 +1926,47 @@ describe('integration train', () => {
     for (const [name, cause] of [
       ['eject-conflict', 'MERGE_CONFLICT'],
       ['eject-checks', 'CHECKS_FAILED'],
+      ['eject-guard', 'GUARD_INCOMPLETE'],
     ] as const) {
       const { main } = await seedRepo(name);
+      if (cause === 'GUARD_INCOMPLETE') {
+        // A rule requiring a complete guard; dep-writer approves so the protected ref's review gate holds.
+        const now = Date.now();
+        await env.DB.batch([
+          env.DB.prepare(
+            `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals, guard_completeness, created_by, created_at, updated_by, updated_at)
+             VALUES (?, ?, 'refs/heads/main', '[]', 0, 'required', ?, ?, ?, ?)`,
+          ).bind(crypto.randomUUID(), repoIds[name], userIds[OWNER], now, userIds[OWNER], now),
+          env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(
+            repoIds[name],
+            userIds['dep-writer'],
+            'write',
+            userIds[OWNER],
+            now,
+            now,
+          ),
+        ]);
+      }
       const a = await workspace(name, 'a.txt', { change: 'review' });
       const b = await workspace(name, 'b.txt', { change: 'review' });
       const other = await workspace(name, 'o.txt', { change: 'review' });
       const c = await workspace(name, 'c.txt');
       const edge = (await pin(name, b.id, a.id, a.head)).json;
       const unrelated = (await pin(name, c.id, other.id, other.head)).json;
+      if (cause === 'GUARD_INCOMPLETE') {
+        for (const n of [a.change!, b.change!]) expect((await call('POST', api(name, `/changes/${n}/approve`), tok.writer, {})).status).toBe(201);
+      }
       for (const n of [a.change!, b.change!]) expect((await enqueue(name, n)).status).toBe(201);
       let deps = trainDeps();
       if (cause === 'MERGE_CONFLICT') await push(name, MAIN, { 'README.md': 'readme\n', 'a.txt': 'main a\n' }, [main]);
-      else deps = trainDeps({ gate: () => scriptedGate('failure').gate });
+      else if (cause === 'GUARD_INCOMPLETE') {
+        const gate: ChecksGate = {
+          async requiredChecksFor(_repo, treeSha, configId) {
+            return { treeSha, configId, required: [{ name: 'kvarm/guard', state: 'success', producer: 'test', incomplete: true, uninspected: 1 }], state: 'success' };
+          },
+        };
+        deps = trainDeps({ gate: () => gate });
+      } else deps = trainDeps({ gate: () => scriptedGate('failure').gate });
       const run = await runTrain(env, repoIds[name]!, MAIN, deps);
       expect(run.ejected, name).toEqual([{ number: a.change, code: cause }]);
       expect(run.published, name).toEqual([]);

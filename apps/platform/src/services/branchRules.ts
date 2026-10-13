@@ -57,8 +57,8 @@ export interface BranchRuleRow {
   pattern: string;
   required_checks: string;
   required_approvals: number;
-  /** Absent from rows read before migration 0023's column was selected: advisory. */
-  guard_completeness?: string | null;
+  /** Migration 0023; read through BRANCH_RULE_COLUMNS. */
+  guard_completeness: string | null;
   created_by_login?: string | null;
   created_at: number;
   updated_by_login?: string | null;
@@ -136,7 +136,8 @@ export function ruleFromRow(row: BranchRuleRow): BranchRule {
     pattern: row.pattern,
     requiredChecks: parseStoredChecks(row.required_checks),
     requiredApprovals: Number(row.required_approvals) || 0,
-    guardCompleteness: row.guard_completeness === 'required' ? 'required' : 'advisory',
+    // Fails closed: a statement that forgot the column must not relax a required rule.
+    guardCompleteness: row.guard_completeness === 'advisory' ? 'advisory' : 'required',
     createdBy: row.created_by_login ?? null,
     createdAt: row.created_at,
     updatedBy: row.updated_by_login ?? null,

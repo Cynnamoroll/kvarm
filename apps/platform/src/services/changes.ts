@@ -947,14 +947,28 @@ export function memoGate(inner: ChecksGate): ChecksGate {
 }
 
 /**
- * Required checks of the target ref's branch rules that the checks-gate
- * answer does not satisfy, then the rules' guard completeness: under
+ * The rules' guard completeness, then the required checks of the target
+ * ref's branch rules that the checks-gate answer does not satisfy. Under
  * `required` a passing kvarm/guard that did not inspect every changed file
  * is refused (GUARD_INCOMPLETE, terminal for that head: the same head is
  * judged the same way again). Approvals are the review gate's
  * (services/reviewGate.ts).
  */
 export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks): Fail | null {
+  // Before the required checks: completeness is fixed for the head, so a queue entry need not hold a checking slot for it.
+  if (policy.guardCompleteness === 'required') {
+    const guard = checks.required.find((c) => c.name === GUARD_CHECK);
+    if (guard?.state === 'success' && guard.incomplete) {
+      const what = guard.uninspected ? `${guard.uninspected} changed file(s) were` : 'part of the change was';
+      return fail(
+        409,
+        `${policy.ref} requires a complete ${GUARD_CHECK} inspection; ${what} not fully inspected ` +
+          '(over the file budget, past the per-file or per-line read limit, unreadable, or beyond a truncated change list); split the change so the guard can read all of it',
+        'GUARD_INCOMPLETE',
+        { checks },
+      );
+    }
+  }
   for (const name of policy.requiredChecks) {
     const found = checks.required.find((c) => c.name === name);
     if (found?.state === 'failure') {
@@ -962,18 +976,6 @@ export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks):
     }
     if (found?.state !== 'success') {
       return fail(409, `required check ${name} has not passed on the merge result`, 'REQUIRED_CHECKS_PENDING', { checks });
-    }
-  }
-  if (policy.guardCompleteness === 'required') {
-    const guard = checks.required.find((c) => c.name === GUARD_CHECK);
-    if (guard?.state === 'success' && guard.incomplete) {
-      return fail(
-        409,
-        `${policy.ref} requires a complete ${GUARD_CHECK} inspection; ${guard.uninspected ?? 0} changed file(s) were not fully inspected ` +
-          '(over the file budget, past the per-file read prefix, unreadable, or beyond a truncated change list); split the change so the guard can read all of it',
-        'GUARD_INCOMPLETE',
-        { checks },
-      );
     }
   }
   return null;

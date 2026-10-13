@@ -55,7 +55,7 @@ export interface GuardFinding {
 }
 
 /** Why a changed path was not fully inspected. */
-export type GuardUninspectedReason = 'over-file-budget' | 'prefix-only' | 'unavailable';
+export type GuardUninspectedReason = 'over-file-budget' | 'prefix-only' | 'line-prefix' | 'unavailable';
 
 export interface GuardUninspected {
   /** Changed paths not fully inspected (the listed ones only; see listTruncated). */
@@ -97,16 +97,20 @@ function splitLines(text: string): string[] {
 
 /**
  * Lines of `newText` not matched by a line of `oldText`, compared as a
- * multiset (order-insensitive), numbered from 1 on the new side.
+ * multiset (order-insensitive), numbered from 1 on the new side. Lines are
+ * cut at GUARD_LIMITS.maxLineChars; `cut.lines` counts the cut ones.
  */
-export function addedLines(oldText: string | null | undefined, newText: string): Array<{ line: number; text: string }> {
+export function addedLines(oldText: string | null | undefined, newText: string, cut?: { lines: number }): Array<{ line: number; text: string }> {
   const remaining = new Map<string, number>();
   for (const l of oldText ? splitLines(oldText) : []) remaining.set(l, (remaining.get(l) ?? 0) + 1);
   const out: Array<{ line: number; text: string }> = [];
   splitLines(newText).forEach((text, i) => {
     const n = remaining.get(text) ?? 0;
     if (n > 0) remaining.set(text, n - 1);
-    else out.push({ line: i + 1, text: text.length > GUARD_LIMITS.maxLineChars ? text.slice(0, GUARD_LIMITS.maxLineChars) : text });
+    else if (text.length > GUARD_LIMITS.maxLineChars) {
+      if (cut) cut.lines++;
+      out.push({ line: i + 1, text: text.slice(0, GUARD_LIMITS.maxLineChars) });
+    } else out.push({ line: i + 1, text });
   });
   return out;
 }
@@ -305,10 +309,12 @@ class Findings {
   }
 }
 
-function scanText(c: GuardChange, content: GuardContent, out: Findings): void {
+/** Scans one file's added text; returns how many added lines were cut at the per-line limit. */
+function scanText(c: GuardChange, content: GuardContent, out: Findings): number {
   const newText = content.new ?? '';
   const oldText = content.old ?? null;
-  const added = addedLines(oldText, newText);
+  const cut = { lines: 0 };
+  const added = addedLines(oldText, newText, cut);
   const gaming = gamingScope(c.path);
   for (const { line, text } of added) {
     const secret = secretOn(text);
@@ -377,6 +383,7 @@ function scanText(c: GuardChange, content: GuardContent, out: Findings): void {
       }
     }
   }
+  return cut.lines;
 }
 
 /**
@@ -387,6 +394,7 @@ export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<str
   const out = new Findings();
   const unscanned: string[] = [];
   const partial: string[] = [];
+  const longLines: string[] = [];
   const uninspected: GuardUninspected = { count: 0, listTruncated: opts.listTruncated === true, paths: [] };
   const skip = (path: string, reason: GuardUninspectedReason) => {
     uninspected.count++;
@@ -409,11 +417,14 @@ export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<str
       skip(c.path, content?.overFileBudget ? 'over-file-budget' : 'unavailable');
       continue;
     }
+    const cutLines = scanText(c, content, out);
     if (content.truncated) {
       partial.push(c.path);
       skip(c.path, 'prefix-only');
+    } else if (cutLines > 0) {
+      longLines.push(c.path);
+      skip(c.path, 'line-prefix');
     }
-    scanText(c, content, out);
   }
   if (partial.length > 0) {
     out.add({
@@ -421,6 +432,14 @@ export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<str
       severity: 'neutral',
       path: partial[0]!,
       message: `${partial.length} changed file(s) were scanned only up to the guard's per-file read budget`,
+    });
+  }
+  if (longLines.length > 0) {
+    out.add({
+      rule: 'guard/incomplete',
+      severity: 'neutral',
+      path: longLines[0]!,
+      message: `${longLines.length} changed file(s) have added lines longer than ${GUARD_LIMITS.maxLineChars} characters that were scanned only up to that length`,
     });
   }
   if (unscanned.length > 0) {
