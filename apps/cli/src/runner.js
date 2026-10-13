@@ -556,9 +556,19 @@ export async function runRunner(options) {
             if (attempt < 2) await sleep(250 * 2 ** attempt);
           }
         }
-        if (reportError) throw reportError;
-        reported++;
-        options.stdout(`reported ${reportBody.conclusion} for ${job.name} (${job.id}) in ${Date.now() - claimedAt} ms`);
+        if (reportError) {
+          // The work already ran, so nothing can improve this job's outcome:
+          // a fenced report (409 STALE_GENERATION, 404 CI_JOB_NOT_FOUND)
+          // means the lease expired and the platform requeues the job itself,
+          // and an unreachable platform does the same once the lease runs
+          // out. The daemon keeps claiming instead of dying with one job.
+          options.stderr(
+            `warning: could not report ${job.name} (${job.id}) after 3 attempts: ${reportError instanceof Error ? reportError.message : String(reportError)}; the platform requeues the job when the lease expires`,
+          );
+        } else {
+          reported++;
+          options.stdout(`reported ${reportBody.conclusion} for ${job.name} (${job.id}) in ${Date.now() - claimedAt} ms`);
+        }
       } finally {
         if (heartbeat) clearInterval(heartbeat);
       }

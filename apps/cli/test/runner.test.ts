@@ -623,6 +623,61 @@ describe('kvarm runner', () => {
     expect(claimRetryMs(null, 12)).toBe(60_000);
   });
 
+  it('keeps claiming after a fenced-away report (409 STALE_GENERATION) instead of dying with it', async () => {
+    vi.useFakeTimers();
+    try {
+      let reports = 0;
+      const claims: string[] = [];
+      let jobClaimed = false;
+      const stderr: string[] = [];
+      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (path.endsWith('/claim')) {
+          if (!jobClaimed) {
+            jobClaimed = true;
+            claims.push('job');
+            return Response.json({ job: { id: 'job-x', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 5, timeoutSeconds: 30 } });
+          }
+          claims.push('after-report');
+          return Response.json({ error: 'unauthorized' }, { status: 401 });
+        }
+        if (path.endsWith('/report')) {
+          reports++;
+          return Response.json({ error: 'the CI job claim is stale', code: 'STALE_GENERATION' }, { status: 409 });
+        }
+        return Response.json({});
+      };
+      const run = runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        apiFetch,
+        checkoutFn: async (o: any) => {
+          mkdirSync(o.dir, { recursive: true });
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+        stdout: () => {},
+        stderr: (l) => stderr.push(l),
+        tempRoot: root,
+        workRoot: join(root, 'report-fenced-work'),
+      });
+      const done = expect(run).rejects.toThrow(/unauthorized/);
+      // Three report attempts (250 ms and 500 ms between them), then the loop claims again.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await done;
+      expect(reports).toBe(3);
+      expect(claims).toEqual(['job', 'after-report']);
+      expect(stderr.filter((l) => l.startsWith('warning:'))).toEqual([
+        'warning: could not report build (job-x) after 3 attempts: ci/jobs/job-x/report: the CI job claim is stale (STALE_GENERATION); the platform requeues the job when the lease expires',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('materializes a warm job through the compare delta without a checkout and reports source delta', async () => {
     const a = 'a'.repeat(40);
     const b = 'b'.repeat(40);
