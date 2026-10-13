@@ -1,6 +1,6 @@
 # Cursor
 
-Status: verified with the Cursor agent CLI 2026.10.01 (`cursor-agent`, the agent bundled with Cursor 3.21) against a local Kvarm instance (`wrangler dev -c wrangler.dev.jsonc`) and an agent token: the `mcp.json` below, including `${env:KVARM_AGENT_TOKEN}` interpolation in `headers`, sends `Authorization: Bearer <token>`, and `cursor-agent mcp list-tools kvarm` lists the registry's tools. Older agent CLIs (2025.09 builds) do not send `headers` for URL servers at all and fall back to OAuth discovery, which Kvarm does not offer; update with Cursor's installer if you see `Invalid OAuth error response` or a 401. Fields marked *uncertain* were not exercised.
+Status: verified with the Cursor agent CLI 2026.10.01 (`cursor-agent`, the agent bundled with Cursor 3.21) against a local Kvarm instance (`wrangler dev -c wrangler.dev.jsonc`) and an agent token: the `mcp.json` below, including `${env:KVARM_AGENT_TOKEN}` interpolation in `headers`, sends `Authorization: Bearer <token>`, `cursor-agent mcp list-tools kvarm` lists the registry's tools, and the agent called `get_repo` and returned the repository. Older agent CLIs (2025.09 builds) do not send `headers` for URL servers at all and fall back to OAuth discovery, which Kvarm does not offer; update with Cursor's installer if you see `Invalid OAuth error response` or a 401. Fields marked *uncertain* were not exercised.
 
 ## Prerequisites
 
@@ -40,6 +40,7 @@ From a terminal in the project: `cursor-agent mcp list-tools kvarm` lists the to
 ## Troubleshooting
 
 - `MCP server "kvarm" has not been approved`: approve it (see Configure); editing the entry requires approving it again.
+- `Tool rejected: User rejected MCP: kvarm-…`: Cursor asks before each tool call; accept it in the chat. A non-interactive `cursor-agent -p` run needs `--force` (or a matching allow rule) to run tools.
 - `Invalid OAuth error response` or a 401 with a fresh token: your agent CLI predates header support for URL servers; update it.
 - Red status or "no tools": toggle the server off and on after fixing the file; Cursor reads the config on change but not the environment after launch.
 - 401: the token or variable is wrong, or the token expired or was revoked.
