@@ -162,10 +162,13 @@ describe('receive-pack client against git http-backend', () => {
     await updateRef(remote, { ref: 'refs/heads/side', oldOid: ZERO_OID, newOid: c0.commit.hash });
 
     const stale = await updateRef(remote, { ref: 'refs/heads/main', oldOid: c1.commit.hash, newOid: c0.commit.hash });
-    expect(stale).toMatchObject({ status: 'stale', httpStatus: 200, reason: 'incorrect old value provided' });
+    expect(stale).toMatchObject({ status: 'stale', httpStatus: 200 });
+    // Older git words the mismatch precisely; git 2.50 says only `failed to update ref`.
+    expect(stale.reason).toMatch(/^(incorrect old value provided|failed to update ref)$/);
 
     const createOnExisting = await updateRef(remote, { ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: c1.commit.hash }, await writePack(c1.objects));
-    expect(createOnExisting).toMatchObject({ status: 'stale', httpStatus: 200, reason: 'reference already exists' });
+    expect(createOnExisting).toMatchObject({ status: 'stale', httpStatus: 200 });
+    expect(createOnExisting.reason).toMatch(/^(reference already exists|failed to update ref)$/);
 
     const staleDelete = await updateRef(remote, { ref: 'refs/heads/side', oldOid: c1.commit.hash, newOid: ZERO_OID });
     expect(staleDelete).toMatchObject({ status: 'stale', httpStatus: 200 });
@@ -332,5 +335,11 @@ describe('isStaleRefReason', () => {
     for (const r of ['non-fast-forward', 'deny updating a hidden ref', 'pre-receive hook declined', 'atomic transaction aborted']) {
       expect(isStaleRefReason(r), r).toBe(false);
     }
+  });
+
+  it('treats git 2.50 `failed to update ref` as stale, but not look-alike reasons', () => {
+    expect(isStaleRefReason('failed to update ref')).toBe(true);
+    expect(isStaleRefReason('failed to update ref: other')).toBe(false);
+    expect(isStaleRefReason('failed to delete ref')).toBe(false);
   });
 });

@@ -98,9 +98,21 @@ const OID_RE = /^[0-9a-f]{40}$/;
  * Artifacts says `stale ref`; git says `incorrect old value provided`,
  * `reference already exists` (create over an existing ref) or reports a lock
  * failure.
+ *
+ * Newer git (observed on 2.50.1 Apple Git-155) reports every failed ref
+ * transaction from receive-pack as the bare `failed to update ref`; the
+ * specific cause (`cannot lock ref ...: is at X but expected Y`, `reference
+ * already exists`) only goes to the sideband error stream (receive-pack.c
+ * update(): rp_error("%s", err.buf); ret = "failed to update ref"). Measured
+ * against git http-backend, a stale old OID, a stale delete and a create over
+ * an existing ref (zero old OID) all produce it, so it cannot be limited to
+ * non-zero old OIDs. Other causes (D/F conflicts, I/O) share the string, but
+ * every command carries an expected old value, the reply to `stale` (re-read
+ * the ref, decide again) is safe for them too, and ref names are validated
+ * client-side before sending, which removes the common non-CAS cause.
  */
 export function isStaleRefReason(reason: string): boolean {
-  return /^(stale ref|incorrect old value provided|reference already exists|failed to lock|cannot lock ref)/.test(reason);
+  return /^(stale ref|incorrect old value provided|reference already exists|failed to lock|cannot lock ref|failed to update ref$)/.test(reason);
 }
 
 function fetchOf(remote: ReceivePackRemote): FetchLike {
