@@ -25,11 +25,12 @@
  * checks access.
  */
 
+import { mergeBase, type CommitReader } from '@kvarm/gitops';
 import { branchIssueNumber, checkFingerprint, issueRefsIn, normalizeFingerprint, type IssueRef } from '@kvarm/issues';
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import { changedPaths } from './compare';
-import { lsRefs, resolveCommitish, type ResolveContext } from './refs';
+import { lsRefs, readCommitInfo, resolveCommitish, type ResolveContext } from './refs';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
 import { normalizePath } from './intents/paths';
@@ -938,8 +939,106 @@ export async function linkIssue(cx: IssueContext, rawNumber: string, input: unkn
   return { ok: true, value: { change: number, issues: ((links?.results as ChangeIssueRow[] | undefined) ?? []).map((r) => changeIssueView(r, number)) } };
 }
 
-/** Commits of one default-branch push that are read for closing references. */
-export const COMMIT_SCAN_MAX = 50;
+/** Bounds of reading one default-branch push for closing references. */
+export const COMMIT_SCAN = {
+  /** Commits read in total, merged side branches included. */
+  commitsMax: 100,
+  /** First-parent commits read from the new tip toward the previous one. */
+  mainlineMax: 50,
+  /** Artifacts log calls (the main line plus one per merged side branch). */
+  logCallsMax: 10,
+  /** Commit reads of one merge-base search. */
+  mergeBaseReadsMax: 500,
+} as const;
+
+export interface PushedCommits {
+  /** Newest first along each chain: the main line, then each merged side branch. */
+  commits: { sha: string; message: string }[];
+  /** The main line did not reach the previous tip within its bound. */
+  mainlineTruncated: boolean;
+  /** Merged side branches that were not read (bounds, criss-cross merges or an unreached merge base). */
+  sidesSkipped: number;
+}
+
+/**
+ * The commits a default-branch push brought in, bounded. The main line is
+ * the first-parent chain from `after` down to `before`. Each merge commit
+ * on it (and on every side branch read) also brought in its other parents'
+ * commits that were not yet on its first parent: the first-parent chain
+ * from that parent down to the merge base of the two. A side chain counts
+ * only when the walk reaches that merge base, so commits that were already
+ * on the branch are never read again (a deliberately reopened issue stays
+ * open); criss-cross merges, bounds and unreached bases skip the side.
+ */
+export async function pushedCommits(env: Env, repo: RepoRow, before: string, after: string): Promise<PushedCommits> {
+  const pending: Promise<unknown>[] = [];
+  try {
+    return await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+      const ctx: ResolveContext = { env, repo, artifacts, bypass: false, waitUntil: (p) => pending.push(p) };
+      const reader: CommitReader = {
+        async readCommit(sha) {
+          const c = await readCommitInfo(ctx, sha);
+          return c ? { treeHash: c.tree, parents: c.parents } : null;
+        },
+      };
+      const seen = new Set<string>();
+      const out: PushedCommits = { commits: [], mainlineTruncated: false, sidesSkipped: 0 };
+      let logs = 0;
+      type Entry = { hash: string; message: string; parents: string[] };
+      const chain = async (tip: string, stop: ReadonlySet<string>, limit: number): Promise<{ commits: Entry[]; reached: boolean } | null> => {
+        if (logs >= COMMIT_SCAN.logCallsMax) return null;
+        logs++;
+        const log = await (await artifacts.get()).log({ ref: tip, limit: limit + 1 });
+        const commits: Entry[] = [];
+        for (const c of log) {
+          if (stop.has(c.hash)) return { commits, reached: true };
+          // Trust the chain only while each entry is the previous one's first parent.
+          if (commits.length === 0 ? c.hash !== tip : commits[commits.length - 1]!.parents[0] !== c.hash) break;
+          if (commits.length >= limit) break;
+          commits.push({ hash: c.hash, message: c.message, parents: c.parents });
+        }
+        return { commits, reached: false };
+      };
+      const take = (commits: Entry[]) => {
+        for (const c of commits) {
+          if (seen.has(c.hash)) continue;
+          seen.add(c.hash);
+          out.commits.push({ sha: c.hash, message: c.message });
+        }
+      };
+      const main = await chain(after, new Set([before]), COMMIT_SCAN.mainlineMax);
+      if (!main) return out;
+      out.mainlineTruncated = !main.reached;
+      take(main.commits);
+      const merges = main.commits.filter((c) => c.parents.length > 1);
+      for (let i = 0; i < merges.length; i++) {
+        const m = merges[i]!;
+        for (const side of m.parents.slice(1)) {
+          const room = COMMIT_SCAN.commitsMax - out.commits.length;
+          if (room <= 0 || seen.has(side)) {
+            if (room <= 0) out.sidesSkipped++;
+            continue;
+          }
+          const base = await mergeBase(reader, m.parents[0]!, side, { maxCommitReads: COMMIT_SCAN.mergeBaseReadsMax, concurrency: 4 });
+          if (base.truncated || base.bases.length !== 1) {
+            out.sidesSkipped++;
+            continue;
+          }
+          const walked = await chain(side, new Set(base.bases), room);
+          if (!walked || !walked.reached) {
+            out.sidesSkipped++;
+            continue;
+          }
+          take(walked.commits);
+          merges.push(...walked.commits.filter((c) => c.parents.length > 1));
+        }
+      }
+      return out;
+    });
+  } finally {
+    await Promise.allSettled(pending);
+  }
+}
 
 export interface CommitClose {
   number: number;

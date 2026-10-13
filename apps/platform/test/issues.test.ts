@@ -416,6 +416,23 @@ describe('commits pushed to the default branch', () => {
     for (const n of [3, 4]) expect((await getIssue('direct', n)).json.state).toBe('open');
   });
 
+  it('read the side branches that merges bring in, down to the merge base and no further', async () => {
+    const r = await seedRepo('direct-merge');
+    for (const title of ['a', 'b', 'c', 'd', 'e']) await fileIssue('direct-merge', { title });
+    // Already on main before the push: its "fixes #3" must not be read again.
+    const x = await commit(r.repo, { 'README.md': 'x\n' }, [r.main], 'old work\n\nFixes #3');
+    const s1 = await commit(r.repo, { 'README.md': 'x\n', 'a.txt': 'a\n' }, [x.sha], 'side one\n\nFixes #4');
+    const s2 = await commit(r.repo, { 'README.md': 'x\n', 'a.txt': 'a\n', 'b.txt': 'b\n' }, [s1.sha], 'side two, closes #5');
+    const m1 = await commit(r.repo, { 'README.md': 'y\n' }, [x.sha], 'main line');
+    const merge = await commit(r.repo, { 'README.md': 'y\n', 'a.txt': 'a\n', 'b.txt': 'b\n' }, [m1.sha, s2.sha], 'Merge branch side');
+    r.repo.refs.set('refs/heads/main', merge.sha);
+    await deliver(pushEvent('direct-merge', 'refs/heads/main', x.sha, merge.sha));
+    expect(await effectDetail('direct-merge', 'issue-commits')).toEqual({ state: 'done', detail: 'closes #4, #5' });
+    expect((await getIssue('direct-merge', 4)).json).toMatchObject({ state: 'closed', closedBy: { commit: s1.sha } });
+    expect((await getIssue('direct-merge', 5)).json).toMatchObject({ state: 'closed', closedBy: { commit: s2.sha } });
+    expect((await getIssue('direct-merge', 3)).json.state).toBe('open');
+  });
+
   it('skip other branches and branch creation, and report a scan that stopped short', async () => {
     const r = await seedRepo('direct-skip');
     await fileIssue('direct-skip', { title: 'a' });

@@ -31,8 +31,8 @@ import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
 import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
 import { continueDependencySettlement } from './dependencies';
-import { COMMIT_SCAN_MAX, commitCloseStatement, commitClosingRefs, retireIssueTasksStatement } from './issues';
-import { withRepo } from '../artifacts/repo';
+import { commitCloseStatement, commitClosingRefs, pushedCommits, retireIssueTasksStatement } from './issues';
+import type { RepoRow } from '../db/repos';
 
 export interface PushEvent {
   namespace: string;
@@ -370,8 +370,9 @@ const changeHooksEffect: PushEffect = {
 
 /**
  * Issues closed by commits pushed to the default branch (services/issues.ts):
- * one bounded first-parent log from the new tip down to the previous one,
- * read for closing keywords; the closes join the completion batch. A merged
+ * the bounded set of commits the push brought in (the first-parent line down
+ * to the previous tip and the side branches its merges brought in, see
+ * pushedCommits), read for closing keywords; the closes join the completion batch. A merged
  * change's own links are closed by its merge record, not here. Creating the
  * branch closes nothing, so an imported history never sweeps issues shut.
  */
@@ -383,19 +384,13 @@ const issueCommitsEffect: PushEffect = {
     if (event.after === ZERO_OID) return { state: 'skipped', detail: 'ref deleted' };
     if (event.before === ZERO_OID) return { state: 'skipped', detail: 'branch created' };
     if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
-    const log = await withRepo(ctx.env, event.repoName, (h) => h.log({ ref: event.after, limit: COMMIT_SCAN_MAX }));
-    const commits: { sha: string; message: string }[] = [];
-    let reached = false;
-    for (const c of log) {
-      if (c.hash === event.before) {
-        reached = true;
-        break;
-      }
-      // Trust the chain only while each entry is the previous one's first parent.
-      if (commits.length > 0 && log[commits.length - 1]!.parents[0] !== c.hash) break;
-      commits.push({ sha: c.hash, message: c.message });
-    }
-    const truncated = reached ? '' : `; scanned ${commits.length} commits, older ones not read`;
+    const repo = await ctx.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(ctx.repoId).first<RepoRow>();
+    if (!repo) return { state: 'skipped', detail: 'repo gone' };
+    const scan = await pushedCommits(ctx.env, repo, event.before, event.after);
+    const commits = scan.commits;
+    const truncated =
+      (scan.mainlineTruncated ? `; scanned ${commits.length} commits, older ones not read` : '') +
+      (scan.sidesSkipped > 0 ? `; ${scan.sidesSkipped} merged branch(es) not read` : '');
     const closes = commitClosingRefs(commits);
     if (closes.length === 0) return { state: 'done', detail: `no closing references in ${commits.length} commits${truncated}` };
     return {
