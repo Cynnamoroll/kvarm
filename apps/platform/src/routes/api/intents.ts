@@ -4,10 +4,10 @@
  * lookup runs first on every route. Reads follow repo read access; the
  * declaration write needs `write` through an `api`-scope credential.
  *
- *   GET  workspaces/overlap?base=&limit=&cursor=
+ *   GET  workspaces/overlap?base=&limit=&cursor=&semantic=
  *   GET  workspaces/:id/intent
  *   POST workspaces/:id/intent        {paths, prefixes?, ttlSeconds?}
- *   GET  forecast?paths=&base=&limit=&cursor=&exclude=
+ *   GET  forecast?paths=&base=&limit=&cursor=&exclude=&semantic=
  *
  * Mounted before the workspace routes so `workspaces/overlap` is not read
  * as a workspace id.
@@ -39,7 +39,7 @@ function reply<T>(c: Context<App>, r: ServiceResult<T>): Response {
 intentsApi.get('/repos/:owner/:repo/workspaces/overlap', async (c) => {
   const rd = await context(c, 'read');
   if ('denied' in rd) return rd.denied;
-  return reply(c, await svc.overlap(rd.cx, { base: c.req.query('base'), limit: c.req.query('limit'), cursor: c.req.query('cursor') }));
+  return reply(c, await svc.overlap(rd.cx, { base: c.req.query('base'), limit: c.req.query('limit'), cursor: c.req.query('cursor'), semantic: c.req.query('semantic') }));
 });
 
 intentsApi.get('/repos/:owner/:repo/workspaces/:id/intent', async (c) => {
@@ -67,6 +67,7 @@ intentsApi.get('/repos/:owner/:repo/forecast', async (c) => {
       limit: c.req.query('limit'),
       cursor: c.req.query('cursor'),
       exclude: c.req.query('exclude'),
+      semantic: c.req.query('semantic'),
     }),
   );
 });
