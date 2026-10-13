@@ -50,9 +50,7 @@ export async function getReviewAnalytics(
        grouped AS (
          SELECT CASE WHEN f.agent_id IS NULL THEN 'human' ELSE 'agent' END AS filer_kind,
                 CASE WHEN f.agent_id IS NULL THEN 'human' ELSE COALESCE(
-                  (SELECT r.model_family FROM change_reviews r
-                    WHERE r.change_set_id = f.change_set_id AND r.principal = f.principal
-                    ORDER BY r.updated_at DESC LIMIT 1), 'human') END AS model_family,
+                  (SELECT a.model_family FROM agents a WHERE a.id = f.agent_id), 'unknown') END AS model_family,
                 f.category, f.severity, COUNT(*) AS filed,
                 SUM(f.status = 'open') AS open,
                 SUM(f.status = 'resolved') AS resolved,
