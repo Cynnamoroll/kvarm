@@ -3,6 +3,7 @@
 export * from './risk';
 export * from './guard';
 export * from './semantic';
+export * from './guide';
 export { countTestCases, dependencyNames, hasGeneratedMarker, isWhitespaceOnlyChange, GENERATED_MARKER_WINDOW } from './content';
 export {
   isCiConfigPath,
