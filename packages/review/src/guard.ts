@@ -10,6 +10,12 @@
  * Findings never carry the matched value: only the rule, path, line and a
  * fixed message. Secret and CI-gaming findings fail the guard; dependency
  * findings and files that could not be scanned make it neutral.
+ *
+ * `complete` says whether every changed path the rules read was read in
+ * full. A neutral verdict is only advisory evidence when it is incomplete:
+ * a file cut at the read prefix or never read can hide anything, so the
+ * result names those paths and branch rules may refuse to publish it
+ * (architecture §0.3).
  */
 
 import { countTestCases, dependencyNames } from './content';
@@ -36,6 +42,8 @@ export interface GuardContent {
   truncated?: boolean;
   /** A wanted side could not be read (budget, size or storage). */
   unavailable?: boolean;
+  /** With `unavailable`: the caller skipped the file because the change exceeded its file budget. */
+  overFileBudget?: boolean;
 }
 
 export interface GuardFinding {
@@ -46,15 +54,33 @@ export interface GuardFinding {
   message: string;
 }
 
+/** Why a changed path was not fully inspected. */
+export type GuardUninspectedReason = 'over-file-budget' | 'prefix-only' | 'unavailable';
+
+export interface GuardUninspected {
+  /** Changed paths not fully inspected (the listed ones only; see listTruncated). */
+  count: number;
+  /** The change listed more files than the guard could enumerate: an unknown number more went unseen. */
+  listTruncated: boolean;
+  /** The first GUARD_LIMITS.maxUninspectedPaths of them, in change order. */
+  paths: Array<{ path: string; reason: GuardUninspectedReason }>;
+}
+
 export interface GuardResult {
   conclusion: GuardConclusion;
   findings: GuardFinding[];
   /** Findings beyond GUARD_LIMITS.maxFindings (they still count toward the conclusion). */
   omitted?: number;
+  /** Every changed path the rules read was read in full and the change list was not truncated. */
+  complete: boolean;
+  /** Present exactly when `complete` is false. */
+  uninspected?: GuardUninspected;
 }
 
 export const GUARD_LIMITS = {
   maxFindings: 50,
+  /** Uninspected paths named in a result (the count covers all of them). */
+  maxUninspectedPaths: 50,
   /** Lines longer than this are scanned only up to it (minified bundles). */
   maxLineChars: 4096,
 } as const;
@@ -361,6 +387,11 @@ export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<str
   const out = new Findings();
   const unscanned: string[] = [];
   const partial: string[] = [];
+  const uninspected: GuardUninspected = { count: 0, listTruncated: opts.listTruncated === true, paths: [] };
+  const skip = (path: string, reason: GuardUninspectedReason) => {
+    uninspected.count++;
+    if (uninspected.paths.length < GUARD_LIMITS.maxUninspectedPaths) uninspected.paths.push({ path, reason });
+  };
   if (opts.listTruncated) {
     out.add({ rule: 'guard/incomplete', severity: 'neutral', path: '.', message: 'the change lists more files than the guard can enumerate; only the listed files were scanned' });
   }
@@ -375,9 +406,13 @@ export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<str
     const content = contents.get(c.path);
     if (!content || content.unavailable || (wants.new && typeof content.new !== 'string') || (wants.old && content.old === undefined)) {
       unscanned.push(c.path);
+      skip(c.path, content?.overFileBudget ? 'over-file-budget' : 'unavailable');
       continue;
     }
-    if (content.truncated) partial.push(c.path);
+    if (content.truncated) {
+      partial.push(c.path);
+      skip(c.path, 'prefix-only');
+    }
     scanText(c, content, out);
   }
   if (partial.length > 0) {
@@ -397,5 +432,6 @@ export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<str
     });
   }
   const conclusion: GuardConclusion = out.failed ? 'failure' : out.list.length + out.omitted > 0 ? 'neutral' : 'success';
-  return { conclusion, findings: out.list, ...(out.omitted > 0 ? { omitted: out.omitted } : {}) };
+  const complete = uninspected.count === 0 && !uninspected.listTruncated;
+  return { conclusion, findings: out.list, ...(out.omitted > 0 ? { omitted: out.omitted } : {}), complete, ...(complete ? {} : { uninspected }) };
 }

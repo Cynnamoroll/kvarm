@@ -197,7 +197,7 @@ export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headT
   changes.forEach((c, i) => {
     const w = guardWants(c);
     if (!w.new) return;
-    if (wanted.length >= GUARD_BUDGETS.maxFiles) contents.set(c.path, { unavailable: true });
+    if (wanted.length >= GUARD_BUDGETS.maxFiles) contents.set(c.path, { unavailable: true, overFileBudget: true });
     else wanted.push({ i, old: w.old && body.files[i]!.oldHash !== null });
   });
   const counter = { blobReads: 0, bytes: 0 };
