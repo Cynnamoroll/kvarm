@@ -27,6 +27,7 @@ import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { coordinationPages } from './routes/coordinationPages';
 import { comparePages } from './routes/comparePages';
+import { reviewPages } from './routes/reviewPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -92,11 +93,12 @@ app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
 // The coordination and compare pages are further /:owner/:repo views; their
-// paths (/activity, /train, /arenas, /candidates, /compare) collide with none
+// paths (/activity, /train, /arenas, /candidates, /compare, /changes) collide with none
 // of the pages above.
 app.route('/:owner/:repo', repoPages);
 app.route('/:owner/:repo', coordinationPages);
 app.route('/:owner/:repo', comparePages);
+app.route('/:owner/:repo', reviewPages);
 
 // Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {
