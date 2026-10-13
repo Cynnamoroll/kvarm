@@ -774,14 +774,16 @@ export const OPERATIONS = Object.freeze([
     name: 'forecast',
     command: ['nexus', 'forecast'],
     family: 'nexus',
-    description: 'Advisory forecast: active workspaces whose declared or observed paths intersect the given paths.',
+    description:
+      'Advisory forecast: active workspaces whose declared or observed paths intersect the given paths, plus semantic dependency matches (imports, export changes, contract families).',
     method: 'GET',
     path: '/repos/{repo}/forecast',
     params: [
       REPO,
       query('paths', 'string[]', 'Paths to forecast (at most 20; a trailing / marks a prefix)', { required: true }),
       query('base', 'string', 'Only workspaces on this base branch'),
-      query('exclude', 'string', 'Workspace id to leave out (usually your own)'),
+      query('exclude', 'string', 'Workspace id to leave out (usually your own); its own import edges are also matched semantically'),
+      query('semantic', 'boolean', 'Include the advisory semantic dependency layer on the first page (default true)'),
       LIMIT(100),
       CURSOR,
     ],
@@ -790,10 +792,17 @@ export const OPERATIONS = Object.freeze([
     name: 'get_overlap',
     command: ['nexus', 'overlap'],
     family: 'nexus',
-    description: 'Pairs of active workspaces whose pushed changes touch the same paths (advisory, from the Nexus index).',
+    description:
+      'Pairs of active workspaces whose pushed changes touch the same paths, plus semantic dependency pairs (advisory, from the Nexus index).',
     method: 'GET',
     path: '/repos/{repo}/workspaces/overlap',
-    params: [REPO, query('base', 'string', 'Base branch (default: the default branch)'), LIMIT(100), CURSOR],
+    params: [
+      REPO,
+      query('base', 'string', 'Base branch (default: the default branch)'),
+      query('semantic', 'boolean', 'Include advisory semantic dependency pairs on the first page (default true)'),
+      LIMIT(100),
+      CURSOR,
+    ],
   }),
 
   // --- candidates, arenas, composition --------------------------------------

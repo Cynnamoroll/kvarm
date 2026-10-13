@@ -25,6 +25,7 @@ import { changedPaths } from '../compare';
 import { readCommitInfo, type ResolveContext } from '../refs';
 import { WORKSPACE_ID_RE, agentOwnershipDenial } from '../workspaces';
 import { INTENT_LIMITS, ancestorPrefixes, collapseObserved, covers, intersects, isPrefix, normalizeDeclaration, normalizePath, prefixUpper } from './paths';
+import { analyzeSemantic, forecastSemanticPlan, overlapSemanticPlan, parseSemanticFlag, semanticWriteStatements, type SemanticForecast, type SemanticOverlap } from './semantic';
 import { declarationReplaceStatements, observedWriteStatements } from './store';
 
 const ZERO_SHA = '0000000000000000000000000000000000000000';
@@ -240,19 +241,29 @@ export async function reconcileObserved(env: Env, t: ObservedTarget): Promise<{ 
       if (c.truncated) omitted.push(`more than ${INTENT_LIMITS.observedMax} top-level entries changed; the first ${INTENT_LIMITS.observedMax} are kept`);
       const reasons = [...omitted];
       if (!c.truncated && c.collapsed) reasons.push(`${changed} changed paths collapsed into directory prefixes (cap ${INTENT_LIMITS.observedMax} entries)`);
-      const statements = observedWriteStatements(env.DB, {
+      const now = Date.now();
+      const observed = observedWriteStatements(env.DB, {
         repoId: t.repoId,
         workspaceId: t.workspaceId,
         pathsJson: JSON.stringify(c.paths),
         baseSha: t.baseSha,
         headSha: t.headSha,
         event: t.event,
-        now: Date.now(),
+        now,
         truncated: reasons.length > 0 ? reasons.join('; ') : null,
         omitted: omitted.length > 0 ? omitted.join('; ') : null,
         prefixes: c.paths.filter(isPrefix).length,
       });
-      return { statements, detail: `${c.paths.length} observed entries for ${changed} changed paths (${diff.source})` };
+      // The semantic rows describe the same head and land under the same guard (architecture §11.2).
+      const semantic = await analyzeSemantic(artifacts, { base: base.tree, head: head.tree }, diff.paths, {
+        incomplete: diff.truncated ? (diff.truncatedReason ?? 'budget exhausted') : null,
+        collapsed: c.collapsed,
+      });
+      const statements = [
+        ...observed,
+        ...semanticWriteStatements(env.DB, { repoId: t.repoId, workspaceId: t.workspaceId, eventAt: t.event?.at ?? 0, headSha: t.headSha, now, record: semantic }),
+      ];
+      return { statements, detail: `${c.paths.length} observed entries for ${changed} changed paths (${diff.source}); semantic: ${semantic.detail}` };
     });
   } finally {
     await Promise.allSettled(pending);
@@ -269,6 +280,8 @@ export interface ForecastQuery {
   limit?: string;
   cursor?: string;
   exclude?: string;
+  /** `0`/`false` leaves the semantic layer out (default: included on the first page). */
+  semantic?: string;
 }
 
 export interface Evidence {
@@ -317,6 +330,8 @@ export interface ForecastResponse {
   truncatedReason?: string;
   /** In-scope workspaces with an incomplete observed index (on every page; absent when there are none). */
   incomplete?: IncompleteIndex[];
+  /** The advisory semantic dependency layer (first page only, unless `semantic=0`); its truncation is its own. */
+  semantic?: SemanticForecast;
   nextCursor: string | null;
   limit: number;
 }
@@ -436,7 +451,7 @@ function parseQueryPaths(raw: string | undefined): string[] | Fail {
 const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === false;
 
 /**
- * GET forecast?paths=a,b/&base=&limit=&cursor=&exclude=: the active
+ * GET forecast?paths=a,b/&base=&limit=&cursor=&exclude=&semantic=: the active
  * workspaces whose declared or observed entries intersect the query paths.
  * Index probes per query path: the path itself and its ancestor prefixes
  * (a declared `src/` matches `src/a.ts`), plus the range below a query
@@ -456,6 +471,8 @@ export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<Ser
   if (cursor !== null && !WORKSPACE_ID_RE.test(cursor)) return fail(400, 'cursor is invalid', 'INVALID_CURSOR');
   const exclude = q.exclude ?? null;
   if (exclude !== null && !WORKSPACE_ID_RE.test(exclude)) return fail(400, 'exclude must be a workspace id', 'INVALID_EXCLUDE');
+  const withSemantic = parseSemanticFlag(q.semantic);
+  if (withSemantic === null) return fail(400, 'semantic must be true, false, 1 or 0', 'INVALID_SEMANTIC');
 
   const exact = new Set<string>();
   const ranges: string[] = [];
@@ -482,11 +499,14 @@ export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<Ser
          LIMIT ${rangeMax + 1})`;
   const now = Date.now();
   const db = cx.env.DB;
-  const results = await db.batch([
+  const semantic = withSemantic && cursor === null ? forecastSemanticPlan(db, { repoId: cx.repo.id, paths, base, exclude }) : null;
+  const pathStatements = [
     db.prepare(exactSql).bind(cx.repo.id, JSON.stringify([...exact]), now, base, cursor ?? '', exclude),
     ...ranges.map((r) => db.prepare(rangeSql).bind(cx.repo.id, r, now, base, cursor ?? '', exclude, prefixUpper(r))),
     incompleteStatement(db, cx.repo.id, base, exclude),
-  ]);
+  ];
+  const all = await db.batch([...pathStatements, ...(semantic?.statements ?? [])]);
+  const results = all.slice(0, pathStatements.length);
   const incompleteRes = results[results.length - 1];
   const hits = hitsOf(results[0]);
   const cutRanges: string[] = [];
@@ -548,6 +568,7 @@ export async function forecast(cx: IntentContext, q: ForecastQuery): Promise<Ser
   };
   if (reasons.length > 0) out.truncatedReason = reasons.join('; ');
   if (incomplete) out.incomplete = incomplete.list;
+  if (semantic) out.semantic = semantic.read(all.slice(pathStatements.length));
   return { ok: true, value: out };
 }
 
@@ -590,6 +611,8 @@ export interface OverlapQuery {
   base?: string;
   limit?: string;
   cursor?: string;
+  /** `0`/`false` leaves the semantic layer out (default: included on the first page). */
+  semantic?: string;
 }
 
 export interface OverlapHead {
@@ -620,6 +643,8 @@ export interface OverlapResponse {
   truncatedReason?: string;
   /** Workspaces on `base` with an incomplete observed index (on every page; absent when there are none). */
   incomplete?: IncompleteIndex[];
+  /** Advisory semantic pairs (first page only, unless `semantic=0`); its truncation is its own. */
+  semantic?: SemanticOverlap;
   nextCursor: string | null;
   limit: number;
 }
@@ -721,13 +746,16 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
     const [a, b, extra] = cursor.split(':');
     if (extra !== undefined || !a || !b || !WORKSPACE_ID_RE.test(a) || !WORKSPACE_ID_RE.test(b)) return fail(400, 'cursor is invalid', 'INVALID_CURSOR');
   }
+  const withSemantic = parseSemanticFlag(q.semantic);
+  if (withSemantic === null) return fail(400, 'semantic must be true, false, 1 or 0', 'INVALID_SEMANTIC');
+  const semantic = withSemantic && cursor === null ? overlapSemanticPlan(cx.env.DB, cx.repo.id, base) : null;
 
   const db = cx.env.DB;
   // Shared paths come from the per-(repo, base, path) share counts, so only
   // paths at least two workspaces touch are read; each group reads its
   // members in id order and aggregates at most one beyond the per-group cap,
   // so collectPairs can tell it was cut.
-  const [groups, prefixHits, incompleteRes] = await db.batch([
+  const [groups, prefixHits, incompleteRes, ...semanticRes] = await db.batch([
     db
       .prepare(
         `SELECT s.path, (SELECT json_group_array(json(head)) FROM (
@@ -752,6 +780,7 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
       )
       .bind(cx.repo.id, base),
     incompleteStatement(db, cx.repo.id, base, null),
+    ...(semantic?.statements ?? []),
   ]);
 
   const reasons: string[] = [];
@@ -811,6 +840,7 @@ export async function overlap(cx: IntentContext, q: OverlapQuery): Promise<Servi
   };
   if (reasons.length > 0) out.truncatedReason = reasons.join('; ');
   if (incomplete) out.incomplete = incomplete.list;
+  if (semantic) out.semantic = semantic.read(semanticRes);
   return { ok: true, value: out };
 }
 
