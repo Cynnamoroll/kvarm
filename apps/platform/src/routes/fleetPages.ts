@@ -97,6 +97,14 @@ function agentIdentity(agentId: string, agentName: string | null): string {
   return html`<span class="k-agent-label m-human" title="${name}">${name}</span><span class="k-agent-label k-mono m-agent" title="${agentId}">${agentId}</span>`;
 }
 
+function until(iso: string): string {
+  const minutes = Math.round((Date.parse(iso) - Date.now()) / 60_000);
+  if (minutes <= 0) return 'DUE';
+  if (minutes < 60) return `IN ${minutes}M`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `IN ${hours}H` : `IN ${Math.round(hours / 24)}D`;
+}
+
 function ago(iso: string | null): string {
   return iso ? timeAgo(Date.parse(iso)) : '—';
 }
@@ -526,8 +534,10 @@ async function loadEnvironment(c: Context<App>): Promise<{ resolved: Resolved; e
   if (!resolved) return null;
   const listed = await environments.listEnvironments(c.env, resolved.repo, resolved.viewer);
   if (!listed.ok) return null;
-  const env = listed.value.find((e) => e.name === c.req.param('name'));
-  return env ? { resolved, env } : null;
+  const listedEnv = listed.value.find((e) => e.name === c.req.param('name'));
+  if (!listedEnv) return null;
+  const detail = await environments.getEnvironment(c.env, resolved.repo, resolved.viewer, listedEnv.id);
+  return { resolved, env: detail.ok ? detail.value : listedEnv };
 }
 
 fleetRepoPages.get('/environments/:name', async (c) => {
@@ -557,11 +567,16 @@ fleetRepoPages.get('/environments/:name', async (c) => {
       env.name,
       `${(env.readyBuildId ? 'READY' : latest?.status ?? 'QUEUED').toUpperCase()}.`,
       `${env.os} environment · ${env.instance} instance · base ${env.baseRef}${env.pending ? ' · another build is queued' : ''}`,
-      `kvarm environment get ${env.name} · ready=${ready ? `#${ready.seq}` : 'none'} · latest=${latest ? `#${latest.seq}:${latest.status}` : 'none'}`,
+      `kvarm environment get ${env.name} · ready=${ready ? `#${ready.seq}` : 'none'} · latest=${latest ? `#${latest.seq}:${latest.status}` : 'none'} · next=${env.nextBuildAt ? `${env.nextBuildAt}:${env.nextBuildReason}` : 'none'}`,
       [
         { label: 'Status', value: (env.readyBuildId ? 'READY' : latest?.status ?? 'QUEUED').toUpperCase() },
         { label: 'Ready age', value: ready ? ago(ready.finishedAt) : '—' },
         { label: 'Last build', value: duration },
+        {
+          label: env.nextBuildReason === 'retry' ? 'Retry' : 'Next rebuild',
+          value: env.nextBuildAt ? until(env.nextBuildAt) : '—',
+          warn: env.nextBuildReason === 'retry',
+        },
         { label: 'Instance', value: env.instance.toUpperCase() },
         { label: 'Idle min', value: env.idleMinutes },
       ],
