@@ -79,8 +79,9 @@ The command runs only because the user explicitly started this runner.
 Execution trust: repository commands are code from whoever pushed the
 commit, often an agent. Before running a job the runner decides from the
 claim's provenance whether it may run on this host:
-  --trust humans   (default) the exact head of a change a human opened runs
-                   on the host; agent-authored changes, agent workspace refs,
+  --trust humans   (default) the exact head of a change a human opened, on a
+                   ref no agent token may push, runs on the host;
+                   agent-authored changes, agent-writable refs,
                    platform-prepared merge commits and anything unknown are
                    untrusted
   --trust none     no job is trusted

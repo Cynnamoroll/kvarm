@@ -39,6 +39,8 @@ export const DEFAULT_PIDS_LIMIT = 1024;
 export const CONTAINER_WORKDIR = '/workspace';
 const KILL_GRACE_MS = 5_000;
 const DETECT_TIMEOUT_MS = 15_000;
+/** Creating includes pulling a missing image, which the job timeout does not cover. */
+const CREATE_TIMEOUT_MS = 15 * 60_000;
 
 /** @param {string} text */
 export function bounded(text) {
@@ -66,21 +68,22 @@ export function repositoryEnvironment() {
 }
 
 /**
- * The same filtered environment for a container, minus the variables that
- * name host paths (PATH, HOME, TMPDIR and the Windows ones), which would be
- * wrong inside the image; HOME points at the container's private /tmp.
+ * The filtered environment for a container. Host paths (PATH, HOME, TMPDIR,
+ * the Windows ones) would be wrong inside the image, and host locales often
+ * name ones the image lacks (macOS sets LC_CTYPE=UTF-8), so only TZ crosses;
+ * the locale is the image's C.UTF-8 and HOME its private /tmp.
  * @returns {Array<[string, string]>}
  */
 export function containerEnvironment() {
-  const hostPaths = new Set(['PATH', 'HOME', 'TMPDIR', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE']);
   /** @type {Array<[string, string]>} */
-  const out = [];
-  for (const [key, value] of Object.entries(repositoryEnvironment())) {
-    if (value === undefined || hostPaths.has(key.toUpperCase())) continue;
-    out.push([key, value]);
-  }
-  out.push(['HOME', '/tmp']);
-  return out.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const out = [
+    ['GIT_TERMINAL_PROMPT', '0'],
+    ['HOME', '/tmp'],
+    ['LANG', 'C.UTF-8'],
+  ];
+  const tz = repositoryEnvironment().TZ;
+  if (tz !== undefined) out.push(['TZ', tz]);
+  return out;
 }
 
 /**
@@ -92,12 +95,13 @@ export function containerEnvironment() {
  * @property {string|null} [authorLogin]
  * @property {{id:string,name:string}|null} [agent]
  * @property {boolean} [agentWorkspaceRef]
+ * @property {boolean} [agentWritableRef]
  */
 
 /**
  * Whether the policy trusts a job's code enough to run it on the host.
- * `humans` trusts only the exact head of a change a human opened outside the
- * agent workspace namespace; anything it cannot establish is untrusted.
+ * `humans` trusts only the exact head of a change a human opened on a ref no
+ * agent credential could write; anything it cannot establish is untrusted.
  * @param {TrustMode} trust
  * @param {JobProvenance | null | undefined} provenance
  * @returns {{trusted: boolean, reason: string}}
@@ -113,29 +117,40 @@ export function trustOf(trust, provenance) {
   }
   if (provenance.agentWorkspaceRef) return { trusted: false, reason: `${change} heads an agent workspace ref` };
   if (provenance.authorKind !== 'human') return { trusted: false, reason: `the author of ${change} is unknown` };
+  if (provenance.agentWritableRef !== false) {
+    return { trusted: false, reason: `an agent token may push ${provenance.headRef ? `the head ref ${provenance.headRef}` : 'the head'} of ${change}` };
+  }
   if (provenance.commit !== 'head') {
     return { trusted: false, reason: `the job runs a platform-prepared commit of ${change}, which can include other changes` };
   }
   return { trusted: true, reason: `${change} is human-authored${provenance.authorLogin ? ` (${provenance.authorLogin})` : ''}` };
 }
 
+/** @typedef {{ runtime: ContainerRuntime, rootless: boolean }} RuntimeProbe */
+
 /**
  * The executor for one job, or a refusal. `container` always isolates;
  * `host` runs trusted jobs and refuses the rest; `auto` runs trusted jobs on
- * the host and isolates the rest when a container runtime is available.
- * @param {{ trust: TrustMode, executor: ExecutorMode, provenance: JobProvenance | null | undefined, runtimeAvailable: boolean }} o
- * @returns {{ run: 'host'|'container'|null, trusted: boolean, reason: string }}
+ * the host and isolates the rest when a container runtime answers. The
+ * runtime is probed only when the plan needs one.
+ * @param {{ trust: TrustMode, executor: ExecutorMode, provenance: JobProvenance | null | undefined, runtime: () => Promise<RuntimeProbe | null> }} o
+ * @returns {Promise<{ run: 'host'|'container'|null, trusted: boolean, reason: string, runtime: RuntimeProbe | null }>}
  */
-export function planExecution(o) {
+export async function planExecution(o) {
   const { trusted, reason } = trustOf(o.trust, o.provenance);
-  if (o.executor === 'container') {
-    return o.runtimeAvailable ? { run: 'container', trusted, reason } : { run: null, trusted, reason: `${reason}; --executor container needs docker or podman, and none is available` };
-  }
-  if (trusted) return { run: 'host', trusted, reason };
-  if (o.executor === 'host') return { run: null, trusted, reason: `${reason}; --executor host does not run untrusted jobs` };
-  return o.runtimeAvailable
-    ? { run: 'container', trusted, reason }
-    : { run: null, trusted, reason: `${reason}, and no container runtime (docker or podman) is available to isolate it` };
+  if (trusted && o.executor !== 'container') return { run: 'host', trusted, reason, runtime: null };
+  if (o.executor === 'host') return { run: null, trusted, reason: `${reason}; --executor host does not run untrusted jobs`, runtime: null };
+  const runtime = await o.runtime();
+  if (runtime) return { run: 'container', trusted, reason, runtime };
+  return {
+    run: null,
+    trusted,
+    reason:
+      o.executor === 'container'
+        ? `${reason}; --executor container needs docker or podman, and none answered`
+        : `${reason}, and no container runtime (docker or podman) answered to isolate it`,
+    runtime: null,
+  };
 }
 
 /**
@@ -147,6 +162,7 @@ export function planExecution(o) {
  * @property {string} [memory]
  * @property {number} [pidsLimit]
  * @property {string|null} [user] `uid:gid` inside the container; undefined maps this user's ids, null keeps the image's user
+ * @property {boolean} [rootless] the runtime runs rootless (see RuntimeProbe)
  */
 
 const IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/;
@@ -179,7 +195,7 @@ function hostUser() {
 }
 
 /**
- * `<runtime> run …` arguments for one job: removed on exit, named so a
+ * `<runtime> create …` arguments for one job: removed on exit, named so a
  * timeout can kill it, the working directory as the only writable host
  * mount, a read-only root with a private /tmp, no capabilities, no
  * privilege escalation, CPU/memory/pids limits and the filtered environment.
@@ -187,15 +203,18 @@ function hostUser() {
  * @param {{ name: string, workdir: string, command: string, env?: Array<[string, string]> }} job
  * @returns {string[]}
  */
-export function containerRunArgs(config, job) {
+export function containerCreateArgs(config, job) {
   const problem = containerConfigError(config);
   if (problem) throw new Error(problem);
   if (!NAME_RE.test(job.name)) throw new Error(`invalid container name ${JSON.stringify(job.name)}`);
   // --mount is comma-separated key=value; a comma in the path would split it.
   if (job.workdir.includes(',')) throw new Error(`the working directory ${JSON.stringify(job.workdir)} contains a comma, which a bind mount cannot carry`);
-  const user = config.user === undefined ? hostUser() : config.user;
+  // Rootless docker has no keep-id: container root is this user on the
+  // host, while any other uid maps to a subordinate id that cannot write
+  // the bind mount.
+  const user = config.user !== undefined ? config.user : config.runtime === 'docker' && config.rootless ? '0:0' : hostUser();
   const args = [
-    'run',
+    'create',
     '--rm',
     '--name',
     job.name,
@@ -222,7 +241,7 @@ export function containerRunArgs(config, job) {
     args.push('--user', user);
     // Rootless podman maps container ids into subordinate ranges; keep-id
     // maps this user's id through so the bind mount stays writable.
-    if (config.runtime === 'podman') args.push('--userns', 'keep-id');
+    if (config.runtime === 'podman' && config.rootless) args.push('--userns', 'keep-id');
   }
   if (config.network !== undefined) args.push('--network', config.network);
   for (const [key, value] of job.env ?? containerEnvironment()) args.push('--env', `${key}=${value}`);
@@ -302,34 +321,70 @@ export function executeShell(command, cwd, timeoutSeconds) {
  */
 
 /**
- * Runs a command in a container. On timeout the container is killed by
- * name through the runtime (killing only the attached client would leave it
- * running), then the client is killed after a grace period.
+ * Runs `spawnFn(runtime, args)` to completion with bounded output.
+ * @param {SpawnFn} spawnFn
+ * @param {string} runtime
+ * @param {string[]} args
+ * @param {number} timeoutMs
+ * @returns {Promise<ExecResult>}
+ */
+function runClient(spawnFn, runtime, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const child = spawnFn(runtime, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+    }, timeoutMs);
+    collect(child, started, () => timedOut, reject, resolve, () => clearTimeout(timer));
+  });
+}
+
+/** Best-effort `<runtime> <args>` whose outcome does not matter. @param {SpawnFn} spawnFn @param {string} runtime @param {string[]} args */
+function fireAndForget(spawnFn, runtime, args) {
+  try {
+    spawnFn(runtime, args, { stdio: 'ignore' }).on('error', () => {});
+  } catch {}
+}
+
+/**
+ * Runs a command in a container. The container is created first, so an
+ * image pull never counts against the job's timeout and the container exists
+ * before the timer can fire; then `start --attach` runs it. On timeout the
+ * container is killed by name (killing only the attached client would leave
+ * it running), then the client after a grace period, then the container is
+ * force-removed in case --rm never saw it stop.
  * @param {string} command
  * @param {string} cwd host working directory, bind-mounted at CONTAINER_WORKDIR
  * @param {number} timeoutSeconds
- * @param {ContainerConfig & { name: string, spawn?: SpawnFn }} o
+ * @param {ContainerConfig & { name: string, spawn?: SpawnFn, createTimeoutMs?: number }} o
  * @returns {Promise<ExecResult>}
  */
-export function executeContainer(command, cwd, timeoutSeconds, o) {
+export async function executeContainer(command, cwd, timeoutSeconds, o) {
+  const spawnFn = o.spawn ?? nodeSpawn;
+  const started = Date.now();
+  const createTimeoutMs = o.createTimeoutMs ?? CREATE_TIMEOUT_MS;
+  // The runtime client needs its own configuration (DOCKER_HOST, config
+  // dirs); it forwards nothing to the container beyond the --env pairs.
+  const created = await runClient(spawnFn, o.runtime, containerCreateArgs(o, { name: o.name, workdir: cwd, command }), createTimeoutMs);
+  if (created.code !== 0 || created.timedOut) {
+    fireAndForget(spawnFn, o.runtime, ['rm', '--force', o.name]);
+    const why = created.timedOut
+      ? `creating the container (pulling ${o.image ?? DEFAULT_IMAGE}) took longer than ${Math.round(createTimeoutMs / 1000)} s`
+      : `${o.runtime} create failed`;
+    return { code: created.code, stdout: '', stderr: bounded(`${why}\n${created.stderr}`), timedOut: false, durationMs: Date.now() - started };
+  }
   return new Promise((resolve, reject) => {
-    const spawnFn = o.spawn ?? nodeSpawn;
-    const args = containerRunArgs(o, { name: o.name, workdir: cwd, command });
-    const started = Date.now();
-    // The runtime client needs its own configuration (DOCKER_HOST, config
-    // dirs); it forwards nothing to the container beyond the --env pairs.
-    const child = spawnFn(o.runtime, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnFn(o.runtime, ['start', '--attach', o.name], { stdio: ['ignore', 'pipe', 'pipe'] });
     let timedOut = false;
     /** @type {NodeJS.Timeout | undefined} */
     let grace;
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        const killer = spawnFn(o.runtime, ['kill', o.name], { stdio: 'ignore' });
-        killer.on('error', () => {});
-      } catch {
-        // The client kill below still ends the job.
-      }
+      fireAndForget(spawnFn, o.runtime, ['kill', o.name]);
       grace = setTimeout(() => {
         try {
           child.kill('SIGKILL');
@@ -337,48 +392,52 @@ export function executeContainer(command, cwd, timeoutSeconds, o) {
       }, KILL_GRACE_MS);
       grace.unref();
     }, timeoutSeconds * 1000);
-    collect(child, started, () => timedOut, reject, resolve, () => {
-      clearTimeout(timer);
-      if (grace) clearTimeout(grace);
-    });
+    collect(
+      child,
+      started,
+      () => timedOut,
+      reject,
+      (result) => {
+        if (timedOut) fireAndForget(spawnFn, o.runtime, ['rm', '--force', o.name]);
+        resolve(result);
+      },
+      () => {
+        clearTimeout(timer);
+        if (grace) clearTimeout(grace);
+      },
+    );
   });
 }
 
 /**
- * The first container runtime whose daemon answers (`<runtime> info`), the
- * requested one only when `preferred` is set, or null.
+ * Rootless runtimes map container ids differently (containerCreateArgs), so
+ * the probe asks for that too; it succeeds only when the daemon answers.
+ * @type {Record<ContainerRuntime, string[]>}
+ */
+const PROBE_ARGS = {
+  docker: ['info', '--format', '{{json .SecurityOptions}}'],
+  podman: ['info', '--format', '{{.Host.Security.Rootless}}'],
+};
+
+/**
+ * The first container runtime whose daemon answers `info`, the requested
+ * one only when `preferred` is set, or null.
  * @param {{ preferred?: ContainerRuntime, spawn?: SpawnFn }} [o]
- * @returns {Promise<ContainerRuntime | null>}
+ * @returns {Promise<RuntimeProbe | null>}
  */
 export async function detectRuntime(o = {}) {
   const spawnFn = o.spawn ?? nodeSpawn;
   const candidates = o.preferred ? [o.preferred] : CONTAINER_RUNTIMES;
   for (const runtime of candidates) {
-    const ok = await new Promise((resolve) => {
-      let child;
-      try {
-        child = spawnFn(runtime, ['info'], { stdio: 'ignore' });
-      } catch {
-        resolve(false);
-        return;
-      }
-      const timer = setTimeout(() => {
-        try {
-          child.kill('SIGKILL');
-        } catch {}
-        resolve(false);
-      }, DETECT_TIMEOUT_MS);
-      timer.unref();
-      child.on('error', () => {
-        clearTimeout(timer);
-        resolve(false);
-      });
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        resolve(code === 0);
-      });
-    });
-    if (ok) return runtime;
+    let result;
+    try {
+      result = await runClient(spawnFn, runtime, PROBE_ARGS[runtime], DETECT_TIMEOUT_MS);
+    } catch {
+      continue;
+    }
+    if (result.code !== 0 || result.timedOut) continue;
+    const rootless = runtime === 'docker' ? result.stdout.includes('rootless') : result.stdout.trim() === 'true';
+    return { runtime, rootless };
   }
   return null;
 }

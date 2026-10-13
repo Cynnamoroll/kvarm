@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkout } from './checkout.js';
 import { CliError } from './checkout.js';
-import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution, trustOf } from './executor.js';
+import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution } from './executor.js';
 import { materialize, openWorkdir } from './workdir.js';
 
 export { executeShell } from './executor.js';
@@ -74,6 +74,9 @@ function boundedSummary(summary) {
 
 /** A job the execution-trust policy will not run on this runner. */
 class JobRefused extends Error {}
+
+/** How long a failed container-runtime probe is remembered. */
+const RUNTIME_RETRY_MS = 60_000;
 
 const REFUSAL_HINT =
   'A runner with a container runtime (docker or podman) and --executor auto or container can run it isolated; a runner started with --trust all runs it on the host.';
@@ -290,8 +293,8 @@ async function fetchDelta(o) {
  * @property {boolean} [hostWarning] warn on every host job under --trust all (default true; off only where the host itself is a throwaway sandbox)
  * @property {import('./executor.js').ExecutorMode} [executor] default 'auto': trusted jobs on the host, the rest in a container
  * @property {Partial<import('./executor.js').ContainerConfig>} [container] container settings; `runtime` unset auto-detects docker, then podman
- * @property {(command:string,cwd:string,timeoutSeconds:number,info:{jobId:string,runtime:import('./executor.js').ContainerRuntime})=>Promise<import('./executor.js').ExecResult>} [executeContainer]
- * @property {(preferred?: import('./executor.js').ContainerRuntime) => Promise<import('./executor.js').ContainerRuntime | null>} [detectRuntimeFn]
+ * @property {(command:string,cwd:string,timeoutSeconds:number,info:{jobId:string}&import('./executor.js').RuntimeProbe)=>Promise<import('./executor.js').ExecResult>} [executeContainer]
+ * @property {(preferred?: import('./executor.js').ContainerRuntime) => Promise<import('./executor.js').RuntimeProbe | null>} [detectRuntimeFn]
  * @property {(line:string)=>void} stdout
  * @property {(line:string)=>void} stderr
  * @property {string} [tempRoot]
@@ -317,11 +320,21 @@ export async function runRunner(options) {
   const runInContainer =
     options.executeContainer ??
     ((command, cwd, timeoutSeconds, info) =>
-      executeContainer(command, cwd, timeoutSeconds, { ...containerConfig, runtime: info.runtime, name: containerName(info.jobId) }));
+      executeContainer(command, cwd, timeoutSeconds, { ...containerConfig, runtime: info.runtime, rootless: info.rootless, name: containerName(info.jobId) }));
   const detect = options.detectRuntimeFn ?? ((preferred) => detectRuntime({ preferred }));
-  /** @type {Promise<import('./executor.js').ContainerRuntime | null> | undefined} */
+  /** @type {Promise<import('./executor.js').RuntimeProbe | null> | undefined} */
   let runtimeProbe;
-  const runtime = () => (runtimeProbe ??= detect(containerConfig.runtime));
+  let probedAt = 0;
+  // A runtime that answered stays known; a missing one is asked again after
+  // a while, so a long-running runner notices a daemon that started later.
+  const runtime = async () => {
+    if (runtimeProbe && Date.now() - probedAt >= RUNTIME_RETRY_MS && (await runtimeProbe.catch(() => null)) === null) runtimeProbe = undefined;
+    if (!runtimeProbe) {
+      probedAt = Date.now();
+      runtimeProbe = detect(containerConfig.runtime);
+    }
+    return runtimeProbe;
+  };
   const deltaFn =
     options.deltaFn ?? ((previous, sha) => fetchDelta({ baseUrl: options.baseUrl, repo: options.repo, pat: options.pat, apiFetch, previous, sha }));
   const runnerId = options.runnerId ?? `kvarm-runner-${crypto.randomUUID()}`;
@@ -357,9 +370,7 @@ export async function runRunner(options) {
       let heartbeat;
       let reportBody;
       try {
-        const needsRuntime = executorMode === 'container' || (executorMode === 'auto' && !trustOf(trust, job.provenance).trusted);
-        const found = needsRuntime ? await runtime() : null;
-        const plan = planExecution({ trust, executor: executorMode, provenance: job.provenance, runtimeAvailable: found !== null });
+        const plan = await planExecution({ trust, executor: executorMode, provenance: job.provenance, runtime });
         // Refused before any byte of the job's code reaches this machine.
         if (plan.run === null) throw new JobRefused(plan.reason);
         const every = Math.max(10_000, Math.floor(120_000 / 3));
@@ -396,9 +407,9 @@ export async function runRunner(options) {
         }
         let result;
         if (isolated) {
-          const rt = /** @type {import('./executor.js').ContainerRuntime} */ (found);
-          options.stdout(`executor: container (${rt}, ${containerConfig.image ?? DEFAULT_IMAGE}): ${plan.reason}`);
-          result = await runInContainer(job.command, slot.work, job.timeoutSeconds, { jobId: job.id, runtime: rt });
+          const rt = /** @type {import('./executor.js').RuntimeProbe} */ (plan.runtime);
+          options.stdout(`executor: container (${rt.runtime}${rt.rootless ? ' rootless' : ''}, ${containerConfig.image ?? DEFAULT_IMAGE}): ${plan.reason}`);
+          result = await runInContainer(job.command, slot.work, job.timeoutSeconds, { jobId: job.id, ...rt });
         } else {
           if (trust === 'all' && options.hostWarning !== false) options.stderr(`warning: running ${job.name} on the host with --trust all; its code has this user's files and network`);
           else if (trust !== 'all') options.stdout(`executor: host: ${plan.reason}`);

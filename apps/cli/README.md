@@ -138,12 +138,13 @@ A `.kvarm/ci.json` command is code from whoever pushed the commit, and on
 Kvarm that is often an agent. The runner decides before materializing or
 running anything, from the `provenance` the claim returns (the change number,
 its head ref, whether the job's commit is the change head or a
-platform-prepared merge commit, and whether a human or an agent token opened
-the change):
+platform-prepared merge commit, whether a human or an agent token opened the
+change, and whether any write agent token of the repository was ever granted
+a pattern matching the head ref):
 
 | `--trust` | runs on the host |
 | --- | --- |
-| `humans` (default) | the exact head of a change a human opened outside the agent workspace namespace (`refs/heads/agents/**`) |
+| `humans` (default) | the exact head of a change a human opened on a ref no agent token may push (not `refs/heads/agents/**`, not matched by any write agent token's grant, revoked and expired ones included) |
 | `none` | nothing |
 | `all` | everything; every host job prints `warning: running <job> on the host with --trust all; …` |
 
@@ -153,36 +154,43 @@ every untrusted job; `--executor container` runs every job in a container and
 exits 2 before claiming if neither docker nor podman answers. A refused job is
 reported as a `failure` whose summary carries `refused: true`, the reason and
 the runner's `trust`/`executor`; it is never skipped silently or left claimed.
-A claim without provenance (an older platform) is untrusted.
+A claim without provenance (an older platform) is untrusted. A runtime that
+did not answer is asked again after a minute, so a long-running runner picks
+up a daemon that starts later.
 
-`humans` judges the change, not the push: the platform does not record which
-principal pushed a head, so a commit an agent token pushed to a human's
-branch (agent tokens may be granted ordinary refs) still counts as the human
-change's head. Run untrusted repositories with `--trust none` or
-`--executor container`.
+The platform does not record which principal pushed a head, so `humans`
+reasons about who could have: a human-opened change whose head ref no agent
+credential may write. A human who pushes an agent's commit to such a ref
+vouches for it. Run repositories whose human writers you do not trust with
+`--trust none` or `--executor container`.
 
 ### Container executor
 
 `--executor container`, or `auto` for an untrusted job, runs the command with
 docker, else podman (`--container-runtime docker|podman` picks one; a runtime
-counts only when `<runtime> info` succeeds). Each job gets a fresh container:
+counts only when `<runtime> info` succeeds, which also tells whether it runs
+rootless). Each job gets a fresh container, created first (`create --rm`, so
+an image pull never eats the job's timeout; creating has its own 15-minute
+budget) and then run with `start --attach`:
 
-- `--rm`, named `kvarm-job-<job>-<random>`; on timeout the runner runs
-  `<runtime> kill <name>` and then kills the client, so the container never
-  outlives the job
+- named `kvarm-job-<job>-<random>`; on timeout the runner runs
+  `<runtime> kill <name>`, kills the client after 5 s and force-removes the
+  container, so it never outlives the job
 - the job's working directory bind-mounted at `/workspace` as the only
   writable host mount and the working directory; a read-only root filesystem
   with a private `/tmp` (also `HOME`); all capabilities dropped and
   `no-new-privileges`; `--init`
 - this user's `uid:gid` so files in the working directory stay yours
   (`--container-user <uid:gid>` overrides, `--container-user image` keeps the
-  image's user; rootless podman also gets `--userns keep-id`)
+  image's user); rootless podman also gets `--userns keep-id`, and rootless
+  docker runs as container root, which is this user on the host
 - `--cpus 2`, `--memory 4g`, `--pids-limit 1024` unless set with `--cpus`,
   `--memory`, `--pids-limit`
 - the runtime's default network, because installs need one; `--network none`
   cuts the job off (installs then only work from a warm working directory)
-- only `LANG`, `LC_*`, `TZ`, `GIT_TERMINAL_PROMPT=0` and `HOME=/tmp` in its
-  environment: the host filter without host paths
+- only `TZ`, `LANG=C.UTF-8`, `GIT_TERMINAL_PROMPT=0` and `HOME=/tmp` in its
+  environment: no host paths, no host locale names the image may lack, no
+  credentials
 - `--image` (default `node:24-bookworm`, the official Node.js LTS image, whose
   full variant carries the `git` the snapshot jobs use; pin a patch tag or a
   digest such as `node:24.x.y-bookworm@sha256:…` for reproducible jobs)
