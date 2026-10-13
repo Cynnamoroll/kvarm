@@ -29,7 +29,15 @@ import { branchIssueNumber, issueRefsIn, normalizeFingerprint, type IssueRef } f
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
-import { normalizeRepoPath } from './contents';
+import { normalizePath } from './intents/paths';
+import {
+  issuePathsCleanupStatement,
+  issuePathsInsertStatement,
+  issuePathsReplaceStatements,
+  issueProbe,
+  touchedIssuesBinds,
+  touchedIssuesSql,
+} from './intents/issuePaths';
 
 export const ISSUE_LIMITS = {
   titleMax: 256,
@@ -84,7 +92,7 @@ export interface IssueLinkView {
   change: number | null;
   workspace: string | null;
   kind: 'closes' | 'refs';
-  source: 'text' | 'branch' | 'workspace' | 'manual';
+  source: 'text' | 'branch' | 'workspace' | 'paths' | 'manual';
   state: 'confirmed' | 'proposed' | 'rejected';
   actor: string | null;
   createdAt: string;
@@ -217,13 +225,13 @@ async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceR
 function parsePaths(v: unknown): ServiceResult<string[] | null> {
   if (v === undefined || v === null) return { ok: true, value: null };
   if (!Array.isArray(v) || v.length > ISSUE_LIMITS.pathsMax) {
-    return fail(422, `paths must be a list of at most ${ISSUE_LIMITS.pathsMax} repository-relative paths`, 'INVALID_PATH');
+    return fail(422, `paths must be a list of at most ${ISSUE_LIMITS.pathsMax} repository-relative paths (a trailing / names a directory)`, 'INVALID_PATH');
   }
   const out: string[] = [];
   for (const p of v) {
-    const norm = typeof p === 'string' && p.length <= ISSUE_LIMITS.pathMax ? normalizeRepoPath(p) : null;
-    if (!norm) return fail(422, `invalid path ${JSON.stringify(p).slice(0, 120)}; paths are repository-relative without . or .. segments`, 'INVALID_PATH');
-    if (!out.includes(norm)) out.push(norm);
+    const norm = normalizePath(p);
+    if (!norm.ok) return fail(422, `invalid path ${JSON.stringify(p).slice(0, 120)}: ${norm.error}`, 'INVALID_PATH');
+    if (!out.includes(norm.value)) out.push(norm.value);
   }
   return { ok: true, value: out };
 }
@@ -351,7 +359,7 @@ export function issueSignalStatements(db: D1Database, repoId: string, s: IssueSi
     authorId: null,
     agentMeta: null,
   };
-  return [upsertStatement(db, repoId, row, now)];
+  return [upsertStatement(db, repoId, row, now), ...(row.paths?.length ? [issuePathsInsertStatement(db, repoId, row.id, row.paths)] : [])];
 }
 
 /**
@@ -396,10 +404,12 @@ export function createIssue(cx: IssueContext, input: unknown): Promise<ServiceRe
       agentMeta: agent ? JSON.stringify({ agentId: agent.agentId, agentName: agent.agentName }) : null,
     };
     const db = cx.env.DB;
-    const [, read] = await db.batch([
+    const results = await db.batch([
       upsertStatement(db, cx.repo.id, row, Date.now()),
+      ...(p.paths?.length ? [issuePathsInsertStatement(db, cx.repo.id, row.id, p.paths)] : []),
       db.prepare(`${ISSUE_SELECT} WHERE i.id = ?1 OR (i.repo_id = ?2 AND i.fingerprint = ?3 AND i.state = 'open') LIMIT 1`).bind(row.id, cx.repo.id, p.fingerprint),
     ]);
+    const read = results[results.length - 1];
     const got = (read?.results as (IssueRow & { id: string })[] | undefined)?.[0];
     if (!got) return fail(500, 'issue could not be filed', 'CREATE_FAILED');
     return { ok: true, value: { issue: issueView(got), created: got.id === row.id } };
@@ -505,10 +515,12 @@ export function updateIssue(cx: IssueContext, rawNumber: string, input: unknown)
       }
       set('body = ?', b.body);
     }
+    let newPaths: string[] | null = null;
     if (b.paths !== undefined) {
       const paths = parsePaths(b.paths);
       if (!paths.ok) return paths;
-      set('paths = ?', paths.value ? JSON.stringify(paths.value) : null);
+      newPaths = paths.value ?? [];
+      set('paths = ?', newPaths.length > 0 ? JSON.stringify(newPaths) : null);
     }
     if (b.closedReason !== undefined && (b.state !== 'closed' || !(CLOSED_REASONS as readonly unknown[]).includes(b.closedReason))) {
       return fail(422, `closedReason goes with state "closed" and is one of ${CLOSED_REASONS.join(', ')}`, 'INVALID_CLOSED_REASON');
@@ -529,10 +541,12 @@ export function updateIssue(cx: IssueContext, rawNumber: string, input: unknown)
     if (sets.length === 0) return fail(422, 'nothing to update: pass title, body, paths or state', 'EMPTY_PATCH');
     set('updated_at = ?', now);
     const db = cx.env.DB;
-    const [, read] = await db.batch([
+    const results = await db.batch([
       db.prepare(`UPDATE issues SET ${sets.join(', ')} WHERE repo_id = ?1 AND number = ?2`).bind(cx.repo.id, number, ...args),
+      ...(newPaths !== null ? issuePathsReplaceStatements(db, cx.repo.id, number, newPaths) : []),
       db.prepare(`${ISSUE_SELECT} WHERE i.repo_id = ?1 AND i.number = ?2`).bind(cx.repo.id, number),
     ]);
+    const read = results[results.length - 1];
     const row = (read?.results as IssueRow[] | undefined)?.[0];
     if (!row) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
     return { ok: true, value: issueView(row) };
@@ -572,6 +586,8 @@ export function changeLinkStatements(
   change: { title: string; body: string | null; head: string },
   actor: string | null,
   now: number,
+  /** The change's changed paths, when known (at creation): open issues about them get proposed links. */
+  changed?: readonly string[],
 ): D1PreparedStatement[] {
   const refs = localIssueRefs(repo, [change.title, change.body]).map((r) => ({ number: r.number, kind: r.kind }));
   const branch = branchIssueNumber(change.head);
@@ -602,7 +618,29 @@ export function changeLinkStatements(
             .bind(repo.id, changeId, actor, now, branch),
         ]
       : []),
+    ...(changed && changed.length > 0 ? [pathLinkStatement(db, repo.id, changeId, changed, actor, now)] : []),
   ];
+}
+
+/** Proposed links per change from the issue-path index; the newest issues win. */
+export const PATH_PROPOSALS_MAX = 10;
+
+/**
+ * Proposes `closes` links to the open issues whose paths the change touches
+ * (Nexus issue-path index). Text, branch and manual links to the same issue
+ * win; a proposal only becomes a close once someone confirms it.
+ */
+function pathLinkStatement(db: D1Database, repoId: string, changeId: string, changed: readonly string[], actor: string | null, now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO issue_links (id, repo_id, issue_id, change_set_id, workspace_id, kind, source, state, actor, created_at, updated_at)
+       SELECT lower(hex(randomblob(16))), ?1, i.id, ?2, NULL, 'closes', 'paths', 'proposed', ?3, ?4, ?4
+         FROM issues i
+        WHERE i.repo_id = ?1 AND i.state = 'open' AND i.id IN (${touchedIssuesSql(5)})
+        ORDER BY i.number DESC LIMIT ${PATH_PROPOSALS_MAX}
+       ON CONFLICT (change_set_id, issue_id) WHERE change_set_id IS NOT NULL DO NOTHING`,
+    )
+    .bind(repoId, changeId, actor, now, ...touchedIssuesBinds(repoId, issueProbe(changed)));
 }
 
 /** True when the repository has an open issue with this number. */
@@ -781,6 +819,7 @@ export function commitCloseStatement(db: D1Database, repoId: string, closes: rea
 export function issueCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
   return [
     db.prepare('DELETE FROM issue_links WHERE repo_id = ?').bind(repoId),
+    issuePathsCleanupStatement(db, repoId),
     db.prepare('DELETE FROM issue_comments WHERE issue_id IN (SELECT id FROM issues WHERE repo_id = ?)').bind(repoId),
     db.prepare('DELETE FROM issues WHERE repo_id = ?').bind(repoId),
   ];

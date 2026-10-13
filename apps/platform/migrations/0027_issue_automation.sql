@@ -8,7 +8,8 @@
 -- human | agent | ci | flake | guard
 ALTER TABLE issues ADD COLUMN source TEXT NOT NULL DEFAULT 'human';
 ALTER TABLE issues ADD COLUMN fingerprint TEXT;
--- JSON array of repository-relative paths the issue is about.
+-- JSON array of repository-relative paths the issue is about (a trailing `/`
+-- is a directory prefix); indexed in issue_paths for the Nexus.
 ALTER TABLE issues ADD COLUMN paths TEXT;
 -- JSON {agentId, agentName} when an agent token filed it.
 ALTER TABLE issues ADD COLUMN agent_meta TEXT;
@@ -34,6 +35,8 @@ CREATE INDEX idx_issues_repo_state_number ON issues(repo_id, state, number);
 -- the head branch; proposed only), workspace (the workspace was created for
 -- the issue), manual (link_issue). Text and branch rows are recomputed from
 -- the change; manual rows, confirmations and rejections alike, are kept.
+-- paths: the change touched files the issue is about (proposed only, from
+-- the Nexus issue-path index).
 CREATE TABLE issue_links (
   id TEXT PRIMARY KEY,
   repo_id TEXT NOT NULL,
@@ -41,7 +44,7 @@ CREATE TABLE issue_links (
   change_set_id TEXT,
   workspace_id TEXT,
   kind TEXT NOT NULL CHECK (kind IN ('closes', 'refs')),
-  source TEXT NOT NULL CHECK (source IN ('text', 'branch', 'workspace', 'manual')),
+  source TEXT NOT NULL CHECK (source IN ('text', 'branch', 'workspace', 'paths', 'manual')),
   state TEXT NOT NULL CHECK (state IN ('confirmed', 'proposed', 'rejected')),
   actor TEXT,
   created_at INTEGER NOT NULL,
@@ -51,3 +54,13 @@ CREATE TABLE issue_links (
 CREATE UNIQUE INDEX idx_issue_links_change ON issue_links(change_set_id, issue_id) WHERE change_set_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_issue_links_workspace ON issue_links(workspace_id, issue_id) WHERE workspace_id IS NOT NULL;
 CREATE INDEX idx_issue_links_issue ON issue_links(issue_id, created_at);
+
+-- The Nexus issue-path index (services/intents/issuePaths.ts): one row per
+-- path or directory prefix of an issue, probed by key and by prefix range.
+CREATE TABLE issue_paths (
+  repo_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  PRIMARY KEY (repo_id, path, issue_id)
+) WITHOUT ROWID;
+CREATE INDEX idx_issue_paths_issue ON issue_paths(issue_id, path);

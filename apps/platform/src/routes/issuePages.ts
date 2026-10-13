@@ -225,7 +225,14 @@ function linkRow(r: Resolved, issue: number, l: svc.IssueLinkView, writable: boo
           <button class="btn" name="state" value="rejected" type="submit">Reject</button>
         </form>`
       : '';
-  const hint = l.source === 'branch' ? 'from the branch name' : l.source === 'text' ? 'from the change text' : l.source === 'workspace' ? 'workspace created for this issue' : 'set by hand';
+  const hints: Record<svc.IssueLinkView['source'], string> = {
+    branch: 'from the branch name',
+    text: 'from the change text',
+    workspace: 'workspace created for this issue',
+    paths: "the change touches this issue's paths",
+    manual: 'set by hand',
+  };
+  const hint = hints[l.source];
   return html`
     <div class="commit-row">
       <div>${raw(target)} <span class="badge">${l.kind}</span> <span class="badge">${l.state}</span>

@@ -754,10 +754,11 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       // The guard judges the change's own edits (merge base -> head) before the row exists, so its run lands in the same batch.
       const guardStarted = Date.now();
       const guard = await guardFor(ctx, { baseSha, baseTree: base.tree, headTree: head.tree, mergeBase: m.mergeBase, body: pair.body });
-      return { ok: true as const, value: { baseSha, headSha, headTree: head.tree, rating: pair.body.rating, m, guard, guardStarted } };
+      const changed = pair.body.files.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path]));
+      return { ok: true as const, value: { baseSha, headSha, headTree: head.tree, rating: pair.body.rating, m, guard, guardStarted, changed } };
     });
     if (!resolved.ok) return resolved;
-    const { baseSha, headSha, headTree, rating, m, guard, guardStarted } = resolved.value;
+    const { baseSha, headSha, headTree, rating, m, guard, guardStarted, changed } = resolved.value;
     const ciConfig = await hasCiJobs(cx.env, cx.repo.artifacts_name, headSha);
     if (!ciConfig.ok) return ciConfig;
 
@@ -798,7 +799,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
         branchRef(p.head),
         observedAt,
       ),
-      ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now),
+      ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now, changed),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
       ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
       // A change into a ref covered by a branch rule asks a human from the start.

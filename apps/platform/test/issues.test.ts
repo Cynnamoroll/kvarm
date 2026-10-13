@@ -13,6 +13,7 @@ import { checkFingerprint } from '@kvarm/issues';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { issueSignalStatements, resolveSignalStatement } from '../src/services/issues';
+import { issueProbe, touchedIssuesBinds, touchedIssuesSql } from '../src/services/intents/issuePaths';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
@@ -333,6 +334,50 @@ describe('changes close their issues', () => {
     ]);
     expect((await merge('wsissue', opened.json.number)).status).toBe(200);
     expect((await getIssue('wsissue', 1)).json).toMatchObject({ state: 'closed', closedBy: { change: opened.json.number, commit: c.sha } });
+  });
+});
+
+describe('issue paths', () => {
+  it('proposes links to open issues whose paths a new change touches; text links win', async () => {
+    const r = await seedRepo('paths');
+    await fileIssue('paths', { title: 'auth is slow', paths: ['src/auth/'] });
+    await fileIssue('paths', { title: 'pager off by one', paths: ['src/pager.ts'] });
+    await fileIssue('paths', { title: 'docs', paths: ['docs/'] });
+    await fileIssue('paths', { title: 'old login bug', paths: ['src/auth/login.ts'] });
+    await call('PATCH', api('paths', '/issues/4'), tok.owner, { state: 'closed' });
+    expect((await getIssue('paths', 1)).json.paths).toEqual(['src/auth/']);
+
+    const c = await commit(r.repo, { 'README.md': 'readme\n', 'src/auth/login.ts': 'x\n', 'src/pager.ts': 'y\n' }, [r.main]);
+    r.repo.refs.set('refs/heads/feature', c.sha);
+    const n = await openChange('paths', { title: 'Speed up auth', head: 'feature', body: 'Fixes #2' });
+    expect((await changeIssues('paths', n)).json.issues.map((i: any) => [i.issue, i.source, i.state, i.willClose])).toEqual([
+      [1, 'paths', 'proposed', false],
+      [2, 'text', 'confirmed', true],
+    ]);
+    // A proposal from paths never closes on its own.
+    await merge('paths', n);
+    expect((await getIssue('paths', 1)).json.state).toBe('open');
+    expect((await getIssue('paths', 2)).json.state).toBe('closed');
+  });
+
+  it('reindexes edited paths and matches wide edits by prefix range', async () => {
+    const r = await seedRepo('paths-edit');
+    await fileIssue('paths-edit', { title: 'x', paths: ['src/a.ts'] });
+    await call('PATCH', api('paths-edit', '/issues/1'), tok.owner, { paths: ['lib/deep/thing.ts'] });
+    const c = await commit(r.repo, { 'README.md': 'readme\n', 'lib/deep/thing.ts': 'z\n' }, [r.main]);
+    r.repo.refs.set('refs/heads/feature', c.sha);
+    const n = await openChange('paths-edit', { title: 'Lib work', head: 'feature' });
+    expect((await changeIssues('paths-edit', n)).json.issues.map((i: any) => [i.issue, i.source])).toEqual([[1, 'paths']]);
+
+    // A change wide enough to collapse into directory prefixes still finds issues below them.
+    const wide = issueProbe(Array.from({ length: 400 }, (_, i) => `lib/deep/gen/f${i}.ts`).concat('lib/deep/thing.ts'));
+    expect(wide.prefixes.length).toBeGreaterThan(0);
+    const probe = { keys: [], prefixes: ['lib/'] };
+    const hit = await env.DB.prepare(`SELECT number FROM issues WHERE id IN (${touchedIssuesSql(1)})`)
+      .bind(...touchedIssuesBinds(repoIds['paths-edit']!, probe))
+      .all<{ number: number }>();
+    expect(hit.results.map((x) => x.number)).toEqual([1]);
+    expect(issueProbe(['a/b/c.ts']).keys.sort()).toEqual(['a/', 'a/b/', 'a/b/c.ts']);
   });
 });
 
