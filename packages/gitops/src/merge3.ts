@@ -21,8 +21,9 @@
  * similar, so a rename-with-edits on one side is reported here as
  * modify/delete where git would merge it (never the reverse direction of a
  * clean merge git would refuse, except rename+delete, which merges to the
- * same tree git writes). Several merge bases (criss-cross) are the caller's
- * concern: pass one base tree.
+ * same tree git writes). Several merge bases (criss-cross) are merged into
+ * one virtual base tree first (virtualBase.ts); `virtualDepth` makes this
+ * merge produce such a tree, conflicts included (architecture §3.1).
  *
  * Budgeted: tree reads, blob reads, blob size, diff work and the total size
  * of the objects the merge creates are bounded, and content merges run one
@@ -109,16 +110,33 @@ export interface Merge3Options {
   contentConcurrency?: number;
   /** Resolves conflicting hunks beyond git's rules (default none: git's result exactly). */
   resolver?: HunkResolver;
+  /**
+   * Call depth of a virtual-ancestor merge (default 0: an ordinary merge).
+   * Above 0 the merge writes a tree even when it conflicts, with merge-ort's
+   * inner-merge rules (architecture §3.1): text conflicts keep their markers
+   * (7 + 2 * depth wide), a modify/delete keeps the base entry, and a
+   * binary, symlink or submodule conflict keeps the base. Conflicts git
+   * settles with rules this merge does not model (renames, file/directory,
+   * type changes) stop it with `virtualConflict`.
+   */
+  virtualDepth?: number;
 }
 
-export type Merge3Truncation = TreeDiffTruncation | 'maxBlobReads' | 'maxBlobBytes' | 'maxMergedBytes' | 'diffBudget' | 'missingObject';
+export type Merge3Truncation =
+  | TreeDiffTruncation
+  | 'maxBlobReads'
+  | 'maxBlobBytes'
+  | 'maxMergedBytes'
+  | 'diffBudget'
+  | 'missingObject'
+  | 'virtualConflict';
 
 export interface Merge3Result {
   /** No conflicts and not truncated. */
   clean: boolean;
-  /** The merged root tree; null when conflicted or truncated. */
+  /** The merged root tree; null when truncated, or when conflicted outside a virtual-ancestor merge. */
   treeHash: string | null;
-  /** Objects the merged tree needs that the merge created (merged blobs, rebuilt trees); empty unless clean. */
+  /** Objects the merged tree needs that the merge created (merged blobs, rebuilt trees); empty unless `treeHash` is set. */
   objects: GitObject[];
   /** Sorted by path, then kind. */
   conflicts: MergeConflict[];
@@ -142,7 +160,11 @@ const DEFAULTS = {
   maxMergedBytes: 16 * 1024 * 1024,
   contentConcurrency: 1,
   resolver: undefined as HunkResolver | undefined,
+  virtualDepth: 0,
 };
+
+/** merge-ort's branch labels inside a virtual-ancestor merge. */
+const VIRTUAL_LABELS = { ours: 'Temporary merge branch 1', theirs: 'Temporary merge branch 2' };
 
 /** Upper bound of an object's raw plus deflated size (deflate's stored-block overhead included). */
 const objectBound = (contentBytes: number) => 2 * (contentBytes + 32) + (contentBytes >> 10) + 64;
@@ -269,6 +291,7 @@ class Merge {
   private readonly objects: GitObject[] = [];
   private readonly tasks: ContentTask[] = [];
   private readonly contentLimiter: Limiter;
+  private readonly virtual: boolean;
   /** Bytes reserved or held by `objects`. */
   private retained = 0;
 
@@ -278,6 +301,12 @@ class Merge {
   ) {
     this.limiter = new Limiter(Math.max(1, opts.concurrency));
     this.contentLimiter = new Limiter(Math.max(1, opts.contentConcurrency));
+    this.virtual = opts.virtualDepth > 0;
+  }
+
+  /** A conflict a virtual-ancestor merge cannot write into its tree the way git would. */
+  private refuseVirtual(path: string): void {
+    if (this.virtual) throw new Stop('virtualConflict', path);
   }
 
   /** Reserves `bound` bytes for an object about to be built, or stops the merge. */
@@ -398,10 +427,10 @@ class Merge {
         this.tasks.push({ place: p, base: bs, ours: side(p, o.entry), theirs: side(p, t.entry) });
       } else if (o.op === 'modify' && t.op === 'delete') {
         this.conflict({ path: p, kind: 'modify-delete', base: bs, ours: side(p, o.entry) });
-        this.edits.set(p, o.entry);
+        this.edits.set(p, this.virtual ? b : o.entry);
       } else if (o.op === 'delete' && t.op === 'modify') {
         this.conflict({ path: p, kind: 'modify-delete', base: bs, theirs: side(p, t.entry) });
-        this.edits.set(p, t.entry);
+        this.edits.set(p, this.virtual ? b : t.entry);
       } else if (o.op === 'rename' && t.op === 'rename') {
         this.edits.set(p, null);
         consumed.ours.add(o.to);
@@ -409,6 +438,7 @@ class Merge {
         if (o.to === t.to) {
           this.tasks.push({ place: o.to, base: bs, ours: side(o.to, o.entry), theirs: side(t.to, t.entry) });
         } else {
+          this.refuseVirtual(p);
           this.conflict({ path: p, kind: 'rename', paths: [p, o.to, t.to], base: bs, ours: side(o.to, o.entry), theirs: side(t.to, t.entry) });
           this.edits.set(o.to, o.entry);
           this.edits.set(t.to, t.entry);
@@ -420,6 +450,7 @@ class Merge {
         this.edits.set(p, null);
         (renamedByOurs ? consumed.ours : consumed.theirs).add(r.to);
         if (other.op === 'delete') {
+          this.refuseVirtual(p);
           this.conflict({ path: p, kind: 'rename', paths: [p, r.to], base: bs, [renamedByOurs ? 'ours' : 'theirs']: side(r.to, r.entry) });
           this.edits.set(r.to, r.entry);
           continue;
@@ -429,6 +460,7 @@ class Merge {
         const collision = otherAdds.get(r.to);
         if (collision) {
           // The other side added a file where this side renamed one to.
+          this.refuseVirtual(r.to);
           (renamedByOurs ? consumed.theirs : consumed.ours).add(r.to);
           const [oe, te] = renamedByOurs ? [r.entry, collision.entry] : [collision.entry, r.entry];
           this.conflict({ path: r.to, kind: 'add-add', ours: side(r.to, oe), theirs: side(r.to, te) });
@@ -446,7 +478,7 @@ class Merge {
 
     const root = await this.build(baseTree, this.editTree(), '');
     const conflicts = this.conflicts.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
-    if (conflicts.length > 0) return this.result({ conflicts });
+    if (conflicts.length > 0 && !this.virtual) return this.result({ conflicts });
     let treeHash = root;
     if (treeHash === null) {
       const bound = objectBound(0);
@@ -456,6 +488,7 @@ class Merge {
       treeHash = empty.hash;
     }
     const resolved = this.resolutions.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    if (conflicts.length > 0) return this.result({ treeHash, objects: this.objects, conflicts });
     return this.result({ clean: true, treeHash, objects: this.objects, resolved });
   }
 
@@ -476,7 +509,10 @@ class Merge {
     const place = (adds: typeof oursAdds, moves: Map<string, string>, who: 'ours' | 'theirs') => {
       for (const [q, { entry }] of adds) {
         const target = moves.get(q) ?? q;
-        if (target !== q) this.conflict({ path: q, kind: 'rename', paths: [q, target], [who]: side(target, entry) });
+        if (target !== q) {
+          this.refuseVirtual(q);
+          this.conflict({ path: q, kind: 'rename', paths: [q, target], [who]: side(target, entry) });
+        }
         const slot = placed.get(target) ?? {};
         slot[who] = entry;
         placed.set(target, slot);
@@ -488,6 +524,12 @@ class Merge {
     for (const [q, { ours: oe, theirs: te }] of placed) {
       if (oe && te && !sameEntry(oe, te)) {
         const kind = typeOf(oe.mode) !== typeOf(te.mode) ? 'typechange' : 'add-add';
+        if (this.virtual) {
+          // git content-merges two added files against an empty base; other add/add shapes take rules not modeled here.
+          if (kind !== 'add-add' || typeOf(oe.mode) !== 'file') this.refuseVirtual(q);
+          this.tasks.push({ place: q, ours: side(q, oe), theirs: side(q, te) });
+          continue;
+        }
         this.conflict({ path: q, kind, ours: side(q, oe), theirs: side(q, te) });
       } else if (oe && te) this.resolutions.push({ path: q, rule: 'add-add-identical' });
       this.edits.set(q, (oe ?? te)!);
@@ -522,6 +564,7 @@ class Merge {
       if (await this.dirExists(renamerTree, dir)) continue;
       const ranked = [...targets].sort((a, b) => b[1] - a[1]);
       if (ranked.length > 1 && ranked[0]![1] === ranked[1]![1]) {
+        this.refuseVirtual(dir);
         this.conflict({ path: dir, kind: 'rename' });
         continue;
       }
@@ -559,6 +602,7 @@ class Merge {
     if (b && sameEntry(o, b)) return void set(th);
     if (b && sameEntry(th, b)) return void set(o);
     if (typeOf(o.mode) !== typeOf(th.mode)) {
+      this.refuseVirtual(place);
       this.conflict({ path: place, kind: 'typechange', base: b, ours: o, theirs: th });
       return void set(o);
     }
@@ -571,9 +615,10 @@ class Merge {
     else if (b && o.hash === b.hash) hash = th.hash;
     else if (b && th.hash === b.hash) hash = o.hash;
     else if (typeOf(o.mode) !== 'file') {
-      // Symlink targets and submodule commits do not merge line by line.
+      // Symlink targets and submodule commits do not merge line by line; a virtual ancestor keeps the base.
+      if (!b) this.refuseVirtual(place);
       this.conflict({ path: place, kind: 'content', base: b, ours: o, theirs: th });
-      return void set(o);
+      return void set(this.virtual && b ? b : o);
     } else {
       const [bb, ob, tb] = await Promise.all([
         b && typeOf(b.mode) !== 'gitlink' ? this.readBlob(b.hash) : Promise.resolve(new Uint8Array(0)),
@@ -581,6 +626,11 @@ class Merge {
         this.readBlob(th.hash),
       ]);
       if (isBinaryContent3(bb, ob, tb)) {
+        if (this.virtual) {
+          // git's binary driver answers a virtual ancestor with the base content and no conflict.
+          const content = b && typeOf(b.mode) !== 'gitlink' ? b.hash : await this.blob(new Uint8Array(0), place);
+          return void set({ mode, hash: content });
+        }
         this.conflict({ path: place, kind: 'binary', base: b, ours: o, theirs: th });
         return void set(o);
       }
@@ -588,24 +638,31 @@ class Merge {
       const merged = mergeText(bb, ob, tb, {
         nodeBudget: this.opts.nodeBudget,
         ...(resolver ? { resolveHunk: (ours: readonly string[], theirs: readonly string[]) => resolver(place, ours, theirs) } : {}),
+        ...(this.virtual ? { labels: VIRTUAL_LABELS, markerSize: 7 + 2 * this.opts.virtualDepth } : {}),
       });
       if (!merged) throw new Stop('diffBudget', place);
       if (!merged.clean) {
-        this.conflict({ path: place, kind: 'content', base: b, ours: o, theirs: th, hunks: merged.conflicts });
-        return void set(o);
+        this.conflict({ path: place, kind: b ? 'content' : 'add-add', base: b, ours: o, theirs: th, hunks: merged.conflicts });
+        // The virtual ancestor keeps the markers, so the outer merge sees both sides' lines against it.
+        return void set(this.virtual ? { mode, hash: await this.blob(merged.merged, place) } : o);
       }
-      const bound = objectBound(merged.merged.length);
-      this.reserve(bound, place);
-      const blob = await buildBlob(merged.merged);
-      this.keep(blob, bound);
-      hash = blob.hash;
+      hash = await this.blob(merged.merged, place);
       this.resolutions.push(merged.resolved > 0 ? { path: place, rule: 'whitespace-only', hunks: merged.resolved } : { path: place, rule: 'non-overlapping' });
     }
     if (!modeClean) {
       this.conflict({ path: place, kind: 'content', base: b, ours: o, theirs: th });
-      return void set(o);
+      return void set(this.virtual ? { mode, hash } : o);
     }
     set({ mode, hash });
+  }
+
+  /** Builds and keeps a blob within the created-bytes budget; returns its id. */
+  private async blob(content: Uint8Array, place: string): Promise<string> {
+    const bound = objectBound(content.length);
+    this.reserve(bound, place);
+    const blob = await buildBlob(content);
+    this.keep(blob, bound);
+    return blob.hash;
   }
 
   private editTree(): EditNode {
@@ -642,6 +699,7 @@ class Merge {
         const sub = await this.build(existing && isTreeMode(existing.mode) ? existing.hash : null, child, `${path}/`);
         const file = child.self !== undefined ? child.self : existing && !isTreeMode(existing.mode) ? existing : null;
         if (sub !== null && file) {
+          this.refuseVirtual(path);
           this.conflict({ path, kind: 'file-directory' });
           entries.set(name, { mode: file.mode, hash: file.hash, name });
         } else if (sub !== null) entries.set(name, { mode: '40000', name, hash: sub });
