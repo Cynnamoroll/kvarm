@@ -626,28 +626,28 @@ class Merge {
         this.readBlob(th.hash),
       ]);
       if (isBinaryContent3(bb, ob, tb)) {
-        if (this.virtual) {
-          // git's binary driver answers a virtual ancestor with the base content and no conflict.
-          const content = b && typeOf(b.mode) !== 'gitlink' ? b.hash : await this.blob(new Uint8Array(0), place);
-          return void set({ mode, hash: content });
+        if (!this.virtual) {
+          this.conflict({ path: place, kind: 'binary', base: b, ours: o, theirs: th });
+          return void set(o);
         }
-        this.conflict({ path: place, kind: 'binary', base: b, ours: o, theirs: th });
-        return void set(o);
+        // git's binary driver answers a virtual ancestor with the base bytes and no content conflict; the mode rule still applies.
+        hash = b && typeOf(b.mode) !== 'gitlink' ? b.hash : await this.blob(bb, place);
+      } else {
+        const resolver = this.opts.resolver;
+        const merged = mergeText(bb, ob, tb, {
+          nodeBudget: this.opts.nodeBudget,
+          ...(resolver ? { resolveHunk: (ours: readonly string[], theirs: readonly string[]) => resolver(place, ours, theirs) } : {}),
+          ...(this.virtual ? { labels: VIRTUAL_LABELS, markerSize: 7 + 2 * this.opts.virtualDepth } : {}),
+        });
+        if (!merged) throw new Stop('diffBudget', place);
+        if (!merged.clean) {
+          this.conflict({ path: place, kind: b ? 'content' : 'add-add', base: b, ours: o, theirs: th, hunks: merged.conflicts });
+          // The virtual ancestor keeps the markers, so the outer merge sees both sides' lines against it.
+          return void set(this.virtual ? { mode, hash: await this.blob(merged.merged, place) } : o);
+        }
+        hash = await this.blob(merged.merged, place);
+        this.resolutions.push(merged.resolved > 0 ? { path: place, rule: 'whitespace-only', hunks: merged.resolved } : { path: place, rule: 'non-overlapping' });
       }
-      const resolver = this.opts.resolver;
-      const merged = mergeText(bb, ob, tb, {
-        nodeBudget: this.opts.nodeBudget,
-        ...(resolver ? { resolveHunk: (ours: readonly string[], theirs: readonly string[]) => resolver(place, ours, theirs) } : {}),
-        ...(this.virtual ? { labels: VIRTUAL_LABELS, markerSize: 7 + 2 * this.opts.virtualDepth } : {}),
-      });
-      if (!merged) throw new Stop('diffBudget', place);
-      if (!merged.clean) {
-        this.conflict({ path: place, kind: b ? 'content' : 'add-add', base: b, ours: o, theirs: th, hunks: merged.conflicts });
-        // The virtual ancestor keeps the markers, so the outer merge sees both sides' lines against it.
-        return void set(this.virtual ? { mode, hash: await this.blob(merged.merged, place) } : o);
-      }
-      hash = await this.blob(merged.merged, place);
-      this.resolutions.push(merged.resolved > 0 ? { path: place, rule: 'whitespace-only', hunks: merged.resolved } : { path: place, rule: 'non-overlapping' });
     }
     if (!modeClean) {
       this.conflict({ path: place, kind: 'content', base: b, ours: o, theirs: th });

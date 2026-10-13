@@ -206,6 +206,16 @@ describe('virtualMergeBase', () => {
     const store = new Store();
     const { B1, B2 } = await crissCross(store, { 'f.txt': ten({ 2: 'B1' }) }, { 'f.txt': ten({ 9: 'B2' }) }, { 'f.txt': ten() });
     expect(await virtualMergeBase(store, [B1, B2], { maxCommitReads: 2 })).toMatchObject({ truncated: true, truncatedReason: 'maxCommitReads' });
+    // Distinct commits are charged once: B1, B2 and their base O fit a budget of exactly 3.
+    expect(await virtualMergeBase(store, [B1, B2], { maxCommitReads: 3 })).toMatchObject({ truncated: false, commitReads: 3 });
+    // The caller's budget decides instead: commits it already paid for are not charged again.
+    const paid = new Set([B1, B2]);
+    expect(await virtualMergeBase(store, [B1, B2], { maxCommitReads: 1, mayReadCommit: (sha) => paid.has(sha) })).toMatchObject({
+      truncated: true,
+      truncatedReason: 'maxCommitReads',
+    });
+    paid.add((await store.readCommit(B1))!.parents[0]!);
+    expect(await virtualMergeBase(store, [B1, B2], { maxCommitReads: 1, mayReadCommit: (sha) => paid.has(sha) })).toMatchObject({ truncated: false });
     expect(await virtualMergeBase(store, [B1, B2], { maxTreeReads: 1 })).toMatchObject({ truncated: true, truncatedReason: 'maxTreeReads' });
     expect(await virtualMergeBase(store, [B1, B2], { maxBlobReads: 1 })).toMatchObject({ truncated: true, truncatedReason: 'maxBlobReads' });
     expect(await virtualMergeBase(store, [B1, 'f'.repeat(40)])).toMatchObject({ truncated: true, truncatedReason: 'missingCommit', truncatedDetail: 'f'.repeat(40) });

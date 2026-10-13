@@ -24,13 +24,20 @@
  * merges together. A spent budget returns `truncated` with no tree.
  */
 
-import { buildTree, parseTree, type GitObject, type TreeEntry } from './index';
+import { parseTree, type GitObject, type TreeEntry } from './index';
 import { merge3, type Merge3Options, type Merge3Truncation, type MergeReader } from './merge3';
 import { mergeBase, type CommitInfo, type CommitReader, type MergeBaseTruncation } from './mergebase';
 
 export interface VirtualBaseOptions extends Omit<Merge3Options, 'resolver' | 'virtualDepth'> {
   /** Max distinct commit reads across every inner merge-base walk (default 2_000). */
   maxCommitReads?: number;
+  /**
+   * Whether reading commit `sha` stays within the caller's commit budget,
+   * replacing this merge's own count against `maxCommitReads`: a caller whose
+   * reader memoizes the commits it already walked (the outer merge-base
+   * walk) charges only for commits that are new to it.
+   */
+  mayReadCommit?: (sha: string) => boolean;
   /** Max merge bases of any one pair, the outermost included (default 8). */
   maxMergeBases?: number;
   /** Max call depth of inner merges; the outermost bases merge at depth 1 (default 3). */
@@ -98,11 +105,18 @@ class VirtualMerge implements CommitReader, MergeReader {
     private readonly opts: VirtualBaseOptions & typeof VIRTUAL_BASE_DEFAULTS,
   ) {}
 
+  /** Set when a commit read was refused for the budget; the walk only sees a failed read. */
+  private overBudget = false;
+
   readCommit(sha: string): Promise<CommitInfo | null> {
     const v = this.virtualCommits.get(sha);
     if (v) return Promise.resolve(v);
     let p = this.commits.get(sha);
     if (!p) {
+      if (!(this.opts.mayReadCommit?.(sha) ?? this.commitReads < this.opts.maxCommitReads)) {
+        this.overBudget = true;
+        return Promise.reject(new Stop('maxCommitReads'));
+      }
       this.commitReads++;
       p = this.inner.readCommit(sha);
       this.commits.set(sha, p);
@@ -154,19 +168,16 @@ class VirtualMerge implements CommitReader, MergeReader {
   }
 
   private async mergeCommits(a: string, b: string, depth: number): Promise<string> {
-    // The walk counts every call, memoized or virtual, so the remaining budget bounds distinct reads too.
+    // readCommit enforces the commit budget on distinct reads; the walk's own limit would also count memoized ones.
     const mb = await mergeBase(this, a, b, {
-      maxCommitReads: this.opts.maxCommitReads - this.commitReads,
+      maxCommitReads: Number.MAX_SAFE_INTEGER,
       ...(this.opts.concurrency !== undefined ? { concurrency: this.opts.concurrency } : {}),
     });
+    if (this.overBudget) throw new Stop('maxCommitReads');
     if (mb.truncated) throw new Stop(mb.truncatedReason ?? 'readError', mb.missingCommit ?? mb.readError);
     const base = await this.baseTree(mb.bases, depth + 1);
     const [ours, theirs] = await Promise.all([this.tree(a), this.tree(b)]);
-    if (base === EMPTY_TREE && !this.objects.has(EMPTY_TREE)) {
-      const empty = await buildTree([]);
-      this.objects.set(empty.hash, empty);
-    }
-    const { maxCommitReads: _c, maxMergeBases: _b, maxVirtualDepth: _d, ...mergeOpts } = this.opts;
+    const { maxCommitReads: _c, maxMergeBases: _b, maxVirtualDepth: _d, mayReadCommit: _m, ...mergeOpts } = this.opts;
     const m = await merge3(this, base, ours, theirs, {
       ...mergeOpts,
       maxTreeReads: this.opts.maxTreeReads - this.treeReads,

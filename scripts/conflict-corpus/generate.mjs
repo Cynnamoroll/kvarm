@@ -9,7 +9,8 @@
  *   --out   corpus directory (default: <tmpdir>/kvarm-conflict-corpus);
  *           rebuilt on every run, and only ever removed when it carries the
  *           corpus marker file
- *   --json  print the full result lists as JSON instead of a summary
+ *   --json  print the tree cases' result list as JSON instead of a summary
+ *           (the criss-cross results are in their expected.json)
  * Writes <out>/expected.json (tree cases) and
  * <out>/criss-cross/expected.json (criss-cross commit graphs, merged by git
  * through a virtual merge base). Requires git >= 2.40 (merge-tree
@@ -34,7 +35,7 @@ const crissCross = buildCrissCrossCorpus(ccDir, allCrissCrossCases());
 writeFileSync(join(ccDir, 'expected.json'), JSON.stringify(crissCross, null, 2) + '\n');
 
 if (args.json) {
-  console.log(JSON.stringify({ cases: results, crissCross }, null, 2));
+  console.log(JSON.stringify(results, null, 2));
 } else {
   for (const r of [...results, ...crissCross]) {
     console.log(`${r.expected.clean ? 'clean   ' : 'conflict'}  ${r.name.padEnd(36)} ${r.expected.clean ? r.expected.tree : r.expected.conflicts.join(' ')}`);

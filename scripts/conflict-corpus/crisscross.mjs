@@ -292,8 +292,10 @@ export function crissCrossRandomCases(seed = 1717, count = 24) {
   for (let c = 0; c < count; c++) {
     const b1 = {};
     const b2 = {};
-    for (let k = 0; k < 1 + Math.floor(rand() * 3); k++) b1[Math.floor(rand() * N)] = `b1-${c}-${k}`;
-    for (let k = 0; k < 1 + Math.floor(rand() * 3); k++) b2[Math.floor(rand() * N)] = `b2-${c}-${k}`;
+    const n1 = 1 + Math.floor(rand() * 3);
+    const n2 = 1 + Math.floor(rand() * 3);
+    for (let k = 0; k < n1; k++) b1[Math.floor(rand() * N)] = `b1-${c}-${k}`;
+    for (let k = 0; k < n2; k++) b2[Math.floor(rand() * N)] = `b2-${c}-${k}`;
     const resolve = (tag) => {
       const out = {};
       for (let i = 0; i < N; i++) {
