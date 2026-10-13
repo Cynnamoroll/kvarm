@@ -25,7 +25,7 @@
  * checks access.
  */
 
-import { branchIssueNumber, issueRefsIn, normalizeFingerprint, type IssueRef } from '@kvarm/issues';
+import { branchIssueNumber, checkFingerprint, issueRefsIn, normalizeFingerprint, type IssueRef } from '@kvarm/issues';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
@@ -56,7 +56,7 @@ export const ISSUE_SOURCES = ['human', 'agent', 'ci', 'flake', 'guard'] as const
 export type IssueSource = (typeof ISSUE_SOURCES)[number];
 export type SignalSource = Exclude<IssueSource, 'human' | 'agent'>;
 const CLOSED_REASONS = ['completed', 'not_planned', 'duplicate'] as const;
-type ClosedReason = (typeof CLOSED_REASONS)[number] | 'verified';
+type ClosedReason = (typeof CLOSED_REASONS)[number] | 'verified' | 'restored';
 
 export interface IssueEvidence {
   sha?: string;
@@ -363,25 +363,86 @@ export function issueSignalStatements(db: D1Database, repoId: string, s: IssueSi
 }
 
 /**
- * Closes the open issue with a fingerprint as `verified`: the signal that
- * filed it has passed again (for example the check passed on a newer
- * default-branch commit). A fingerprint with no open issue changes nothing.
+ * Closes the open issue with a fingerprint: `verified` when the signal that
+ * filed it has passed again, `restored` when the signal's owner returned it
+ * to normal handling (a quarantined check restored). A fingerprint with no
+ * open issue changes nothing; a later recurrence files a new issue.
  */
 export function resolveSignalStatements(
   db: D1Database,
   repoId: string,
   fingerprint: string,
-  verified: { commit?: string | null; evidence?: IssueEvidence | null },
+  verified: { commit?: string | null; evidence?: IssueEvidence | null; reason?: 'verified' | 'restored' },
   now: number,
 ): D1PreparedStatement[] {
   const close = db
     .prepare(
-      `UPDATE issues SET state = 'closed', closed_reason = 'verified', closed_at = ?3, updated_at = ?3, closed_by_change_id = NULL,
+      `UPDATE issues SET state = 'closed', closed_reason = ?6, closed_at = ?3, updated_at = ?3, closed_by_change_id = NULL,
               closed_by_commit = ?4, evidence = COALESCE(?5, evidence)
         WHERE repo_id = ?1 AND fingerprint = ?2 AND state = 'open'`,
     )
-    .bind(repoId, normalizeFingerprint(fingerprint) ?? '', now, verified.commit ?? null, verified.evidence ? JSON.stringify(verified.evidence) : null);
+    .bind(
+      repoId,
+      normalizeFingerprint(fingerprint) ?? '',
+      now,
+      verified.commit ?? null,
+      verified.evidence ? JSON.stringify(verified.evidence) : null,
+      verified.reason ?? 'verified',
+    );
   return [close, retireIssueTasksStatement(db, repoId, now)];
+}
+
+/**
+ * Files the flake that a CI report just registered (services/ci.ts
+ * reportJob) as an issue, or counts it on the check's open issue. Runs in
+ * the report's own batch and writes only when the flake row `flakeId` was
+ * inserted by that batch, so a repeated or stale report never counts twice.
+ * The fingerprint is `checkFingerprint(name)`, built in SQL.
+ */
+export function flakeIssueStatement(db: D1Database, repoId: string, flakeId: string, now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO issues (id, repo_id, number, title, body, author_id, state, created_at, source, fingerprint, paths, agent_meta, evidence,
+           occurrences, last_seen_at, updated_at)
+       SELECT ?3, ?2, (SELECT COALESCE(MAX(number), 0) + 1 FROM issues WHERE repo_id = ?2),
+              'Check ' || f.name || ' is flaky',
+              'The check \`' || f.name || '\` failed and then passed on its automatic retry at ' || f.head_sha ||
+                COALESCE(' (change #' || c.number || ')', '') || '. Every further flake of this check counts as one more occurrence here; ' ||
+                'the first attempt''s output is in the flake registry (GET ci/flakes). Quarantine the check while it is fixed so it ' ||
+                'neither blocks nor satisfies merges; restoring it closes this issue.',
+              NULL, 'open', ?4, 'flake', 'check:' || lower(f.name), NULL, NULL,
+              json_object('check', f.name, 'sha', f.head_sha), 1, ?4, ?4
+         FROM ci_flakes f LEFT JOIN change_sets c ON c.id = f.change_set_id
+        WHERE f.id = ?1 AND f.repo_id = ?2
+       ON CONFLICT (repo_id, fingerprint) WHERE state = 'open' AND fingerprint IS NOT NULL
+       DO UPDATE SET occurrences = occurrences + 1, last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at,
+                     evidence = excluded.evidence`,
+    )
+    .bind(flakeId, repoId, crypto.randomUUID(), now);
+}
+
+/**
+ * Makes sure a quarantined check has an open issue tracking it: files one
+ * when the check has none (an open flake issue for it already tracks it).
+ */
+export function quarantineIssueStatement(db: D1Database, repoId: string, name: string, by: string | null, now: number): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO issues (id, repo_id, number, title, body, author_id, state, created_at, source, fingerprint, paths, agent_meta, evidence,
+           occurrences, last_seen_at, updated_at)
+       SELECT ?1, ?2, COALESCE(MAX(number), 0) + 1, ?3, ?4, NULL, 'open', ?5, 'ci', ?6, NULL, NULL, json_object('check', ?7), 1, ?5, ?5
+         FROM issues WHERE repo_id = ?2
+       ON CONFLICT (repo_id, fingerprint) WHERE state = 'open' AND fingerprint IS NOT NULL DO NOTHING`,
+    )
+    .bind(
+      crypto.randomUUID(),
+      repoId,
+      `Check ${name} is quarantined`.slice(0, ISSUE_LIMITS.titleMax),
+      `The check \`${name}\` was quarantined${by ? ` by ${by}` : ''}: it still runs, but its results neither block nor satisfy merges until it is restored. Restoring it closes this issue.`,
+      now,
+      checkFingerprint(name),
+      name,
+    );
 }
 
 export interface FiledIssue {

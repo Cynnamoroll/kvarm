@@ -115,17 +115,22 @@ export function branchIssueNumber(branch: string): number | null {
   return null;
 }
 
-/** A fingerprint as stored: trimmed, lower-case, single-spaced; null when empty or too long. */
+/**
+ * A fingerprint as stored: trimmed, with ASCII letters lower-cased; null when
+ * empty or too long. Only ASCII is folded so SQL can build the same value with
+ * `lower()` (SQLite folds ASCII only) inside the batch that raises a signal.
+ */
 export function normalizeFingerprint(v: unknown): string | null {
   if (typeof v !== 'string') return null;
-  const s = v.trim().toLowerCase().replace(/\s+/g, ' ');
+  const s = v.trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
   return s.length > 0 && s.length <= ISSUE_REF_LIMITS.fingerprintMax ? s : null;
 }
 
 /**
  * The one fingerprint of a check by name. A failing default-branch run, a
  * flake (pass on retry) and a quarantine of the same check all land on the
- * same open issue.
+ * same open issue. SQL builds it as `'check:' || lower(name)` from a stored
+ * (already trimmed) check name.
  */
 export function checkFingerprint(name: string): string {
   return normalizeFingerprint(`check:${name.trim()}`) ?? 'check:';

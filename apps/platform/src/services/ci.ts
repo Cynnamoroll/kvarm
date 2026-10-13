@@ -9,6 +9,7 @@ import type { ServiceResult } from '../repos/service';
 import { withLazyRepo } from '../artifacts/repo';
 import { CHECK_RUN_COLUMNS, checkRunView, type CheckRunRow, type CheckRunView } from './checks';
 import { CI_CONFIG_PATH, CI_LIMITS, parseCiConfig, type CiConfig } from './ciConfig';
+import { flakeIssueStatement } from './issues';
 
 export const CI_LEASE_SECONDS = 120;
 export { CI_CONFIG_PATH, CI_LIMITS, type CiConfig } from './ciConfig';
@@ -418,6 +419,7 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
   const p = parseReport(input);
   if (!p.ok) return p;
   const now = Date.now();
+  const flakeId = crypto.randomUUID();
   const [job, , runRead, , changeRead] = await env.DB.batch([
     env.DB.prepare(
       `UPDATE ci_jobs SET status = ?5, summary = ?6, finished_at = ?7, lease_until = NULL
@@ -433,7 +435,7 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
             SELECT 1 FROM ci_flakes f
              WHERE f.repo_id = ?2 AND f.name = k.name AND f.head_sha = j.head_sha AND f.tree_sha = j.tree_sha
           )`,
-    ).bind(id, repo.id, crypto.randomUUID(), now),
+    ).bind(id, repo.id, flakeId, now),
     env.DB.prepare(
       `UPDATE check_runs SET
          attempt = CASE WHEN ?5 = 'failure'
@@ -535,6 +537,8 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
               END
         WHERE repo_id = ?2 AND tree_sha = (SELECT tree_sha FROM ci_jobs WHERE id = ?1 AND repo_id = ?2)`,
     ).bind(id, repo.id),
+    // A flake registered above files (or counts on) the check's issue (services/issues.ts).
+    flakeIssueStatement(env.DB, repo.id, flakeId, now),
   ]);
   const moved = (job?.results as Array<{ tree_sha: string; check_run_id: string }> | undefined)?.[0];
   const run = (runRead?.results as CheckRunRow[] | undefined)?.[0];

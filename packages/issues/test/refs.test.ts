@@ -104,7 +104,9 @@ describe('branchIssueNumber', () => {
 
 describe('fingerprints', () => {
   it('normalizes free-form fingerprints and rejects empty or oversized ones', () => {
-    expect(normalizeFingerprint('  CI:Test  Suite\n')).toBe('ci:test suite');
+    expect(normalizeFingerprint('  CI:Test  Suite\n')).toBe('ci:test  suite');
+    // Only ASCII folds, exactly like SQLite lower().
+    expect(normalizeFingerprint('Ünit:ÄB')).toBe('Ünit:Äb');
     expect(normalizeFingerprint('   ')).toBeNull();
     expect(normalizeFingerprint('x'.repeat(ISSUE_REF_LIMITS.fingerprintMax + 1))).toBeNull();
     expect(normalizeFingerprint(42)).toBeNull();

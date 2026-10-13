@@ -156,7 +156,7 @@ describe('filing', () => {
     const report = { title: 'TypeError in parser', fingerprint: '  Test:Parser  Handles Tabs ', evidence: { sha: 'a'.repeat(40), check: 'test' } };
     const a = await fileIssue('file', report);
     expect(a.status).toBe(201);
-    expect(a.json).toMatchObject({ number: 2, fingerprint: 'test:parser handles tabs', occurrences: 1 });
+    expect(a.json).toMatchObject({ number: 2, fingerprint: 'test:parser  handles tabs', occurrences: 1 });
     const b = await fileIssue('file', { ...report, title: 'Same bug, other words', evidence: { sha: 'b'.repeat(40) } });
     expect(b.status).toBe(200);
     expect(b.json).toMatchObject({ number: 2, title: 'TypeError in parser', occurrences: 2, created: false, evidence: { sha: 'b'.repeat(40) } });
