@@ -755,6 +755,25 @@ async function computeFileDiff(ctx: Ctx, change: CompareFile | TreeChange): Prom
   return out;
 }
 
+/** A cached per-file diff for other services deriving facts from the same trees. */
+export async function cachedFileDiff(ctx: ResolveContext, change: CompareFile | TreeChange): Promise<FileDiffBody> {
+  if ('binary' in change && change.binary) return { hunks: [], approximate: false, binary: true };
+  if ('tooLarge' in change && change.tooLarge) return { hunks: [], approximate: false, tooLarge: true };
+  const cacheKey = compareKeys.filediff(change.oldHash, change.newHash);
+  const literal = statKey(change) === null;
+  if (!ctx.bypass && !literal) {
+    const hit = await readJson<FileDiffBody>(cacheKey);
+    if (hit) {
+      markOutcome('hit');
+      return hit;
+    }
+  }
+  const body = await computeFileDiff(ctx, change);
+  if (!ctx.bypass && !literal) ctx.waitUntil(writeJson(cacheKey, JSON.stringify(body)));
+  markOutcome(ctx.bypass ? 'bypass' : literal ? 'bypass' : 'miss');
+  return body;
+}
+
 export interface FileDiffResult {
   response: FileDiffResponse;
   cache: CacheOutcome;

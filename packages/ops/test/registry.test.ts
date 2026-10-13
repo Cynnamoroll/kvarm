@@ -92,6 +92,14 @@ describe('operation registry', () => {
     expect(findOperation('resolve_escalation')).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });
     expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
+    expect(findOperation('set_review_policy')?.params.find((p) => p.name === 'requiredReviews')?.required).toBeFalsy();
+    expect(findOperation('get_review_guide')).toMatchObject({ command: ['review', 'guide'], method: 'GET', path: '/repos/{repo}/changes/{number}/review-guide', readOnly: true });
+    expect(findOperation('submit_review_guide')).toMatchObject({ command: ['review', 'submit-guide'], method: 'POST', path: '/repos/{repo}/changes/{number}/review-guide' });
+    expect(findOperation('ack_review_units')).toMatchObject({ command: ['review', 'ack'], method: 'POST', path: '/repos/{repo}/changes/{number}/review-acks' });
+    expect(findOperation('submit_findings')).toMatchObject({ command: ['finding', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/findings' });
+    expect(findOperation('list_findings')).toMatchObject({ command: ['finding', 'list'], method: 'GET', path: '/repos/{repo}/changes/{number}/findings', readOnly: true });
+    expect(findOperation('update_finding')).toMatchObject({ command: ['finding', 'update'], method: 'PATCH', path: '/repos/{repo}/changes/{number}/findings/{id}' });
+    expect(findOperation('list_attention')).toMatchObject({ command: ['review', 'attention'], method: 'GET', path: '/repos/{repo}/attention', readOnly: true });
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
     const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40) });
     expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40) }]);

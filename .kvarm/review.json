@@ -1,0 +1,9 @@
+{
+  "contracts": [
+    "packages/ops/src/index.js",
+    "apps/platform/migrations/**",
+    "apps/platform/wrangler.jsonc",
+    "apps/platform/src/routes/**",
+    "packages/*/src/index.ts"
+  ]
+}

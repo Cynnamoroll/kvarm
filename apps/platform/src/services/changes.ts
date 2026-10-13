@@ -23,7 +23,7 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { recordMergeAudit } from './audit';
-import { credentialMayUpdateRef, type Actor } from './authz';
+import { credentialMayUpdateRef, type Actor, type RepoRole } from './authz';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   CHECK_RUN_COLUMNS,
@@ -289,6 +289,7 @@ export interface ChangeContext {
   env: Env;
   repo: RepoRow;
   actor: Actor | null;
+  role?: RepoRole;
   /** The repo's branch rules, when the caller read them in its authority batch. */
   branchRules?: BranchRule[];
   waitUntil(p: Promise<unknown>): void;

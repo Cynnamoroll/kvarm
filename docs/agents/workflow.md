@@ -44,6 +44,10 @@ The workspace ref is created already; you update it. A token whose `refs` do not
 
 Check readiness with `get_mergeability` and `list_checks` (both take `repo` and `number`). Required checks and human approvals come from the repository's branch rules; `get_branch_policy` with `{"repo": "...", "ref": "main"}` shows them. Reviews are in `get_reviews`; a push stales approvals.
 
+## 5a. Guide, review and triage
+
+The author reads `review guide` for stable coverage units, then submits `review submit-guide` with the current `headSha`, chapter keys, tier and contract declarations. A reviewer reads the guide, acknowledges reviewed units with `review ack`, and submits any issues with `finding submit`; use `finding list` to see current, outdated and blocking findings. The author resolves or dismisses findings they own only when allowed, updates the guide after each push, and uses `review attention` to see whose turn it is before enqueueing or merging.
+
 ## 6. Enqueue
 
 `enqueue_change` with `{"repo": "...", "number": 7, "headSha": "<40-hex head you tested>"}`. Read the current head with `get_change` after your last push; it must equal your local `git rev-parse HEAD`. Enqueuing approves that head, and the branch rules still decide whether more approvals are needed. The integration train prepares the exact composed tree and checks it; only the final publication takes a short lease. `headSha` makes the call fail with `HEAD_MOVED` if the change moved, so you never enqueue code you did not look at. Drafts are refused with 409, and a full queue answers 429 with `Retry-After`.

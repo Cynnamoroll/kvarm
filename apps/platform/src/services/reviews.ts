@@ -36,6 +36,7 @@ import {
   type ReviewBlocker,
   type ReviewFactsRow,
 } from './reviewGate';
+import { getGuide } from './reviewGuide';
 
 export { HUMAN_MODEL_FAMILY };
 export const REVIEW_VERDICTS = ['approve', 'request-changes'] as const;
@@ -122,6 +123,7 @@ interface ReviewRow {
   body: string | null;
   created_at: number;
   updated_at: number;
+  coverage: string | null;
 }
 
 interface EscalationRow {
@@ -166,6 +168,7 @@ export interface ReviewView {
   body: string | null;
   createdAt: string;
   updatedAt: string;
+  coverage: { units: number; acked: number; scrutinizeUnacked: number };
 }
 
 export interface EscalationView {
@@ -240,6 +243,18 @@ function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorVie
     body: r.body,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
+    coverage: (() => {
+      try {
+        const parsed = JSON.parse(r.coverage ?? 'null') as { units?: unknown; acked?: unknown; scrutinizeUnacked?: unknown } | null;
+        return {
+          units: typeof parsed?.units === 'number' ? parsed.units : 0,
+          acked: typeof parsed?.acked === 'number' ? parsed.acked : 0,
+          scrutinizeUnacked: typeof parsed?.scrutinizeUnacked === 'number' ? parsed.scrutinizeUnacked : 0,
+        };
+      } catch {
+        return { units: 0, acked: 0, scrutinizeUnacked: 0 };
+      }
+    })(),
   };
 }
 
@@ -281,7 +296,7 @@ function packetStatements(db: D1Database, repoId: string, number: number): D1Pre
     db
       .prepare(
         `SELECT r.id, r.head_sha, r.principal, r.user_id, r.user_login, r.agent_id, r.agent_name, r.model_family, r.verdict, r.body,
-                r.created_at, r.updated_at
+                r.created_at, r.updated_at, r.coverage
            FROM change_reviews r WHERE r.change_set_id = ${CHANGE_ID}
           ORDER BY r.updated_at DESC, r.id LIMIT ${REVIEW_LIMITS.reviewsMax}`,
       )
@@ -374,6 +389,8 @@ export function getReviewPacket(env: Env, repo: RepoRow, rawNumber: string): Pro
 
 export interface ReviewPolicyView {
   requiredReviews: number;
+  guideRequired: boolean;
+  blockingFindings: 'none' | 'high-confirmed';
   /** False while the repo has never set a policy (no review requirement). */
   configured: boolean;
   updatedBy: string | null;
@@ -382,16 +399,25 @@ export interface ReviewPolicyView {
 
 interface PolicyRow {
   required_reviews: number;
+  guide_required: number;
+  blocking_findings: string;
   updated_by_login: string | null;
   updated_at: number;
 }
 
-const POLICY_SELECT = `SELECT p.required_reviews, u.login AS updated_by_login, p.updated_at
+const POLICY_SELECT = `SELECT p.required_reviews, p.guide_required, p.blocking_findings, u.login AS updated_by_login, p.updated_at
   FROM review_policies p LEFT JOIN users u ON u.id = p.updated_by WHERE p.repo_id = ?1`;
 
 function policyView(row: PolicyRow | null | undefined): ReviewPolicyView {
-  if (!row) return { requiredReviews: 0, configured: false, updatedBy: null, updatedAt: null };
-  return { requiredReviews: Number(row.required_reviews) || 0, configured: true, updatedBy: row.updated_by_login, updatedAt: iso(row.updated_at) };
+  if (!row) return { requiredReviews: 0, guideRequired: false, blockingFindings: 'high-confirmed', configured: false, updatedBy: null, updatedAt: null };
+  return {
+    requiredReviews: Number(row.required_reviews) || 0,
+    guideRequired: Boolean(row.guide_required),
+    blockingFindings: row.blocking_findings === 'none' ? 'none' : 'high-confirmed',
+    configured: true,
+    updatedBy: row.updated_by_login,
+    updatedAt: iso(row.updated_at),
+  };
 }
 
 /** GET review-policy */
@@ -401,21 +427,35 @@ export async function getReviewPolicy(env: Env, repo: RepoRow): Promise<ServiceR
 
 /** PUT review-policy {requiredReviews} (repo admins). One batch: upsert, audit row, read-back. */
 export async function setReviewPolicy(env: Env, repo: RepoRow, actor: Actor, input: unknown): Promise<ServiceResult<ReviewPolicyView>> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object {requiredReviews}', 'INVALID_BODY');
-  const n = (input as Record<string, unknown>).requiredReviews;
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object with at least one policy field', 'INVALID_BODY');
+  const body = input as Record<string, unknown>;
+  const allowed = ['requiredReviews', 'guideRequired', 'blockingFindings'];
+  if (Object.keys(body).some((key) => !allowed.includes(key))) {
+    return fail(400, 'provide one or more of requiredReviews, guideRequired, blockingFindings', 'INVALID_BODY');
+  }
+  if (Object.keys(body).length === 0) return fail(422, 'at least one review policy field is required', 'POLICY_FIELD_REQUIRED');
+  const old = await env.DB.prepare(POLICY_SELECT).bind(repo.id).first<PolicyRow>();
+  const n = body.requiredReviews === undefined ? old?.required_reviews ?? 0 : body.requiredReviews;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > REVIEW_LIMITS.requiredMax) {
     return fail(400, `requiredReviews must be an integer from 0 to ${REVIEW_LIMITS.requiredMax}`, 'INVALID_REQUIRED_REVIEWS');
   }
+  const guideRequired = body.guideRequired === undefined ? Boolean(old?.guide_required) : body.guideRequired;
+  if (typeof guideRequired !== 'boolean') return fail(400, 'guideRequired must be a boolean', 'INVALID_GUIDE_REQUIRED');
+  const blockingFindings = body.blockingFindings === undefined ? old?.blocking_findings ?? 'high-confirmed' : body.blockingFindings;
+  if (blockingFindings !== 'none' && blockingFindings !== 'high-confirmed') return fail(400, 'blockingFindings must be "none" or "high-confirmed"', 'INVALID_BLOCKING_FINDINGS');
   const now = Date.now();
   const [, , read] = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO review_policies (repo_id, required_reviews, updated_by, updated_at) VALUES (?1, ?2, ?3, ?4)
-       ON CONFLICT (repo_id) DO UPDATE SET required_reviews = excluded.required_reviews, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
-    ).bind(repo.id, n, actor.user.id, now),
+      `INSERT INTO review_policies (repo_id, required_reviews, guide_required, blocking_findings, updated_by, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+       ON CONFLICT (repo_id) DO UPDATE SET required_reviews = excluded.required_reviews, guide_required = excluded.guide_required,
+         blocking_findings = excluded.blocking_findings, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+    ).bind(repo.id, n, guideRequired ? 1 : 0, blockingFindings, actor.user.id, now),
     env.DB.prepare(
       `INSERT INTO events (id, type, payload, processed_at, created_at)
-       VALUES (?1, 'review_policy.updated', json_object('repoId', ?2, 'repo', ?3, 'requiredReviews', ?4, 'actor', ?5), ?6, ?6)`,
-    ).bind(crypto.randomUUID(), repo.id, `${repo.owner_login}/${repo.name}`, n, actor.user.login, now),
+       VALUES (?1, 'review_policy.updated', json_object('repoId', ?2, 'repo', ?3, 'requiredReviews', ?4,
+         'guideRequired', ?5, 'blockingFindings', ?6, 'actor', ?7), ?8, ?8)`,
+    ).bind(crypto.randomUUID(), repo.id, `${repo.owner_login}/${repo.name}`, n, guideRequired, blockingFindings, actor.user.login, now),
     env.DB.prepare(POLICY_SELECT).bind(repo.id),
   ]);
   return { ok: true, value: policyView((read?.results as PolicyRow[] | undefined)?.[0]) };
@@ -507,6 +547,13 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     if (authorPrincipal === me.id) {
       return fail(409, 'self-review: the author of a change cannot review it; another principal must review', 'SELF_REVIEW');
     }
+    const guide = await getGuide(cx, rawNumber);
+    if (!guide.ok) return guide;
+    const coverage = {
+      units: guide.value.coverage.units,
+      acked: guide.value.units.filter((unit) => unit.acked).length,
+      scrutinizeUnacked: guide.value.units.filter((unit) => unit.tier === 'scrutinize' && !unit.acked).length,
+    };
     const headSha = target.head_sha;
     const family = me.kind === 'agent' ? target.reviewer_family : HUMAN_MODEL_FAMILY;
     // A human other than the author answers for every open escalation by approving the current head.
@@ -542,14 +589,14 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
       db
         .prepare(
           `INSERT INTO change_reviews (id, repo_id, change_set_id, head_sha, principal, user_id, user_login, agent_id, agent_name, token_id,
-                                       model_family, verdict, body, created_at, updated_at)
-           SELECT ?1, c.repo_id, c.id, c.head_sha, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13
+                                       model_family, verdict, body, coverage, created_at, updated_at)
+           SELECT ?1, c.repo_id, c.id, c.head_sha, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14
              FROM change_sets c WHERE c.id = ?2 AND c.head_sha = ?3 AND c.state IN ('open', 'conflicted')
            ON CONFLICT (change_set_id, head_sha, principal) DO UPDATE SET
              verdict = excluded.verdict, body = excluded.body, model_family = excluded.model_family, token_id = excluded.token_id,
-             user_login = excluded.user_login, agent_name = excluded.agent_name, updated_at = excluded.updated_at`,
+             user_login = excluded.user_login, agent_name = excluded.agent_name, coverage = excluded.coverage, updated_at = excluded.updated_at`,
         )
-        .bind(crypto.randomUUID(), target.id, headSha, me.id, me.userId, me.login, me.agentId, me.agentName, me.tokenId, family, p.verdict, p.body, now),
+        .bind(crypto.randomUUID(), target.id, headSha, me.id, me.userId, me.login, me.agentId, me.agentName, me.tokenId, family, p.verdict, p.body, JSON.stringify(coverage), now),
       ...effects,
       ...packetStatements(db, cx.repo.id, number),
     ]);
@@ -814,4 +861,3 @@ export async function pendingReviews(env: Env, repo: RepoRow, q: { limit?: strin
     },
   };
 }
-

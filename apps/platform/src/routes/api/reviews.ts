@@ -21,6 +21,7 @@ import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
 import type { ChangeContext } from '../../services/changes';
 import * as reviews from '../../services/reviews';
+import * as guide from '../../services/reviewGuide';
 
 export const reviewsApi = new Hono<App>();
 
@@ -43,6 +44,7 @@ async function writeContext(
     env: c.env,
     repo: d.repo,
     actor: d.actor,
+    role: d.role,
     branchRules: d.branchRules ?? [],
     waitUntil: (p) => c.executionCtx.waitUntil(p),
   };
@@ -106,6 +108,80 @@ reviewsApi.post('/repos/:owner/:repo/changes/:number/escalations/:id/resolve', a
   const w = await writeContext(c, { requireActor: true, allowAgent: true });
   if ('denied' in w) return w.denied;
   const r = await reviews.resolveEscalation(w.cx, c.req.param('number'), c.req.param('id'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/changes/:number/review-guide', async (c) => {
+  const d = await authorizeRoute(c, 'read', { branchRules: true });
+  if (!d.ok) return denyJson(c, d);
+  const cx: ChangeContext = { env: c.env, repo: d.repo, actor: d.actor, role: d.role, waitUntil: (p) => c.executionCtx.waitUntil(p) };
+  const r = await guide.getGuide(cx, c.req.param('number'), {
+    since: c.req.query('since'),
+    unacked: c.req.query('unacked'),
+    include: c.req.query('include'),
+  });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.post('/repos/:owner/:repo/changes/:number/review-guide', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.submitGuide(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value, r.value.created ? 201 : 200);
+});
+
+reviewsApi.post('/repos/:owner/:repo/changes/:number/review-acks', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.ackUnits(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/changes/:number/findings', async (c) => {
+  const d = await authorizeRoute(c, 'read');
+  if (!d.ok) return denyJson(c, d);
+  const cx: ChangeContext = { env: c.env, repo: d.repo, actor: d.actor, role: d.role, waitUntil: (p) => c.executionCtx.waitUntil(p) };
+  const r = await guide.listFindings(cx, c.req.param('number'), {
+    status: c.req.query('status'),
+    limit: c.req.query('limit'),
+    cursor: c.req.query('cursor'),
+  });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.post('/repos/:owner/:repo/changes/:number/findings', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.submitFindings(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value, r.value.created.length ? 201 : 200);
+});
+
+reviewsApi.patch('/repos/:owner/:repo/changes/:number/findings/:id', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.updateFinding(w.cx, c.req.param('number'), c.req.param('id'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/attention', async (c) => {
+  const d = await authorizeRoute(c, 'read', { branchRules: true });
+  if (!d.ok) return denyJson(c, d);
+  const cx: ChangeContext = {
+    env: c.env,
+    repo: d.repo,
+    actor: d.actor,
+    role: d.role,
+    branchRules: d.branchRules ?? [],
+    waitUntil: (p) => c.executionCtx.waitUntil(p),
+  };
+  const r = await guide.listAttention(cx, { mine: c.req.query('mine'), limit: c.req.query('limit'), cursor: c.req.query('cursor') });
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

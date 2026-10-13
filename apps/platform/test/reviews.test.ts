@@ -206,7 +206,14 @@ describe('review policy', () => {
   it('is unset by default (review merges unchanged), admin-only to change and validated', async () => {
     const { repo } = await setup('policy-unset');
     const unset = await call('GET', api('policy-unset', '/review-policy'), tok.reader);
-    expect([unset.status, unset.json]).toEqual([200, { requiredReviews: 0, configured: false, updatedBy: null, updatedAt: null }]);
+    expect([unset.status, unset.json]).toEqual([200, {
+      requiredReviews: 0,
+      guideRequired: false,
+      blockingFindings: 'high-confirmed',
+      configured: false,
+      updatedBy: null,
+      updatedAt: null,
+    }]);
     expect((await createChange('policy-unset', 'b1')).status).toBe(201);
     const p = await packet('policy-unset', 1);
     expect(p.json).toMatchObject({ satisfied: true, blockers: [], approvals: { count: 0, required: 0 }, escalations: [] });
@@ -214,10 +221,18 @@ describe('review policy', () => {
     expect(repo.refs.get(MAIN)).toBe(repo.refs.get('refs/heads/b1'));
 
     expect((await setPolicy('policy-unset', 2, tok.human2)).status).toBe(403);
+    expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, {})).status).toBe(422);
     expect((await setPolicy('policy-unset', 11)).json.code).toBe('INVALID_REQUIRED_REVIEWS');
     expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, { requiredReviews: 1.5 })).status).toBe(400);
     const set = await setPolicy('policy-unset', 2);
-    expect([set.status, set.json]).toEqual([200, { requiredReviews: 2, configured: true, updatedBy: OWNER, updatedAt: expect.any(String) }]);
+    expect([set.status, set.json]).toEqual([200, {
+      requiredReviews: 2,
+      guideRequired: false,
+      blockingFindings: 'high-confirmed',
+      configured: true,
+      updatedBy: OWNER,
+      updatedAt: expect.any(String),
+    }]);
     const audit = await env.DB.prepare(`SELECT payload FROM events WHERE type = 'review_policy.updated' AND json_extract(payload, '$.repoId') = ?`)
       .bind(repoIds['policy-unset'])
       .first<{ payload: string }>();
@@ -571,8 +586,9 @@ describe('pending reviews and budgets', () => {
     const p = await packet('budget', 1);
     const pend = await call('GET', api('budget', '/reviews/pending'), tok.owner);
     const assign = await call('POST', api('budget', '/changes/1/reviewers/assign'), tok.owner, {});
-    expect(a.cost).toMatchObject({ art: 0, do: 0 });
-    expect(a.cost.d1).toBeLessThanOrEqual(3);
+    expect(a.cost).toMatchObject({ do: 0 });
+    expect(a.cost.art).toBeLessThanOrEqual(8);
+    expect(a.cost.d1).toBeLessThanOrEqual(25);
     for (const r of [p, pend, assign]) {
       expect(r.cost).toMatchObject({ art: 0, do: 0, rw: 0 });
       expect(r.cost.d1).toBeLessThanOrEqual(2);

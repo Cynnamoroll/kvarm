@@ -51,7 +51,13 @@ export type EscalationReason = (typeof ESCALATION_REASONS)[number];
 /** Reasons opened once per change by the platform itself rather than by a review. */
 export type StickyReason = 'protected-path' | 'final-selection';
 
-export type ReviewBlockCode = 'APPROVALS_REQUIRED' | 'ESCALATION_OPEN' | 'REVIEWS_REQUIRED';
+export type ReviewBlockCode =
+  | 'APPROVALS_REQUIRED'
+  | 'ESCALATION_OPEN'
+  | 'REVIEWS_REQUIRED'
+  | 'FINDINGS_OPEN'
+  | 'GUIDE_REQUIRED'
+  | 'CONTRACT_UNDECLARED';
 
 export interface ReviewFacts {
   required: number;
@@ -61,16 +67,22 @@ export interface ReviewFacts {
   protectedSeen: boolean;
   finalSelected: boolean;
   finalSeen: boolean;
+  blockingFindings?: number;
+  guideRequired?: boolean;
+  guidePresent?: boolean;
+  undeclared?: number;
 }
 
 export interface ReviewFactsRow {
-  rv_required: number | null;
+  rv_policy_json?: string | null;
+  rv_guide_json?: string | null;
   rv_approvals: number | null;
   rv_humans: number | null;
   rv_open: string | null;
   rv_protected_seen: number | null;
   rv_final_selected: number | null;
   rv_final_seen: number | null;
+  rv_blocking_findings?: number | null;
 }
 
 export interface ReviewBlocker {
@@ -129,14 +141,26 @@ export function reviewFactExpressions(c = 'c') {
     // A change is linked to at most one workspace: LIMIT 1 ends the idx_ws_change probe at that row.
     finalSelected: `COALESCE((SELECT a.selected_workspace = w.id FROM workspaces w LEFT JOIN arenas a ON a.id = w.arena_id WHERE w.change_set_id = ${c}.id LIMIT 1), 0)`,
     finalSeen: `EXISTS (SELECT 1 FROM change_escalations e WHERE e.change_set_id = ${c}.id AND e.reason = 'final-selection')`,
+    blockingFindings: `(SELECT COUNT(*) FROM review_findings f WHERE f.change_set_id = ${c}.id
+      AND f.status = 'open' AND COALESCE((SELECT p.blocking_findings FROM review_policies p WHERE p.repo_id = ${c}.repo_id), 'high-confirmed') = 'high-confirmed'
+      AND ((f.severity = 'high' AND f.confidence = 'confirmed') OR f.category = 'security'))`,
+    guideRequired: `COALESCE((SELECT p.guide_required FROM review_policies p WHERE p.repo_id = ${c}.repo_id), 0)`,
+    guidePresent: `EXISTS (SELECT 1 FROM review_guides g WHERE g.change_set_id = ${c}.id AND g.head_sha = ${c}.head_sha)`,
+    undeclared: `COALESCE((SELECT g.undeclared FROM review_guides g WHERE g.change_set_id = ${c}.id AND g.head_sha = ${c}.head_sha
+      ORDER BY (g.source = 'author') DESC LIMIT 1), 0)`,
   };
 }
 
 /** Select-list columns (`rv_*`) carrying the review facts of the change row aliased `c`. */
 export function reviewFactsColumns(c = 'c'): string {
   const f = reviewFactExpressions(c);
-  return `${f.required} AS rv_required, ${f.approvals} AS rv_approvals, ${f.humans} AS rv_humans, ${f.open} AS rv_open,
-          ${f.protectedSeen} AS rv_protected_seen, ${f.finalSelected} AS rv_final_selected, ${f.finalSeen} AS rv_final_seen`;
+  return `(SELECT json_array(p.required_reviews, p.guide_required, p.blocking_findings) FROM review_policies p WHERE p.repo_id = ${c}.repo_id) AS rv_policy_json,
+          ${f.approvals} AS rv_approvals, ${f.humans} AS rv_humans, ${f.open} AS rv_open,
+          ${f.protectedSeen} AS rv_protected_seen, ${f.finalSelected} AS rv_final_selected, ${f.finalSeen} AS rv_final_seen,
+          (SELECT COUNT(*) FROM review_findings f WHERE f.change_set_id = ${c}.id AND f.status = 'open'
+            AND ((f.severity = 'high' AND f.confidence = 'confirmed') OR f.category = 'security')) AS rv_blocking_findings,
+          (SELECT json_array(g.undeclared) FROM review_guides g WHERE g.change_set_id = ${c}.id AND g.head_sha = ${c}.head_sha
+            ORDER BY (g.source = 'author') DESC LIMIT 1) AS rv_guide_json`;
 }
 
 /**
@@ -148,10 +172,21 @@ export function reviewFactsColumns(c = 'c'): string {
  */
 export function reviewGuardCondition(c: string, humansParam: string, protectedParam: string): string {
   const f = reviewFactExpressions(c);
-  return `(${f.openCount} = 0 AND ${f.approvals} >= ${f.required}
+  const blocking = `NOT EXISTS (SELECT 1 FROM review_findings finding WHERE finding.change_set_id = ${c}.id
+    AND finding.status = 'open' AND ((finding.severity = 'high' AND finding.confidence = 'confirmed') OR finding.category = 'security'))`;
+  const guideUndeclared = `(SELECT g.undeclared FROM review_guides g WHERE g.change_set_id = ${c}.id AND g.head_sha = ${c}.head_sha
+    ORDER BY (g.source = 'author') DESC LIMIT 1)`;
+  const policyGate = `COALESCE(
+    (SELECT (${f.approvals} >= p.required_reviews)
+            AND (p.blocking_findings = 'none' OR ${blocking})
+            AND (p.guide_required = 0 OR COALESCE(${guideUndeclared}, -1) = 0)
+       FROM review_policies p WHERE p.repo_id = ${c}.repo_id),
+    (${f.approvals} >= 0 AND ${blocking}))`;
+  return `(${f.openCount} = 0
            AND ((${humansParam} IS NULL AND NOT EXISTS (SELECT 1 FROM branch_rules b WHERE b.repo_id = ${c}.repo_id))
                 OR (${humansParam} IS NOT NULL AND ${f.humans} >= ${humansParam} AND (${protectedParam} = 0 OR ${f.protectedSeen})))
-           AND (NOT ${f.finalSelected} OR ${f.finalSeen}))`;
+           AND (NOT ${f.finalSelected} OR ${f.finalSeen})
+           AND ${policyGate})`;
 }
 
 /** The facts statement for one change by repo and number. */
@@ -176,14 +211,30 @@ export function parseReviewFacts(row: Partial<ReviewFactsRow> | null | undefined
   } catch {
     open = [];
   }
+  let policy: unknown[] = [];
+  let guide: unknown[] = [];
+  try {
+    policy = JSON.parse(row?.rv_policy_json ?? '[]') as unknown[];
+  } catch {
+    policy = [];
+  }
+  try {
+    guide = JSON.parse(row?.rv_guide_json ?? '[]') as unknown[];
+  } catch {
+    guide = [];
+  }
   return {
-    required: Number(row?.rv_required ?? 0) || 0,
+    required: Number(policy[0] ?? 0) || 0,
     approvals: Number(row?.rv_approvals ?? 0) || 0,
     humans: Number(row?.rv_humans ?? 0) || 0,
     open: [...new Set(open)].sort(),
     protectedSeen: Boolean(row?.rv_protected_seen),
     finalSelected: Boolean(row?.rv_final_selected),
     finalSeen: Boolean(row?.rv_final_seen),
+    blockingFindings: policy[2] === 'none' ? 0 : Number(row?.rv_blocking_findings ?? 0) || 0,
+    guideRequired: Boolean(policy[1]),
+    guidePresent: row?.rv_guide_json !== null && row?.rv_guide_json !== undefined,
+    undeclared: Number(guide[0] ?? 0) || 0,
   };
 }
 
@@ -213,6 +264,15 @@ export function reviewGate(facts: ReviewFacts, policy: BranchPolicy): ReviewGate
       code: 'REVIEWS_REQUIRED',
       error: `the review policy requires ${facts.required} approving review(s) of the current head from distinct principals other than the author; ${facts.approvals} so far`,
     });
+  }
+  if ((facts.blockingFindings ?? 0) > 0) {
+    blockers.push({ code: 'FINDINGS_OPEN', error: `${facts.blockingFindings} blocking review finding(s) remain open` });
+  }
+  if (facts.guideRequired && !facts.guidePresent) {
+    blockers.push({ code: 'GUIDE_REQUIRED', error: 'the repository requires a review guide for the current head' });
+  }
+  if (facts.guideRequired && facts.guidePresent && (facts.undeclared ?? 0) > 0) {
+    blockers.push({ code: 'CONTRACT_UNDECLARED', error: `${facts.undeclared} changed contract surface(s) are undeclared in the review guide` });
   }
   const first = blockers[0];
   const detail: ReviewBlockDetail = {

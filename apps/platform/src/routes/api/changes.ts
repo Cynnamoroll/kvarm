@@ -40,7 +40,7 @@ function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: fals
 async function readContext(c: Context<App>) {
   const d = await authorizeRoute(c, 'read');
   if (!d.ok) return { denied: denyJson(c, d) } as const;
-  const cx: svc.ChangeContext = { env: c.env, repo: d.repo, actor: d.actor, waitUntil: (p) => c.executionCtx.waitUntil(p) };
+  const cx: svc.ChangeContext = { env: c.env, repo: d.repo, actor: d.actor, role: d.role, waitUntil: (p) => c.executionCtx.waitUntil(p) };
   return { cx } as const;
 }
 
@@ -51,6 +51,7 @@ async function writeContext(c: Context<App>) {
     env: c.env,
     repo: d.repo,
     actor: d.actor,
+    role: d.role,
     branchRules: d.branchRules ?? [],
     waitUntil: (p) => c.executionCtx.waitUntil(p),
   };

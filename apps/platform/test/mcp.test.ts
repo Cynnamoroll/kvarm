@@ -275,6 +275,9 @@ describe('MCP handshake and registry', () => {
     expect(r.status).toBe(200);
     const tools = r.json.result.tools as Array<{ name: string; description: string; inputSchema: any; annotations?: any }>;
     expect(tools.map((t) => t.name)).toEqual(OPERATIONS.map((o) => o.name));
+    for (const name of ['get_review_guide', 'submit_review_guide', 'ack_review_units', 'submit_findings', 'list_findings', 'update_finding', 'list_attention']) {
+      expect(tools.map((tool) => tool.name), name).toContain(name);
+    }
     const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'list_tasks', 'claim_task', 'complete_task', 'get_attribution', 'set_attribution'];
     const dependencies = ['add_dependency', 'list_dependencies', 'repin_dependency', 'detach_dependency', 'get_train'];
     for (const n of [...original, ...dependencies]) expect(tools.map((t) => t.name), n).toContain(n);

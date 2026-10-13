@@ -37,6 +37,10 @@ This inversion is why the merge engine and the integration train do not depend o
 - **Composition.** `POST candidates/compose` folds compatible pieces (paths) from several candidate attempts onto the base head with gitops `merge3`, creating a composed workspace ref and change. The composed tree runs the same exact-tree required checks as the train. A clean merge whose required check fails is a **semantic conflict**, reported separately from textual conflicts (`services/compositions.ts`, §11.4).
 - **Decisions and context.** Besides attribution notes, agents record decisions `{task?, paths[], chosen, rejected[], reason, actor, at}` in D1, indexed by task and by path. The MCP tool `get_context(task|path)` returns earlier decisions and rejection reasons, bounded, paginated and checked by the shared authority (`services/decisions.ts`, `services/attribution.ts`).
 
+### 0.4.1 Guided review
+
+`services/reviewGuide.ts` builds deterministic coverage from the base/head trees, reuses cached per-file diffs, and validates author or reviewer guides against that map. Acknowledgements follow stable content keys across pushes; findings, declared contract surfaces and the review policy feed the shared publication gate and `services/attention.ts`. The REST routes are thin adapters and `packages/ops/src/index.js` exposes the same operations to CLI and MCP.
+
 ### 0.5 Execution posture
 
 Kvarm runs no agents and calls no hosted model. Agents run where their users run them (Claude Code, Devin, a laptop, an on-premises runner) and coordinate through git workspace refs, MCP tools, declared intents, the merge queue and task dispatch. CI is user-owned: `kvarm runner` claims jobs on the user's machine. A claim carries the job's provenance (its change, head ref, whether the commit is the change head or a platform-prepared merge commit, whether a human or an agent opened the change, and whether any agent token grant matches the head ref). The runner's execution-trust policy uses it to run the job on the host, run it in a docker or podman container, or refuse it and report a failure, before any of the job's code reaches the machine; by default only heads of human changes on refs no agent credential may write run on the host. The pusher of a head is not recorded, so the policy reasons about who could have pushed it.
@@ -217,6 +221,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0030_provenance_audit` | attribution evidence levels, the `ref_updates` ledger of gate pushes, merges and train publications, the `audit_commits` export index and trusted provenance keys (§9) |
 | `0032_session_revocations` | signed-out browser sessions, refused until their cookie would expire (§11.1) |
 | `0033_webhooks` | outbound webhooks, their delivery log, and the triggers that record platform events for delivery (§11.5) |
+| `0034_review_guides` | review guides, content-keyed acknowledgements, structured findings, guide/finding policy and approval coverage (§0.4.1) |
 
 ## 7. Testing
 
