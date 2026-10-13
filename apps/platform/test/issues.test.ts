@@ -7,7 +7,7 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { checkFingerprint } from '@kvarm/issues';
 import { mintPAT, type Scope } from '../src/auth/pat';
@@ -106,6 +106,33 @@ async function openChange(repo: string, body: Record<string, unknown>): Promise<
   const r = await call('POST', api(repo, '/changes'), tok.owner, { base: 'main', ...body });
   expect(r.status, JSON.stringify(r.json)).toBe(201);
   return r.json.number as number;
+}
+
+function pushEvent(repo: string, ref: string, before: string, after: string) {
+  return {
+    type: 'cf.artifacts.repo.pushed',
+    source: { type: 'artifacts', namespace: 'default', repoName: `${OWNER}--${repo}` },
+    payload: { ref, before, after, commits: [], totalCommitsCount: 0, commitsTruncated: false },
+    metadata: { accountId: 'acct', eventSubscriptionId: 'sub', eventSchemaVersion: 1, eventTimestamp: new Date().toISOString() },
+  };
+}
+
+async function deliver(body: unknown) {
+  const batch = createMessageBatch('kvarm-events', [{ id: crypto.randomUUID(), timestamp: new Date(), attempts: 1, body }]);
+  const ctx = createExecutionContext();
+  await worker.queue!(batch, env, ctx);
+  const result = await getQueueResult(batch, ctx);
+  await waitOnExecutionContext(ctx);
+  expect(result.explicitAcks).toHaveLength(1);
+}
+
+async function effectDetail(repo: string, effect: string): Promise<{ state: string; detail: string | null } | null> {
+  return env.DB.prepare(
+    `SELECT f.state, f.detail FROM push_event_effects f JOIN push_events e ON e.id = f.event_id
+      WHERE e.repo_id = ? AND f.effect = ? ORDER BY e.received_at DESC LIMIT 1`,
+  )
+    .bind(repoIds[repo], effect)
+    .first();
 }
 
 beforeAll(async () => {
@@ -306,6 +333,39 @@ describe('changes close their issues', () => {
     ]);
     expect((await merge('wsissue', opened.json.number)).status).toBe(200);
     expect((await getIssue('wsissue', 1)).json).toMatchObject({ state: 'closed', closedBy: { change: opened.json.number, commit: c.sha } });
+  });
+});
+
+describe('commits pushed to the default branch', () => {
+  it('close the issues their messages close, attributed to the oldest closing commit', async () => {
+    const r = await seedRepo('direct');
+    for (const title of ['a', 'b', 'c', 'd']) await fileIssue('direct', { title });
+    const c1 = await commit(r.repo, { 'README.md': 'one\n' }, [r.main], 'parser: tabs\n\nFixes #1. Refs #3.');
+    const c2 = await commit(r.repo, { 'README.md': 'two\n' }, [c1.sha], `again\n\nCloses: #1\nResolves ${OWNER}/direct#2, other/repo#4`);
+    r.repo.refs.set('refs/heads/main', c2.sha);
+    await deliver(pushEvent('direct', 'refs/heads/main', r.main, c2.sha));
+    expect(await effectDetail('direct', 'issue-commits')).toEqual({ state: 'done', detail: `closes #1, ${OWNER}/direct#2, other/repo#4` });
+    expect((await getIssue('direct', 1)).json).toMatchObject({ state: 'closed', closedReason: 'completed', closedBy: { change: null, commit: c1.sha } });
+    expect((await getIssue('direct', 2)).json).toMatchObject({ state: 'closed', closedBy: { commit: c2.sha } });
+    for (const n of [3, 4]) expect((await getIssue('direct', n)).json.state).toBe('open');
+  });
+
+  it('skip other branches and branch creation, and report a scan that stopped short', async () => {
+    const r = await seedRepo('direct-skip');
+    await fileIssue('direct-skip', { title: 'a' });
+    const side = await commit(r.repo, { 'README.md': 'x\n' }, [r.main], 'fixes #1');
+    r.repo.refs.set('refs/heads/side', side.sha);
+    await deliver(pushEvent('direct-skip', 'refs/heads/side', r.main, side.sha));
+    expect(await effectDetail('direct-skip', 'issue-commits')).toEqual({ state: 'skipped', detail: 'not the default branch' });
+    await deliver(pushEvent('direct-skip', 'refs/heads/main', '0'.repeat(40), side.sha));
+    expect(await effectDetail('direct-skip', 'issue-commits')).toEqual({ state: 'skipped', detail: 'branch created' });
+    expect((await getIssue('direct-skip', 1)).json.state).toBe('open');
+
+    // A previous tip the bounded log never reaches: what was read still counts, and the detail says so.
+    const unrelated = await commit(r.repo, { 'README.md': 'elsewhere\n' });
+    await deliver(pushEvent('direct-skip', 'refs/heads/main', unrelated.sha, side.sha));
+    expect(await effectDetail('direct-skip', 'issue-commits')).toEqual({ state: 'done', detail: 'closes #1; scanned 2 commits, older ones not read' });
+    expect((await getIssue('direct-skip', 1)).json.state).toBe('closed');
   });
 });
 

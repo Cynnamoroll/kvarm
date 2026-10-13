@@ -31,6 +31,8 @@ import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
 import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
 import { continueDependencySettlement } from './dependencies';
+import { COMMIT_SCAN_MAX, commitCloseStatement, commitClosingRefs } from './issues';
+import { withRepo } from '../artifacts/repo';
 
 export interface PushEvent {
   namespace: string;
@@ -366,7 +368,45 @@ const changeHooksEffect: PushEffect = {
   },
 };
 
-export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect, changeHooksEffect];
+/**
+ * Issues closed by commits pushed to the default branch (services/issues.ts):
+ * one bounded first-parent log from the new tip down to the previous one,
+ * read for closing keywords; the closes join the completion batch. A merged
+ * change's own links are closed by its merge record, not here. Creating the
+ * branch closes nothing, so an imported history never sweeps issues shut.
+ */
+const issueCommitsEffect: PushEffect = {
+  name: 'issue-commits',
+  async run(ctx) {
+    const { event } = ctx;
+    if (event.ref !== `refs/heads/${ctx.defaultBranch}`) return { state: 'skipped', detail: 'not the default branch' };
+    if (event.after === ZERO_OID) return { state: 'skipped', detail: 'ref deleted' };
+    if (event.before === ZERO_OID) return { state: 'skipped', detail: 'branch created' };
+    if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
+    const log = await withRepo(ctx.env, event.repoName, (h) => h.log({ ref: event.after, limit: COMMIT_SCAN_MAX }));
+    const commits: { sha: string; message: string }[] = [];
+    let reached = false;
+    for (const c of log) {
+      if (c.hash === event.before) {
+        reached = true;
+        break;
+      }
+      // Trust the chain only while each entry is the previous one's first parent.
+      if (commits.length > 0 && log[commits.length - 1]!.parents[0] !== c.hash) break;
+      commits.push({ sha: c.hash, message: c.message });
+    }
+    const truncated = reached ? '' : `; scanned ${commits.length} commits, older ones not read`;
+    const closes = commitClosingRefs(commits);
+    if (closes.length === 0) return { state: 'done', detail: `no closing references in ${commits.length} commits${truncated}` };
+    return {
+      state: 'done',
+      detail: `closes ${closes.map((c) => `${c.repo ?? ''}#${c.number}`).join(', ')}${truncated}`,
+      statements: [commitCloseStatement(ctx.env.DB, ctx.repoId, closes, Date.now())],
+    };
+  },
+};
+
+export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect, changeHooksEffect, issueCommitsEffect];
 
 // ---------------------------------------------------------------------------
 // Dispatcher

@@ -730,6 +730,53 @@ export async function linkIssue(cx: IssueContext, rawNumber: string, input: unkn
   return { ok: true, value: { change: number, issues: ((links?.results as ChangeIssueRow[] | undefined) ?? []).map((r) => changeIssueView(r, number)) } };
 }
 
+/** Commits of one default-branch push that are read for closing references. */
+export const COMMIT_SCAN_MAX = 50;
+
+export interface CommitClose {
+  number: number;
+  /** Lower-case `owner/name` when the reference was qualified. */
+  repo: string | null;
+  sha: string;
+}
+
+/**
+ * The issues that commit messages close (`fixes #12` in a commit pushed to
+ * the default branch), each attributed to the oldest commit that closes it.
+ * Commits are given newest first, as the log returns them.
+ */
+export function commitClosingRefs(commits: readonly { sha: string; message: string }[]): CommitClose[] {
+  const out = new Map<string, CommitClose>();
+  for (let i = commits.length - 1; i >= 0; i--) {
+    const c = commits[i]!;
+    for (const r of issueRefsIn(c.message)) {
+      if (r.kind !== 'closes') continue;
+      const repo = r.repo?.toLowerCase() ?? null;
+      const key = `${repo ?? ''}#${r.number}`;
+      if (!out.has(key)) out.set(key, { number: r.number, repo, sha: c.sha });
+    }
+  }
+  return [...out.values()];
+}
+
+/**
+ * Closes the open issues that pushed commits close. A qualified reference
+ * counts only when it names this repository.
+ */
+export function commitCloseStatement(db: D1Database, repoId: string, closes: readonly CommitClose[], now: number): D1PreparedStatement {
+  const closer = `(SELECT json_extract(j.value, '$.sha') FROM json_each(?2) j, repos r
+      WHERE r.id = issues.repo_id AND json_extract(j.value, '$.number') = issues.number
+        AND (json_extract(j.value, '$.repo') IS NULL OR json_extract(j.value, '$.repo') = lower(r.owner_login || '/' || r.name))
+      LIMIT 1)`;
+  return db
+    .prepare(
+      `UPDATE issues SET state = 'closed', closed_reason = 'completed', closed_at = ?3, updated_at = ?3, closed_by_change_id = NULL,
+              closed_by_commit = ${closer}
+        WHERE repo_id = ?1 AND state = 'open' AND ${closer} IS NOT NULL`,
+    )
+    .bind(repoId, JSON.stringify(closes), now);
+}
+
 /** Statements that remove a repo's issues and their links and comments, for the repo DELETE batch (before the repo row). */
 export function issueCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
   return [
