@@ -91,7 +91,7 @@ import {
 import type { ChangeRating } from './risk';
 import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
-import { actorName, changeLinkStatements, mergeCloseStatement, retireIssueTasksStatement } from './issues';
+import { actorName, changeLinkStatements, mergeCloseStatement, refreshPathLinks, retireIssueTasksStatement } from './issues';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -1509,6 +1509,10 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
   async (e) => {
     const repo = await e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId).first<RepoRow>();
     if (repo) await queueChangeCi(e.env, repo, e.change.id, e.headSha);
+  },
+  // Issue proposals from paths follow the new head (advice only; never fails the push).
+  async (e) => {
+    await refreshPathLinks(e.env, e.repoId, e.change.id, e.headSha);
   },
 ];
 

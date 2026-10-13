@@ -360,6 +360,27 @@ describe('issue paths', () => {
     expect((await getIssue('paths', 2)).json.state).toBe('closed');
   });
 
+  it('follows the head: a push replaces unanswered path proposals and keeps answered ones', async () => {
+    const r = await seedRepo('paths-push');
+    await fileIssue('paths-push', { title: 'pager', paths: ['src/pager.ts'] });
+    await fileIssue('paths-push', { title: 'docs', paths: ['docs/'] });
+    await fileIssue('paths-push', { title: 'auth', paths: ['src/auth/'] });
+    const one = await commit(r.repo, { 'README.md': 'readme\n', 'src/pager.ts': 'p\n', 'src/auth/a.ts': 'a\n' }, [r.main]);
+    r.repo.refs.set('refs/heads/feature', one.sha);
+    const n = await openChange('paths-push', { title: 'Work', head: 'feature' });
+    expect((await changeIssues('paths-push', n)).json.issues.map((i: any) => i.issue)).toEqual([1, 3]);
+    // Someone rejects the auth proposal; that answer must survive the recompute.
+    await call('POST', api('paths-push', `/changes/${n}/issues`), tok.owner, { issue: 3, state: 'rejected' });
+
+    const two = await commit(r.repo, { 'README.md': 'readme\n', 'docs/guide.md': 'g\n', 'src/auth/a.ts': 'a\n' }, [one.sha]);
+    r.repo.refs.set('refs/heads/feature', two.sha);
+    await deliver(pushEvent('paths-push', 'refs/heads/feature', one.sha, two.sha));
+    expect((await changeIssues('paths-push', n)).json.issues.map((i: any) => [i.issue, i.source, i.state])).toEqual([
+      [2, 'paths', 'proposed'],
+      [3, 'manual', 'rejected'],
+    ]);
+  });
+
   it('reindexes edited paths and matches wide edits by prefix range', async () => {
     const r = await seedRepo('paths-edit');
     await fileIssue('paths-edit', { title: 'x', paths: ['src/a.ts'] });

@@ -26,7 +26,10 @@
  */
 
 import { branchIssueNumber, checkFingerprint, issueRefsIn, normalizeFingerprint, type IssueRef } from '@kvarm/issues';
+import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
+import { changedPaths } from './compare';
+import { lsRefs, resolveCommitish, type ResolveContext } from './refs';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
 import { normalizePath } from './intents/paths';
@@ -731,17 +734,82 @@ export const PATH_PROPOSALS_MAX = 10;
  * (Nexus issue-path index). Text, branch and manual links to the same issue
  * win; a proposal only becomes a close once someone confirms it.
  */
-function pathLinkStatement(db: D1Database, repoId: string, changeId: string, changed: readonly string[], actor: string | null, now: number): D1PreparedStatement {
+function pathLinkStatement(
+  db: D1Database,
+  repoId: string,
+  changeId: string,
+  changed: readonly string[],
+  actor: string | null,
+  now: number,
+  /** Write only while the change's head is still this commit. */
+  headSha?: string,
+): D1PreparedStatement {
+  const atHead = headSha ? 'AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?2 AND c.head_sha = ?8)' : '';
   return db
     .prepare(
       `INSERT INTO issue_links (id, repo_id, issue_id, change_set_id, workspace_id, kind, source, state, actor, created_at, updated_at)
        SELECT lower(hex(randomblob(16))), ?1, i.id, ?2, NULL, 'closes', 'paths', 'proposed', ?3, ?4, ?4
          FROM issues i
-        WHERE i.repo_id = ?1 AND i.state = 'open' AND i.id IN (${touchedIssuesSql(5)})
+        WHERE i.repo_id = ?1 AND i.state = 'open' AND i.id IN (${touchedIssuesSql(5)}) ${atHead}
         ORDER BY i.number DESC LIMIT ${PATH_PROPOSALS_MAX}
        ON CONFLICT (change_set_id, issue_id) WHERE change_set_id IS NOT NULL DO NOTHING`,
     )
-    .bind(repoId, changeId, actor, now, ...touchedIssuesBinds(repoId, issueProbe(changed)));
+    .bind(repoId, changeId, actor, now, ...touchedIssuesBinds(repoId, issueProbe(changed)), ...(headSha ? [headSha] : []));
+}
+
+/**
+ * Recomputes a change's path proposals after its head moved (a head-moved
+ * hook in services/changes.ts): the still-unanswered `paths` proposals are
+ * replaced by those of the new head's changed paths, guarded by the head.
+ * Answered links (manual) and text, branch and workspace links stay. A
+ * repository without indexed issue paths costs one D1 batch and no
+ * Artifacts work. Proposals are advice, so a failure is logged, never
+ * raised into the push effect.
+ */
+export async function refreshPathLinks(env: Env, repoId: string, changeId: string, headSha: string): Promise<'refreshed' | 'skipped'> {
+  const db = env.DB;
+  try {
+    const [repoRes, changeRes, indexed] = await db.batch([
+      db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
+      db.prepare('SELECT base_ref, head_sha, state FROM change_sets WHERE id = ? AND repo_id = ?').bind(changeId, repoId),
+      db.prepare('SELECT 1 FROM issue_paths WHERE repo_id = ? LIMIT 1').bind(repoId),
+    ]);
+    const repo = (repoRes?.results as RepoRow[] | undefined)?.[0];
+    const change = (changeRes?.results as Array<{ base_ref: string; head_sha: string | null; state: string }> | undefined)?.[0];
+    if (!repo || !change || change.head_sha !== headSha || (change.state !== 'open' && change.state !== 'conflicted')) return 'skipped';
+    if (!indexed?.results.length) return 'skipped';
+    const pending: Promise<unknown>[] = [];
+    try {
+      const changed = await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+        const ctx: ResolveContext = { env, repo, artifacts, bypass: false, waitUntil: (p) => pending.push(p) };
+        const baseRef = `refs/heads/${change.base_ref}`;
+        const baseSha = (await lsRefs(ctx, [baseRef])).get(baseRef) ?? null;
+        if (!baseSha) return null;
+        const commits = await resolveCommitish(ctx, [baseSha, headSha]);
+        const base = commits.get(baseSha);
+        const head = commits.get(headSha);
+        if (!base || !head) return null;
+        return (await changedPaths(ctx, base.tree, head.tree)).paths;
+      });
+      if (changed === null) return 'skipped';
+      const now = Date.now();
+      await db.batch([
+        db
+          .prepare(
+            `DELETE FROM issue_links WHERE change_set_id = ?1 AND source = 'paths' AND state = 'proposed'
+               AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = ?1 AND c.head_sha = ?2)`,
+          )
+          .bind(changeId, headSha),
+        ...(changed.length > 0 ? [pathLinkStatement(db, repoId, changeId, changed, 'kvarm', now, headSha)] : []),
+      ]);
+      return 'refreshed';
+    } finally {
+      await Promise.allSettled(pending);
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({ issuePathRefresh: { repo: repoId, change: changeId, error: String(err).slice(0, 200) } }));
+    return 'skipped';
+  }
 }
 
 /** True when the repository has an open issue with this number. */
