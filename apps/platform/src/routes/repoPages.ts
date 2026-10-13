@@ -654,7 +654,7 @@ repoPages.get('/settings', async (c) => {
  * requestCredential has already refused cross-origin session posts. Bearer
  * credentials are not ambient and need none.
  */
-async function sessionFormRefused(c: Context<App>, viewer: ApiActor, form: Record<string, unknown>): Promise<Response | null> {
+export async function sessionFormRefused(c: Context<App>, viewer: ApiActor, form: Record<string, unknown>): Promise<Response | null> {
   if (viewer.via !== 'session') return null;
   const session = await requestSession(c);
   if (session && csrfTokenValid(session, form._csrf)) return null;

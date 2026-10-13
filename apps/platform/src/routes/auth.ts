@@ -106,7 +106,9 @@ authRoutes.get('/callback', async (c) => {
     return signInFailed(c, state, 500);
   }
   if (!user.ok) return signInFailed(c, state, user.status);
-  const session = await sessionCookie(c.env, newSessionPayload(user.value, auth));
+  // One clock reading, so Max-Age is exactly the session lifetime.
+  const now = Date.now();
+  const session = await sessionCookie(c.env, newSessionPayload(user.value, auth, now), now);
   return redirect(pending.returnTo, [...clearStateCookies(state), session]);
 });
 
