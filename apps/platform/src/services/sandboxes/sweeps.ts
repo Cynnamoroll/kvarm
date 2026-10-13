@@ -1,11 +1,9 @@
 import { requestEnvironmentBuild } from '../environments';
 import { sandboxProvider } from './provider';
 
-const BATCH_SIZE = 50;
+export const FLEET_SWEEP_CRON = '0 */6 * * *';
 
-export async function handleFleetScheduled(env: Env, ctx: ExecutionContext): Promise<void> {
-  ctx.waitUntil(runFleetSweeps(env));
-}
+const BATCH_SIZE = 50;
 
 export async function runFleetSweeps(env: Env): Promise<void> {
   const now = Date.now();

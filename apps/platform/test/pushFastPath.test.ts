@@ -291,6 +291,9 @@ describe('confirmed push fast path', () => {
         ['snapshot', 'skipped'],
         ['intent-index', 'skipped'],
         ['change-hooks', 'done'],
+        ['issue-commits', 'skipped'],
+        ['issue-guard', 'skipped'],
+        ['environment-builds', 'skipped'],
       ]),
     );
   });
