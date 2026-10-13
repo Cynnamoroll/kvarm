@@ -66,13 +66,38 @@ revertsApi.delete('/repos/:owner/:repo/incidents/webhook', async (c) => {
   return r.ok ? actorJson(c, r.value) : failJson(c, r);
 });
 
+/** The request body, or null once it passes `max` bytes (the rest is never buffered, declared length or not). */
+async function readBounded(req: Request, max: number): Promise<Uint8Array | null> {
+  if (Number(req.headers.get('content-length') ?? 0) > max) return null;
+  if (!req.body) return new Uint8Array();
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let off = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, off);
+    off += chunk.length;
+  }
+  return out;
+}
+
 revertsApi.post('/repos/:owner/:repo/incidents', async (c) => {
   // The signature covers the exact bytes, so the body is read raw and bounded before anything parses it.
-  const declared = Number(c.req.header('content-length') ?? '0');
-  if (declared > incidents.INCIDENT_LIMITS.maxBodyBytes) {
+  const body = await readBounded(c.req.raw, incidents.INCIDENT_LIMITS.maxBodyBytes);
+  if (body === null) {
     return c.json({ error: `the body exceeds ${incidents.INCIDENT_LIMITS.maxBodyBytes} bytes`, code: 'BODY_TOO_LARGE' }, 413);
   }
-  const body = new Uint8Array(await c.req.arrayBuffer());
   const r = await incidents.receiveIncident(
     {
       owner: c.req.param('owner'),

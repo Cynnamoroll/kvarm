@@ -248,5 +248,8 @@ describe('revertMessage', () => {
     expect(revertMessage({ subject: 'Merge feature', commit: sha, parent: 'b'.repeat(40), merge: true, reason: 'p99 doubled' })).toBe(
       `Revert "Merge feature"\n\nThis reverts commit ${sha}, reversing\nchanges made to ${'b'.repeat(40)}.\n\np99 doubled\n`,
     );
+    expect(revertMessage({ subject: 'Last of three', commit: sha, parent: 'b'.repeat(40), merge: false, range: true })).toBe(
+      `Revert "Last of three"\n\nThis reverts commits ${'b'.repeat(40)}..${sha}.\n`,
+    );
   });
 });

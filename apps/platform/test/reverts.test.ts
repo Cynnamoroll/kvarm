@@ -8,7 +8,7 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
@@ -277,6 +277,58 @@ describe('POST reverts', () => {
   });
 });
 
+describe('revert lifecycle', () => {
+  it('names every commit of a fast-forwarded change set in the message of its revert', async () => {
+    const repo = await seedRepo('ffrange');
+    const { '.kvarm/ci.json': _ci, ...plain } = BASE;
+    const base = await commit(repo, plain);
+    const one = await commit(repo, { ...plain, 'one.txt': '1\n' }, [base.sha]);
+    const two = await commit(repo, { ...plain, 'one.txt': '1\n', 'two.txt': '2\n' }, [one.sha]);
+    repo.refs.set(MAIN, base.sha);
+    repo.refs.set('refs/heads/feature', two.sha);
+    expect((await call('POST', `${R('ffrange')}/changes`, tok.owner, { title: 'two commits', base: 'main', head: 'feature' })).status).toBe(201);
+    const m = await call('POST', `${R('ffrange')}/changes/1/merge`, tok.owner, {});
+    expect(m.json.merge?.kind).toBe('fast-forward');
+    const r = await revert('ffrange', { changeNumber: 1 });
+    expect(r.status, r.text).toBe(201);
+    expect(r.json.revert).toMatchObject({ sha: two.sha, parent: base.sha, treeSha: base.tree });
+    expect(commitOf(repo, r.json.revert.commit).message).toContain(`This reverts commits ${base.sha}..${two.sha}.`);
+  });
+
+  it('marks a revert that stops applying conflicted without dispatching a task nobody could complete', async () => {
+    const repo = await seedRepo('stale-revert');
+    const { bad, later } = await history(repo);
+    const r = await revert('stale-revert', { sha: bad.sha, mergePolicy: 'review' });
+    expect(r.status).toBe(201);
+    const n = r.json.change.number as number;
+    const rework = await commit(repo, { ...BASE, 'src/app.js': 'line 1\nline TWO!\nline 3\nline 4\nline 5\n', 'bad.txt': 'bad\n', 'later.txt': 'later\n' }, [later.sha]);
+    repo.refs.set(MAIN, rework.sha);
+    const ctx = createExecutionContext();
+    const batch = createMessageBatch('kvarm-events', [
+      {
+        id: crypto.randomUUID(),
+        timestamp: new Date(),
+        attempts: 1,
+        body: {
+          type: 'cf.artifacts.repo.pushed',
+          source: { type: 'artifacts', namespace: 'default', repoName: `${OWNER}--stale-revert` },
+          payload: { ref: MAIN, before: later.sha, after: rework.sha, commits: [], totalCommitsCount: 0, commitsTruncated: false },
+          metadata: { accountId: 'acct', eventSubscriptionId: 'sub', eventSchemaVersion: 1, eventTimestamp: new Date().toISOString() },
+        },
+      },
+    ]);
+    await worker.queue!(batch, env, ctx);
+    await getQueueResult(batch, ctx);
+    await waitOnExecutionContext(ctx);
+    const after = await call('GET', `${R('stale-revert')}/changes/${n}`, tok.owner);
+    expect(after.json).toMatchObject({ kind: 'revert', state: 'conflicted' });
+    const tasks = await env.DB.prepare('SELECT COUNT(*) AS n FROM agent_tasks WHERE repo_id = ?').bind(repoIds['stale-revert']).first<{ n: number }>();
+    expect(tasks?.n).toBe(0);
+    // The remedy is a fresh revert on the new tip, which conflicts too here and says so.
+    expect((await revert('stale-revert', { sha: bad.sha })).json.code).toBe('REVERT_CONFLICT');
+  });
+});
+
 describe('MCP', () => {
   it('create_revert and rotate_incident_secret reach the same routes as REST', async () => {
     const repo = await seedRepo('mcp');
@@ -408,6 +460,63 @@ describe('incident webhooks', () => {
     const unknown = await deliver('unsigned', event('evt-404', 'f'.repeat(40)), { secret });
     expect([unknown.status, unknown.json.code]).toEqual([404, 'COMMIT_NOT_FOUND']);
     expect(await counts('unsigned', repo)).toEqual(before);
+  });
+
+  it('keys idempotency by source and id, and a delivery that takes over an abandoned claim never opens a second change', async () => {
+    const repo = await seedRepo('takeover');
+    const { bad } = await history(repo);
+    const { secret } = (await rotate('takeover')).json as { secret: string };
+    const first = await deliver('takeover', event('7', bad.sha), { secret });
+    expect(first.status).toBe(201);
+    // Same id from another source is another event.
+    const other = JSON.stringify({ specversion: '1.0', id: '7', source: 'apm', type: 't', subject: bad.sha });
+    const second = await deliver('takeover', other, { secret });
+    expect(second.status).toBe(201);
+    expect(second.json.change.number).not.toBe(first.json.change.number);
+
+    // The first delivery's final write was lost and its claim abandoned: a retry adopts its change.
+    await env.DB.prepare(`UPDATE incident_events SET state = 'pending', change_number = NULL, change_set_id = NULL, claimed_at = 0 WHERE repo_id = ? AND event_source = ?`)
+      .bind(repoIds.takeover, 'https://pager.example/alerts')
+      .run();
+    const before = await counts('takeover', repo);
+    const adopted = await deliver('takeover', event('7', bad.sha), { secret });
+    expect(adopted.status, adopted.text).toBe(200);
+    expect(adopted.json).toMatchObject({ duplicate: true, change: { number: first.json.change.number } });
+    expect(await counts('takeover', repo)).toMatchObject({ changes: before.changes, refs: before.refs });
+
+    // A delivery that pushed its branch and died before the change existed: the retry opens the change on that branch.
+    const key = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('https://pager.example/alerts\u00009')))]
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .slice(0, 8);
+    const branch = `kvarm-revert/${bad.sha.slice(0, 7)}-${key}`;
+    repo.refs.set(`refs/heads/${branch}`, first.json.revert.commit);
+    const recovered = await deliver('takeover', event('9', bad.sha), { secret });
+    expect(recovered.status, recovered.text).toBe(201);
+    expect(recovered.json).toMatchObject({ duplicate: false, recovered: true, change: { kind: 'revert', head: branch, mergePolicy: 'draft' } });
+    expect((await deliver('takeover', event('9', bad.sha), { secret })).json).toMatchObject({ duplicate: true, change: { number: recovered.json.change.number } });
+  });
+
+  it('refuses a body over 64 KiB without buffering it, whether or not its length is declared', async () => {
+    const repo = await seedRepo('big');
+    await history(repo);
+    const before = await counts('big', repo);
+    const chunk = new Uint8Array(16 * 1024).fill(0x20);
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        if (pulled > 64) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const headers = { 'content-type': 'application/cloudevents+json', 'x-kvarm-timestamp': String(Math.floor(Date.now() / 1000)), 'x-kvarm-signature': `sha256=${'0'.repeat(64)}` };
+    const chunked = await send(new Request(`${ORIGIN}${R('big')}/incidents`, { method: 'POST', headers, body: stream, duplex: 'half' } as RequestInit));
+    expect([chunked.status, chunked.json.code]).toEqual([413, 'BODY_TOO_LARGE']);
+    expect(pulled).toBeLessThan(64);
+    const declared = await send(new Request(`${ORIGIN}${R('big')}/incidents`, { method: 'POST', headers, body: new Uint8Array(65 * 1024) }));
+    expect(declared.status).toBe(413);
+    expect(await counts('big', repo)).toEqual(before);
   });
 
   it('rotation invalidates the previous secret at once', async () => {

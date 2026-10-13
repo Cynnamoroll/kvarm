@@ -102,11 +102,18 @@ export async function revertTree(reader: CommitReader & MergeReader, input: Reve
 
 /**
  * git's revert message for `subject` (the reverted commit's first line),
- * followed by the caller's reason as its own paragraph.
+ * followed by the caller's reason as its own paragraph. `range` names a
+ * revert relative to an `against` commit that is not the commit's first
+ * parent: every commit in `parent..commit` is undone, not only the last.
  */
-export function revertMessage(o: { subject: string; commit: string; parent: string | null; merge: boolean; reason?: string }): string {
+export function revertMessage(o: { subject: string; commit: string; parent: string | null; merge: boolean; range?: boolean; reason?: string }): string {
   const subject = o.subject.split('\n', 1)[0]!.trim();
-  const what = o.merge && o.parent ? `This reverts commit ${o.commit}, reversing\nchanges made to ${o.parent}.` : `This reverts commit ${o.commit}.`;
+  const what =
+    o.range && o.parent
+      ? `This reverts commits ${o.parent}..${o.commit}.`
+      : o.merge && o.parent
+        ? `This reverts commit ${o.commit}, reversing\nchanges made to ${o.parent}.`
+        : `This reverts commit ${o.commit}.`;
   const reason = o.reason?.trim();
   return `Revert "${subject}"\n\n${what}\n${reason ? `\n${reason}\n` : ''}`;
 }

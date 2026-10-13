@@ -90,6 +90,12 @@ export interface RevertCreated {
 export interface RevertOrigin {
   /** Appended to the change body: who asked for the revert (for example an incident event). */
   note?: string;
+  /**
+   * Fixes the branch suffix instead of a random one. Branch creation is a
+   * compare-and-swap from nothing, so a second attempt with the same key gets
+   * `409 REVERT_BRANCH_EXISTS` instead of a second change.
+   */
+  branchKey?: string;
 }
 
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -140,6 +146,11 @@ function randomSuffix(): string {
   return [...crypto.getRandomValues(new Uint8Array(4))].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** `kvarm-revert/<sha7>-<key>`: the key is random, or derived from an incident event so a repeated delivery names the same branch. */
+export function revertBranch(sha: string, key: string): string {
+  return `${REVERT_BRANCH_NAMESPACE.slice('refs/heads/'.length)}/${sha.slice(0, 7)}-${key}`;
+}
+
 function conflictList(conflicts: readonly MergeConflict[]) {
   const listed = conflicts.slice(0, REVERT_LIMITS.conflictsMax).map((c) => ({ path: c.path, kind: c.kind, paths: c.paths }));
   return { conflicts: listed, conflictCount: conflicts.length, ...(conflicts.length > listed.length ? { conflictsTruncated: true } : {}) };
@@ -186,20 +197,7 @@ export function createRevert(cx: ChangeContext, input: unknown, deps: RevertDeps
         meta = null;
       }
       if (!meta || meta.hash !== commitSha) return fail(404, `commit not found: ${commitSha}`, 'COMMIT_NOT_FOUND');
-      const r = await revertTree(
-        artifactsMergeSources(ctx),
-        { commit: commitSha, target: baseSha, ...(against ? { against } : {}) },
-        {
-          maxTreeReads: MERGE_BUDGETS.maxTreeReads,
-          maxChanges: MERGE_BUDGETS.maxChanges,
-          maxBlobReads: MERGE_BUDGETS.maxBlobReads,
-          maxBlobBytes: MERGE_BUDGETS.maxBlobBytes,
-          nodeBudget: MERGE_BUDGETS.nodeBudget,
-          concurrency: MERGE_BUDGETS.concurrency,
-          maxMergedBytes: MERGE_BUDGETS.maxMergedBytes,
-          contentConcurrency: MERGE_BUDGETS.contentConcurrency,
-        },
-      );
+      const r = await revertTree(artifactsMergeSources(ctx), { commit: commitSha, target: baseSha, ...(against ? { against } : {}) }, { ...MERGE_BUDGETS });
       switch (r.status) {
         case 'missing':
           return r.missing === 'commit'
@@ -218,34 +216,48 @@ export function createRevert(cx: ChangeContext, input: unknown, deps: RevertDeps
             ? fail(503, `could not read the revert inputs (${r.truncatedReason ?? 'readError'})`, 'REVERT_READ_FAILED')
             : fail(422, `the revert exceeds the ${r.truncatedReason} budget`, 'REVERT_TOO_LARGE', { reason: r.truncatedReason });
       }
-      return { ok: true as const, value: { baseSha, r, subject: meta.message } };
+      // A fast-forwarded change set of several commits reverts as one range; its message must not name only the head.
+      const range = against !== undefined && meta.parents[0] !== against;
+      return { ok: true as const, value: { baseSha, r, subject: meta.message, range } };
     });
     if (!planned.ok) return planned;
-    const { baseSha, r, subject } = planned.value;
+    const { baseSha, r, subject, range } = planned.value;
 
     const time = Math.floor(Date.now() / 1000);
     const committer: GitIdent = { ...KVARM_COMMITTER, time };
     const who = mergeAuthor(cx.actor);
     const author: GitIdent = who ? { ...who, time } : committer;
-    const message = revertMessage({ subject, commit: commitSha, parent: r.parent, merge: r.merge, ...(p.reason ? { reason: p.reason } : {}) });
+    const message = revertMessage({ subject, commit: commitSha, parent: r.parent, merge: r.merge, range, ...(p.reason ? { reason: p.reason } : {}) });
     const commit = await buildCommit({ tree: r.treeHash!, parents: [baseSha], author, committer, message });
-    const branch = `${REVERT_BRANCH_NAMESPACE.slice('refs/heads/'.length)}/${commitSha.slice(0, 7)}-${randomSuffix()}`;
+    const branch = revertBranch(commitSha, origin.branchKey ?? randomSuffix());
     const ref = branchRef(branch);
 
     const pusher = deps.pusher(cx.env, cx.repo);
+    // The branch is only reachable through its change; a failure to open the change removes it (compare-and-swap, best effort).
+    const removeBranch = () => pusher.updateRef({ ref, oldOid: commit.hash, newOid: ZERO_OID }).catch(() => undefined);
     const pushed = await pusher.updateRef({ ref, oldOid: ZERO_OID, newOid: commit.hash }, [commit, ...r.objects]);
+    if (pushed.status === 'stale') return fail(409, `the revert branch ${branch} already exists`, 'REVERT_BRANCH_EXISTS', { ref: branch });
     let created = pushed.status === 'ok';
-    if (pushed.status === 'unknown') created = (await pusher.listRefs().catch(() => new Map<string, string>())).get(ref) === commit.hash;
+    if (pushed.status === 'unknown') {
+      const live = await pusher.listRefs().catch(() => null);
+      created = live?.get(ref) === commit.hash;
+      if (!live) await removeBranch();
+    }
     if (!created) {
       return fail(502, `the revert branch could not be created (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''})`, 'REF_CREATE_FAILED');
     }
 
     const title = p.title ?? message.split('\n', 1)[0]!.slice(0, CHANGE_LIMITS.titleMax);
     const body = [message.split('\n\n').slice(1).join('\n\n').trim(), origin.note].filter(Boolean).join('\n\n');
-    const change = await createChange(cx, { title, body, base, head: branch, mergePolicy }, { kind: 'revert' });
+    let change: ServiceResult<ChangeDetail>;
+    try {
+      change = await createChange(cx, { title, body, base, head: branch, mergePolicy }, { kind: 'revert' });
+    } catch (err) {
+      await removeBranch();
+      throw err;
+    }
     if (!change.ok) {
-      // Nothing references the branch without its change; best effort, a leftover branch is inert.
-      await pusher.updateRef({ ref, oldOid: commit.hash, newOid: ZERO_OID }).catch(() => undefined);
+      await removeBranch();
       return change;
     }
     return {

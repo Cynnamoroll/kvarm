@@ -33,8 +33,18 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { preauthAllowed } from '../ratelimit';
 import { repoBranchRulesSelect, ruleFromRow, type BranchRuleRow } from './branchRules';
-import { MERGE_POLICIES, changeView, readChange, type ChangeContext, type ChangeView, type MergePolicy } from './changes';
-import { createRevert, defaultRevertDeps, type RevertCreated, type RevertDeps } from './reverts';
+import {
+  CHANGE_LIMITS,
+  MERGE_POLICIES,
+  changeView,
+  createChange,
+  readChange,
+  type ChangeContext,
+  type ChangeDetail,
+  type ChangeView,
+  type MergePolicy,
+} from './changes';
+import { createRevert, defaultRevertDeps, revertBranch, type RevertCreated, type RevertDeps } from './reverts';
 
 declare global {
   interface Env {
@@ -200,7 +210,9 @@ export interface IncidentDelivery {
 
 export type IncidentOutcome =
   | ({ duplicate: false; eventId: string } & RevertCreated)
-  | { duplicate: true; eventId: string; change: ChangeView | null };
+  | { duplicate: true; eventId: string; change: ChangeView | null }
+  // A delivery that took over an abandoned claim and opened the change on the branch the first one had pushed.
+  | { duplicate: false; eventId: string; recovered: true; change: ChangeView };
 
 const EVENT_ID_MAX = 256;
 
@@ -262,6 +274,11 @@ interface ClaimRow {
   change_number: number | null;
 }
 
+type Found = RepoRow & { incident_key_nonce: string; incident_key_hash: string };
+
+/** Stands in for a missing webhook so an unknown repository costs the same key work as a known one. */
+const DECOY = { id: 'kvarm-incident-decoy', nonce: '0'.repeat(32) };
+
 /** POST incidents: see the module comment. */
 export async function receiveIncident(d: IncidentDelivery, env: Env, deps: RevertDeps = defaultRevertDeps): Promise<ServiceResult<IncidentOutcome>> {
   const now = d.now ?? Math.floor(Date.now() / 1000);
@@ -279,15 +296,16 @@ export async function receiveIncident(d: IncidentDelivery, env: Env, deps: Rever
       WHERE r.owner_login = ? AND r.name = ?`,
   )
     .bind(d.owner, d.name)
-    .first<RepoRow & { incident_key_nonce: string; incident_key_hash: string }>();
-  if (!found) return UNVERIFIED;
-  const secret = await deriveSecret(master, found.id, found.incident_key_nonce);
+    .first<Found>();
+  // Derive and verify even without a webhook, so response time does not tell which repositories have one.
+  const secret = await deriveSecret(master, found?.id ?? DECOY.id, found?.incident_key_nonce ?? DECOY.nonce);
   const signedBytes = new Uint8Array(signed.timestamp.length + 1 + d.body.length);
   signedBytes.set(encode(`${signed.timestamp}.`), 0);
   signedBytes.set(d.body, signed.timestamp.length + 1);
   const valid = await crypto.subtle.verify('HMAC', await hmacKey(secret, 'verify'), signed.signature, signedBytes);
-  if (!valid) {
-    if ((await sha256Hex(secret)) !== found.incident_key_hash) console.warn(JSON.stringify({ incidentKeyMismatch: 1 }));
+  const fingerprint = await sha256Hex(secret);
+  if (!found || !valid) {
+    if (found && fingerprint !== found.incident_key_hash) console.warn(JSON.stringify({ incidentKeyMismatch: 1 }));
     return UNVERIFIED;
   }
   const { incident_key_nonce: _n, incident_key_hash: _h, ...repo } = found;
@@ -295,51 +313,93 @@ export async function receiveIncident(d: IncidentDelivery, env: Env, deps: Rever
   const parsed = parseIncidentEvent(d.body);
   if (!parsed.ok) return parsed;
   const ev = parsed.value;
+  const key = { repoId: repo.id, source: ev.source, id: ev.id };
 
-  // Claim the id before any ref is written, so concurrent deliveries of one event open one change.
+  // Claim the event before any ref is written, so concurrent deliveries of one event open one change.
   const claim = randomHex(8);
   const nowMs = Date.now();
   const [, read] = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO incident_events (repo_id, event_id, subject_sha, state, claim, claimed_at)
-       VALUES (?1, ?2, ?3, 'pending', ?4, ?5)
-       ON CONFLICT(repo_id, event_id) DO UPDATE SET claim = ?4, claimed_at = ?5
-        WHERE incident_events.state = 'pending' AND incident_events.claimed_at < ?6`,
-    ).bind(repo.id, ev.id, ev.subject, claim, nowMs, nowMs - INCIDENT_LIMITS.claimTakeoverMs),
-    env.DB.prepare('SELECT state, claim, change_number FROM incident_events WHERE repo_id = ? AND event_id = ?').bind(repo.id, ev.id),
+      `INSERT INTO incident_events (repo_id, event_source, event_id, subject_sha, state, claim, claimed_at)
+       VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)
+       ON CONFLICT(repo_id, event_source, event_id) DO UPDATE SET claim = ?5, claimed_at = ?6
+        WHERE incident_events.state = 'pending' AND incident_events.claimed_at < ?7`,
+    ).bind(repo.id, ev.source, ev.id, ev.subject, claim, nowMs, nowMs - INCIDENT_LIMITS.claimTakeoverMs),
+    env.DB.prepare('SELECT state, claim, change_number FROM incident_events WHERE repo_id = ? AND event_source = ? AND event_id = ?').bind(repo.id, ev.source, ev.id),
   ]);
   const row = (read?.results as ClaimRow[] | undefined)?.[0];
   if (!row) return refuse(500, 'the event could not be recorded', 'EVENT_RECORD_FAILED');
-  if (row.state === 'opened') {
-    const change = row.change_number !== null ? await readChange(env, repo.id, row.change_number) : null;
-    return { ok: true, value: { duplicate: true, eventId: ev.id, change: change ? changeView(change) : null } };
-  }
+  if (row.state === 'opened') return duplicate(env, repo.id, ev.id, row.change_number);
   if (row.claim !== claim) return refuse(409, 'another delivery of this event is being processed; retry shortly', 'EVENT_IN_PROGRESS');
 
   const rules = ((await repoBranchRulesSelect(env.DB, repo.id).all<BranchRuleRow>()).results ?? []).map(ruleFromRow);
   const cx: ChangeContext = { env, repo, actor: null, branchRules: rules, waitUntil: d.waitUntil };
-  const opened = await createRevert(
-    cx,
-    { sha: ev.subject, ...(ev.reason !== undefined ? { reason: ev.reason } : {}), ...(ev.base !== undefined ? { base: ev.base } : {}), ...(ev.mergePolicy ? { mergePolicy: ev.mergePolicy } : {}) },
-    deps,
-    { note: `Opened by incident event ${JSON.stringify(ev.id)} (type ${JSON.stringify(ev.type)}, source ${JSON.stringify(ev.source)}).` },
-  ).catch(async (err: unknown) => {
-    await releaseClaim(env, repo.id, ev.id, claim);
+  const note = `Opened by incident event ${JSON.stringify(ev.id)} (type ${JSON.stringify(ev.type)}, source ${JSON.stringify(ev.source)}).`;
+  // The branch is named after the event: a delivery that took over an abandoned claim finds the first one's branch.
+  const branchKey = (await sha256Hex(`${ev.source}\0${ev.id}`)).slice(0, 8);
+  const mergePolicy = ev.mergePolicy ?? 'draft';
+  let opened: ServiceResult<RevertCreated | { change: ChangeDetail }>;
+  try {
+    opened = await createRevert(
+      cx,
+      { sha: ev.subject, mergePolicy, ...(ev.reason !== undefined ? { reason: ev.reason } : {}), ...(ev.base !== undefined ? { base: ev.base } : {}) },
+      deps,
+      { note, branchKey },
+    );
+    if (!opened.ok && opened.code === 'REVERT_BRANCH_EXISTS') {
+      const branch = revertBranch(ev.subject, branchKey);
+      const existing = await env.DB.prepare('SELECT number FROM change_sets WHERE repo_id = ? AND head_ref = ? ORDER BY number LIMIT 1')
+        .bind(repo.id, branch)
+        .first<{ number: number }>();
+      if (existing) {
+        await markOpened(env, key, claim, existing.number);
+        return duplicate(env, repo.id, ev.id, existing.number);
+      }
+      // The earlier delivery pushed the branch and died before its change existed: open it now.
+      const title = `Revert ${ev.subject} (incident ${ev.id})`.slice(0, CHANGE_LIMITS.titleMax);
+      const base = ev.base ?? repo.default_branch;
+      const c = await createChange(cx, { title, body: [ev.reason, note].filter(Boolean).join('\n\n'), base, head: branch, mergePolicy }, { kind: 'revert' });
+      opened = c.ok ? { ok: true, value: { change: c.value } } : c;
+    }
+  } catch (err) {
+    await releaseClaim(env, key, claim);
     throw err;
-  });
+  }
   if (!opened.ok) {
-    await releaseClaim(env, repo.id, ev.id, claim);
+    await releaseClaim(env, key, claim);
     return opened;
   }
-  await env.DB.prepare(
-    `UPDATE incident_events SET state = 'opened', change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?4), change_number = ?4, opened_at = ?5
-      WHERE repo_id = ?1 AND event_id = ?2 AND claim = ?3 AND state = 'pending'`,
-  )
-    .bind(repo.id, ev.id, claim, opened.value.change.number, Date.now())
-    .run();
+  const recorded = await markOpened(env, key, claim, opened.value.change.number);
+  // A lost claim means another delivery took it over; the branch name kept it from opening a second change.
+  if (!recorded) console.warn(JSON.stringify({ incidentClaimLost: 1 }));
+  if (!('revert' in opened.value)) return duplicate(env, repo.id, ev.id, opened.value.change.number, false);
   return { ok: true, value: { duplicate: false, eventId: ev.id, ...opened.value } };
 }
 
-function releaseClaim(env: Env, repoId: string, eventId: string, claim: string): Promise<unknown> {
-  return env.DB.prepare(`DELETE FROM incident_events WHERE repo_id = ? AND event_id = ? AND claim = ? AND state = 'pending'`).bind(repoId, eventId, claim).run();
+async function duplicate(env: Env, repoId: string, eventId: string, number: number | null, isDuplicate = true): Promise<ServiceResult<IncidentOutcome>> {
+  const change = number !== null ? await readChange(env, repoId, number) : null;
+  if (!isDuplicate && change) return { ok: true, value: { duplicate: false, eventId, recovered: true, change: changeView(change) } };
+  return { ok: true, value: { duplicate: true, eventId, change: change ? changeView(change) : null } };
+}
+
+interface EventKey {
+  repoId: string;
+  source: string;
+  id: string;
+}
+
+async function markOpened(env: Env, key: EventKey, claim: string, number: number): Promise<boolean> {
+  const r = await env.DB.prepare(
+    `UPDATE incident_events SET state = 'opened', change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?5), change_number = ?5, opened_at = ?6
+      WHERE repo_id = ?1 AND event_source = ?2 AND event_id = ?3 AND claim = ?4 AND state = 'pending'`,
+  )
+    .bind(key.repoId, key.source, key.id, claim, number, Date.now())
+    .run();
+  return (r.meta.changes ?? 0) > 0;
+}
+
+function releaseClaim(env: Env, key: EventKey, claim: string): Promise<unknown> {
+  return env.DB.prepare(`DELETE FROM incident_events WHERE repo_id = ? AND event_source = ? AND event_id = ? AND claim = ? AND state = 'pending'`)
+    .bind(key.repoId, key.source, key.id, claim)
+    .run();
 }

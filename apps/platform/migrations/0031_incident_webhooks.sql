@@ -18,13 +18,17 @@ CREATE TABLE incident_webhooks (
   rotated_at INTEGER NOT NULL
 );
 
--- Idempotency by CloudEvents id: the first verified delivery of an id claims
--- the row ('pending') before any ref is written, records the revert change it
--- opened ('opened'), and every later delivery of the id answers with that
--- change. A claim whose delivery failed is removed so a retry recomputes; a
--- pending claim older than the takeover window may be taken over.
+-- Idempotency by CloudEvents source + id (unique together by the spec): the
+-- first verified delivery of an event claims the row ('pending') before any
+-- ref is written, records the revert change it opened ('opened'), and every
+-- later delivery of the event answers with that change. A claim whose
+-- delivery failed is removed so a retry recomputes; a pending claim older
+-- than the takeover window may be taken over. The revert branch name is
+-- derived from the event as well, so a taken-over delivery cannot open a
+-- second change for it.
 CREATE TABLE incident_events (
   repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  event_source TEXT NOT NULL,
   event_id TEXT NOT NULL,
   subject_sha TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('pending', 'opened')),
@@ -33,5 +37,5 @@ CREATE TABLE incident_events (
   change_number INTEGER,
   claimed_at INTEGER NOT NULL,
   opened_at INTEGER,
-  PRIMARY KEY (repo_id, event_id)
+  PRIMARY KEY (repo_id, event_source, event_id)
 );

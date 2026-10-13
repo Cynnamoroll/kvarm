@@ -362,7 +362,7 @@ Then drop any event whose `x-kvarm-event-id` you have already processed.
 
 ### Sending a Kvarm incident
 
-A repository admin creates the webhook secret once (`kvarm incident rotate <owner>/<repo>` or `POST …/incidents/webhook/rotate`); the reply is the only time the secret is shown, and rotating again invalidates it at once. The incident system then posts a [CloudEvents 1.0](https://cloudevents.io) event in structured JSON mode: `subject` is the full id of the commit to revert, `id` is the idempotency key (a second delivery of the same id answers `200` with the change the first one opened, never a second change), and `data` may carry `reason`, `base` and `mergePolicy` (default `draft`). The signature is HMAC-SHA256 with the secret over `<timestamp>.<raw body>`, where the timestamp is Unix seconds and must be within 300 seconds of the platform's clock:
+A repository admin creates the webhook secret once (`kvarm incident rotate <owner>/<repo>` or `POST …/incidents/webhook/rotate`); the reply is the only time the secret is shown, and rotating again invalidates it at once. The incident system then posts a [CloudEvents 1.0](https://cloudevents.io) event in structured JSON mode: `subject` is the full id of the commit to revert, `source` and `id` together are the idempotency key (a second delivery of the same event answers `200` with the change the first one opened, never a second change), and `data` may carry `reason`, `base` and `mergePolicy` (default `draft`). The signature is HMAC-SHA256 with the secret over `<timestamp>.<raw body>`, where the timestamp is Unix seconds and must be within 300 seconds of the platform's clock:
 
 ```sh
 body='{"specversion":"1.0","id":"inc-4711","source":"https://pager.example/alerts","type":"com.example.incident.opened","subject":"<40-hex sha>","data":{"reason":"checkout errors spiked"}}'
@@ -373,7 +373,7 @@ curl -s -X POST "$KVARM_BASE_URL/api/v1/repos/<owner>/<repo>/incidents" \
   -H "x-kvarm-timestamp: $ts" -H "x-kvarm-signature: sha256=$sig" --data-binary "$body"
 ```
 
-A verified event answers `201 {duplicate: false, eventId, revert, change}`. A missing, stale or wrong signature, an unknown repository and a repository without a webhook all answer the same `401 INVALID_SIGNATURE` and write nothing. The revert change is authored by Kvarm and goes through guard, CI and the queue like any other.
+A verified event answers `201 {duplicate: false, eventId, revert, change}`. A missing, stale or wrong signature, an unknown repository and a repository without a webhook all answer the same `401 INVALID_SIGNATURE` and write nothing. The revert change is authored by Kvarm and goes through guard, CI and the queue like any other. To land a draft revert at once, set its policy to `review` and merge it (`kvarm change update <owner>/<repo> <n> --merge-policy review`, then `kvarm change merge <owner>/<repo> <n>`); its required checks still apply.
 
 ## Demo harness
 
