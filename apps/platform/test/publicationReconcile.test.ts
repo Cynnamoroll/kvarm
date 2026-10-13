@@ -166,13 +166,16 @@ function trainDeps(over: Partial<TrainDeps> & { crashAt?: PublicationCheckpoint;
 }
 
 /** A pusher whose receive-pack reply is lost after the store processed the request. */
-function lostReply(): Pick<TrainDeps, 'pusher'> {
+function lostReply(timeline?: string[]): Pick<TrainDeps, 'pusher'> {
   return {
     pusher(e, r) {
       const real = defaultTrainDeps.pusher(e, r);
       return {
         listRefs: () => real.listRefs(),
-        updateRef: (command, objects) => real.updateRef(command, objects),
+        updateRef: (command, objects) => {
+          timeline?.push(`updateRef:${command.ref}`);
+          return real.updateRef(command, objects);
+        },
         async prepareUpdate(command, objects) {
           const prepared = await real.prepareUpdate(command, objects);
           return {
@@ -250,12 +253,13 @@ interface IntentSnap {
   old_sha: string;
   new_sha: string;
   observed_sha: string | null;
+  attempt: number;
 }
 
 async function intents(name: string): Promise<IntentSnap[]> {
   return (
     (
-      await env.DB.prepare('SELECT queue_id, generation, state, old_sha, new_sha, observed_sha FROM merge_publication_intents WHERE repo_id = ? ORDER BY created_at, generation')
+      await env.DB.prepare('SELECT queue_id, generation, state, old_sha, new_sha, observed_sha, attempt FROM merge_publication_intents WHERE repo_id = ? ORDER BY created_at, generation')
         .bind(repoIds[name])
         .all<IntentSnap>()
     ).results ?? []
@@ -411,9 +415,10 @@ describe('injected failures converge to registry == ref', () => {
 
     await expectConsistent('crash-before-push', repo, numbers);
     expect(pushesTo(repo, MAIN)).toHaveLength(1);
-    expect((await intents('crash-before-push')).map((i) => [i.state, i.observed_sha])).toEqual([
-      ['not_applied', main],
-      ['published', null],
+    expect((await intents('crash-before-push')).map((i) => [i.state, i.observed_sha, i.attempt])).toEqual([
+      ['not_applied', main, 0],
+      // The recovered attempt counts: the retry is attempt 1.
+      ['published', null, 1],
     ]);
     expect((await reconciledEvents('crash-before-push')).map((e) => e.outcome)).toEqual(['not_applied']);
   });
@@ -488,7 +493,13 @@ describe('injected failures converge to registry == ref', () => {
 
   it('(e) a lost reply whose push landed is completed by reconciliation in the same run, not guessed', async () => {
     const { repo, numbers } = await setup('lost-moved', 1, { merge: true });
-    const deps = trainDeps(lostReply());
+    const timeline: string[] = [];
+    const deps = trainDeps({
+      ...lostReply(timeline),
+      observe: (e) => {
+        if (e.type === 'lease') timeline.push(`lease:${e.op}`);
+      },
+    });
     const run = await runTrain(env, repoIds['lost-moved']!, MAIN, deps);
     expect(run.published).toEqual(numbers);
     await expectConsistent('lost-moved', repo, numbers);
@@ -496,6 +507,64 @@ describe('injected failures converge to registry == ref', () => {
     expect((await intents('lost-moved')).map((i) => i.state)).toEqual(['reconciled']);
     expect((await reconciledEvents('lost-moved')).map((e) => e.outcome)).toEqual(['completed']);
     expect(await leaseOf('lost-moved')).toBeNull();
+    // The follow-up of the reconciled record (the merge commit's attribution note) runs after the lease is released.
+    expect(timeline).toEqual(['lease:acquire', 'lease:release', 'updateRef:refs/notes/kvarm-attribution']);
+  });
+
+  it('a crashed publication someone already built on is completed, not counted as a base move, even with its attempts spent', async () => {
+    const { repo, numbers } = await setup('built-on', 1, { merge: true });
+    await expect(runTrain(env, repoIds['built-on']!, MAIN, trainDeps({ crashAt: 'pushed' }))).rejects.toThrow(Crash);
+    const landed = repo.refs.get(MAIN)!;
+    const onTop = await commit(repo, { 'README.md': 'readme\n', 'base.txt': 'base\n', 'f1.txt': 'file 1\n', 'later.txt': 'l\n' }, [landed]);
+    repo.refs.set(MAIN, onTop.sha);
+    await env.DB.prepare('UPDATE merge_queue SET attempts = ?2 WHERE repo_id = ?1').bind(repoIds['built-on'], TRAIN_LIMITS.maxAttempts - 1).run();
+
+    await deliver(await letTimePass('built-on'));
+    const [entry] = await entries('built-on');
+    expect(entry).toMatchObject({ state: 'published', merge_commit: landed, reason_code: 'PUBLICATION_RECONCILED' });
+    expect(await getChange('built-on', numbers[0]!)).toMatchObject({ state: 'merged', mergeCommit: landed });
+    expect(repo.refs.get(MAIN)).toBe(onTop.sha);
+    expect(pushesTo(repo, MAIN)).toHaveLength(1);
+    expect((await intents('built-on')).map((i) => [i.state, i.observed_sha])).toEqual([['reconciled', onTop.sha]]);
+    expect((await reconciledEvents('built-on')).map((e) => e.outcome)).toEqual(['completed']);
+  });
+
+  it('an earlier attempt that landed late is recognized even after a newer attempt failed on it', async () => {
+    const { repo, main, numbers } = await setup('late-older', 1, { merge: true });
+    // Attempt 1 stalls right before its send.
+    let reachedA!: () => void;
+    const atA = new Promise<void>((r) => (reachedA = r));
+    let letGoA!: () => void;
+    const releaseA = new Promise<void>((r) => (letGoA = r));
+    const runA = runTrain(env, repoIds['late-older']!, MAIN, trainDeps({ hold: { at: 'intent-recorded', reached: reachedA, release: releaseA } }));
+    await atA;
+
+    // Attempt 1 is reconciled as not applied (the ref still holds main); attempt 2 is claimed, and right before
+    // its own send attempt 1's push lands, so attempt 2's push is answered stale.
+    await letTimePass('late-older');
+    const b = trainDeps({
+      async checkpoint(step) {
+        if (step !== 'intent-recorded') return;
+        letGoA();
+        for (let i = 0; i < 200 && repo.refs.get(MAIN) === main; i++) await new Promise((r) => setTimeout(r, 10));
+      },
+    });
+    await runTrain(env, repoIds['late-older']!, MAIN, b);
+    await runA;
+    const landed = repo.refs.get(MAIN)!;
+    expect(landed).not.toBe(main);
+    const first = (await intents('late-older'))[0]!;
+    expect(first).toMatchObject({ old_sha: main, new_sha: landed });
+
+    for (let i = 0; i < 3 && (await entries('late-older')).some((r) => r.active === 1); i++) {
+      await env.DB.prepare('UPDATE merge_trains SET runner_until = 0 WHERE repo_id = ?1').bind(repoIds['late-older']).run();
+      await runTrain(env, repoIds['late-older']!, MAIN, trainDeps());
+    }
+    await expectConsistent('late-older', repo, numbers);
+    expect(repo.refs.get(MAIN)).toBe(landed);
+    const states = (await intents('late-older')).map((i) => i.state);
+    expect(states[0]).toBe('reconciled');
+    expect(states.slice(1).every((s) => s === 'moved')).toBe(true);
   });
 
   it('(e) a lost reply whose read-back also fails stays pending, then a later pass completes it', async () => {
