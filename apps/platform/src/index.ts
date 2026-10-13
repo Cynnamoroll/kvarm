@@ -24,6 +24,7 @@ import { handleEventBatch } from './services/events';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
+import { issuePages } from './routes/issuePages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -84,6 +85,7 @@ app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req,
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
+app.route('/:owner/:repo', issuePages);
 app.route('/:owner/:repo', repoPages);
 
 // Static assets (public/*) as the final fallback.
