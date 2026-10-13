@@ -24,8 +24,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import * as nodePath from 'node:path';
 import { CliError, parseRepo } from './checkout.js';
+import { inside } from './untar.js';
+
+/** @typedef {import('node:path').PlatformPath} PlatformPath */
+
+const { dirname, join } = nodePath;
 
 /** Untracked directories (matched by name at any depth) that survive a warm sync. */
 export const CACHE_DIRS = new Set(['node_modules', '.venv', 'venv', 'target', '.cache', '.gradle', '.turbo', '__pycache__', '.pytest_cache', '.mypy_cache', '.tox']);
@@ -267,23 +272,57 @@ export function listTree(dir) {
   return out;
 }
 
-/** @param {unknown} path */
-function assertSafePath(path) {
-  if (typeof path !== 'string' || path === '' || isAbsolute(path) || path.split('/').some((s) => s === '' || s === '.' || s === '..')) {
-    throw new Error(`state lists an unsafe path: ${JSON.stringify(path)}`);
+/**
+ * The components of a repository path (git's `/`-separated form) under the
+ * separators and absolute-path rules of `p`, or a throw when the path could
+ * name anything outside the directory it is joined to. On Windows both `/`
+ * and `\` separate components and drive, UNC and device prefixes are
+ * absolute; on POSIX a backslash is an ordinary filename byte, so Git names
+ * such as `a\b.txt` stay literal. Same rules as `archiveTarget` in untar.js,
+ * minus its tolerance for `.` and empty components, which git never records.
+ * @param {unknown} path
+ * @param {PlatformPath} [p] path implementation (defaults to the host's)
+ * @returns {string[]}
+ */
+export function repoPathParts(path, p = nodePath) {
+  const unsafe = () => new Error(`unsafe path ${JSON.stringify(path)}`);
+  if (typeof path !== 'string' || path === '' || path.includes('\0')) throw unsafe();
+  const windows = p.sep === '\\';
+  if (p.isAbsolute(path) || (windows && /^[A-Za-z]:/.test(path))) throw unsafe();
+  const parts = path.split(windows ? /[\\/]/ : '/');
+  for (const part of parts) {
+    if (part === '' || part === '.' || part === '..') throw unsafe();
+    // Win32 drops trailing dots and spaces (`.. ` and `...` can act as `..`); `:` names drives and NTFS streams.
+    if (windows && (part.includes(':') || /^[. ]+$/.test(part))) throw unsafe();
   }
+  return parts;
+}
+
+/**
+ * The absolute destination of validated `parts` below `work`, re-checked
+ * after resolution so no filesystem call can act outside the workdir even
+ * if a caller skipped `repoPathParts`.
+ * @param {string} work
+ * @param {string[]} parts
+ * @param {PlatformPath} [p]
+ */
+export function workdirTarget(work, parts, p = nodePath) {
+  const target = p.join(work, ...parts);
+  if (p.relative(work, target) === '' || !inside(work, target, p)) throw new Error(`path escapes the workdir: ${JSON.stringify(parts.join('/'))}`);
+  return target;
 }
 
 /**
  * @param {string} text
+ * @param {PlatformPath} p
  * @returns {RecordedState}
  */
-function parseState(text) {
+function parseState(text, p) {
   const state = JSON.parse(text);
   if (!state || state.version !== STATE_VERSION || !Array.isArray(state.files) || typeof state.sha !== 'string' || !/^[0-9a-f]{40}$/.test(state.sha)) {
     throw new Error(`state file is not a version ${STATE_VERSION} manifest`);
   }
-  state.files.forEach(assertSafePath);
+  for (const path of state.files) repoPathParts(path, p);
   if (!state.blobs || !state.modes || typeof state.blobs !== 'object' || typeof state.modes !== 'object') {
     throw new Error(`state file is not a version ${STATE_VERSION} manifest`);
   }
@@ -437,17 +476,16 @@ function scanTree(work, files) {
 }
 
 /**
- * The entry `work` holds at `path` right now, or null when it is missing.
- * @param {string} work
- * @param {string} path
+ * The entry at `dest` right now, or null when it is missing.
+ * @param {string} dest
  * @returns {{ kind: 'file'|'symlink'|'other', hash?: string, executable?: boolean } | null}
  */
-function inspectLocal(work, path) {
-  const st = lstatOrNull(join(work, ...path.split('/')));
+function inspectLocal(dest) {
+  const st = lstatOrNull(dest);
   if (st === null) return null;
-  if (st.isSymbolicLink()) return { kind: 'symlink', hash: blobHash(Buffer.from(readlinkSync(join(work, ...path.split('/'))), 'utf8')) };
+  if (st.isSymbolicLink()) return { kind: 'symlink', hash: blobHash(Buffer.from(readlinkSync(dest), 'utf8')) };
   if (!st.isFile()) return { kind: 'other' };
-  return { kind: 'file', hash: blobHash(readFileSync(join(work, ...path.split('/')))), executable: (st.mode & 0o111) !== 0 };
+  return { kind: 'file', hash: blobHash(readFileSync(dest)), executable: (st.mode & 0o111) !== 0 };
 }
 
 /**
@@ -456,20 +494,20 @@ function inspectLocal(work, path) {
  * type and executable bit a job may have dirtied.
  * @param {string} work
  * @param {string} path
+ * @param {string[]} parts `path` split by `repoPathParts`
  * @param {{ hash: string, mode: string }} entry
  * @param {(path: string) => Promise<Uint8Array>} read
  */
-async function materializeEntry(work, path, entry, read) {
-  const parts = path.split('/');
+async function materializeEntry(work, path, parts, entry, read) {
+  const dest = workdirTarget(work, parts);
   // Parents are repaired before the leaf is inspected, chmodded or removed:
   // through a symlinked parent those calls would act outside the workdir.
   prepareParents(work, parts);
-  const local = inspectLocal(work, path);
+  const local = inspectLocal(dest);
   const wantSymlink = entry.mode === '120000';
   const sameKind = local !== null && local.kind === (wantSymlink ? 'symlink' : 'file');
   const sameBytes = sameKind && local !== null && local.hash === entry.hash;
   if (wantSymlink ? sameBytes : sameBytes && (entry.mode === '100755') === Boolean(local?.executable)) return;
-  const dest = join(work, ...parts);
   if (sameBytes) {
     chmodSync(dest, entry.mode === '100755' ? 0o755 : 0o644);
     return;
@@ -493,9 +531,12 @@ async function materializeEntry(work, path, entry, read) {
  * @param {string} work
  * @param {RecordedState} previous
  * @param {DeltaManifest} manifest
+ * @param {PlatformPath} p path rules for repository paths
  * @returns {Promise<{ files: string[], blobs: Record<string, string>, modes: Record<string, string> }>}
  */
-async function applyDelta(work, previous, manifest) {
+async function applyDelta(work, previous, manifest, p) {
+  /** @param {string} path */
+  const partsOf = (path) => repoPathParts(path, p);
   /** @type {Map<string, { hash: string, mode: string }>} */
   const keep = new Map();
   for (const path of previous.files) keep.set(path, { hash: /** @type {string} */ (previous.blobs[path]), mode: /** @type {string} */ (previous.modes[path]) });
@@ -504,9 +545,13 @@ async function applyDelta(work, previous, manifest) {
   /** @type {Map<string, { hash: string, mode: string }>} */
   const writes = new Map();
 
+  // Every changed path is validated before the first filesystem call, so a
+  // rejected one leaves the workdir untouched on the way to the fallback.
   for (const c of manifest.changes) {
-    assertSafePath(c.path);
-    if (c.oldPath !== undefined) assertSafePath(c.oldPath);
+    partsOf(c.path);
+    if (c.oldPath !== undefined) partsOf(c.oldPath);
+  }
+  for (const c of manifest.changes) {
     if (isTreeMode(c.oldMode) || isTreeMode(c.newMode)) throw new Error(`delta change for ${JSON.stringify(c.path)} still carries a tree side`);
     // A gitlink (submodule) never appears in a snapshot checkout: the new
     // side is not materialized and the old side never existed on disk.
@@ -541,15 +586,16 @@ async function applyDelta(work, previous, manifest) {
   /** @type {Set<string>} */
   const dirs = new Set();
   for (const path of keep.keys()) {
-    const parts = path.split('/');
+    const parts = partsOf(path);
     for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
   }
 
   for (const path of remove) {
     if (keep.has(path)) continue;
-    const parts = path.split('/');
+    const parts = partsOf(path);
+    const target = workdirTarget(work, parts);
     if (!realParents(work, parts)) continue;
-    rmSync(join(work, ...parts), { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
     for (let i = parts.length - 1; i > 0; i--) {
       if (dirs.has(parts.slice(0, i).join('/'))) break;
       try {
@@ -559,12 +605,12 @@ async function applyDelta(work, previous, manifest) {
       }
     }
   }
-  prune(work, '', new Set(keep.keys()), dirs);
+  prune(work, '', new Set([...keep.keys()].map((path) => partsOf(path).join('/'))), dirs);
   for (const [path, entry] of keep) {
-    if (!writes.has(path)) await materializeEntry(work, path, entry, manifest.read);
+    if (!writes.has(path)) await materializeEntry(work, path, partsOf(path), entry, manifest.read);
   }
   for (const [path, entry] of writes) {
-    await materializeEntry(work, path, entry, manifest.read);
+    await materializeEntry(work, path, partsOf(path), entry, manifest.read);
   }
 
   /** @type {Record<string, string>} */
@@ -585,19 +631,20 @@ async function applyDelta(work, previous, manifest) {
  * the state is part of the warm path, so an unreadable state throws into the
  * caller's full-checkout fallback like any other warm failure.
  * @param {Slot} slot
- * @param {{ sha: string, delta: (previous: RecordedState, sha: string) => Promise<DeltaManifest> }} o
+ * @param {{ sha: string, delta: (previous: RecordedState, sha: string) => Promise<DeltaManifest>, pathRules?: PlatformPath }} o
  * @returns {Promise<Materialized | null>}
  */
 async function syncWarm(slot, o) {
+  const p = o.pathRules ?? nodePath;
   const recorded = readOrNull(slot.state);
   if (recorded === null) return null;
-  const previous = parseState(recorded);
+  const previous = parseState(recorded, p);
   rmSync(slot.state, { force: true });
   if (!lstatOrNull(slot.work)?.isDirectory()) throw new Error('workdir is missing');
   discard(slot.staging);
   const manifest = await o.delta(previous, o.sha);
   if (manifest.sha !== o.sha) throw new Error(`delta was computed for ${manifest.sha}, expected ${o.sha}`);
-  const tree = await applyDelta(slot.work, previous, manifest);
+  const tree = await applyDelta(slot.work, previous, manifest, p);
   writeState(slot.state, o.sha, tree.files, tree.blobs, tree.modes);
   return { source: manifest.source, sha: o.sha, files: tree.files.length, workdir: 'warm' };
 }
@@ -606,8 +653,10 @@ async function syncWarm(slot, o) {
  * Materializes `sha` in the slot's work directory: a warm delta sync when
  * the slot holds a recorded previous tree, otherwise (or with `fresh`, or
  * after any warm failure) a full checkout into an emptied directory.
+ * `pathRules` sets how repository paths split and what counts as absolute
+ * (the host's rules by default); filesystem calls always use the host's.
  * @param {Slot} slot
- * @param {{ sha: string, fresh?: boolean, checkout: (dir: string) => Promise<import('./checkout.js').CheckoutResult>, delta: (previous: RecordedState, sha: string) => Promise<DeltaManifest>, stderr: (line: string) => void }} o
+ * @param {{ sha: string, fresh?: boolean, checkout: (dir: string) => Promise<import('./checkout.js').CheckoutResult>, delta: (previous: RecordedState, sha: string) => Promise<DeltaManifest>, stderr: (line: string) => void, pathRules?: PlatformPath }} o
  * @returns {Promise<Materialized>}
  */
 export async function materialize(slot, o) {

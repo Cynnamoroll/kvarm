@@ -2,13 +2,13 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { diffTrees } from '@kvarm/gitops';
 import { checkout } from '../src/checkout.js';
 import type { HttpFetch } from '../src/http.js';
 import { runRunner } from '../src/runner.js';
-import { slotPaths } from '../src/workdir.js';
+import { materialize, openWorkdir, repoPathParts, slotPaths, workdirTarget } from '../src/workdir.js';
 import { git, tarFromCommit, tempDir } from './helpers';
 
 const root = tempDir('kvarm-cli-warm-');
@@ -58,12 +58,33 @@ function makeHistory() {
   git(work, ['add', '-A']);
   git(work, ['commit', '-q', '-m', 'three']);
   const c3 = git(work, ['rev-parse', 'HEAD']);
+
+  // Literal backslashes and a drive-like prefix are ordinary POSIX filename bytes.
+  put('dir\\name.txt', 'backslash v1\n');
+  put('..\\lit.txt', 'dotdot backslash\n');
+  put('C:notes', 'drive-like\n');
+  put('sub/a\\b.txt', 'nested backslash\n');
+  put('old\\gone.txt', 'removed next\n');
+  git(work, ['add', '-A']);
+  git(work, ['commit', '-q', '-m', 'four']);
+  const c4 = git(work, ['rev-parse', 'HEAD']);
+
+  put('dir\\name.txt', 'backslash v2\n');
+  rmSync(join(work, '..\\lit.txt'));
+  chmodSync(join(work, 'C:notes'), 0o755);
+  rmSync(join(work, 'old\\gone.txt'));
+  put('new\\file.txt', 'added with a backslash\n');
+  git(work, ['add', '-A']);
+  git(work, ['commit', '-q', '-m', 'five']);
+  const c5 = git(work, ['rev-parse', 'HEAD']);
   return {
     work,
     c1,
     c2,
     c3,
-    tars: { [c1]: tarFromCommit(work, c1), [c2]: tarFromCommit(work, c2), [c3]: tarFromCommit(work, c3) } as Record<string, Uint8Array>,
+    c4,
+    c5,
+    tars: Object.fromEntries([c1, c2, c3, c4, c5].map((c) => [c, tarFromCommit(work, c)])) as Record<string, Uint8Array>,
   };
 }
 
@@ -127,11 +148,12 @@ function treeState(dir: string, ignore: string[] = []): Record<string, string> {
  * directory (the tree API's `PATH_NOT_FOUND` cases).
  */
 const lsTree = (ref: string, path: string) => {
-  const out = spawnSync('git', path ? ['ls-tree', `${ref}:${path}`] : ['ls-tree', ref], { cwd: history.work, encoding: 'utf8' });
+  // -z keeps names with backslashes unquoted.
+  const out = spawnSync('git', ['ls-tree', '-z', path ? `${ref}:${path}` : ref], { cwd: history.work, encoding: 'utf8' });
   if (out.status !== 0) return null;
-  const text = out.stdout.trim();
+  const text = out.stdout.replace(/\0$/, '');
   return text
-    ? text.split('\n').map((line) => {
+    ? text.split('\0').map((line) => {
         const [meta, name] = line.split('\t') as [string, string];
         const [mode, type, hash] = meta.split(' ') as [string, string, string];
         return { name, mode, hash, type };
@@ -515,6 +537,95 @@ describe('kvarm runner warm workdir', () => {
     expect(observed).toEqual(treeState(await freshCheckout(history.c1)));
   });
 
+  it('warm syncs literal-backslash and drive-like POSIX filenames byte-equal to a fresh snapshot checkout', async () => {
+    const workRoot = join(root, 'posix-backslash');
+    await runOnce(workRoot, [job('p1', history.c3)], async () => ok);
+    const slot = slotPaths(workRoot, 'alice/demo', 0);
+    for (const [id, sha] of [
+      ['p2', history.c4],
+      ['p3', history.c5],
+    ] as const) {
+      const downloads = snapshotDownloads.count;
+      let observed: Record<string, string> = {};
+      const run = await runOnce(workRoot, [job(id, sha)], async (_command, cwd) => {
+        observed = treeState(cwd);
+        return ok;
+      });
+      expect(run.reports[0]).toMatchObject({ conclusion: 'success', summary: { sha, source: 'delta' } });
+      expect(run.stdout).toContain('workdir: warm');
+      expect(run.stderr.filter((l) => !l.startsWith('checkout: note:'))).toEqual([]);
+      expect(snapshotDownloads.count).toBe(downloads);
+      expect(observed).toEqual(treeState(await freshCheckout(sha)));
+    }
+    expect(readFileSync(join(slot.work, 'dir\\name.txt'), 'utf8')).toBe('backslash v2\n');
+    expect(lstatSync(join(slot.work, 'C:notes')).mode & 0o111).not.toBe(0);
+    expect(existsSync(join(slot.work, '..\\lit.txt'))).toBe(false);
+    expect(JSON.parse(readFileSync(slot.state, 'utf8')).files).toContain('new\\file.txt');
+  });
+
+  it('rejects Windows backslash traversal in delta and recorded paths under win32 rules and falls back without touching anything outside', async () => {
+    const workRoot = join(root, 'win32-delta');
+    await runOnce(workRoot, [job('w1', history.c1)], async () => ok);
+    const bytes = Buffer.from('escaped\n');
+    const hash = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    const added = (path: string) => ({ path, status: 'added' as const, oldHash: null, oldMode: null, newHash: hash, newMode: '100644' });
+    const cases: { name: string; changes?: unknown[]; state?: string }[] = [
+      { name: 'added', changes: [added('..\\outside.txt')] },
+      { name: 'nested', changes: [added('a\\..\\..\\outside.txt')] },
+      { name: 'mixed', changes: [added('a/..\\..\\outside.txt')] },
+      { name: 'removed', changes: [{ path: '..\\outside.txt', status: 'removed', oldHash: hash, oldMode: '100644', newHash: null, newMode: null }] },
+      { name: 'renamed', changes: [{ ...added('README.md'), status: 'renamed', oldPath: '..\\outside.txt', oldHash: hash, oldMode: '100644' }] },
+      { name: 'drive', changes: [added('C:\\outside.txt')] },
+      { name: 'unc', changes: [added('\\\\server\\share\\outside.txt')] },
+      { name: 'state', state: '..\\outside.txt' },
+    ];
+    const slot = openWorkdir({ workRoot, repo: 'alice/demo', tempRoot: root, stderr: () => {} });
+    try {
+      const outside = join(slot.dir, 'outside.txt');
+      writeFileSync(outside, 'outside the workdir\n');
+      const fresh = treeState(await freshCheckout(history.c2));
+      for (const c of cases) {
+        if (c.state !== undefined) {
+          const recorded = JSON.parse(readFileSync(slot.state, 'utf8'));
+          recorded.files.push(c.state);
+          recorded.blobs[c.state] = hash;
+          recorded.modes[c.state] = '100644';
+          writeFileSync(slot.state, JSON.stringify(recorded));
+        }
+        const reads: string[] = [];
+        const stderr: string[] = [];
+        let deltas = 0;
+        const got = await materialize(slot, {
+          sha: history.c2,
+          pathRules: win32,
+          stderr: (l) => stderr.push(l),
+          checkout: (dir) => realCheckout({ baseUrl: BASE, pat: 'p', repo: 'alice/demo', ref: history.c2, dir, stdout: () => {}, stderr: () => {} }),
+          delta: async () => {
+            deltas++;
+            return {
+              sha: history.c2,
+              source: 'delta',
+              changes: c.changes as any,
+              read: async (p) => {
+                reads.push(p);
+                return bytes;
+              },
+            };
+          },
+        });
+        expect(got.workdir, c.name).toBe('fresh');
+        expect(stderr.join('\n'), c.name).toMatch(/warm sync failed: unsafe path .*; falling back to a full snapshot checkout/);
+        expect(deltas, c.name).toBe(c.state === undefined ? 1 : 0);
+        expect(reads, c.name).toEqual([]);
+        expect(treeState(slot.work), c.name).toEqual(fresh);
+        expect(readFileSync(outside, 'utf8'), c.name).toBe('outside the workdir\n');
+        expect(readdirSync(slot.dir).filter((n) => !['work', 'staging', 'state.json'].includes(n)), c.name).toEqual(['outside.txt']);
+      }
+    } finally {
+      slot.release();
+    }
+  });
+
   it('drops a clone fallback checkout\u2019s .git on the first warm sync without downloading a tarball', async () => {
     const workRoot = join(root, 'clone-state');
     // The first job materializes through git (the clone fallback), so the
@@ -790,5 +901,83 @@ describe('kvarm runner warm workdir edge cases', () => {
     expect(second.stderr.join('\n')).toMatch(/warm sync failed: .*EISDIR.*; falling back to a full snapshot checkout/);
     expect(observed).toEqual(treeState(await freshCheckout(history.c2)));
     expect(lstatSync(slot.state).isFile()).toBe(true);
+  });
+});
+
+describe('repoPathParts and workdirTarget', () => {
+  describe('with Windows path semantics', () => {
+    const winWork = 'C:\\work\\slot-0\\work';
+    const target = (raw: string) => workdirTarget(winWork, repoPathParts(raw, win32), win32);
+
+    it.each([
+      '..\\outside.txt',
+      'a\\..\\..\\x',
+      'a/..\\..\\x',
+      'a\\b\\..\\..\\..\\x',
+      '..\\',
+      'dir\\',
+      'C:\\x',
+      'C:/x',
+      'C:evil.txt',
+      'c:..\\evil.txt',
+      'D:',
+      '\\evil.txt',
+      '/evil.txt',
+      '\\\\server\\share',
+      '\\\\server\\share\\evil.txt',
+      '//server/share/evil.txt',
+      '\\\\?\\C:\\evil.txt',
+      '\\\\.\\C:\\evil.txt',
+      'dir\\x:stream',
+      'dir\\...\\evil.txt',
+      'dir\\.. \\evil.txt',
+      'dir\\\\double.txt',
+      'a\\.\\b.txt',
+      'a\0b',
+    ])('rejects %j', (raw) => {
+      expect(() => target(raw)).toThrow(/unsafe path/);
+    });
+
+    it('splits both separators into components that resolve inside the workdir', () => {
+      expect(repoPathParts('dir\\file.txt', win32)).toEqual(['dir', 'file.txt']);
+      expect(target('dir\\file.txt')).toBe('C:\\work\\slot-0\\work\\dir\\file.txt');
+      expect(target('dir/sub\\file.txt')).toBe('C:\\work\\slot-0\\work\\dir\\sub\\file.txt');
+      expect(target('..foo\\bar..txt')).toBe('C:\\work\\slot-0\\work\\..foo\\bar..txt');
+    });
+
+    it('re-checks resolved containment where the destination is computed', () => {
+      expect(() => workdirTarget(winWork, ['..', 'x'], win32)).toThrow(/escapes the workdir/);
+      expect(() => workdirTarget(winWork, ['..\\x'], win32)).toThrow(/escapes the workdir/);
+      expect(() => workdirTarget(winWork, ['C:\\x'], win32)).toThrow(/escapes the workdir/);
+    });
+  });
+
+  describe('with POSIX path semantics', () => {
+    const posixWork = '/work/slot-0/work';
+    const target = (raw: string) => workdirTarget(posixWork, repoPathParts(raw, posix), posix);
+
+    it.each(['../escape', 'ok/../../x', '..', '.', '', '/etc/passwd', 'a//b.txt', 'a/./b', 'a/', 'a\0b'])('rejects %j', (raw) => {
+      expect(() => target(raw)).toThrow(/unsafe path/);
+    });
+
+    it('rejects non-string paths', () => {
+      expect(() => repoPathParts(undefined, posix)).toThrow(/unsafe path/);
+      expect(() => repoPathParts(7, posix)).toThrow(/unsafe path/);
+    });
+
+    it('treats backslashes and drive-like prefixes as ordinary filename bytes', () => {
+      expect(repoPathParts('foo\\bar.txt', posix)).toEqual(['foo\\bar.txt']);
+      expect(target('foo\\bar.txt')).toBe('/work/slot-0/work/foo\\bar.txt');
+      expect(target('..\\lit.txt')).toBe('/work/slot-0/work/..\\lit.txt');
+      expect(target('C:notes')).toBe('/work/slot-0/work/C:notes');
+      expect(target('C:\\x')).toBe('/work/slot-0/work/C:\\x');
+      expect(target('a/name. ')).toBe('/work/slot-0/work/a/name. ');
+      expect(target('sub/a\\..\\..\\b.txt')).toBe('/work/slot-0/work/sub/a\\..\\..\\b.txt');
+    });
+
+    it('re-checks resolved containment where the destination is computed', () => {
+      expect(() => workdirTarget(posixWork, ['..', 'x'], posix)).toThrow(/escapes the workdir/);
+      expect(() => workdirTarget(posixWork, ['/etc/passwd'], posix)).not.toThrow();
+    });
   });
 });

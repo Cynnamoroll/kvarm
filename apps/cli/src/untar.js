@@ -140,11 +140,12 @@ export function parsePax(data) {
 }
 
 /**
+ * Whether `target` is `dest` or lies below it, under the rules of `p`.
  * @param {string} dest
  * @param {string} target
  * @param {PlatformPath} [p]
  */
-function inside(dest, target, p = nodePath) {
+export function inside(dest, target, p = nodePath) {
   const rel = p.relative(dest, target);
   return rel === '' || (!rel.startsWith(`..${p.sep}`) && rel !== '..' && !p.isAbsolute(rel));
 }
