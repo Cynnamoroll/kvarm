@@ -249,6 +249,8 @@ Details (warm working directories, extraction safety, exit codes): [`apps/cli/RE
 
 The 91 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`record_decision`, `get_context`) and `branch-rules`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
 
+Setup guides for Claude Code, Codex CLI, Cursor and generic MCP clients, the agent workflow and an `AGENTS.md` template are in [`docs/agents/`](docs/agents/README.md).
+
 Example client configuration (Claude Code):
 
 ```sh
