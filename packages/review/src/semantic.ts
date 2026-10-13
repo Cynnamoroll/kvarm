@@ -275,7 +275,7 @@ function goImports(text: string, masked: string): Found[] {
 }
 
 /** The import specifiers of one file, in source order. */
-export function extractSemanticImports(path: string, text: string): { specs: ImportSpec[] } {
+export function extractImports(path: string, text: string): { specs: ImportSpec[] } {
   const lang = languageOf(path);
   if (!lang) return { specs: [] };
   const masked = maskSource(text, lang);
@@ -295,7 +295,7 @@ const CJS_EXPORT = new RegExp(`${NOT_MEMBER}(?:module\\.)?exports\\.([A-Za-z_$][
 const CJS_EXPORT_DEFAULT = new RegExp(`${NOT_MEMBER}module\\.exports\\s*=(?!=)`, 'g');
 
 /** The names a TS/JS module exports, sorted (`default` for a default export). */
-export function extractSemanticExports(text: string): string[] {
+export function extractExports(text: string): string[] {
   const masked = maskSource(text, 'js');
   const names = new Set<string>();
   for (const m of masked.matchAll(JS_EXPORT_DECL)) names.add(m[1] ? 'default' : m[2]!);
@@ -624,7 +624,7 @@ export async function analyzeDependencies(source: SemanticTreeSource, input: Dep
     if (!lang) return [];
     const text = await w.text(input.headTree, path);
     if (text === null) return [];
-    let specs = extractSemanticImports(path, text).specs;
+    let specs = extractImports(path, text).specs;
     if (specs.length > limits.importsPerFileMax) {
       w.note(`more than ${limits.importsPerFileMax} imports in ${path}; the first ${limits.importsPerFileMax} are read`);
       specs = specs.slice(0, limits.importsPerFileMax);
@@ -672,8 +672,8 @@ export async function analyzeDependencies(source: SemanticTreeSource, input: Dep
       const headText = present ? await w.text(input.headTree, path) : '';
       if (w.stopped) break;
       if (headText === null) continue;
-      const before = new Set(extractSemanticExports(baseText));
-      const after = new Set(extractSemanticExports(headText));
+      const before = new Set(extractExports(baseText));
+      const after = new Set(extractExports(headText));
       const added = [...after].filter((n) => !before.has(n)).slice(0, limits.exportNamesMax);
       const removed = [...before].filter((n) => !after.has(n)).slice(0, limits.exportNamesMax);
       if (added.length > 0 || removed.length > 0) exportChanges.push({ path, added, removed });

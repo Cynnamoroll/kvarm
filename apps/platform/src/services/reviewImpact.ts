@@ -1,4 +1,4 @@
-import { extractImports, isCodePath, isTestPath, resolveSpecifier, type ReviewImport } from '@kvarm/review';
+import { extractReviewImports, isCodePath, isTestPath, resolveSpecifier, type ReviewImport } from '@kvarm/review';
 import { withLazyRepo } from '../artifacts/repo';
 import { compareKeys, readJson, writeJson } from '../cache/compare';
 import type { ServiceResult } from '../repos/service';
@@ -96,10 +96,17 @@ function workspacePatterns(value: unknown): string[] {
 }
 
 function workspaceAllowed(directory: string, patterns: string[]): boolean {
-  if (!patterns.length) return true;
-  return patterns.some((pattern) => {
-    const normalized = pattern.replace(/\/\*\*?$/, '').replace(/\/$/, '');
-    return directory === normalized || directory.startsWith(`${normalized}/`);
+  const candidates = patterns.length ? patterns : ['packages/*'];
+  const directoryParts = directory.split('/');
+  return candidates.some((pattern) => {
+    const normalized = pattern.replace(/^\.\//, '').replace(/\/+$/, '');
+    if (!normalized) return false;
+    const patternParts = normalized.split('/');
+    const recursive = patternParts.at(-1) === '**';
+    if (recursive) patternParts.pop();
+    if (directoryParts.length < patternParts.length) return false;
+    if (!recursive && directoryParts.length !== patternParts.length) return false;
+    return patternParts.every((part, index) => part === '*' || part === directoryParts[index]);
   });
 }
 
@@ -149,7 +156,7 @@ async function loadBlobEntry(
     return value;
   }
   let manifest: Record<string, unknown> | null | undefined;
-  if (path === 'package.json' || /(^|\/)packages\/[^/]+\/package\.json$/.test(path)) {
+  if (/(^|\/)package\.json$/.test(path)) {
     try {
       const parsed: unknown = JSON.parse(text);
       manifest = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
@@ -158,7 +165,7 @@ async function loadBlobEntry(
     }
   }
   const value: ImportCacheEntry = {
-    imports: isCodePath(path) ? extractImports(text) : [],
+    imports: isCodePath(path) ? extractReviewImports(text) : [],
     ...(manifest !== undefined ? { manifest } : {}),
   };
   budget.entries.set(sha, value);
@@ -187,18 +194,19 @@ async function computeImpact(cx: ChangeContext, built: CoverageBuild): Promise<R
     const files = await headFiles(ctx, built.headTree, budget);
     const fileSet = new Set(files.keys());
     for (const path of changed) fileSet.add(path);
+    const rootSha = files.get('package.json');
+    const rootManifest = rootSha ? await loadBlobEntry(ctx, 'package.json', rootSha, budget) : null;
+    const declaredPatterns = workspacePatterns(rootManifest?.manifest?.workspaces);
+    const patterns = declaredPatterns.length ? declaredPatterns : ['packages/*'];
     for (const [path, sha] of files) {
       const entry = { path, sha };
-      if (path === 'package.json' || /(^|\/)packages\/[^/]+\/package\.json$/.test(path)) {
-        const loaded = await loadBlobEntry(ctx, path, sha, budget);
-        if (!loaded?.manifest || path === 'package.json') continue;
-        const packageName = loaded.manifest.name;
+      if (path.endsWith('/package.json')) {
         const directory = path.slice(0, -'/package.json'.length);
-        const root = files.get('package.json');
-        const rootManifest = root ? await loadBlobEntry(ctx, 'package.json', root, budget) : null;
-        const patterns = workspacePatterns(rootManifest?.manifest?.workspaces);
-        if (typeof packageName === 'string' && workspaceAllowed(directory, patterns)) {
-          workspaces.set(packageName, packageEntry(directory, loaded.manifest));
+        if (workspaceAllowed(directory, patterns)) {
+          const loaded = await loadBlobEntry(ctx, path, sha, budget);
+          const manifest = loaded?.manifest;
+          const packageName = manifest?.name;
+          if (manifest && typeof packageName === 'string') workspaces.set(packageName, packageEntry(directory, manifest));
         }
       }
       if (!isCodePath(entry.path)) continue;
@@ -211,8 +219,6 @@ async function computeImpact(cx: ChangeContext, built: CoverageBuild): Promise<R
       if (!loaded) continue;
       importEntries.set(entry.path, loaded.imports);
     }
-    const rootSha = files.get('package.json');
-    if (rootSha) await loadBlobEntry(ctx, 'package.json', rootSha, budget);
     const changedSet = new Set(changed);
     const consumerMap = new Map<string, Consumer[]>();
     const consumerOverflow = new Set<string>();

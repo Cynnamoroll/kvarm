@@ -4,8 +4,10 @@ export * from './risk';
 export * from './guard';
 export * from './semantic';
 export * from './guide';
-export * from './exports';
-export * from './imports';
+export { diffExports, extractExportSignatures } from './exports';
+export type { ExportKind, ExportSignature, ExportSignatureChange, ExtractExportsResult } from './exports';
+export { extractReviewImports, resolveSpecifier } from './imports';
+export type { ReviewImport } from './imports';
 export { countTestCases, dependencyNames, hasGeneratedMarker, isWhitespaceOnlyChange, GENERATED_MARKER_WINDOW } from './content';
 export {
   isCiConfigPath,

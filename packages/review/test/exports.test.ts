@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { diffExports, extractExports } from '../src/exports';
+import { diffExports, extractExportSignatures } from '../src/exports';
 
 describe('export signatures', () => {
   it('extracts top-level declarations, re-exports, defaults and namespaces', () => {
-    const result = extractExports(
+    const result = extractExportSignatures(
       'src/api.ts',
       `
 // export const commented = 1;
@@ -49,7 +49,7 @@ export default function main(value: string): number { return 1; }
   });
 
   it('handles ambient declarations in declaration files and masks comments and templates', () => {
-    const result = extractExports(
+    const result = extractExportSignatures(
       'src/api.d.ts',
       `
 /* export declare const hidden: string; */
@@ -75,28 +75,28 @@ const sample = \`export declare const notExported: boolean\`;
   });
 
   it('normalizes whitespace and drops trailing semicolons and commas', () => {
-    const result = extractExports('api.ts', 'export type   Result<T> =\n  T | null;\nexport { value, };');
+    const result = extractExportSignatures('api.ts', 'export type   Result<T> =\n  T | null;\nexport { value, };');
     expect(result.exports[0]?.signature).toBe('export type Result<T> = T | null');
     expect(result.exports[1]?.signature).toBe('export { value }');
   });
 
   it('caps declaration signatures at two kilobytes and the source at 512 KiB', () => {
     const declaration = `export interface Large { value: "${'x'.repeat(3000)}"; }`;
-    const large = extractExports('api.ts', declaration);
+    const large = extractExportSignatures('api.ts', declaration);
     expect(large.exports[0]?.signature).toHaveLength(2048);
-    expect(extractExports('api.ts', `${' '.repeat(512 * 1024 + 1)}export const missed = true;`)).toEqual({
+    expect(extractExportSignatures('api.ts', `${' '.repeat(512 * 1024 + 1)}export const missed = true;`)).toEqual({
       exports: [],
       truncated: true,
     });
   });
 
   it('reports removed, changed and added names deterministically', () => {
-    const base = extractExports('api.ts', `
+    const base = extractExportSignatures('api.ts', `
 export function changed(value: string): string { return value; }
 export const removed = 1;
 export type retained = number;
 `);
-    const head = extractExports('api.ts', `
+    const head = extractExportSignatures('api.ts', `
 export function changed(value: number): string { return String(value); }
 export type retained = number;
 export interface added { id: string }

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { extractImports, resolveSpecifier } from '../src/imports';
+import { extractReviewImports, resolveSpecifier } from '../src/imports';
 
 describe('review import extraction', () => {
   it('finds static imports, re-exports, side effects, require and literal dynamic imports', () => {
-    expect(extractImports(`
+    expect(extractReviewImports(`
 import type { User, Thing as Alias } from './models';
 import Client, * as ui from '@kvarm/ui';
 import './side-effect';

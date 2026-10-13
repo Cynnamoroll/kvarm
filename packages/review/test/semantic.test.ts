@@ -3,8 +3,8 @@ import {
   SEMANTIC_LIMITS,
   analyzeDependencies,
   contractFamily,
-  extractSemanticExports,
-  extractSemanticImports,
+  extractExports,
+  extractImports,
   goImportTarget,
   resolveCandidates,
   type SemanticBlob,
@@ -67,7 +67,7 @@ const notLiteral = import(name);
 const s = "import { z } from './in-string'";
 foo.require('./method');
 `;
-    const specs = extractSemanticImports('src/app.ts', text).specs;
+    const specs = extractImports('src/app.ts', text).specs;
     expect(specs.map((s) => s.spec)).toEqual(['./util', '../types', './def.js', './side-effect', './reexport', './star', './req', './lazy', './tpl']);
     expect(specs[0]!.names).toEqual(['a', 'b']);
     expect(specs[2]!.names).toEqual(['default', '*']);
@@ -88,17 +88,17 @@ export * as ns from './x';
 module.exports.legacy = 1;
 // export const commented = 1;
 `;
-    expect(extractSemanticExports(text)).toEqual(['C', 'E', 'I', 'Ty', 'a', 'bee', 'default', 'f', 'g', 'k', 'legacy', 'ns']);
+    expect(extractExports(text)).toEqual(['C', 'E', 'I', 'Ty', 'a', 'bee', 'default', 'f', 'g', 'k', 'legacy', 'ns']);
   });
 
   it('names a const enum by its name, not the enum keyword', () => {
-    expect(extractSemanticExports('export const enum Direction { Up }\nexport declare const enum Mode { A }\n')).toEqual(['Direction', 'Mode']);
+    expect(extractExports('export const enum Direction { Up }\nexport declare const enum Mode { A }\n')).toEqual(['Direction', 'Mode']);
   });
 
   it('names generator exports and masks a regex literal after a keyword', () => {
-    expect(extractSemanticExports('export function *gen() {}\nexport async function* agen() {}\n')).toEqual(['agen', 'gen']);
+    expect(extractExports('export function *gen() {}\nexport async function* agen() {}\n')).toEqual(['agen', 'gen']);
     const text = "function f(s) {\n  return /`/.test(s);\n}\nconst lazy = import('./after');\nconst q = a / b / c;\nrequire('./also');\n";
-    expect(extractSemanticImports('src/x.ts', text).specs.map((s) => s.spec)).toEqual(['./after', './also']);
+    expect(extractImports('src/x.ts', text).specs.map((s) => s.spec)).toEqual(['./after', './also']);
   });
 });
 
@@ -114,7 +114,7 @@ from ..parent.thing import (
 from pkg.api import handler  # trailing comment
 # import commented
 `;
-    const specs = extractSemanticImports('app/svc/main.py', text).specs;
+    const specs = extractImports('app/svc/main.py', text).specs;
     expect(specs.map((s) => s.spec)).toEqual(['os', 'pkg.mod', '.', '..parent.thing', 'pkg.api']);
     expect(specs[2]!.names).toEqual(['sibling']);
     expect(specs[3]!.names).toEqual(['One', 'Two']);
@@ -129,7 +129,7 @@ import (
   // "example.com/m/commented"
 )
 `;
-    expect(extractSemanticImports('cmd/main.go', text).specs.map((s) => s.spec)).toEqual(['fmt', 'example.com/m/pkg/api', 'example.com/m/internal/db']);
+    expect(extractImports('cmd/main.go', text).specs.map((s) => s.spec)).toEqual(['fmt', 'example.com/m/pkg/api', 'example.com/m/internal/db']);
     expect(goImportTarget('example.com/m/pkg/api', { module: 'example.com/m', dir: '' })).toBe('pkg/api/');
     expect(goImportTarget('example.com/m/pkg/api', { module: 'example.com/m', dir: 'svc/' })).toBe('svc/pkg/api/');
     expect(goImportTarget('fmt', { module: 'example.com/m', dir: '' })).toBeNull();

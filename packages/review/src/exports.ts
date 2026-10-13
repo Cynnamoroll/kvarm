@@ -334,7 +334,7 @@ function parseExport(
   return null;
 }
 
-export function extractExports(path: string, text: string): ExtractExportsResult {
+export function extractExportSignatures(path: string, text: string): ExtractExportsResult {
   if (new TextEncoder().encode(text).byteLength > MAX_SOURCE_BYTES) return { exports: [], truncated: true };
   const masked = maskSource(text, true);
   const signatures = maskSource(text, false);

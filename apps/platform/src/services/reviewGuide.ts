@@ -7,7 +7,7 @@ import {
   buildCoverage,
   carryGuide,
   diffExports,
-  extractExports,
+  extractExportSignatures,
   fallbackGuide,
   isCodePath,
   isContractPath,
@@ -199,8 +199,8 @@ async function computeMap(
       exportFileCount++;
       material = await cachedFileDiffWithTexts(ctx, entry, MAX_EXPORT_BYTES);
       if (material.oldText !== undefined && material.newText !== undefined) {
-        const before = extractExports(entry.oldPath ?? entry.path, material.oldText);
-        const after = extractExports(entry.path, material.newText);
+        const before = extractExportSignatures(entry.oldPath ?? entry.path, material.oldText);
+        const after = extractExportSignatures(entry.path, material.newText);
         if (before.truncated || after.truncated) exportTruncated = true;
         breaks.push(...diffExports(before, after).map((item) => ({ path: entry.path, ...item })));
       } else if (material.body.tooLarge) {

@@ -169,7 +169,7 @@ function relativePath(fromPath: string, specifier: string): string | null {
   return segments.join('/');
 }
 
-export function extractImports(text: string): ReviewImport[] {
+export function extractReviewImports(text: string): ReviewImport[] {
   const masked = maskCode(text);
   const starts = lineStarts(text);
   const found: Array<ReviewImport & { at: number }> = [];

@@ -127,6 +127,7 @@ describe('guided review endpoints', () => {
     await openChange('impact-flow');
     const path = api('impact-flow', '/changes/1/review/impact');
     const cold = await call('GET', path, tokens.owner);
+    costs['GET review impact cold'] = cold.cost;
     expect(cold.status).toBe(200);
     const file = (cold.json.files as Array<{ path: string; consumers: Array<{ path: string; line: number; specifier: string; test: boolean }>; affected: Array<{ name: string }>; tests: string[] }>).find((item) => item.path === 'src/a.ts')!;
     expect(file.consumers).toEqual(expect.arrayContaining([
@@ -136,9 +137,97 @@ describe('guided review endpoints', () => {
     expect(file.affected).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'a', path: 'src/use.ts' })]));
     expect(file.tests).toContain('tests/a.test.ts');
     const warm = await call('GET', path, tokens.owner);
-    costs['GET review impact'] = warm.cost;
+    costs['GET review impact warm'] = warm.cost;
     expect(warm.cost.art).toBe(0);
     expect(warm.json).toEqual(cold.json);
+  });
+
+  it('resolves package and subpath imports from app workspaces declared at the root', async () => {
+    await setup('impact-app-workspace', 'packages/lib/src/index.ts', [], {
+      base: {
+        'package.json': JSON.stringify({ workspaces: ['apps/*', 'packages/*'] }),
+        'packages/lib/package.json': JSON.stringify({
+          name: '@kvarm/lib',
+          exports: { '.': './src/index.ts', './subpath': './src/subpath.ts' },
+        }),
+        'packages/lib/src/index.ts': 'export const value = 1;\n',
+        'packages/lib/src/subpath.ts': 'export const extra = 1;\n',
+        'apps/web/package.json': JSON.stringify({ name: 'web' }),
+        'apps/web/src/use.ts': "import { value } from '@kvarm/lib';\nimport { extra } from '@kvarm/lib/subpath';\n",
+      },
+      head: { 'packages/lib/src/index.ts': 'export const value = 2;\n' },
+    });
+    await openChange('impact-app-workspace');
+    const response = await call('GET', api('impact-app-workspace', '/changes/1/review/impact'), tokens.owner);
+    const file = (response.json.files as Array<{ path: string; consumers: Array<{ path: string; specifier: string }> }>)
+      .find((item) => item.path === 'packages/lib/src/index.ts')!;
+    expect(file.consumers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'apps/web/src/use.ts', specifier: '@kvarm/lib' }),
+      expect.objectContaining({ path: 'apps/web/src/use.ts', specifier: '@kvarm/lib/subpath' }),
+    ]));
+  });
+
+  it('falls back to packages/* when the root manifest has no workspace patterns', async () => {
+    await setup('impact-default-workspace', 'packages/lib/src/index.ts', [], {
+      base: {
+        'package.json': JSON.stringify({ name: 'single-package-root' }),
+        'packages/lib/package.json': JSON.stringify({ name: '@kvarm/default-lib' }),
+        'packages/lib/src/index.ts': 'export const value = 1;\n',
+        'src/use.ts': "import { value } from '@kvarm/default-lib';\n",
+      },
+      head: { 'packages/lib/src/index.ts': 'export const value = 2;\n' },
+    });
+    await openChange('impact-default-workspace');
+    const response = await call('GET', api('impact-default-workspace', '/changes/1/review/impact'), tokens.owner);
+    const file = (response.json.files as Array<{ path: string; consumers: Array<{ path: string; specifier: string }> }>)
+      .find((item) => item.path === 'packages/lib/src/index.ts')!;
+    expect(file.consumers).toContainEqual(expect.objectContaining({
+      path: 'src/use.ts',
+      specifier: '@kvarm/default-lib',
+    }));
+  });
+
+  it('does not resolve package manifests outside root workspace patterns', async () => {
+    await setup('impact-nonworkspace-package', 'examples/x/src/index.ts', [], {
+      base: {
+        'package.json': JSON.stringify({ workspaces: ['apps/*', 'packages/*'] }),
+        'apps/web/src/use.ts': "import { example } from '@kvarm/example';\n",
+        'examples/x/package.json': JSON.stringify({
+          name: '@kvarm/example',
+          exports: { '.': './src/index.ts' },
+        }),
+        'examples/x/src/index.ts': 'export const example = 1;\n',
+      },
+      head: { 'examples/x/src/index.ts': 'export const example = 2;\n' },
+    });
+    await openChange('impact-nonworkspace-package');
+    const response = await call('GET', api('impact-nonworkspace-package', '/changes/1/review/impact'), tokens.owner);
+    const file = (response.json.files as Array<{ path: string; consumers: Array<{ path: string; specifier: string }> }>)
+      .find((item) => item.path === 'examples/x/src/index.ts')!;
+    expect(file.consumers).not.toContainEqual(expect.objectContaining({
+      path: 'apps/web/src/use.ts',
+      specifier: '@kvarm/example',
+    }));
+  });
+
+  it('supports object-form workspaces and recursive trailing patterns', async () => {
+    await setup('impact-recursive-workspace', 'packages/group/lib/src/index.ts', [], {
+      base: {
+        'package.json': JSON.stringify({ workspaces: { packages: ['packages/**'] } }),
+        'packages/group/lib/package.json': JSON.stringify({ name: '@kvarm/deep-lib' }),
+        'packages/group/lib/src/index.ts': 'export const value = 1;\n',
+        'src/use.ts': "import { value } from '@kvarm/deep-lib';\n",
+      },
+      head: { 'packages/group/lib/src/index.ts': 'export const value = 2;\n' },
+    });
+    await openChange('impact-recursive-workspace');
+    const response = await call('GET', api('impact-recursive-workspace', '/changes/1/review/impact'), tokens.owner);
+    const file = (response.json.files as Array<{ path: string; consumers: Array<{ path: string; specifier: string }> }>)
+      .find((item) => item.path === 'packages/group/lib/src/index.ts')!;
+    expect(file.consumers).toContainEqual(expect.objectContaining({
+      path: 'src/use.ts',
+      specifier: '@kvarm/deep-lib',
+    }));
   });
 
   it('truncates import impact at the per-file consumer budget', async () => {
@@ -444,6 +533,8 @@ describe('guided review endpoints', () => {
 
   it('prints measured x-kvarm-cost counters for each new endpoint', () => {
     expect(costs).toEqual(expect.objectContaining({
+      'GET review impact cold': expect.any(Object),
+      'GET review impact warm': expect.any(Object),
       'GET review guide': expect.any(Object),
       'POST submit guide': expect.any(Object),
       'POST review ack': expect.any(Object),
