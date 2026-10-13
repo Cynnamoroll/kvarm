@@ -19,6 +19,14 @@ export interface RequiredCheck {
   producer: string;
   /** Producer-specific run id, for links and evidence. */
   runId?: string;
+  /**
+   * The run passed without inspecting everything it covers (kvarm/guard past
+   * its read budgets). The state stays `success`; branch rules that require
+   * guard completeness refuse it at publication (architecture §0.3).
+   */
+  incomplete?: true;
+  /** With `incomplete`: how many changed paths went uninspected (a truncated change list adds an unknown number). */
+  uninspected?: number;
 }
 
 export interface RequiredChecks {
