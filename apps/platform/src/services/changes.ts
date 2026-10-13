@@ -955,10 +955,19 @@ export function memoGate(inner: ChecksGate): ChecksGate {
  * (services/reviewGate.ts).
  */
 export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks): Fail | null {
-  // Before the required checks: completeness is fixed for the head, so a queue entry need not hold a checking slot for it.
-  if (policy.guardCompleteness === 'required') {
+  for (const name of policy.requiredChecks) {
+    if (checks.required.find((c) => c.name === name)?.state === 'failure') {
+      return fail(409, `required check ${name} failed`, 'REQUIRED_CHECKS_FAILED', { checks });
+    }
+  }
+  // Before pending checks: completeness is fixed for the head, so a queue entry need not hold a checking slot for it.
+  // A failing gate is reported as that failure, never as incompleteness.
+  if (policy.guardCompleteness === 'required' && checks.state !== 'failure') {
     const guard = checks.required.find((c) => c.name === GUARD_CHECK);
-    if (guard?.state === 'success' && guard.incomplete) {
+    if (!guard) {
+      return fail(409, `${policy.ref} requires a complete ${GUARD_CHECK} inspection and there is no ${GUARD_CHECK} verdict yet`, 'REQUIRED_CHECKS_PENDING', { checks });
+    }
+    if (guard.state === 'success' && guard.incomplete) {
       const what = guard.uninspected ? `${guard.uninspected} changed file(s) were` : 'part of the change was';
       return fail(
         409,
@@ -970,11 +979,7 @@ export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks):
     }
   }
   for (const name of policy.requiredChecks) {
-    const found = checks.required.find((c) => c.name === name);
-    if (found?.state === 'failure') {
-      return fail(409, `required check ${name} failed`, 'REQUIRED_CHECKS_FAILED', { checks });
-    }
-    if (found?.state !== 'success') {
+    if (checks.required.find((c) => c.name === name)?.state !== 'success') {
       return fail(409, `required check ${name} has not passed on the merge result`, 'REQUIRED_CHECKS_PENDING', { checks });
     }
   }

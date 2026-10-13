@@ -392,13 +392,16 @@ function scanText(c: GuardChange, content: GuardContent, out: Findings): number 
  */
 export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<string, GuardContent>, opts: { listTruncated?: boolean } = {}): GuardResult {
   const out = new Findings();
-  const unscanned: string[] = [];
-  const partial: string[] = [];
-  const longLines: string[] = [];
+  // One guard/incomplete finding per kind of shortfall, in this order: count and first path.
+  const shortfalls = new Map<'prefix' | 'line' | 'unscanned', { count: number; first: string }>();
   const uninspected: GuardUninspected = { count: 0, listTruncated: opts.listTruncated === true, paths: [] };
   const skip = (path: string, reason: GuardUninspectedReason) => {
     uninspected.count++;
     if (uninspected.paths.length < GUARD_LIMITS.maxUninspectedPaths) uninspected.paths.push({ path, reason });
+    const kind = reason === 'prefix-only' ? 'prefix' : reason === 'line-prefix' ? 'line' : 'unscanned';
+    const seen = shortfalls.get(kind);
+    if (seen) seen.count++;
+    else shortfalls.set(kind, { count: 1, first: path });
   };
   if (opts.listTruncated) {
     out.add({ rule: 'guard/incomplete', severity: 'neutral', path: '.', message: 'the change lists more files than the guard can enumerate; only the listed files were scanned' });
@@ -413,42 +416,21 @@ export function guard(changes: readonly GuardChange[], contents: ReadonlyMap<str
     if (!wants.new) continue;
     const content = contents.get(c.path);
     if (!content || content.unavailable || (wants.new && typeof content.new !== 'string') || (wants.old && content.old === undefined)) {
-      unscanned.push(c.path);
       skip(c.path, content?.overFileBudget ? 'over-file-budget' : 'unavailable');
       continue;
     }
     const cutLines = scanText(c, content, out);
-    if (content.truncated) {
-      partial.push(c.path);
-      skip(c.path, 'prefix-only');
-    } else if (cutLines > 0) {
-      longLines.push(c.path);
-      skip(c.path, 'line-prefix');
-    }
+    if (content.truncated) skip(c.path, 'prefix-only');
+    else if (cutLines > 0) skip(c.path, 'line-prefix');
   }
-  if (partial.length > 0) {
-    out.add({
-      rule: 'guard/incomplete',
-      severity: 'neutral',
-      path: partial[0]!,
-      message: `${partial.length} changed file(s) were scanned only up to the guard's per-file read budget`,
-    });
-  }
-  if (longLines.length > 0) {
-    out.add({
-      rule: 'guard/incomplete',
-      severity: 'neutral',
-      path: longLines[0]!,
-      message: `${longLines.length} changed file(s) have added lines longer than ${GUARD_LIMITS.maxLineChars} characters that were scanned only up to that length`,
-    });
-  }
-  if (unscanned.length > 0) {
-    out.add({
-      rule: 'guard/incomplete',
-      severity: 'neutral',
-      path: unscanned[0]!,
-      message: `${unscanned.length} changed file(s) could not be scanned within the guard's read budget`,
-    });
+  const messages = {
+    prefix: (n: number) => `${n} changed file(s) were scanned only up to the guard's per-file read budget`,
+    line: (n: number) => `${n} changed file(s) have added lines longer than ${GUARD_LIMITS.maxLineChars} characters that were scanned only up to that length`,
+    unscanned: (n: number) => `${n} changed file(s) could not be scanned within the guard's read budget`,
+  };
+  for (const kind of ['prefix', 'line', 'unscanned'] as const) {
+    const s = shortfalls.get(kind);
+    if (s) out.add({ rule: 'guard/incomplete', severity: 'neutral', path: s.first, message: messages[kind](s.count) });
   }
   const conclusion: GuardConclusion = out.failed ? 'failure' : out.list.length + out.omitted > 0 ? 'neutral' : 'success';
   const complete = uninspected.count === 0 && !uninspected.listTruncated;

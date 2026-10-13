@@ -195,11 +195,13 @@ const GITLINK_MODE = '160000';
  */
 export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headTree: string, known?: CompareBody): Promise<GuardSummary> {
   const body = known ?? (await treePairBody(ctx, baseTree, headTree)).body;
+  // The compare body marks a file binary when either side is: only an added one is surely binary on its new
+  // side. For the rest the guard sniffs the new side itself, so text replacing a binary file is still scanned.
   const changes: GuardChange[] = body.files.map((f) => ({
     path: f.path,
     status: f.status,
     ...(f.oldPath !== undefined ? { oldPath: f.oldPath } : {}),
-    ...(f.binary || f.newMode === GITLINK_MODE ? { binary: true } : {}),
+    ...((f.binary && f.status === 'added') || f.newMode === GITLINK_MODE ? { binary: true } : {}),
   }));
   const contents = new Map<string, GuardContent>();
   const wanted: Array<{ i: number; old: boolean }> = [];
@@ -207,7 +209,7 @@ export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headT
     const w = guardWants(c);
     if (!w.new) return;
     if (wanted.length >= GUARD_BUDGETS.maxFiles) contents.set(c.path, { unavailable: true, overFileBudget: true });
-    else wanted.push({ i, old: w.old && body.files[i]!.oldHash !== null });
+    else wanted.push({ i, old: w.old && body.files[i]!.oldHash !== null && !body.files[i]!.binary });
   });
   const counter = { blobReads: 0, bytes: 0 };
   await runPool(wanted, GUARD_BUDGETS.concurrency, async ({ i, old }) => {
@@ -216,7 +218,7 @@ export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headT
       old && f.oldHash ? readSide(ctx.artifacts, f.oldHash, counter) : null,
       f.newHash ? readSide(ctx.artifacts, f.newHash, counter) : ({ unavailable: true } as const),
     ]);
-    if ('binary' in after || (before && 'binary' in before)) {
+    if ('binary' in after) {
       changes[i] = { ...changes[i]!, binary: true };
       return;
     }
@@ -224,10 +226,12 @@ export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headT
       contents.set(f.path, { unavailable: true });
       return;
     }
+    // A binary old side has no lines to subtract: every line of the new text counts as added.
+    const oldText = before && 'text' in before ? before : null;
     contents.set(f.path, {
-      old: before ? before.text : null,
+      old: oldText ? oldText.text : null,
       new: after.text,
-      ...(after.truncated || (before && before.truncated) ? { truncated: true } : {}),
+      ...(after.truncated || oldText?.truncated ? { truncated: true } : {}),
     });
   });
   const result = guard(changes, contents, { listTruncated: body.truncated });
@@ -243,7 +247,9 @@ export async function evaluateGuard(ctx: ResolveContext, baseTree: string, headT
 
 function uninspectedPhrase(u: GuardUninspected): string {
   const files = `${u.count} changed file(s) not fully inspected`;
-  return u.listTruncated ? `${files} and the change list was truncated` : files;
+  if (!u.listTruncated) return files;
+  const listed = 'the change list was truncated, so files past it were not inspected';
+  return u.count > 0 ? `${listed}, and ${files}` : listed;
 }
 
 export function guardTitle(r: GuardResult): string {

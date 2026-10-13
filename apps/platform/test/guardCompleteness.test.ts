@@ -15,7 +15,7 @@ import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import worker from '../src/index';
 import { effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from '../src/services/branchRules';
 import { branchPolicyBlock } from '../src/services/changes';
-import { GUARD_BUDGETS } from '../src/services/checks';
+import { GUARD_BUDGETS, guardTitle } from '../src/services/checks';
 import { defaultTrainDeps, runTrain } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -189,6 +189,16 @@ describe('guard completeness: the check shows what it did not inspect', () => {
   });
 });
 
+describe('guard completeness: binary sides', () => {
+  it('guard completeness: a binary file replaced by text is scanned as new text, not skipped as binary', async () => {
+    const AWS_KEY = 'AKIA' + 'IOSFODNN7EXAMPLE';
+    await scenario('gc-binary-old', { 'data.txt': `aws_key=${AWS_KEY}\n` }, [], { 'data.txt': 'bin\u0000ary\n' });
+    const run = (await call('GET', `${R('gc-binary-old')}/changes/1/checks`, tok.owner)).json.checks[0];
+    expect(run.conclusion).toBe('failure');
+    expect(run.summary.findings).toEqual([expect.objectContaining({ rule: 'secret/aws-access-key', path: 'data.txt', line: 1 })]);
+  });
+});
+
 describe('guard completeness: branch rules', () => {
   it('guard completeness: rules default to advisory and validate the setting', async () => {
     await seedRepo('gc-rules');
@@ -251,6 +261,23 @@ describe('guard completeness: branch rules', () => {
     expect(block?.error).toContain('part of the change was not fully inspected');
     const advisory = branchPolicyBlock({ ...policy, guardCompleteness: 'advisory' }, checks);
     expect(advisory?.code).toBe('REQUIRED_CHECKS_PENDING');
+
+    // A failed check is reported as the failure, not as incompleteness.
+    const failed = { ...checks, state: 'failure' as const, required: [{ ...checks.required[0]!, state: 'failure' as const }, checks.required[1]!] };
+    expect(branchPolicyBlock(policy, failed)?.code).toBe('REQUIRED_CHECKS_FAILED');
+    const treeFailure = { ...failed, required: [{ name: 'ci/other', state: 'failure' as const, producer: 'ci' }, checks.required[1]!] };
+    expect(branchPolicyBlock({ ...policy, requiredChecks: [] }, treeFailure)).toBeNull();
+
+    // A gate answer without any kvarm/guard verdict never satisfies a required rule.
+    const noGuard = { ...checks, state: 'success' as const, required: [{ name: 'ci/test', state: 'success' as const, producer: 'ci' }] };
+    expect(branchPolicyBlock(policy, noGuard)?.code).toBe('REQUIRED_CHECKS_PENDING');
+    expect(branchPolicyBlock({ ...policy, guardCompleteness: 'advisory' }, noGuard)).toBeNull();
+  });
+
+  it('guard completeness: the title of a truncated list with every listed file read does not claim a count of zero', () => {
+    const title = guardTitle({ conclusion: 'neutral', findings: [], complete: false, uninspected: { count: 0, listTruncated: true, paths: [] } });
+    expect(title).toMatch(/^incomplete: the change list was truncated/);
+    expect(title).not.toContain('0 changed');
   });
 
   it('guard completeness: incomplete guard + advisory rule merges', async () => {
