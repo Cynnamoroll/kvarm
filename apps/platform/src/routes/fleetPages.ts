@@ -81,7 +81,7 @@ async function csrfField(c: Context<App>): Promise<string> {
  * any write, so a new handler cannot skip the check by reading the body itself.
  */
 async function postedForm(c: Context<App>, viewer: ApiActor): Promise<Record<string, unknown> | Response> {
-  const form = (await c.req.parseBody()) as Record<string, unknown>;
+  const form = await readForm(c);
   return (await sessionFormRefused(c, viewer, form)) ?? form;
 }
 
@@ -90,9 +90,12 @@ async function postedForm(c: Context<App>, viewer: ApiActor): Promise<Record<str
  * never read, so these routes accept any body from it as they did before.
  */
 async function csrfRefused(c: Context<App>, viewer: ApiActor): Promise<Response | null> {
-  if (viewer.via !== 'session') return null;
-  const posted = await postedForm(c, viewer);
-  return posted instanceof Response ? posted : null;
+  return viewer.via === 'session' ? sessionFormRefused(c, viewer, await readForm(c)) : null;
+}
+
+/** An unparseable body reads as an empty form, which a session post then fails for its missing token. */
+async function readForm(c: Context<App>): Promise<Record<string, unknown>> {
+  return ((await c.req.parseBody().catch(() => ({}))) as Record<string, unknown>);
 }
 
 /** A same-origin Referer to return to; a missing, foreign or malformed one falls back to `/fleet`. */

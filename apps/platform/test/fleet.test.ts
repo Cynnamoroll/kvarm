@@ -481,6 +481,10 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
     expect(await row()).toEqual(before);
     expect(await builds()).toBe(buildsBefore);
 
+    const rebuilt = await post(`${envBase}/rebuild`, '', payload.csrf);
+    expect(rebuilt.status).toBe(302);
+    expect(rebuilt.location).toContain('rebuilt=1');
+    expect(await builds()).toBe(buildsBefore! + 1);
     expect((await post(envBase, edit, payload.csrf)).status).toBe(302);
     expect((await row())?.instance).toBe('standard-2');
     expect((await post(`${envBase}/archive`, '', payload.csrf)).status).toBe(302);
@@ -500,7 +504,17 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
       expect((await post(`${BASE}/sandboxes/${id}/${action}`, '', payload.csrf, 'https://evil.test')).status, action).toBe(404);
     }
     expect(await sandboxStatus(id)).toBe('running');
+    // A multipart post with no boundary cannot be parsed: refused as tokenless, not a 500.
+    const unparseable = await browser(`${BASE}/sandboxes/${id}/stop`, {
+      method: 'POST',
+      headers: { 'content-type': 'multipart/form-data', origin: ORIGIN },
+      body: 'x',
+    });
+    expect(unparseable.status).toBe(403);
+    expect(await sandboxStatus(id)).toBe('running');
 
+    expect((await post(`${BASE}/sandboxes/${id}/stop`, '', payload.csrf)).status).toBe(302);
+    expect(await sandboxStatus(id)).toBe('sleeping');
     // A malformed Referer must not turn the completed discard into an error.
     const discarded = await browser(`${BASE}/sandboxes/${id}/discard`, {
       method: 'POST',
