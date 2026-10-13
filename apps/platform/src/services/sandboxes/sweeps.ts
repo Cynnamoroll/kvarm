@@ -3,8 +3,14 @@ import { sandboxProvider } from './provider';
 
 const BATCH_SIZE = 50;
 
-export async function handleFleetScheduled(env: Env, ctx: ExecutionContext): Promise<void> {
-  ctx.waitUntil(runFleetSweeps(env));
+/** The Worker's 6-hour cron trigger: run the sweeps and log the outcome (a failure is logged, never thrown). */
+export async function runFleetCron(env: Env): Promise<void> {
+  try {
+    await runFleetSweeps(env);
+    console.log(JSON.stringify({ cron: 'fleet' }));
+  } catch (err) {
+    console.log(JSON.stringify({ cron: 'fleet', error: String(err).slice(0, 200) }));
+  }
 }
 
 export async function runFleetSweeps(env: Env): Promise<void> {

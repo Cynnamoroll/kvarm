@@ -25,6 +25,14 @@ describe('findDuplicateKeys', () => {
     expect(findDuplicateKeys(text)).toEqual(['a.x']);
   });
 
+  it('sees a key followed by a comment before its colon', () => {
+    expect(findDuplicateKeys('{"triggers" /* c */ : 1, "triggers" // c\n : 2}')).toEqual(['triggers']);
+  });
+
+  it('makes parseJsonc refuse a duplicate key instead of keeping the last', () => {
+    expect(() => parseJsonc('{"triggers":1,"triggers":2}')).toThrow(/duplicate key.*triggers/);
+  });
+
   it('ignores comments, key-like strings, escapes and trailing commas', () => {
     const text = `{
       // "triggers": 1

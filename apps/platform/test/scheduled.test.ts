@@ -1,9 +1,11 @@
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { FLEET_SWEEP_CRON, WEBHOOK_CRON } from '../src/cron';
 import { dispatchScheduled, type ScheduledJobs } from '../src/scheduled';
+
+const env = cfEnv as unknown as Env;
 
 function spies() {
   const webhooks = vi.fn(async () => {});
@@ -54,14 +56,13 @@ describe('scheduled dispatch on the cron expression', () => {
       try {
         await worker.scheduled({ cron, scheduledTime: Date.now(), noRetry() {} } as ScheduledController, env, ctx);
         await waitOnExecutionContext(ctx);
-        if (cron === WEBHOOK_CRON) {
-          expect(log.mock.calls.some((c) => String(c[0]).includes('"cron":"webhooks"'))).toBe(true);
-        } else if (cron === 'bogus') {
-          expect(warn).toHaveBeenCalledTimes(1);
-          expect(log).not.toHaveBeenCalled();
-        } else {
-          expect(log.mock.calls.some((c) => String(c[0]).includes('"cron":"webhooks"'))).toBe(false);
-        }
+        const ran = (name: string) => log.mock.calls.some((c) => String(c[0]).includes(`"cron":"${name}"`));
+        // A job that ran but failed logs an "error" field; that is not a pass.
+        expect(log.mock.calls.some((c) => String(c[0]).includes('"error"'))).toBe(false);
+        expect([ran('webhooks'), ran('fleet')]).toEqual(
+          cron === WEBHOOK_CRON ? [true, false] : cron === FLEET_SWEEP_CRON ? [false, true] : [false, false],
+        );
+        expect(warn).toHaveBeenCalledTimes(cron === 'bogus' ? 1 : 0);
       } finally {
         log.mockRestore();
         warn.mockRestore();

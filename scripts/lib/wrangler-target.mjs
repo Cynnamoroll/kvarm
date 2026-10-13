@@ -35,6 +35,8 @@ export const SETTINGS = ['KVARM_D1_DATABASE_ID', 'KVARM_D1_DATABASE_NAME', 'KVAR
 
 /** Parses JSON with comments and trailing commas (the wrangler.jsonc dialect). */
 export function parseJsonc(text) {
+  const dupes = findDuplicateKeys(text);
+  if (dupes.length) throw new Error(`duplicate key in JSONC config (the last one would silently win): ${dupes.join(', ')}`);
   let out = '';
   let i = 0;
   while (i < text.length) {
@@ -82,7 +84,15 @@ export function findDuplicateKeys(text) {
       let j = i + 1;
       while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
       let k = j + 1;
-      while (k < text.length && /\s/.test(text[k] ?? '')) k++;
+      for (;;) {
+        while (k < text.length && /\s/.test(text[k] ?? '')) k++;
+        if (text[k] === '/' && text[k + 1] === '*') {
+          const end = text.indexOf('*/', k + 2);
+          k = end === -1 ? text.length : end + 2;
+        }
+        else if (text[k] === '/' && text[k + 1] === '/') while (k < text.length && text[k] !== '\n') k++;
+        else break;
+      }
       if (frame && !frame.array && text[k] === ':') {
         const key = JSON.parse(text.slice(i, j + 1));
         if (frame.keys.has(key)) dupes.push(frame.path ? `${frame.path}.${key}` : key);
