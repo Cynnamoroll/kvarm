@@ -134,7 +134,7 @@ async function main() {
   const status = await api(`/commits/${headSha}/status`);
   console.log(`commit status (GET …/commits/:sha/status): ${status.status} state=${status.json?.state}`);
   const merge = await api(`/changes/${n}/mergeability`);
-  const m = merge.json ?? {};
+  const m = merge.json?.mergeability ?? {};
   console.log(`mergeability (GET …/changes/:n/mergeability): ${merge.status} status=${m.status} mergeable=${m.mergeable} requiredChecks=${m.checks?.state} [${(m.checks?.required ?? []).map((c) => `${c.name}:${c.state}`).join(', ')}]`);
 
   const ok =
