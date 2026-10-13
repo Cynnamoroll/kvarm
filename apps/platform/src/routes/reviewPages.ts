@@ -72,7 +72,8 @@ async function renderReview(c: Context<App>, r: PageResolved, flash: string | nu
   const number = c.req.param('number') ?? '';
   const mode: ReviewView = c.req.query('view') === 'risk' ? 'risk' : c.req.query('view') === 'files' ? 'files' : 'guided';
   const cx = changeCx(c, r);
-  const guide = await getGuide(cx, number, { include: 'hunks' });
+  const focus = c.req.query('since') === 'parent';
+  const guide = await getGuide(cx, number, { include: 'hunks', ...(focus ? { since: 'parent' } : {}) });
   if (!guide.ok) return guide.status === 404 ? notFound(c) : errorPage(c, r, guide.status, guide.error, guide.code ?? 'ERROR');
   const title = await c.env.DB.prepare('SELECT title FROM change_sets WHERE repo_id = ?1 AND number = ?2')
     .bind(r.repo.id, guide.value.number)
@@ -83,6 +84,7 @@ async function renderReview(c: Context<App>, r: PageResolved, flash: string | nu
     title: title?.title ?? '',
     base: repoBase(r),
     mode,
+    focus,
     canWrite: writable,
     canReview: writable,
     flash,

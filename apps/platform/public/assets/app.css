@@ -372,3 +372,5 @@ details.diff-file .diff-stat .muted { color: var(--fg-muted); }
 .chip.warn { color: #d29922; border-color: #9e6a03; }
 .rv-sub { margin-top: 10px; }
 .rv-evidence { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+.rv-stack-list { list-style: none; margin: 4px 0; padding: 0; display: grid; gap: 4px; }
+.rv-stack-list li { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }

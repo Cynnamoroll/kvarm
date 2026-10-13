@@ -119,6 +119,7 @@ function unitBlock(u: Unit, chapterTier: Unit['tier'], findings: Finding[], ctx:
     raised ? `<span class="chip signal" title="Kvarm raised this above the chapter's tier">raised from ${chapterTier}</span>` : '',
     u.contract ? '<span class="chip signal">contract</span>' : '',
     u.moved ? `<span class="chip" title="every changed line is a move">moved from ${esc(u.moved.from)}</span>` : '',
+    u.inherited ? `<a class="chip" href="${ctx.base}/changes/${u.inherited.change}" title="the same content is part of a parent change in this stack">from #${u.inherited.change}</a>` : '',
     u.ackCount > 0 ? `<span class="chip" title="reviewers who acknowledged this unit">${u.ackCount} ack</span>` : '',
   ].join('');
   const body = u.receipt
@@ -144,6 +145,24 @@ interface PageCtx {
   canWrite: boolean;
 }
 
+function stackCard(view: ReviewGuideView, base: string, pageBase: string, mode: ReviewView, focus: boolean): string {
+  const { parents, children, inherited } = view.stack;
+  if (parents.length === 0 && children.length === 0) return '';
+  const layer = (l: ReviewGuideView['stack']['parents'][number], rel: string) =>
+    `<li><span class="muted">${rel}</span> <a href="${base}/changes/${l.number}">#${l.number}</a> ${esc(l.title)} <span class="chip">${esc(l.state)}</span> <span class="chip${l.edgeState === 'active' || l.edgeState === 'satisfied' ? '' : ' signal'}" title="dependency edge">${esc(l.edgeState)}</span> <span class="muted">${WAITING_LABEL[l.waitingOn] ?? esc(l.waitingOn)} · ${l.approvals.have}/${l.approvals.need} approvals</span></li>`;
+  const toggle = inherited > 0
+    ? focus
+      ? `<a href="${pageBase}?view=${mode}">show all ${inherited} inherited ${inherited === 1 ? 'unit' : 'units'} too</a>`
+      : `<a href="${pageBase}?view=${mode}&amp;since=parent">only this layer</a> <span class="muted">(${inherited} ${inherited === 1 ? 'unit belongs' : 'units belong'} to a parent)</span>`
+    : '';
+  return `<div class="card rv-stack">
+      <div class="card-title">Stack</div>
+      <ul class="rv-stack-list">${parents.map((l) => layer(l, 'on top of')).join('')}${children.map((l) => layer(l, 'under')).join('')}</ul>
+      ${toggle ? `<p>${toggle}</p>` : ''}
+      ${view.stack.truncated ? '<p class="muted">Stack truncated (bounded read).</p>' : ''}
+    </div>`;
+}
+
 export interface ReviewPageInput {
   view: ReviewGuideView;
   title: string;
@@ -151,13 +170,16 @@ export interface ReviewPageInput {
   mode: ReviewView;
   canWrite: boolean;
   canReview: boolean;
+  /** Focused on this stack layer: units inherited from a parent change are hidden. */
+  focus?: boolean;
   flash?: string | null;
 }
 
 export function reviewPageBody(input: ReviewPageInput): string {
   const { view, base, mode } = input;
   const pageBase = `${base}/changes/${view.number}`;
-  const returnTo = `${pageBase}?view=${mode}`;
+  const focus = input.focus === true;
+  const returnTo = `${pageBase}?view=${mode}${focus ? '&since=parent' : ''}`;
   const ctx: PageCtx = { view, base, pageBase, returnTo, canWrite: input.canWrite };
   const sections = sectionsFor(view, mode);
   const findingsByUnit = new Map<string, Finding[]>();
@@ -297,7 +319,7 @@ export function reviewPageBody(input: ReviewPageInput): string {
         ${view.truncated || view.hunksTruncated ? raw('<div class="flash warn">Some hunks are not inlined (bounded read); the coverage counts still include them.</div>') : ''}
         <div class="pager">
           <span class="muted">view</span>
-          ${raw((['guided', 'risk', 'files'] as const).map((m) => (m === mode ? `<strong>${m}</strong>` : `<a href="${pageBase}?view=${m}">${m}</a>`)).join(' '))}
+          ${raw((['guided', 'risk', 'files'] as const).map((m) => (m === mode ? `<strong>${m}</strong>` : `<a href="${pageBase}?view=${m}${focus ? '&amp;since=parent' : ''}">${m}</a>`)).join(' '))}
           <span class="spacer"></span>
           <span class="muted">keys: j/k next/previous unit · a mark reviewed</span>
         </div>
@@ -306,6 +328,7 @@ export function reviewPageBody(input: ReviewPageInput): string {
         <nav class="rv-rail"><ol>${raw(rail)}</ol></nav>
         <div class="rv-main">
           ${raw(overview)}
+          ${raw(stackCard(view, base, pageBase, mode, focus))}
           ${raw(impact)}
           ${loose.length ? raw(`<div class="card"><div class="card-title">Findings outside the current diff</div>${loose.map((f) => findingCard(f)).join('')}</div>`) : ''}
           ${raw(chapters)}

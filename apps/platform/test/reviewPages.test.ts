@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
+import { reviewPageBody } from '../src/render/reviewPage';
+import type { ReviewGuideView } from '../src/services/reviewGuide';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -174,5 +176,40 @@ describe('guided review pages', () => {
     expect(warm.cost.do).toBe(0);
     expect(warm.cost.d1).toBeLessThanOrEqual(6);
     costs.page = warm.cost;
+  });
+  it('renders stack layers, inherited units and the focused-layer toggle', async () => {
+    await setup('stack');
+    await openChange('stack');
+    const guide = await call('GET', api('stack', '/changes/1/review-guide?include=hunks'), tokens.owner);
+    expect(guide.status).toBe(200);
+    const view = guide.json as unknown as ReviewGuideView;
+    const unit = view.units.find((u) => u.path === 'src/a.ts')!;
+    const layer = { number: 7, title: 'Parent layer', state: 'open', headSha: null, edgeState: 'active' as const, waitingOn: 'reviewers' as const, approvals: { have: 0, need: 1 } };
+    const stacked: ReviewGuideView = {
+      ...view,
+      units: view.units.map((u) => (u.key === unit.key ? { ...u, inherited: { change: 7 } } : u)),
+      stack: { parents: [layer], children: [{ ...layer, number: 9, title: 'Child layer', edgeState: 'stale' }], inherited: 1 },
+    };
+    const input = { view: stacked, title: 'Stacked', base: `/${OWNER}/stack`, mode: 'guided' as const, canWrite: true, canReview: true };
+    const full = reviewPageBody(input);
+    expect(full).toContain('<div class="card-title">Stack</div>');
+    expect(full).toContain(`href="/${OWNER}/stack/changes/7">#7</a> Parent layer`);
+    expect(full).toContain(`href="/${OWNER}/stack/changes/9">#9</a> Child layer`);
+    expect(full).toContain('<span class="chip signal" title="dependency edge">stale</span>');
+    expect(full).toContain(`<a class="chip" href="/${OWNER}/stack/changes/7"`);
+    expect(full).toContain(`href="/${OWNER}/stack/changes/1?view=guided&amp;since=parent">only this layer</a>`);
+    const focused = reviewPageBody({ ...input, focus: true });
+    expect(focused).toContain('show all 1 inherited unit too');
+    expect(focused).toContain(`name="return" value="/${OWNER}/stack/changes/1?view=guided&amp;since=parent#`);
+    const plain = reviewPageBody({ ...input, view: { ...view, stack: { parents: [], children: [], inherited: 0 } } });
+    expect(plain).not.toContain('<div class="card-title">Stack</div>');
+  });
+
+  it('passes since=parent through to the guide for the focused layer', async () => {
+    await setup('focus');
+    await openChange('focus');
+    const page = await pageCall('GET', pg('focus', 'changes/1?since=parent'), tokens.owner);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('<code>src/a.ts</code>');
   });
 });
