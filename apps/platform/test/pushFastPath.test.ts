@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EMPTY_PACK, pktLine, readPktLines, ZERO_OID } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { PUSH_EFFECTS } from '../src/services/events';
 import { branchPushUpdates, FAST_PATH_CHANGE_LIMIT } from '../src/services/pushFastPath';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
@@ -285,14 +286,15 @@ describe('confirmed push fast path', () => {
     const effects = await env.DB.prepare('SELECT effect, state FROM push_event_effects WHERE event_id = ?')
       .bind(events.results![0]!.id)
       .all<{ effect: string; state: string }>();
-    expect(new Map((effects.results ?? []).map((e) => [e.effect, e.state]))).toEqual(
-      new Map([
-        ['purge', 'done'],
-        ['snapshot', 'skipped'],
-        ['intent-index', 'skipped'],
-        ['change-hooks', 'done'],
-      ]),
-    );
+    // Per effect rather than an exact map, so a new push effect does not break this test: the
+    // effects the fast path already ran are done exactly once, and every other one is skipped
+    // for a push to a non-default branch.
+    const rows = effects.results ?? [];
+    const states = new Map(rows.map((e) => [e.effect, e.state]));
+    expect(rows).toHaveLength(states.size);
+    expect([...states.keys()].sort()).toEqual(PUSH_EFFECTS.map((e) => e.name).sort());
+    const fastPathDone = new Set(['purge', 'change-hooks']);
+    for (const [effect, state] of states) expect([effect, state]).toEqual([effect, fastPathDone.has(effect) ? 'done' : 'skipped']);
   });
 
   it('changes nothing when the compare-and-swap does not apply, and the event stays authoritative', async () => {
