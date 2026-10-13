@@ -19,7 +19,7 @@ These decisions shape the whole codebase. Later sections refer back to them.
 
 ### 0.2 Out of scope for this version
 
-The following are designed but not built; the README lists them under "Deferred roadmap": revert change sets, inbound incident webhooks and outbound webhook delivery, audit export (`get_audit`), contract capsules, semantic packets, hotspot suggestions, priority credits, resource lifecycle, advisory low-signal test flags and the collaborative UI pass. Code paths that would serve them either do not exist or are documented as inert.
+The following are designed but not built; the README lists them under "Deferred roadmap": revert change sets, inbound incident webhooks, audit export (`get_audit`), contract capsules, semantic packets, hotspot suggestions, priority credits, resource lifecycle, advisory low-signal test flags and the collaborative UI pass. Code paths that would serve them either do not exist or are documented as inert.
 
 ### 0.3 The checks gate
 
