@@ -61,6 +61,7 @@ export interface SandboxView {
   pushRef: string | null;
   ownerUserId: string;
   agentId: string;
+  agentName: string | null;
   status: SandboxRow['status'];
   task: string | null;
   lastActiveAt: string;
@@ -97,6 +98,8 @@ export interface SandboxApprovalView {
   sandboxId: string;
   command: string;
   requestedBy: string;
+  agentId?: string | null;
+  agentName?: string | null;
   status: 'pending' | 'approved' | 'denied' | 'used';
   decidedBy: string | null;
   decidedAt: string | null;
@@ -135,6 +138,7 @@ function sandboxView(row: SandboxRow, extra: Partial<SandboxView> = {}): Sandbox
     pushRef: workspaceRef,
     ownerUserId: row.owner_user_id,
     agentId: row.agent_id,
+    agentName: row.agent_name ?? null,
     status: row.status,
     task: row.task,
     lastActiveAt: new Date(row.last_active_at).toISOString(),
@@ -190,9 +194,10 @@ function repoDirectoryName(name: string): string {
 }
 
 const SANDBOX_SELECT = `SELECT s.*, w.ref AS workspace_ref, r.owner_login AS repo_owner,
-       r.name AS repo_name, e.name AS environment_name
+       r.name AS repo_name, e.name AS environment_name, a.name AS agent_name
   FROM sandboxes s
   LEFT JOIN workspaces w ON w.id = s.workspace_id
+  LEFT JOIN agents a ON a.id = s.agent_id
   JOIN repos r ON r.id = s.repo_id
   JOIN environments e ON e.id = s.environment_id`;
 
@@ -959,12 +964,15 @@ export async function listSandboxApprovals(
   const access = await authorized(env, repo, actor, 'read');
   if (!access.ok) return access;
   const rows = await env.DB.prepare(
-    `SELECT a.*, r.owner_login AS repo_owner, r.name AS repo_name
+    `SELECT a.*, r.owner_login AS repo_owner, r.name AS repo_name,
+            s.agent_id AS agent_id, ag.name AS agent_name
        FROM sandbox_approvals a JOIN repos r ON r.id = a.repo_id
+       JOIN sandboxes s ON s.id = a.sandbox_id
+       LEFT JOIN agents ag ON ag.id = s.agent_id
       WHERE a.repo_id = ?1 ORDER BY a.created_at DESC LIMIT ?2`,
   )
     .bind(repo.id, Math.min(Math.max(Math.trunc(limit), 1), 200))
-    .all<SandboxApprovalView & { repo_owner: string; repo_name: string; sandbox_id: string; requested_by: string; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
+    .all<SandboxApprovalView & { repo_owner: string; repo_name: string; sandbox_id: string; requested_by: string; agent_id: string | null; agent_name: string | null; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
   return {
     ok: true,
     value: (rows.results ?? []).map((row) => ({
@@ -973,6 +981,8 @@ export async function listSandboxApprovals(
       sandboxId: row.sandbox_id,
       command: row.command,
       requestedBy: row.requested_by,
+      agentId: row.agent_id,
+      agentName: row.agent_name,
       status: row.status,
       decidedBy: row.decided_by,
       decidedAt: iso(row.decided_at),
@@ -989,15 +999,17 @@ export async function listMyPendingApprovals(
   if (!actor) return fail(401, 'authentication required', 'UNAUTHENTICATED');
   if (actor.agent) return fail(403, 'agents cannot list human approvals', 'AGENT_FORBIDDEN');
   const rows = await env.DB.prepare(
-    `SELECT a.*, r.owner_login AS repo_owner, r.name AS repo_name
+    `SELECT a.*, r.owner_login AS repo_owner, r.name AS repo_name,
+            s.agent_id AS agent_id, ag.name AS agent_name
        FROM sandbox_approvals a
        JOIN sandboxes s ON s.id = a.sandbox_id
        JOIN repos r ON r.id = a.repo_id
+       LEFT JOIN agents ag ON ag.id = s.agent_id
       WHERE s.owner_user_id = ?1 AND a.status = 'pending' AND a.expires_at > ?2
       ORDER BY a.created_at DESC LIMIT 100`,
   )
     .bind(actor.user.id, Date.now())
-    .all<SandboxApprovalView & { repo_owner: string; repo_name: string; sandbox_id: string; requested_by: string; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
+    .all<SandboxApprovalView & { repo_owner: string; repo_name: string; sandbox_id: string; requested_by: string; agent_id: string | null; agent_name: string | null; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
   return {
     ok: true,
     value: (rows.results ?? []).map((row) => ({
@@ -1006,6 +1018,8 @@ export async function listMyPendingApprovals(
       sandboxId: row.sandbox_id,
       command: row.command,
       requestedBy: row.requested_by,
+      agentId: row.agent_id,
+      agentName: row.agent_name,
       status: row.status,
       decidedBy: row.decided_by,
       decidedAt: iso(row.decided_at),
