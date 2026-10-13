@@ -90,10 +90,14 @@ async function queueJobs(
   for (const [position, job] of config.value.jobs.entries()) {
     const runId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
+    // A quarantined name still queues and runs; its runs are marked so the
+    // checks gate and the rollup never count them (services/flakes.ts).
     statements.push(
       env.DB.prepare(
         `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, tree_sha, name, status, attempt, required, quarantined, created_at)
-         SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'queued', 1, ?7, 0, ?8
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'queued', 1, ?7,
+                CASE WHEN EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = ?6) THEN 1 ELSE 0 END,
+                ?8
           WHERE NOT EXISTS (SELECT 1 FROM check_runs WHERE change_set_id = ?3 AND head_sha = ?4 AND name = ?6)`,
       ).bind(runId, repo.id, changeId, headSha, tree, job.name, job.required ? 1 : 0, now + position),
       env.DB.prepare(
@@ -395,25 +399,84 @@ export interface ReportedJob {
   run: CheckRunView;
   change: { number: number; policy: string; baseRef: string; queued: boolean } | null;
   treeSha: string;
+  /** True when this failure requeued the check's one automatic retry. */
+  retried: boolean;
 }
 
-/** Terminal update + check run + readback, atomically fenced by generation and owner. */
+/**
+ * Terminal update + check run + readback, atomically fenced by generation
+ * and owner. A failure of a required, non-quarantined check at attempt 1 is
+ * not terminal: the same check run is requeued at attempt 2 with this
+ * report's summary kept as its evidence, and the job row is replaced by a
+ * fresh queued copy (INSERT OR REPLACE on the job's immutable identity)
+ * that re-runs the same head and tree. Attempt 2 is always terminal, and
+ * a pass there records the flake (services/flakes.ts); the composition
+ * readback recomputes from the check runs, so it stays pending through a
+ * retry and concludes on the final attempt.
+ */
 export async function reportJob(env: Env, repo: RepoRow, id: string, input: unknown): Promise<ServiceResult<ReportedJob>> {
   const p = parseReport(input);
   if (!p.ok) return p;
   const now = Date.now();
-  const [job, runRead, changeRead] = await env.DB.batch([
+  const [job, , runRead, , changeRead] = await env.DB.batch([
     env.DB.prepare(
       `UPDATE ci_jobs SET status = ?5, summary = ?6, finished_at = ?7, lease_until = NULL
        WHERE id = ?1 AND repo_id = ?2 AND generation = ?3 AND claimed_by = ?4 AND status = 'running' AND lease_until > ?7
        RETURNING tree_sha, check_run_id`,
     ).bind(id, repo.id, p.value.generation, p.value.runnerId, p.value.conclusion, p.value.summary, now),
     env.DB.prepare(
-      `UPDATE check_runs SET status = ?5, conclusion = ?5, summary = ?6, finished_at = ?7
+      `INSERT INTO ci_flakes (id, repo_id, name, tree_sha, head_sha, change_set_id, attempt, summary, seen_at)
+       SELECT ?3, ?2, k.name, j.tree_sha, j.head_sha, j.change_set_id, k.attempt, k.summary, ?4
+         FROM check_runs k JOIN ci_jobs j ON j.check_run_id = k.id
+        WHERE j.id = ?1 AND j.repo_id = ?2 AND j.status = 'success' AND k.attempt = 2
+          AND NOT EXISTS (
+            SELECT 1 FROM ci_flakes f
+             WHERE f.repo_id = ?2 AND f.name = k.name AND f.head_sha = j.head_sha AND f.tree_sha = j.tree_sha
+          )`,
+    ).bind(id, repo.id, crypto.randomUUID(), now),
+    env.DB.prepare(
+      `UPDATE check_runs SET
+         attempt = CASE WHEN ?5 = 'failure'
+                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
+                            AND check_runs.attempt = 1
+                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+                       THEN 2 ELSE check_runs.attempt END,
+         status = CASE WHEN ?5 = 'failure'
+                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
+                            AND check_runs.attempt = 1
+                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+                       THEN 'queued' ELSE ?5 END,
+         conclusion = CASE WHEN ?5 = 'failure'
+                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
+                            AND check_runs.attempt = 1
+                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+                       THEN NULL ELSE ?5 END,
+         summary = CASE WHEN ?5 = 'failure'
+                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
+                            AND check_runs.attempt = 1
+                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+                       THEN (SELECT summary FROM ci_jobs WHERE id = ?1) ELSE ?6 END,
+         started_at = CASE WHEN ?5 = 'failure'
+                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
+                            AND check_runs.attempt = 1
+                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+                       THEN NULL ELSE check_runs.started_at END,
+         finished_at = CASE WHEN ?5 = 'failure'
+                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
+                            AND check_runs.attempt = 1
+                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+                       THEN NULL ELSE ?7 END
        WHERE id = (SELECT check_run_id FROM ci_jobs
                     WHERE id = ?1 AND repo_id = ?2 AND generation = ?3 AND claimed_by = ?4 AND status = ?5 AND finished_at = ?7)
        RETURNING ${CHECK_RUN_COLUMNS.replaceAll('k.', '')}`,
     ).bind(id, repo.id, p.value.generation, p.value.runnerId, p.value.conclusion, p.value.summary, now),
+    env.DB.prepare(
+      `INSERT OR REPLACE INTO ci_jobs (id, repo_id, change_set_id, check_run_id, head_sha, tree_sha, name, command, required, timeout_seconds, created_at)
+       SELECT ?4, repo_id, change_set_id, check_run_id, head_sha, tree_sha, name, command, required, timeout_seconds, ?3
+         FROM ci_jobs
+        WHERE id = ?1 AND repo_id = ?2
+          AND EXISTS (SELECT 1 FROM check_runs k WHERE k.id = ci_jobs.check_run_id AND k.status = 'queued' AND k.attempt = 2)`,
+    ).bind(id, repo.id, now, crypto.randomUUID()),
     env.DB.prepare(
       `SELECT c.number, c.merge_policy, c.base_ref,
               EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queued
@@ -486,10 +549,125 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
       run: checkRunView(run),
       treeSha: moved.tree_sha,
       change: c ? { number: c.number, policy: c.merge_policy, baseRef: c.base_ref, queued: c.queued === 1 } : null,
+      retried: p.value.conclusion === 'failure' && run.status === 'queued' && (run.attempt ?? 1) === 2,
     },
   };
 }
 
-export function ciCleanupStatement(db: D1Database, repoId: string): D1PreparedStatement {
-  return db.prepare('DELETE FROM ci_jobs WHERE repo_id = ?').bind(repoId);
+export function ciCleanupStatement(db: D1Database, repoId: string): D1PreparedStatement[] {
+  return [
+    db.prepare('DELETE FROM ci_flakes WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM ci_quarantine WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM ci_jobs WHERE repo_id = ?').bind(repoId),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Queue visibility
+// ---------------------------------------------------------------------------
+
+const JOBS_PAGE_DEFAULT = 50;
+const JOBS_PAGE_MAX = 100;
+
+export interface CiJobView {
+  id: string;
+  name: string;
+  status: string;
+  required: boolean;
+  quarantined: boolean;
+  change: number | null;
+  headSha: string;
+  treeSha: string;
+  runnerId: string | null;
+  leaseUntil: string | null;
+  timeoutSeconds: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface CiJobsView {
+  jobs: CiJobView[];
+  nextCursor: string | null;
+}
+
+interface CiJobListRow {
+  id: string;
+  name: string;
+  status: string;
+  required: number;
+  quarantined: number | null;
+  change_number: number | null;
+  head_sha: string;
+  tree_sha: string;
+  claimed_by: string | null;
+  lease_until: number | null;
+  timeout_seconds: number;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+const isoOrNull = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
+
+function encodeJobsCursor(createdAt: number, id: string): string {
+  return btoa(`${createdAt}:${id}`).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+function decodeJobsCursor(cursor: string): { createdAt: number; id: string } | null {
+  try {
+    const text = atob(cursor.replace(/-/g, '+').replace(/_/g, '/'));
+    const m = /^(\d{1,16}):([0-9a-f-]{36})$/.exec(text);
+    return m ? { createdAt: Number(m[1]), id: m[2]! } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One bounded page of the repository's runner jobs, newest first: the queue every runner claims from. */
+export async function listCiJobs(env: Env, repo: RepoRow, page: { limit?: string; cursor?: string }): Promise<ServiceResult<CiJobsView>> {
+  let limit = JOBS_PAGE_DEFAULT;
+  if (page.limit !== undefined) {
+    limit = /^\d{1,4}$/.test(page.limit) ? Number(page.limit) : 0;
+    if (limit < 1 || limit > JOBS_PAGE_MAX) {
+      return { ok: false, status: 400, error: `limit must be an integer from 1 to ${JOBS_PAGE_MAX}`, code: 'INVALID_LIMIT' };
+    }
+  }
+  const after = page.cursor === undefined ? null : decodeJobsCursor(page.cursor);
+  if (page.cursor !== undefined && !after) {
+    return { ok: false, status: 400, error: 'invalid cursor', code: 'INVALID_CURSOR' };
+  }
+  const select = `SELECT j.id, j.name, j.status, j.required, k.quarantined, c.number AS change_number,
+         j.head_sha, j.tree_sha, j.claimed_by, j.lease_until, j.timeout_seconds, j.created_at, j.started_at, j.finished_at
+    FROM ci_jobs j JOIN check_runs k ON k.id = j.check_run_id LEFT JOIN change_sets c ON c.id = j.change_set_id
+   WHERE j.repo_id = ?1`;
+  const stmt = after
+    ? env.DB.prepare(`${select} AND (j.created_at < ?2 OR (j.created_at = ?2 AND j.id < ?3)) ORDER BY j.created_at DESC, j.id DESC LIMIT ?4`).bind(repo.id, after.createdAt, after.id, limit + 1)
+    : env.DB.prepare(`${select} ORDER BY j.created_at DESC, j.id DESC LIMIT ?2`).bind(repo.id, limit + 1);
+  const rows = (await stmt.all<CiJobListRow>()).results ?? [];
+  const more = rows.length > limit;
+  const pageRows = more ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  return {
+    ok: true,
+    value: {
+      jobs: pageRows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        required: r.required === 1,
+        quarantined: r.quarantined === 1,
+        change: r.change_number ?? null,
+        headSha: r.head_sha,
+        treeSha: r.tree_sha,
+        runnerId: r.claimed_by,
+        leaseUntil: isoOrNull(r.lease_until),
+        timeoutSeconds: r.timeout_seconds,
+        createdAt: new Date(r.created_at).toISOString(),
+        startedAt: isoOrNull(r.started_at),
+        finishedAt: isoOrNull(r.finished_at),
+      })),
+      nextCursor: more && last ? encodeJobsCursor(last.created_at, last.id) : null,
+    },
+  };
 }

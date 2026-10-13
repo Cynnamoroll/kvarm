@@ -1692,7 +1692,7 @@ export async function onHeadPushed(
 export function changeCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
   return [
     db.prepare('DELETE FROM comments WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
-    ciCleanupStatement(db, repoId),
+    ...ciCleanupStatement(db, repoId),
     db.prepare('DELETE FROM check_runs WHERE repo_id = ?').bind(repoId),
     db.prepare('UPDATE workspaces SET change_set_id = NULL WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM merge_queue WHERE repo_id = ?').bind(repoId),

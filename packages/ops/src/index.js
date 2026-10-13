@@ -1227,6 +1227,44 @@ export const OPERATIONS = Object.freeze([
     path: '/repos/{repo}/branch-policy',
     params: [REPO, query('ref', 'string', 'Branch name or full ref', { required: true, positional: true })],
   }),
+
+  // --- ci: runner jobs, flaky checks ---------------------------------------
+  define({
+    name: 'list_ci_jobs',
+    command: ['ci', 'jobs'],
+    family: 'ci',
+    description: 'The repository CI job queue, newest first: queued, running and finished runner jobs with claims, leases and the change they belong to.',
+    method: 'GET',
+    path: '/repos/{repo}/ci/jobs',
+    params: [REPO, LIMIT(100), CURSOR],
+  }),
+  define({
+    name: 'list_ci_flakes',
+    command: ['ci', 'flakes'],
+    family: 'ci',
+    description: 'Flaky-check registry: required runner checks that failed once and passed on the automatic retry, plus the checks currently quarantined for the repository.',
+    method: 'GET',
+    path: '/repos/{repo}/ci/flakes',
+    params: [REPO, LIMIT(100), CURSOR],
+  }),
+  define({
+    name: 'quarantine_ci_check',
+    command: ['ci', 'quarantine'],
+    family: 'ci',
+    description: 'Quarantine a check name (repo admins only). The check still runs but its runs never satisfy or block a required-checks gate, and its failures never retry.',
+    method: 'POST',
+    path: '/repos/{repo}/ci/flakes/{check}/quarantine',
+    params: [REPO, pathArg('check', 'Check name to quarantine')],
+  }),
+  define({
+    name: 'restore_ci_check',
+    command: ['ci', 'restore'],
+    family: 'ci',
+    description: 'Restore a quarantined check name to normal handling (repo admins only); its recorded runs count again.',
+    method: 'POST',
+    path: '/repos/{repo}/ci/flakes/{check}/restore',
+    params: [REPO, pathArg('check', 'Check name to restore')],
+  }),
 ]);
 
 const BY_NAME = new Map(OPERATIONS.map((op) => [op.name, op]));

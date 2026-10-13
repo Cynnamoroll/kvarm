@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono';
 import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
 import * as ci from '../../services/ci';
+import * as flakes from '../../services/flakes';
 import { resumeAfterCheck } from '../../services/changes';
 
 export const ciApi = new Hono<App>();
@@ -12,6 +13,16 @@ function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: fals
 
 async function runnerContext(c: Context<App>) {
   const d = await authorizeRoute(c, 'write', { requireActor: true, transport: 'ci' });
+  return d.ok ? ({ d } as const) : ({ denied: denyJson(c, d) } as const);
+}
+
+async function readContext(c: Context<App>) {
+  const d = await authorizeRoute(c, 'read');
+  return d.ok ? ({ d } as const) : ({ denied: denyJson(c, d) } as const);
+}
+
+async function adminContext(c: Context<App>) {
+  const d = await authorizeRoute(c, 'admin', { requireActor: true });
   return d.ok ? ({ d } as const) : ({ denied: denyJson(c, d) } as const);
 }
 
@@ -42,5 +53,37 @@ ciApi.post('/repos/:owner/:repo/ci/jobs/:id/report', async (c) => {
   if (r.value.change) {
     c.executionCtx.waitUntil(resumeAfterCheck(c.env, x.d.repo.id, r.value.change, (p) => c.executionCtx.waitUntil(p)));
   }
-  return actorJson(c, { run: r.value.run, change: r.value.change ? { number: r.value.change.number } : null });
+  return actorJson(c, { run: r.value.run, change: r.value.change ? { number: r.value.change.number } : null, retried: r.value.retried });
+});
+
+ciApi.get('/repos/:owner/:repo/ci/jobs', async (c) => {
+  const x = await readContext(c);
+  if ('denied' in x) return x.denied;
+  const r = await ci.listCiJobs(c.env, x.d.repo, { limit: c.req.query('limit'), cursor: c.req.query('cursor') });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+ciApi.get('/repos/:owner/:repo/ci/flakes', async (c) => {
+  const x = await readContext(c);
+  if ('denied' in x) return x.denied;
+  const r = await flakes.listFlakes(c.env, x.d.repo, { limit: c.req.query('limit'), cursor: c.req.query('cursor') });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+ciApi.post('/repos/:owner/:repo/ci/flakes/:check/quarantine', async (c) => {
+  const x = await adminContext(c);
+  if ('denied' in x) return x.denied;
+  const r = await flakes.quarantineCheck(c.env, x.d.repo, x.d.actor?.user.id ?? null, c.req.param('check'));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+ciApi.post('/repos/:owner/:repo/ci/flakes/:check/restore', async (c) => {
+  const x = await adminContext(c);
+  if ('denied' in x) return x.denied;
+  const r = await flakes.restoreCheck(c.env, x.d.repo, c.req.param('check'));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
 });
