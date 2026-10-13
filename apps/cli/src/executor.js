@@ -182,6 +182,11 @@ export function containerConfigError(c) {
   if (c.runtime !== undefined && !CONTAINER_RUNTIMES.includes(c.runtime)) return `container runtime must be one of ${CONTAINER_RUNTIMES.join(', ')}`;
   if (c.image !== undefined && !IMAGE_RE.test(c.image)) return `invalid image ${JSON.stringify(c.image)}`;
   if (c.network !== undefined && !NETWORK_RE.test(c.network)) return `invalid network ${JSON.stringify(c.network)}`;
+  // Sharing the host's or another container's network namespace would hand
+  // an untrusted job every service listening on localhost.
+  if (c.network !== undefined && (c.network === 'host' || c.network.startsWith('container:'))) {
+    return `--network ${c.network} would share a network namespace with the host or another container; use a bridge network or none`;
+  }
   if (c.cpus !== undefined && !(CPUS_RE.test(c.cpus) && Number(c.cpus) > 0)) return `invalid cpus ${JSON.stringify(c.cpus)}`;
   if (c.memory !== undefined && !(MEMORY_RE.test(c.memory) && parseInt(c.memory, 10) > 0)) return `invalid memory ${JSON.stringify(c.memory)}`;
   if (c.pidsLimit !== undefined && !(Number.isInteger(c.pidsLimit) && c.pidsLimit > 0)) return `invalid pids limit ${String(c.pidsLimit)}`;
@@ -365,7 +370,6 @@ function fireAndForget(spawnFn, runtime, args) {
  */
 export async function executeContainer(command, cwd, timeoutSeconds, o) {
   const spawnFn = o.spawn ?? nodeSpawn;
-  const started = Date.now();
   const createTimeoutMs = o.createTimeoutMs ?? CREATE_TIMEOUT_MS;
   // The runtime client needs its own configuration (DOCKER_HOST, config
   // dirs); it forwards nothing to the container beyond the --env pairs.
@@ -375,9 +379,11 @@ export async function executeContainer(command, cwd, timeoutSeconds, o) {
     const why = created.timedOut
       ? `creating the container (pulling ${o.image ?? DEFAULT_IMAGE}) took longer than ${Math.round(createTimeoutMs / 1000)} s`
       : `${o.runtime} create failed`;
-    return { code: created.code, stdout: '', stderr: bounded(`${why}\n${created.stderr}`), timedOut: false, durationMs: Date.now() - started };
+    return { code: created.code, stdout: '', stderr: bounded(`${why}\n${created.stderr}`), timedOut: false, durationMs: created.durationMs };
   }
   return new Promise((resolve, reject) => {
+    // Like the host executor, the duration covers the command, not the pull.
+    const started = Date.now();
     const child = spawnFn(o.runtime, ['start', '--attach', o.name], { stdio: ['ignore', 'pipe', 'pipe'] });
     let timedOut = false;
     /** @type {NodeJS.Timeout | undefined} */
@@ -396,7 +402,10 @@ export async function executeContainer(command, cwd, timeoutSeconds, o) {
       child,
       started,
       () => timedOut,
-      reject,
+      (err) => {
+        fireAndForget(spawnFn, o.runtime, ['rm', '--force', o.name]);
+        reject(err);
+      },
       (result) => {
         if (timedOut) fireAndForget(spawnFn, o.runtime, ['rm', '--force', o.name]);
         resolve(result);

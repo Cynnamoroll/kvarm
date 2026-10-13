@@ -45,9 +45,10 @@ const result = await runRunner({
   runnerId: env.KVARM_RUNNER_ID,
   workRoot: env.KVARM_WORK_ROOT,
   once: true,
-  // The container is the isolation boundary: it holds no host files and
-  // its credentials live only in this exec's environment, which the
-  // repository command never sees.
+  // The throwaway container is the isolation boundary: it holds no host
+  // files. The command does not inherit this exec's credentials, but runs
+  // as the same user as this process, so it could read them from /proc;
+  // see SECURITY.md (CI runner threat model).
   trust: 'all',
   executor: 'host',
   hostWarning: false,

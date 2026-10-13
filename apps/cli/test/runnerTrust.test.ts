@@ -195,6 +195,9 @@ describe('container executor', () => {
   it('rejects settings a runtime would parse as options and paths a bind mount cannot carry', () => {
     expect(containerConfigError({ image: '--privileged' })).toMatch(/invalid image/);
     expect(containerConfigError({ network: '-x' })).toMatch(/invalid network/);
+    expect(containerConfigError({ network: 'host' })).toMatch(/share a network namespace/);
+    expect(containerConfigError({ network: 'container:db' })).toMatch(/share a network namespace/);
+    expect(containerConfigError({ network: 'bridge' })).toBeNull();
     expect(containerConfigError({ cpus: '0' })).toMatch(/invalid cpus/);
     expect(containerConfigError({ memory: 'lots' })).toMatch(/invalid memory/);
     expect(containerConfigError({ pidsLimit: Number.NaN })).toMatch(/invalid pids limit/);
@@ -213,6 +216,30 @@ describe('container executor', () => {
       ['podman', 'create', '--rm', '--name'],
       ['podman', 'start', '--attach', 'kvarm-job-a'],
     ]);
+  });
+
+  it('removes the created container when the attached start cannot be spawned', async () => {
+    const { spawn, calls } = fakeSpawn((_command, args, child) => {
+      if (args[0] === 'create') child.finish(0);
+      else if (args[0] === 'start') setImmediate(() => child.emit('error', new Error('spawn EAGAIN')));
+      else child.finish(0);
+    });
+    await expect(executeContainer('make', '/w', 30, { runtime: 'docker', name: 'kvarm-job-e', user: null, spawn })).rejects.toThrow('EAGAIN');
+    expect(calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['create', '--rm'],
+      ['start', '--attach'],
+      ['rm', '--force'],
+    ]);
+  });
+
+  it('measures the command, not the image pull, as the job duration', async () => {
+    const { spawn } = fakeSpawn((_command, args, child) => {
+      if (args[0] === 'create') setTimeout(() => child.finish(0), 120);
+      else child.finish(0);
+    });
+    const result = await executeContainer('true', '/w', 30, { runtime: 'docker', name: 'kvarm-job-d', user: null, spawn });
+    expect(result.code).toBe(0);
+    expect(result.durationMs).toBeLessThan(100);
   });
 
   it('reports a failed create (an image that cannot be pulled) without starting anything', async () => {

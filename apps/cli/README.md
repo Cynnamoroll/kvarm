@@ -182,12 +182,16 @@ budget) and then run with `start --attach`:
   `no-new-privileges`; `--init`
 - this user's `uid:gid` so files in the working directory stay yours
   (`--container-user <uid:gid>` overrides, `--container-user image` keeps the
-  image's user); rootless podman also gets `--userns keep-id`, and rootless
-  docker runs as container root, which is this user on the host
+  image's user, often root, whose files a rootful runtime then leaves
+  root-owned in the working directory); rootless podman also gets
+  `--userns keep-id`, and rootless docker runs as container root, which is
+  this user on the host
 - `--cpus 2`, `--memory 4g`, `--pids-limit 1024` unless set with `--cpus`,
   `--memory`, `--pids-limit`
 - the runtime's default network, because installs need one; `--network none`
-  cuts the job off (installs then only work from a warm working directory)
+  cuts the job off (installs then only work from a warm working directory);
+  `host` and `container:<name>` are refused, since they would hand the job
+  every service listening on the host's or another container's localhost
 - only `TZ`, `LANG=C.UTF-8`, `GIT_TERMINAL_PROMPT=0` and `HOME=/tmp` in its
   environment: no host paths, no host locale names the image may lack, no
   credentials
@@ -195,7 +199,8 @@ budget) and then run with `start --attach`:
   full variant carries the `git` the snapshot jobs use; pin a patch tag or a
   digest such as `node:24.x.y-bookworm@sha256:…` for reproducible jobs)
 
-Output limits and the report are the same as on the host. Container jobs use
+Output limits and the report are the same as on the host; `durationMs` covers
+the command, not the image pull. Container jobs use
 their own working directories under `<workdir>-container`, so code that ran
 isolated can never leave files (a `node_modules/.bin` script, a hook) for a
 later host job. The summary names `executor: host|container` (and the
