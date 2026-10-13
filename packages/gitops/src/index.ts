@@ -22,6 +22,7 @@ export * from './pack';
 export * from './receivePack';
 export * from './mergebase';
 export * from './merge3';
+export * from './virtualBase';
 export * from './compose';
 export * from './notes';
 export * from './resolve';

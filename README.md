@@ -325,7 +325,8 @@ Configured limits (constants in the code, documented with their behavior in the 
 - Dependencies: chains of at most 4 workspaces, at most 8 direct pins per workspace.
 - `kvarm/guard` reads at most 100 files, 64 KiB per side; anything beyond is reported as uninspected (`complete: false`), and blocks publication only into refs whose branch rule sets `guardCompleteness: "required"` (`409 GUARD_INCOMPLETE`).
 - CI: at most 16 jobs per `.kvarm/ci.json`; runner leases of 120 s, renewed by heartbeat.
-- Known engine limits: criss-cross histories with several merge bases are refused (`422 MULTIPLE_MERGE_BASES`); Artifacts `log()` follows first parents and is capped at 1,000 entries; multi-ref atomicity is not assumed, so the platform pushes one ref per write.
+- Criss-cross merges: histories with several merge bases merge through a virtual merge base as git's default strategy does; at most 8 merge bases per pair and a recursion depth of 3, sharing the merge's read budgets (then `422 MULTIPLE_MERGE_BASES` with a `reason`). Bases that conflict on a rename, file/directory or type change are refused the same way.
+- Known engine limits: renames are detected only when exact; Artifacts `log()` follows first parents and is capped at 1,000 entries; multi-ref atomicity is not assumed, so the platform pushes one ref per write.
 
 ## Deferred roadmap
 

@@ -12,8 +12,12 @@
  * expected old value; only a confirmed `ok` counts. A moved target is
  * `STALE_TARGET` (re-plan).
  *
- * Criss-cross histories (several merge bases) are refused as
- * `MULTIPLE_MERGE_BASES` rather than merged against an arbitrary base.
+ * Criss-cross histories (several merge bases) merge against a virtual base
+ * tree, the bases merged recursively as git's ort strategy does (gitops
+ * virtualBase.ts, architecture §3.1). More bases or deeper recursion than
+ * the budgets allow, or bases that conflict in a way the virtual tree cannot
+ * hold, are refused as `MULTIPLE_MERGE_BASES` with the reason, never merged
+ * against an arbitrary base.
  *
  * Three-way merges run gitops' deterministic resolution stage (resolve.ts):
  * besides what git merges, a hunk whose two sides differ only in whitespace
@@ -31,6 +35,8 @@ import {
   merge3,
   mergeBase,
   parseTree,
+  TreeReadBudgetError,
+  virtualMergeBase,
   type ClassifiedConflict,
   type CommitInfo,
   type CommitReader,
@@ -64,7 +70,27 @@ export const MERGE_BUDGETS = {
   /** Raw plus compressed bytes of the objects a merge creates, held until publication. */
   maxMergedBytes: 16 * 1024 * 1024,
   contentConcurrency: 1,
+  /**
+   * Criss-cross histories: merge bases of any one pair, and the call depth
+   * of the recursive merge that folds them into a virtual base. The inner
+   * merges spend the read and created-bytes budgets above, shared with the
+   * outer merge, so these two only bound the shape.
+   */
+  maxMergeBases: 8,
+  maxVirtualDepth: 3,
 };
+
+/** Unknown-plan reasons that are a criss-cross the request path refuses (`MULTIPLE_MERGE_BASES`). */
+const CRISS_CROSS_REFUSALS = new Map<string, string>([
+  ['maxMergeBases', 'the head and the target have more merge bases than the maxMergeBases budget'],
+  ['maxVirtualDepth', 'merging the merge bases recurses deeper than the maxVirtualDepth budget'],
+  ['virtualConflict', 'the merge bases conflict in a way a virtual merge base cannot represent (rename, file/directory or type change)'],
+]);
+
+/** Whether an `unknown` plan is a criss-cross the request path refuses; like a budget stop, it depends only on the two commits. */
+export function isCrissCrossRefusal(unknownReason: string | undefined): boolean {
+  return CRISS_CROSS_REFUSALS.has(unknownReason ?? '');
+}
 
 export type MergeBudgets = Partial<typeof MERGE_BUDGETS>;
 
@@ -115,13 +141,20 @@ export interface Mergeability {
   headSha: string;
   status: MergeStatus;
   fastForward: boolean;
+  /** The merge base; for a criss-cross, the first of `mergeBases`. */
   mergeBase: string | null;
+  /** Every merge base, sorted, when there are several (the merge ran against their virtual merge). */
+  mergeBases?: string[];
   /** The tree publication would produce (the head tree for a fast-forward); null unless fast-forward or clean. */
   treeSha: string | null;
   conflicts: MergeConflict[];
   /** Paths both sides changed that merged cleanly, with the rule that merged each (three-way merges only). */
   resolved: MergeResolution[];
-  /** For `unknown`: the budget or read failure that stopped planning, or `criss-cross`. */
+  /**
+   * For `unknown`: the budget or read failure that stopped planning; for a
+   * criss-cross the request path refuses, `maxMergeBases`, `maxVirtualDepth`
+   * or `virtualConflict`.
+   */
   unknownReason?: string;
   /** Required checks for `treeSha`; null when there is no tree to check. */
   checks: RequiredChecks | null;
@@ -143,7 +176,10 @@ export interface PreparedMerge {
   kind: 'fast-forward' | 'merge';
   targetSha: string;
   headSha: string;
+  /** The merge base; for a criss-cross, the first of `mergeBases`. */
   mergeBase: string;
+  /** Every merge base, sorted, when there are several. */
+  mergeBases?: string[];
   treeSha: string;
   /** The commit the target ref will point at: the head for a fast-forward. */
   mergeCommit: string;
@@ -222,11 +258,12 @@ export type MergeErrorCode =
 
 export type MergeResult<T> =
   | { ok: true; value: T }
-  | { ok: false; status: number; error: string; code: MergeErrorCode; conflicts?: MergeConflict[]; checks?: RequiredChecks };
+  | { ok: false; status: number; error: string; code: MergeErrorCode; reason?: string; conflicts?: MergeConflict[]; checks?: RequiredChecks };
 
 interface MergePlan {
   status: MergeStatus;
   mergeBase: string | null;
+  mergeBases?: string[];
   treeSha: string | null;
   conflicts: MergeConflict[];
   resolved: MergeResolution[];
@@ -238,11 +275,15 @@ interface MergePlan {
 const READ_FAILURES = new Set(['missingCommit', 'missingObject', 'readError']);
 
 /** Memoizes and counts commit reads so the merge-base walk and tree lookups share them. */
-class CommitCache implements CommitReader {
+export class CommitCache implements CommitReader {
   reads = 0;
   private readonly seen = new Map<string, Promise<CommitInfo | null>>();
 
   constructor(private readonly source: CommitReader) {}
+
+  has(sha: string): boolean {
+    return this.seen.has(sha);
+  }
 
   readCommit(sha: string): Promise<CommitInfo | null> {
     let p = this.seen.get(sha);
@@ -253,6 +294,55 @@ class CommitCache implements CommitReader {
     }
     return p;
   }
+}
+
+export interface SharedTrees extends MergeSources {
+  /** Distinct trees fetched so far. */
+  fetched(): number;
+}
+
+/**
+ * Tree reads memoized across the merges of one criss-cross (the virtual
+ * base's inner merges and the outer merge mostly read the same subtrees),
+ * with one budget on distinct fetches: past it a read throws
+ * `TreeReadBudgetError`, which a merge reports as `maxTreeReads`.
+ */
+export function sharedTrees(sources: MergeSources, maxTreeReads: number): SharedTrees {
+  const trees = new Map<string, Promise<TreeEntry[] | null>>();
+  return {
+    readCommit: (sha) => sources.readCommit(sha),
+    readTree(hash) {
+      let p = trees.get(hash);
+      if (!p) {
+        if (trees.size >= maxTreeReads) return Promise.reject(new TreeReadBudgetError(hash));
+        p = sources.readTree(hash);
+        trees.set(hash, p);
+      }
+      return p;
+    },
+    readBlob: (hash) => sources.readBlob(hash),
+    fetched: () => trees.size,
+  };
+}
+
+export type VirtualBaseOutcome =
+  | { ok: true; treeHash: string; sources: MergeSources; objects: GitObject[]; work: { blobReads: number; bytes: number } }
+  | { ok: false; reason: string; work: { blobReads: number; bytes: number } };
+
+/**
+ * The virtual merge base of a criss-cross (architecture §3.1) within budget
+ * `b`. Commits go through `commits`, so the inner walks pay only for commits
+ * the outer walk has not read; trees go through `trees`, whose fetches the
+ * caller counts. The returned sources also serve the virtual objects, for
+ * the merge that uses the virtual base; the caller gives that merge what is
+ * left of the blob and created-bytes budgets.
+ */
+export async function crissCrossBase(trees: SharedTrees, commits: CommitCache, bases: readonly string[], b: typeof MERGE_BUDGETS): Promise<VirtualBaseOutcome> {
+  const reader: MergeSources = { readCommit: (sha) => commits.readCommit(sha), readTree: (h) => trees.readTree(h), readBlob: (h) => trees.readBlob(h) };
+  const v = await virtualMergeBase(reader, bases, { ...b, mayReadCommit: (sha) => commits.has(sha) || commits.reads < b.maxCommitReads });
+  const work = { blobReads: v.blobReads, bytes: v.objects.reduce((n, o) => n + o.raw.length + o.store.length, 0) };
+  if (v.truncated || v.treeHash === null) return { ok: false, reason: v.truncatedReason ?? 'readError', work };
+  return { ok: true, treeHash: v.treeHash, sources: overlaySources(reader, new Map(v.objects.map((o) => [o.hash, o]))), objects: v.objects, work };
 }
 
 async function plan(sources: MergeSources, targetSha: string, headSha: string, budgets: MergeBudgets = {}): Promise<MergePlan> {
@@ -276,39 +366,67 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
   const none = { treeSha: null, conflicts: [], resolved: [], objects: [] };
   if (mb.bases.includes(headSha)) return { status: 'up-to-date', mergeBase: headSha, ...none, work: work() };
   if (mb.bases.length === 0) return { status: 'unrelated', mergeBase: null, ...none, work: work() };
-  if (mb.bases.length > 1) return unknown('criss-cross');
-  const base = mb.bases[0]!;
+  const bases = [...mb.bases].sort();
+  const base = bases[0]!;
+  const several = bases.length > 1 ? { mergeBases: bases } : {};
 
   let trees: Array<CommitInfo | null>;
   try {
     trees = await Promise.all([commits.readCommit(base), commits.readCommit(targetSha), commits.readCommit(headSha)]);
   } catch {
-    return unknown('readError', { mergeBase: base });
+    return unknown('readError', { mergeBase: base, ...several });
   }
   const [baseCommit, targetCommit, headCommit] = trees;
-  if (!baseCommit || !targetCommit || !headCommit) return unknown('missingCommit', { mergeBase: base });
+  if (!baseCommit || !targetCommit || !headCommit) return unknown('missingCommit', { mergeBase: base, ...several });
 
-  if (base === targetSha) {
+  if (bases.length === 1 && base === targetSha) {
     return { status: 'fast-forward', mergeBase: base, treeSha: headCommit.treeHash, conflicts: [], resolved: [], objects: [], work: work() };
   }
 
-  const m = await merge3(sources, baseCommit.treeHash, targetCommit.treeHash, headCommit.treeHash, {
-    maxTreeReads: b.maxTreeReads,
+  // Criss-cross: merge the bases into a virtual base tree first (architecture §3.1); its
+  // inner merges spend the same read and created-bytes budgets as the outer merge.
+  let baseTree = baseCommit.treeHash;
+  let mergeSources = sources;
+  let virtualWork = { blobReads: 0, bytes: 0 };
+  let shared: SharedTrees | null = null;
+  if (bases.length > 1) {
+    shared = sharedTrees(sources, b.maxTreeReads);
+    const v = await crissCrossBase(shared, commits, bases, b);
+    virtualWork = v.work;
+    if (!v.ok) {
+      return { ...unknown(v.reason, { mergeBase: base, ...several }), work: { commitReads: commits.reads, treeReads: shared.fetched(), blobReads: v.work.blobReads } };
+    }
+    baseTree = v.treeHash;
+    mergeSources = v.sources;
+  }
+
+  const m = await merge3(mergeSources, baseTree, targetCommit.treeHash, headCommit.treeHash, {
+    // Over shared trees the reader enforces maxTreeReads on distinct fetches, the virtual base's included.
+    maxTreeReads: shared ? Number.MAX_SAFE_INTEGER : b.maxTreeReads,
     maxChanges: b.maxChanges,
-    maxBlobReads: b.maxBlobReads,
+    maxBlobReads: b.maxBlobReads - virtualWork.blobReads,
     maxBlobBytes: b.maxBlobBytes,
     nodeBudget: b.nodeBudget,
     concurrency: b.concurrency,
-    maxMergedBytes: b.maxMergedBytes,
+    maxMergedBytes: b.maxMergedBytes - virtualWork.bytes,
     contentConcurrency: b.contentConcurrency,
     resolver,
   });
-  const mergeWork = { commitReads: commits.reads, treeReads: m.treeReads, blobReads: m.blobReads };
-  if (m.truncated) return { ...unknown(m.truncatedReason ?? 'readError', { mergeBase: base }), work: mergeWork };
+  const mergeWork = { commitReads: commits.reads, treeReads: shared ? shared.fetched() : m.treeReads, blobReads: virtualWork.blobReads + m.blobReads };
+  if (m.truncated) return { ...unknown(m.truncatedReason ?? 'readError', { mergeBase: base, ...several }), work: mergeWork };
   if (!m.clean) {
-    return { status: 'conflicts', mergeBase: base, treeSha: null, conflicts: classifyConflicts(m.conflicts, RESOLVE), resolved: [], objects: [], work: mergeWork };
+    return {
+      status: 'conflicts',
+      mergeBase: base,
+      ...several,
+      treeSha: null,
+      conflicts: classifyConflicts(m.conflicts, RESOLVE),
+      resolved: [],
+      objects: [],
+      work: mergeWork,
+    };
   }
-  return { status: 'clean', mergeBase: base, treeSha: m.treeHash, conflicts: [], resolved: m.resolved, objects: m.objects, work: mergeWork };
+  return { status: 'clean', mergeBase: base, ...several, treeSha: m.treeHash, conflicts: [], resolved: m.resolved, objects: m.objects, work: mergeWork };
 }
 
 /** Mergeability without the checks: the merge plan of a commit pair only. */
@@ -323,6 +441,7 @@ export async function computeMergePlan(sources: MergeSources, input: Omit<Mergea
     status: p.status,
     fastForward: p.status === 'fast-forward',
     mergeBase: p.mergeBase,
+    ...(p.mergeBases ? { mergeBases: p.mergeBases } : {}),
     treeSha: p.treeSha,
     conflicts: p.conflicts,
     resolved: p.resolved,
@@ -346,8 +465,9 @@ function planFailure(p: MergePlan): MergeResult<never> {
     case 'unrelated':
       return { ok: false, status: 409, error: 'the head and the target share no history', code: 'UNRELATED_HISTORIES' };
     default:
-      if (p.unknownReason === 'criss-cross') {
-        return { ok: false, status: 422, error: 'the head and the target have several merge bases', code: 'MULTIPLE_MERGE_BASES' };
+      {
+        const refusal = CRISS_CROSS_REFUSALS.get(p.unknownReason ?? '');
+        if (refusal) return { ok: false, status: 422, error: refusal, code: 'MULTIPLE_MERGE_BASES', reason: p.unknownReason! };
       }
       if (READ_FAILURES.has(p.unknownReason ?? 'readError')) {
         return { ok: false, status: 503, error: `could not read the merge inputs (${p.unknownReason})`, code: 'MERGE_READ_FAILED' };
@@ -359,7 +479,15 @@ function planFailure(p: MergePlan): MergeResult<never> {
 export async function prepareMerge(sources: MergeSources, input: PrepareInput): Promise<MergeResult<PreparedMerge>> {
   const p = await plan(sources, input.targetSha, input.headSha, input.budgets);
   if ((p.status !== 'fast-forward' && p.status !== 'clean') || !p.treeSha || !p.mergeBase) return planFailure(p);
-  const common = { targetSha: input.targetSha, headSha: input.headSha, mergeBase: p.mergeBase, treeSha: p.treeSha, resolved: p.resolved, work: p.work };
+  const common = {
+    targetSha: input.targetSha,
+    headSha: input.headSha,
+    mergeBase: p.mergeBase,
+    ...(p.mergeBases ? { mergeBases: p.mergeBases } : {}),
+    treeSha: p.treeSha,
+    resolved: p.resolved,
+    work: p.work,
+  };
   if (p.status === 'fast-forward') {
     return { ok: true, value: { kind: 'fast-forward', ...common, mergeCommit: input.headSha, objects: [] } };
   }

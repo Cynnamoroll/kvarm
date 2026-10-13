@@ -16,7 +16,7 @@
  * conflict, and the change's merge is refused by the same gate.
  */
 
-import { buildCommit, composeTrees, mergeBase, type ComposePiece, type GitIdent } from '@kvarm/gitops';
+import { buildCommit, composeTrees, mergeBase, type ComposePiece, type GitIdent, type GitObject } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import { touchRepoPushedStatement } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -26,7 +26,7 @@ import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './check
 import { reconcileObserved } from './intents/forecast';
 import { observedSeedFailedStatement } from './intents/store';
 import { normalizePath } from './intents/paths';
-import { KVARM_COMMITTER, MERGE_BUDGETS, artifactsMergeSources } from './merge';
+import { CommitCache, KVARM_COMMITTER, MERGE_BUDGETS, artifactsMergeSources, crissCrossBase, isCrissCrossRefusal, overlaySources, sharedTrees, type SharedTrees } from './merge';
 import { RefStoreUnavailable, lsRefs, readCommitInfo, type ResolveContext } from './refs';
 import {
   WORKSPACE_ID_RE,
@@ -56,6 +56,9 @@ export const COMPOSE_LIMITS = {
 
 const ZERO_SHA = '0000000000000000000000000000000000000000';
 
+/** Stops of a virtual merge base that are read failures, not budgets. */
+const COMPOSE_READ_REASONS = new Set(['readError', 'missingObject', 'missingCommit']);
+
 type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
 
 function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
@@ -78,7 +81,10 @@ export const defaultComposeDeps: ComposeDeps = { ...defaultWorkspaceDeps, gate: 
 export interface CompositionSource {
   workspace: string;
   headSha: string;
+  /** The merge base with the base head; for a criss-cross, the first of `mergeBases`. */
   mergeBase: string;
+  /** Every merge base, sorted, when there are several (the piece was diffed against their virtual merge). */
+  mergeBases?: string[];
   /** Selected paths (a trailing `/` is a prefix); null: the whole workspace. */
   paths: string[] | null;
 }
@@ -300,32 +306,66 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
 
       const pieces: ComposePiece[] = [];
       const recorded: CompositionSource[] = [];
+      const virtualObjects = new Map<string, GitObject>();
+      // Virtual merge bases of criss-cross pieces spend the composition's own read and created-bytes budgets;
+      // their trees are memoized for the fold below.
+      const spent = { blobReads: 0, bytes: 0 };
+      let trees: SharedTrees | null = null;
       for (const piece of p.pieces) {
         const headSha = heads.get(found.get(piece.workspace)!.ref!) ?? null;
         if (!headSha) return fail(409, `the ref of workspace ${piece.workspace} is gone`, 'WORKSPACE_REF_MISSING', { workspace: piece.workspace });
-        const mb = await mergeBase(sources, baseSha, headSha, { maxCommitReads: MERGE_BUDGETS.maxCommitReads, concurrency: MERGE_BUDGETS.concurrency });
+        const commits = new CommitCache(sources);
+        const mb = await mergeBase(commits, baseSha, headSha, { maxCommitReads: MERGE_BUDGETS.maxCommitReads, concurrency: MERGE_BUDGETS.concurrency });
         if (mb.truncated) {
           return mb.truncatedReason === 'maxCommitReads'
             ? fail(422, `history of ${piece.workspace} exceeds the merge-base budget`, 'COMPOSITION_TOO_LARGE', { workspace: piece.workspace })
             : fail(503, `could not read the history of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
         }
         if (mb.bases.length === 0) return fail(409, `workspace ${piece.workspace} shares no history with ${p.base}`, 'UNRELATED_HISTORIES', { workspace: piece.workspace });
-        if (mb.bases.length > 1) return fail(422, `workspace ${piece.workspace} has several merge bases with ${p.base}`, 'MULTIPLE_MERGE_BASES', { workspace: piece.workspace });
-        const [mbCommit, headCommit] = await Promise.all([readCommitInfo(ctx, mb.bases[0]!), readCommitInfo(ctx, headSha)]);
-        if (!mbCommit || !headCommit) return fail(503, `could not read the commits of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
-        pieces.push({ name: piece.workspace, baseTree: mbCommit.tree, headTree: headCommit.tree, ...(piece.paths ? { paths: piece.paths } : {}) });
-        recorded.push({ workspace: piece.workspace, headSha, mergeBase: mb.bases[0]!, paths: piece.paths });
+        const bases = [...mb.bases].sort();
+        // Both were read by the merge-base walk; the cache answers without another read.
+        const [headCommit, mbCommit] = await Promise.all([commits.readCommit(headSha), commits.readCommit(bases[0]!)]);
+        if (!headCommit || !mbCommit) return fail(503, `could not read the commits of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
+        let baseTree = mbCommit.treeHash;
+        if (bases.length > 1) {
+          // A criss-cross piece diffs against the virtual merge of its bases (architecture §3.1).
+          trees ??= sharedTrees(sources, MERGE_BUDGETS.maxTreeReads);
+          const v = await crissCrossBase(trees, commits, bases, {
+            ...MERGE_BUDGETS,
+            maxBlobReads: MERGE_BUDGETS.maxBlobReads - spent.blobReads,
+            maxMergedBytes: MERGE_BUDGETS.maxMergedBytes - spent.bytes,
+          });
+          spent.blobReads += v.work.blobReads;
+          spent.bytes += v.work.bytes;
+          if (!v.ok) {
+            const reason = v.reason;
+            if (isCrissCrossRefusal(reason)) {
+              return fail(422, `workspace ${piece.workspace} has several merge bases with ${p.base} that cannot be merged (${reason})`, 'MULTIPLE_MERGE_BASES', {
+                workspace: piece.workspace,
+                reason,
+              });
+            }
+            return COMPOSE_READ_REASONS.has(reason)
+              ? fail(503, `could not read the merge bases of ${piece.workspace} (${reason})`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace })
+              : fail(422, `merging the merge bases of ${piece.workspace} exceeds the ${reason} budget`, 'COMPOSITION_TOO_LARGE', { workspace: piece.workspace });
+          }
+          baseTree = v.treeHash;
+          for (const o of v.objects) virtualObjects.set(o.hash, o);
+        }
+        pieces.push({ name: piece.workspace, baseTree, headTree: headCommit.treeHash, ...(piece.paths ? { paths: piece.paths } : {}) });
+        recorded.push({ workspace: piece.workspace, headSha, mergeBase: bases[0]!, ...(bases.length > 1 ? { mergeBases: bases } : {}), paths: piece.paths });
       }
 
       const n = pieces.length;
-      const result = await composeTrees(sources, baseCommit.tree, pieces, {
-        maxTreeReads: MERGE_BUDGETS.maxTreeReads,
+      // composeTrees counts the memoized re-reads too, so its share stays within what the virtual bases left.
+      const result = await composeTrees(trees ? overlaySources(trees, virtualObjects) : sources, baseCommit.tree, pieces, {
+        maxTreeReads: Math.max(1, MERGE_BUDGETS.maxTreeReads - (trees?.fetched() ?? 0)),
         maxChanges: MERGE_BUDGETS.maxChanges,
-        maxBlobReads: Math.max(1, Math.floor(MERGE_BUDGETS.maxBlobReads / n)),
+        maxBlobReads: Math.max(1, Math.floor((MERGE_BUDGETS.maxBlobReads - spent.blobReads) / n)),
         maxBlobBytes: MERGE_BUDGETS.maxBlobBytes,
         nodeBudget: MERGE_BUDGETS.nodeBudget,
         concurrency: MERGE_BUDGETS.concurrency,
-        maxMergedBytes: Math.floor(MERGE_BUDGETS.maxMergedBytes / n),
+        maxMergedBytes: Math.max(1, Math.floor((MERGE_BUDGETS.maxMergedBytes - spent.bytes) / n)),
         contentConcurrency: MERGE_BUDGETS.contentConcurrency,
       });
       if (result.unmatched.length > 0) {

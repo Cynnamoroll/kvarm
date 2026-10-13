@@ -41,3 +41,32 @@ export function parseMergeTree(
 ): { tree: string; conflicts: string[]; messages: { paths: string[]; type: string; message: string }[] };
 export function buildCorpus(dir: string, cases: CorpusCase[]): CorpusResult[];
 export function loadObjects(dir: string): Map<string, { type: string; content: Uint8Array }>;
+
+/** One commit of a criss-cross case: name, parent names, patch over the first parent (a root's whole file map). */
+export type CommitSpec = [name: string, parents: string[], patch: Record<string, Exclude<FileSpec, { from: string }> | null>];
+
+export interface CrissCrossCase {
+  name: string;
+  expect?: 'clean' | 'conflict';
+  /** How many merge bases git reports for the tips; checked when the corpus is built. */
+  bases?: number;
+  /** In creation order; parents come first. */
+  commits: CommitSpec[];
+  ours: string;
+  theirs: string;
+}
+
+export interface CrissCrossResult {
+  name: string;
+  /** Commit oids of the tips. */
+  ours: string;
+  theirs: string;
+  /** `git merge-base --all`, sorted. */
+  bases: string[];
+  expected: CorpusResult['expected'];
+}
+
+export const CRISS_CROSS_CASES: CrissCrossCase[];
+export function crissCrossRandomCases(seed?: number, count?: number): CrissCrossCase[];
+export function allCrissCrossCases(): CrissCrossCase[];
+export function buildCrissCrossCorpus(dir: string, cases: CrissCrossCase[]): CrissCrossResult[];

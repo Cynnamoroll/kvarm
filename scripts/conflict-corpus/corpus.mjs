@@ -11,10 +11,12 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export { allCases, HAND_CASES, textCases, treeCases } from './cases.mjs';
+export { allCrissCrossCases, CRISS_CROSS_CASES, crissCrossRandomCases } from './crisscross.mjs';
 
 const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LC_ALL: 'C' };
 const MARKER = '.conflict-corpus';
@@ -203,11 +205,10 @@ export function parseMergeTree(stdout, labels) {
 }
 
 /**
- * Builds the corpus in `dir` (recreated; only a directory this module made,
- * marked by `.conflict-corpus`, is ever removed) and returns one record per
- * case with git's result.
+ * Recreates `dir` with an empty bare corpus repository; only a directory
+ * this module made, marked by `.conflict-corpus`, is ever removed.
  */
-export function buildCorpus(dir, cases) {
+function freshRepo(dir) {
   if (existsSync(dir)) {
     if (!existsSync(join(dir, MARKER))) throw new Error(`${dir} exists and is not a conflict corpus; refusing to replace it`);
     rmSync(dir, { recursive: true, force: true });
@@ -218,6 +219,12 @@ export function buildCorpus(dir, cases) {
   const init = spawnSync('git', ['init', '-q', '--bare', repo], { env: GIT_ENV });
   if (init.status !== 0) throw new Error(`git init failed: ${init.stderr.toString()}`);
   gitOk(repo, ['mktree'], '');
+  return repo;
+}
+
+/** Builds the corpus in `dir` (see freshRepo) and returns one record per case with git's result. */
+export function buildCorpus(dir, cases) {
+  const repo = freshRepo(dir);
 
   const sides = cases.map((c) => {
     const ours = applyPatch(c.base, c.ours);
@@ -241,6 +248,90 @@ export function buildCorpus(dir, cases) {
       throw new Error(`corpus case ${c.name} expected ${c.expect} but git says ${clean ? 'clean' : 'conflict'}: ${JSON.stringify(parsed.messages)}`);
     }
     return { name: c.name, base, ours, theirs, expected: { clean, tree: parsed.tree, conflicts: clean ? [] : parsed.conflicts } };
+  });
+}
+
+/**
+ * Commit objects are written literally with a fixed identity and increasing
+ * dates (one second per commit, in case order), so the corpus is
+ * reproducible and git orders merge bases by creation. No git identity
+ * configuration is read or overridden.
+ */
+const CORPUS_IDENT = 'Kvarm <kvarm@kvarm.invalid>';
+const CORPUS_EPOCH = 1_790_000_000;
+
+/**
+ * Builds the criss-cross corpus (crisscross.mjs) in `dir` and records what
+ * git does with each pair of tips: `git merge-base --all` (checked against
+ * the case's `bases`) and `git merge-tree --write-tree -z <ours> <theirs>`,
+ * which computes the merge bases itself and merges them into a virtual
+ * ancestor exactly as `git merge` with the default strategy (ort) does.
+ */
+export function buildCrissCrossCorpus(dir, cases) {
+  const repo = freshRepo(dir);
+  const maps = cases.map((c) => {
+    const files = new Map();
+    for (const [name, parents, patch] of c.commits) {
+      if (files.has(name)) throw new Error(`corpus case ${c.name}: commit ${name} is defined twice`);
+      const first = parents[0];
+      if (first !== undefined && !files.has(first)) throw new Error(`corpus case ${c.name}: ${name} names unknown parent ${first}`);
+      files.set(name, first === undefined ? { ...patch } : applyPatch(files.get(first), patch));
+    }
+    return files;
+  });
+  const allTrees = maps.flatMap((m) => [...m.values()]);
+  const blobOids = writeBlobs(
+    repo,
+    allTrees.flatMap((files) => Object.values(files).map(leaf).filter((l) => l.content)).map((l) => l.content),
+  );
+  const treeOids = writeTrees(repo, allTrees, blobOids);
+
+  let tick = 0;
+  let t = 0;
+  const bodies = [];
+  const commitOids = maps.map((m, ci) => {
+    const oids = new Map();
+    for (const [name, parents] of cases[ci].commits) {
+      const time = `${CORPUS_EPOCH + tick++} +0000`;
+      const text =
+        `tree ${treeOids[t++]}\n` +
+        parents.map((p) => `parent ${oids.get(p)}\n`).join('') +
+        `author ${CORPUS_IDENT} ${time}\ncommitter ${CORPUS_IDENT} ${time}\n\n${cases[ci].name} ${name}\n`;
+      const content = Buffer.from(text, 'utf8');
+      const oid = createHash('sha1').update(`commit ${content.length}\0`).update(content).digest('hex');
+      oids.set(name, oid);
+      bodies.push(content);
+    }
+    return oids;
+  });
+  const objDir = join(repo, 'corpus-commits');
+  mkdirSync(objDir, { recursive: true });
+  const paths = bodies.map((b, i) => {
+    const p = join(objDir, String(i));
+    writeFileSync(p, b);
+    return p;
+  });
+  const written = gitOk(repo, ['hash-object', '-w', '-t', 'commit', '--stdin-paths'], paths.join('\n') + '\n').toString().trim().split('\n');
+  rmSync(objDir, { recursive: true, force: true });
+  const expectedOids = commitOids.flatMap((m) => [...m.values()]);
+  if (written.join() !== expectedOids.join()) throw new Error('corpus: git wrote different commit ids than computed');
+
+  return cases.map((c, i) => {
+    const ours = commitOids[i].get(c.ours);
+    const theirs = commitOids[i].get(c.theirs);
+    if (!ours || !theirs) throw new Error(`corpus case ${c.name}: unknown tip`);
+    const bases = gitOk(repo, ['merge-base', '--all', ours, theirs]).toString().split('\n').filter(Boolean).sort();
+    if (c.bases !== undefined && bases.length !== c.bases) {
+      throw new Error(`corpus case ${c.name} expected ${c.bases} merge bases but git found ${bases.length}`);
+    }
+    const r = git(repo, ['merge-tree', '--write-tree', '-z', ours, theirs]);
+    if (r.status !== 0 && r.status !== 1) throw new Error(`merge-tree failed for ${c.name} (${r.status}): ${r.stderr.toString()}`);
+    const parsed = parseMergeTree(r.stdout, [ours, theirs]);
+    const clean = r.status === 0;
+    if (c.expect && (c.expect === 'clean') !== clean) {
+      throw new Error(`corpus case ${c.name} expected ${c.expect} but git says ${clean ? 'clean' : 'conflict'}: ${JSON.stringify(parsed.messages)}`);
+    }
+    return { name: c.name, ours, theirs, bases, expected: { clean, tree: parsed.tree, conflicts: clean ? [] : parsed.conflicts } };
   });
 }
 

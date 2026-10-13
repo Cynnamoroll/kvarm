@@ -67,6 +67,7 @@ import { changeSignalCleanup } from './intents/store';
 import {
   artifactsMergeSources,
   computeMergePlan,
+  isCrissCrossRefusal,
   overlaySources,
   prepareMerge,
   publishMerge,
@@ -191,6 +192,8 @@ export interface MergeabilityView {
   targetSha: string;
   headSha: string;
   mergeBase: string | null;
+  /** Every merge base when there are several (a criss-cross merged through a virtual base). */
+  mergeBases?: string[];
   treeSha: string | null;
   unknownReason?: string;
   checks: RequiredChecks | null;
@@ -270,6 +273,7 @@ function mergeabilityView(m: Mergeability): MergeabilityView {
     targetSha: m.targetSha,
     headSha: m.headSha,
     mergeBase: m.mergeBase,
+    ...(m.mergeBases ? { mergeBases: m.mergeBases } : {}),
     treeSha: m.treeSha,
     ...(m.unknownReason !== undefined ? { unknownReason: m.unknownReason } : {}),
     checks: m.checks,
@@ -297,6 +301,8 @@ export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
   dependencies?: DependencyView[];
   headSha?: string;
   recordedHead?: string;
+  /** Which criss-cross budget or limit refused a merge (`MULTIPLE_MERGE_BASES`). */
+  reason?: string;
 };
 
 export function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
@@ -437,7 +443,7 @@ type CachedPlan = MergePlanView;
 
 /** Outcomes that depend only on the two commits (never transient read failures). */
 function cacheablePlan(m: CachedPlan): boolean {
-  return m.status !== 'unknown' || m.unknownReason === 'criss-cross' || (m.unknownReason?.startsWith('max') ?? false) || m.unknownReason === 'diffBudget';
+  return m.status !== 'unknown' || isCrissCrossRefusal(m.unknownReason) || (m.unknownReason?.startsWith('max') ?? false) || m.unknownReason === 'diffBudget';
 }
 
 /**
@@ -460,7 +466,8 @@ export async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, tar
 
 /** The cached merge plan of a commit pair, without asking the checks-gate (conflict evaluation, guard base). */
 export async function mergePlanFor(ctx: ResolveContext, targetSha: string, headSha: string): Promise<CachedPlan> {
-  const key = internalKey('mergeplan/v2', ctx.repo.id, targetSha, headSha);
+  // v3: v2 entries cached criss-cross pairs as refused; they now merge through a virtual base.
+  const key = internalKey('mergeplan/v3', ctx.repo.id, targetSha, headSha);
   const hit = await readCachedJson<CachedPlan>(key);
   if (hit) return hit;
   const plan = await computeMergePlan(artifactsMergeSources(ctx), { targetSha, headSha });
@@ -474,7 +481,8 @@ export async function mergePlanFor(ctx: ResolveContext, targetSha: string, headS
 
 /**
  * The guard over the change's own edits: its merge base's tree against the
- * head tree (the base tip's when there is no single merge base). `body` is
+ * head tree (the base tip's when there is none; for a criss-cross, the first
+ * of its merge bases, architecture §3.1). `body` is
  * the base tip -> head compare body when the caller already holds it.
  */
 async function guardFor(
@@ -1187,7 +1195,10 @@ async function performMerge(
           const t = conflictTransition(row, { status: 'conflicts', headSha, targetSha, conflicts: prepared.conflicts });
           if (t) await cx.env.DB.batch(transitionStatements(cx.env.DB, cx.repo.id, { id: row.id, number: row.number, head_sha: headSha }, t, Date.now()));
         }
-        return fail(prepared.status, prepared.error, prepared.code, prepared.conflicts ? { conflicts: conflictViews(prepared.conflicts).conflicts } : {});
+        return fail(prepared.status, prepared.error, prepared.code, {
+          ...(prepared.reason !== undefined ? { reason: prepared.reason } : {}),
+          ...(prepared.conflicts ? { conflicts: conflictViews(prepared.conflicts).conflicts } : {}),
+        });
       }
       let ciCheckRef: string | null = null;
       if (prepared.value.kind === 'merge') {
