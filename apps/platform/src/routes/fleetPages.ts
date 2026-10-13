@@ -380,7 +380,7 @@ fleetRepoPages.get('/environments/:name', async (c) => {
     <div class="section-head">
       <div>
         <h2>${env.name} ${raw(pill(env.readyBuildId ? 'ready' : latest?.status ?? 'queued'))}</h2>
-        <p class="muted">${env.os} · ${env.instance} · from <code>${env.baseRef}</code>${env.pending ? ' · another build is queued' : ''}</p>
+        <p class="muted">${env.os} · ${env.instance} · from <code>${env.baseRef}</code>${env.pending ? ' · another build is queued' : ''}${latest && ready && latest.seq > ready.seq ? ` · latest build #${latest.seq} ${latest.status}` : ''}</p>
       </div>
       ${raw(
         isAdmin

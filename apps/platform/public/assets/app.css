@@ -164,8 +164,10 @@ pre {
 .section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin:16px 0 4px}
 .section-head h2{margin:0 0 4px;font-size:20px;display:flex;align-items:center;gap:8px}
 .section-head p{margin:0}
+.section-head>.btn{white-space:nowrap;flex-shrink:0}
 .actions{display:flex;gap:8px;align-items:center}
 .actions form{margin:0;display:flex;gap:8px}
+.actions .btn{height:32px;display:inline-flex;align-items:center;box-sizing:border-box}
 .btn.danger{color:var(--danger)}
 .btn.danger:hover{background:rgba(248,81,73,.12);border-color:var(--danger)}
 .pill{display:inline-block;border-radius:20px;padding:1px 9px;font-size:11px;font-weight:600;line-height:18px;border:1px solid var(--border);color:var(--fg-muted);text-transform:lowercase;vertical-align:middle}
