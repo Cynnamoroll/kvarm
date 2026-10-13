@@ -441,6 +441,7 @@ describe('queue dispatcher', () => {
       { body: pushBody('val-orphans-123', 'refs/heads/main', ZERO, A, iso(T0)) },
       { body: { type: 'cf.artifacts.repo.created', source: { type: 'artifacts', namespace: 'default', repoName: 'x' } } },
       { body: 'not json at all' },
+      { body: { kind: 'review.nudge', repoId: 'bad', changeId: 'bad', headSha: 'bad', waitingOn: 'queue', seq: 3 } },
       { body: otherNamespace },
       { body: pushBody(repo.artifactsName, 'refs/heads/main', ZERO, A, iso(T0)) },
     ]);
@@ -456,7 +457,7 @@ describe('queue dispatcher', () => {
       .map((c) => String(c[0]))
       .filter((l) => l.startsWith('{"cost"'))
       .map((l) => (JSON.parse(l) as { outcome: string; cost: { d1: number } }));
-    expect(outcomes.map((o) => o.outcome)).toEqual(['unknown-repo', 'ignored', 'ignored', 'unknown-repo', 'processed']);
+    expect(outcomes.map((o) => o.outcome)).toEqual(['unknown-repo', 'ignored', 'ignored', 'ignored', 'unknown-repo', 'processed']);
     expect(outcomes[0]!.cost.d1).toBe(1);
     expect(outcomes[1]!.cost.d1).toBe(0);
     expect(outcomes[3]!.cost.d1).toBe(0);

@@ -22,7 +22,7 @@
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
-import { modelFamilyEvidence, type EvidenceLevel } from './provenance';
+import { modelFamilyEvidence, weakerEvidence, type EvidenceLevel } from './provenance';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
 import { autoMerge, branchRef, fail, guarded, parseNumber, readChange, type ChangeContext } from './changes';
 import {
@@ -37,6 +37,8 @@ import {
   type ReviewFactsRow,
 } from './reviewGate';
 import { reviewMapAckKeys, reviewParentChangeIdsSql } from './reviewGuide';
+import { enqueueReviewNudge } from './reviewNudges';
+import { reviewAuthorSelection, reviewerCandidates, selectReviewer, type ReviewerCandidate, type ReviewerCandidateRow } from './reviewerSelection';
 
 export { HUMAN_MODEL_FAMILY };
 export const REVIEW_VERDICTS = ['approve', 'request-changes'] as const;
@@ -77,16 +79,6 @@ function actorPrincipal(actor: Actor): Principal {
   return a
     ? { id: `agent:${a.agentId}`, kind: 'agent', userId: actor.user.id, login: actor.user.login, agentId: a.agentId, agentName: a.agentName, tokenId: a.tokenId }
     : { id: `user:${actor.user.id}`, kind: 'user', userId: actor.user.id, login: actor.user.login, agentId: null, agentName: null, tokenId: null };
-}
-
-function parseAgentMeta(meta: string | null): { id: string; name: string } | null {
-  if (!meta) return null;
-  try {
-    const v = JSON.parse(meta) as { agentId?: unknown; agentName?: unknown };
-    return typeof v.agentId === 'string' && typeof v.agentName === 'string' ? { id: v.agentId, name: v.agentName } : null;
-  } catch {
-    return null;
-  }
 }
 
 function differentFamily(reviewer: string | null, author: string | null): boolean {
@@ -205,26 +197,15 @@ export interface ReviewPacket {
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function authorView(row: PacketChangeRow): AuthorView {
-  const agent = parseAgentMeta(row.agent_meta);
-  if (agent) {
-    return { principal: `agent:${agent.id}`, kind: 'agent', login: row.author_login, agent, modelFamily: row.author_family, modelFamilyEvidence: modelFamilyEvidence(row.author_family, false) };
-  }
+  const selection = reviewAuthorSelection(row.agent_meta, row.author_id, row.author_family);
   return {
-    principal: row.author_id ? `user:${row.author_id}` : null,
-    kind: 'user',
+    principal: selection.principal,
+    kind: selection.kind,
     login: row.author_login,
-    agent: null,
-    modelFamily: HUMAN_MODEL_FAMILY,
-    modelFamilyEvidence: modelFamilyEvidence(HUMAN_MODEL_FAMILY, true),
+    agent: selection.agent,
+    modelFamily: selection.modelFamily,
+    modelFamilyEvidence: selection.modelFamilyEvidence,
   };
-}
-
-const LEVEL_RANK: Record<EvidenceLevel, number> = { declared: 0, authenticated: 1, verified: 2 };
-
-/** The weaker of two evidence levels; null when either side has no family. */
-function weaker(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
-  if (a === null || b === null) return null;
-  return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
 }
 
 function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorView, 'modelFamily' | 'modelFamilyEvidence'>): ReviewView {
@@ -236,7 +217,7 @@ function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorVie
     modelFamily: r.model_family,
     modelFamilyEvidence: evidence,
     differentFamily: differentFamily(r.model_family, author.modelFamily),
-    differentFamilyEvidence: weaker(evidence, author.modelFamilyEvidence),
+    differentFamilyEvidence: weakerEvidence(evidence, author.modelFamilyEvidence),
     verdict: r.verdict,
     headSha: r.head_sha,
     current: r.head_sha === headSha,
@@ -393,6 +374,7 @@ export interface ReviewPolicyView {
   guideRequired: boolean;
   blockingFindings: 'none' | 'high-confirmed';
   dangerAckRequired: boolean;
+  nudgeAfterMinutes: number | null;
   /** False while the repo has never set a policy (no review requirement). */
   configured: boolean;
   updatedBy: string | null;
@@ -404,20 +386,22 @@ interface PolicyRow {
   guide_required: number;
   blocking_findings: string;
   danger_ack_required: number;
+  nudge_after_minutes: number | null;
   updated_by_login: string | null;
   updated_at: number;
 }
 
-const POLICY_SELECT = `SELECT p.required_reviews, p.guide_required, p.blocking_findings, p.danger_ack_required, u.login AS updated_by_login, p.updated_at
+const POLICY_SELECT = `SELECT p.required_reviews, p.guide_required, p.blocking_findings, p.danger_ack_required, p.nudge_after_minutes, u.login AS updated_by_login, p.updated_at
   FROM review_policies p LEFT JOIN users u ON u.id = p.updated_by WHERE p.repo_id = ?1`;
 
 function policyView(row: PolicyRow | null | undefined): ReviewPolicyView {
-  if (!row) return { requiredReviews: 0, guideRequired: false, blockingFindings: 'high-confirmed', dangerAckRequired: false, configured: false, updatedBy: null, updatedAt: null };
+  if (!row) return { requiredReviews: 0, guideRequired: false, blockingFindings: 'high-confirmed', dangerAckRequired: false, nudgeAfterMinutes: null, configured: false, updatedBy: null, updatedAt: null };
   return {
     requiredReviews: Number(row.required_reviews) || 0,
     guideRequired: Boolean(row.guide_required),
     blockingFindings: row.blocking_findings === 'none' ? 'none' : 'high-confirmed',
     dangerAckRequired: Boolean(row.danger_ack_required),
+    nudgeAfterMinutes: row.nudge_after_minutes,
     configured: true,
     updatedBy: row.updated_by_login,
     updatedAt: iso(row.updated_at),
@@ -433,9 +417,9 @@ export async function getReviewPolicy(env: Env, repo: RepoRow): Promise<ServiceR
 export async function setReviewPolicy(env: Env, repo: RepoRow, actor: Actor, input: unknown): Promise<ServiceResult<ReviewPolicyView>> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object with at least one policy field', 'INVALID_BODY');
   const body = input as Record<string, unknown>;
-  const allowed = ['requiredReviews', 'guideRequired', 'blockingFindings', 'dangerAckRequired'];
+  const allowed = ['requiredReviews', 'guideRequired', 'blockingFindings', 'dangerAckRequired', 'nudgeAfterMinutes'];
   if (Object.keys(body).some((key) => !allowed.includes(key))) {
-    return fail(400, 'provide one or more of requiredReviews, guideRequired, blockingFindings, dangerAckRequired', 'INVALID_BODY');
+    return fail(400, 'provide one or more of requiredReviews, guideRequired, blockingFindings, dangerAckRequired, nudgeAfterMinutes', 'INVALID_BODY');
   }
   if (Object.keys(body).length === 0) return fail(422, 'at least one review policy field is required', 'POLICY_FIELD_REQUIRED');
   const old = await env.DB.prepare(POLICY_SELECT).bind(repo.id).first<PolicyRow>();
@@ -449,20 +433,25 @@ export async function setReviewPolicy(env: Env, repo: RepoRow, actor: Actor, inp
   if (blockingFindings !== 'none' && blockingFindings !== 'high-confirmed') return fail(400, 'blockingFindings must be "none" or "high-confirmed"', 'INVALID_BLOCKING_FINDINGS');
   const dangerAckRequired = body.dangerAckRequired === undefined ? Boolean(old?.danger_ack_required) : body.dangerAckRequired;
   if (typeof dangerAckRequired !== 'boolean') return fail(400, 'dangerAckRequired must be a boolean', 'INVALID_DANGER_ACK_REQUIRED');
+  const nudgeAfterMinutes = body.nudgeAfterMinutes === undefined ? old?.nudge_after_minutes ?? null : body.nudgeAfterMinutes;
+  if (nudgeAfterMinutes !== null && (typeof nudgeAfterMinutes !== 'number' || !Number.isInteger(nudgeAfterMinutes) || nudgeAfterMinutes < 15 || nudgeAfterMinutes > 10080)) {
+    return fail(400, 'nudgeAfterMinutes must be null or an integer from 15 to 10080', 'INVALID_NUDGE_AFTER_MINUTES');
+  }
   const now = Date.now();
   const [, , read] = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO review_policies (repo_id, required_reviews, guide_required, blocking_findings, danger_ack_required, updated_by, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      `INSERT INTO review_policies (repo_id, required_reviews, guide_required, blocking_findings, danger_ack_required, nudge_after_minutes, updated_by, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
        ON CONFLICT (repo_id) DO UPDATE SET required_reviews = excluded.required_reviews, guide_required = excluded.guide_required,
          blocking_findings = excluded.blocking_findings, danger_ack_required = excluded.danger_ack_required,
+         nudge_after_minutes = excluded.nudge_after_minutes,
          updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
-    ).bind(repo.id, n, guideRequired ? 1 : 0, blockingFindings, dangerAckRequired ? 1 : 0, actor.user.id, now),
+    ).bind(repo.id, n, guideRequired ? 1 : 0, blockingFindings, dangerAckRequired ? 1 : 0, nudgeAfterMinutes, actor.user.id, now),
     env.DB.prepare(
       `INSERT INTO events (id, type, payload, processed_at, created_at)
        VALUES (?1, 'review_policy.updated', json_object('repoId', ?2, 'repo', ?3, 'requiredReviews', ?4,
-         'guideRequired', ?5, 'blockingFindings', ?6, 'dangerAckRequired', ?7, 'actor', ?8), ?9, ?9)`,
-    ).bind(crypto.randomUUID(), repo.id, `${repo.owner_login}/${repo.name}`, n, guideRequired, blockingFindings, dangerAckRequired, actor.user.login, now),
+         'guideRequired', ?5, 'blockingFindings', ?6, 'dangerAckRequired', ?7, 'nudgeAfterMinutes', ?8, 'actor', ?9), ?10, ?10)`,
+    ).bind(crypto.randomUUID(), repo.id, `${repo.owner_login}/${repo.name}`, n, guideRequired, blockingFindings, dangerAckRequired, nudgeAfterMinutes, actor.user.login, now),
     env.DB.prepare(POLICY_SELECT).bind(repo.id),
   ]);
   return { ok: true, value: policyView((read?.results as PolicyRow[] | undefined)?.[0]) };
@@ -510,7 +499,9 @@ interface ReviewTargetRow {
   head_sha: string | null;
   author_id: string | null;
   agent_meta: string | null;
+  author_family: string | null;
   merge_policy: string;
+  nudge_after_minutes: number | null;
   reviewer_family: string | null;
 }
 
@@ -539,8 +530,11 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     const target = await db
       .prepare(
         `SELECT c.id, c.number, c.state, c.base_sha, c.head_sha, c.author_id, c.agent_meta, c.merge_policy,
-                (SELECT a.model_family FROM agents a WHERE a.id = ?3) AS reviewer_family
-           FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2`,
+                p.nudge_after_minutes,
+                (SELECT a.model_family FROM agents a WHERE a.id = ?3) AS reviewer_family,
+                (SELECT a.model_family FROM agents a WHERE a.id = json_extract(c.agent_meta, '$.agentId')) AS author_family
+           FROM change_sets c LEFT JOIN review_policies p ON p.repo_id = c.repo_id
+          WHERE c.repo_id = ?1 AND c.number = ?2`,
       )
       .bind(cx.repo.id, number, me.agentId)
       .first<ReviewTargetRow>();
@@ -550,8 +544,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     if (p.headSha !== null && p.headSha !== target.head_sha) {
       return { ...fail(409, `the change's head is ${target.head_sha}, not the reviewed ${p.headSha}; review the new head`, 'HEAD_MOVED'), headSha: target.head_sha } as ServiceResult<never>;
     }
-    const authorAgent = parseAgentMeta(target.agent_meta);
-    const authorPrincipal = authorAgent ? `agent:${authorAgent.id}` : target.author_id ? `user:${target.author_id}` : null;
+    const authorPrincipal = reviewAuthorSelection(target.agent_meta, target.author_id, target.author_family).principal;
     if (authorPrincipal === me.id) {
       return fail(409, 'self-review: the author of a change cannot review it; another principal must review', 'SELF_REVIEW');
     }
@@ -677,6 +670,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     }
     let packet = buildPacket(await withRecordedEscalations(cx.env, cx.repo.id, read));
     packet = await proceedPerPolicy(cx, number, packet);
+    if (target.nudge_after_minutes !== null) await enqueueReviewNudge(cx.env, cx.repo.id, target.id, headSha);
     return { ok: true, value: { created: mine.created_at === now, review: reviewView(mine, headSha, packet.author), packet } };
   });
 }
@@ -753,24 +747,7 @@ export function resolveEscalation(cx: ChangeContext, rawNumber: string, id: stri
 // Assignment
 // ---------------------------------------------------------------------------
 
-interface CandidateRow {
-  id: string;
-  name: string;
-  owner_login: string;
-  model_family: string | null;
-  reviewed: number;
-}
-
-export interface ReviewerCandidate {
-  principal: string;
-  agent: { id: string; name: string; owner: string };
-  modelFamily: string | null;
-  modelFamilyEvidence: EvidenceLevel | null;
-  differentFamily: boolean;
-  differentFamilyEvidence: EvidenceLevel | null;
-  eligible: boolean;
-  ineligibleReason?: 'author' | 'already-reviewed';
-}
+export type { ReviewerCandidate } from './reviewerSelection';
 
 export interface Assignment {
   number: number;
@@ -825,22 +802,8 @@ export function assignReviewer(cx: ChangeContext, rawNumber: string, input: unkn
     const change = (changeRes?.results as PacketChangeRow[] | undefined)?.[0];
     if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const author = authorView(change);
-    const candidates: ReviewerCandidate[] = ((candRes?.results as CandidateRow[] | undefined) ?? []).map((a) => {
-      const principal = `agent:${a.id}`;
-      const ineligible = principal === author.principal ? 'author' : a.reviewed ? 'already-reviewed' : null;
-      return {
-        principal,
-        agent: { id: a.id, name: a.name, owner: a.owner_login },
-        modelFamily: a.model_family,
-        modelFamilyEvidence: modelFamilyEvidence(a.model_family, false),
-        differentFamily: differentFamily(a.model_family, author.modelFamily),
-        differentFamilyEvidence: weaker(modelFamilyEvidence(a.model_family, false), author.modelFamilyEvidence),
-        eligible: ineligible === null,
-        ...(ineligible ? { ineligibleReason: ineligible } : {}),
-      };
-    });
-    const eligible = candidates.filter((c) => c.eligible);
-    const assigned = eligible.find((c) => c.differentFamily) ?? eligible[0] ?? null;
+    const candidates = reviewerCandidates(author, (candRes?.results as ReviewerCandidateRow[] | undefined) ?? []);
+    const assigned = selectReviewer(candidates);
     return {
       ok: true,
       value: {

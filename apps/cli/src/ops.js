@@ -103,6 +103,10 @@ export function parseOperationArgs(op, argv) {
   const assign = (p, raw) => {
     switch (p.type) {
       case 'integer':
+        if (p.nullable && raw === 'null') {
+          args[p.name] = null;
+          return;
+        }
         if (!/^-?\d+$/.test(raw)) throw usage(`argument "${p.name}" must be an integer, got "${raw}"`);
         args[p.name] = Number(raw);
         return;

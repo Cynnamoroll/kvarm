@@ -106,6 +106,8 @@ describe('operation registry', () => {
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
     const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40) });
     expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40) }]);
+    expect(buildRequest(findOperation('set_review_policy')!, { repo: 'o/r', nudgeAfterMinutes: null }))
+      .toMatchObject({ method: 'PUT', path: '/api/v1/repos/o/r/review-policy', body: { nudgeAfterMinutes: null } });
   });
 
   it('registers the audit export and provenance key operations', () => {

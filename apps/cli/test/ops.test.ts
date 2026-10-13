@@ -129,6 +129,12 @@ describe('kvarm operations', () => {
     expect(last().url).toBe('/api/v1/repos/o/r/forecast?paths=a.ts%2Csrc%2F');
   });
 
+  it('passes null for nullable review-policy fields', async () => {
+    await kvarm(['review-policy', 'set', 'o/r', '--nudge-after-minutes', 'null']);
+    expect(last()).toMatchObject({ method: 'PUT', url: '/api/v1/repos/o/r/review-policy' });
+    expect(JSON.parse(last().body)).toEqual({ nudgeAfterMinutes: null });
+  });
+
   it('keeps commas inside decision paths: repeated flags, one literal path each', async () => {
     await kvarm(['decision', 'record', 'o/r', '--paths', 'src/a,b.ts', '--paths', 'c.md', '--chosen', 'ws-b', '--rejected', '[]', '--reason', 'r']);
     expect(last()).toMatchObject({ method: 'POST', url: '/api/v1/repos/o/r/decisions' });

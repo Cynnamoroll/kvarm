@@ -1361,6 +1361,9 @@ interface AttentionRow extends ReviewFactsRow {
   rv_checks_failing: number;
   rv_request_changes: number;
   rv_actor_reviewed: number;
+  nudged_count: number;
+  nudged_last_at: number | null;
+  nudged_suggested_principal: string | null;
 }
 
 export async function listAttention(
@@ -1393,6 +1396,9 @@ export async function listAttention(
             EXISTS (SELECT 1 FROM check_runs k WHERE k.change_set_id = c.id AND k.head_sha = c.head_sha AND k.conclusion = 'failure') AS rv_checks_failing,
             EXISTS (SELECT 1 FROM change_reviews r WHERE r.change_set_id = c.id AND r.head_sha = c.head_sha AND r.verdict = 'request-changes') AS rv_request_changes
             , EXISTS (SELECT 1 FROM change_reviews r WHERE r.change_set_id = c.id AND r.head_sha = c.head_sha AND r.principal = ?2) AS rv_actor_reviewed
+            , (SELECT COUNT(*) FROM review_nudges n WHERE n.change_set_id = c.id AND n.head_sha = c.head_sha) AS nudged_count
+            , (SELECT MAX(n.sent_at) FROM review_nudges n WHERE n.change_set_id = c.id AND n.head_sha = c.head_sha) AS nudged_last_at
+            , (SELECT n.suggested_principal FROM review_nudges n WHERE n.change_set_id = c.id AND n.head_sha = c.head_sha ORDER BY n.sent_at DESC, n.seq DESC LIMIT 1) AS nudged_suggested_principal
        FROM change_sets c WHERE c.repo_id = ?1 AND c.state IN ('open', 'conflicted')
        ORDER BY COALESCE(c.updated_at, c.created_at) ASC, c.number ASC LIMIT 501`,
   ).bind(cx.repo.id, principal).all<AttentionRow>();
@@ -1436,6 +1442,11 @@ export async function listAttention(
       risk: { score: row.risk_score, level: row.risk_level },
       updatedAt: new Date(row.updated_at ?? row.created_at).toISOString(),
       review: { approvals: { count: review.approvals, required: review.required, humans: review.humans, humansRequired: branch.requiredApprovals } },
+      nudged: row.nudged_count > 0 ? {
+        count: row.nudged_count,
+        lastAt: row.nudged_last_at === null ? null : new Date(row.nudged_last_at).toISOString(),
+        suggestedReviewer: row.nudged_suggested_principal,
+      } : null,
     };
   });
   changes.sort((a, b) => Number(b.yourTurn) - Number(a.yourTurn) || Date.parse(a.updatedAt) - Date.parse(b.updatedAt) || a.number - b.number);

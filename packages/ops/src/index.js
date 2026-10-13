@@ -22,6 +22,7 @@
  * @property {'path' | 'query' | 'body'} in
  * @property {string} description
  * @property {boolean} [required]
+ * @property {boolean} [nullable]
  * @property {boolean} [positional] CLI positional argument (in declaration order) instead of a --flag
  * @property {readonly string[]} [enum]
  * @property {'repo'} [format] `owner/name`, expanded to two encoded path segments
@@ -674,6 +675,7 @@ export const OPERATIONS = Object.freeze([
       body('guideRequired', 'boolean', 'Require a guide for the current head'),
       body('blockingFindings', 'string', 'Which open findings block publication', { enum: ['none', 'high-confirmed'] }),
       body('dangerAckRequired', 'boolean', 'Require acknowledgements for scrutinize coverage before approval'),
+      body('nudgeAfterMinutes', 'integer', 'Delay before review reminders (15-10080 minutes); null disables reminders', { nullable: true }),
     ],
   }),
   define({
@@ -1560,6 +1562,7 @@ function checkValue(p, v) {
   const fail = (/** @type {string} */ what) => {
     throw new OperationInputError(`argument "${p.name}" must be ${what}`, p.name);
   };
+  if (v === null && p.nullable) return null;
   switch (p.type) {
     case 'string':
       if (typeof v !== 'string') fail('a string');
@@ -1601,7 +1604,7 @@ export function buildRequest(op, args) {
   let hasBody = false;
   for (const p of op.params) {
     const raw = args[p.name];
-    if (raw === undefined || raw === null) {
+    if (raw === undefined || (raw === null && !p.nullable)) {
       if (p.required) throw new OperationInputError(`argument "${p.name}" is required (${p.description})`, p.name);
       continue;
     }

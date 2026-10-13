@@ -9,7 +9,7 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
@@ -33,12 +33,17 @@ class FakeWorkflow {
 }
 
 const sent: unknown[] = [];
+const sentSchedules: Array<{ body: unknown; delaySeconds?: number }> = [];
 const fakeEvents = {
-  async send(body: unknown) {
+  async send(body: unknown, options?: { delaySeconds?: number }) {
     sent.push(body);
+    sentSchedules.push({ body, delaySeconds: options?.delaySeconds });
   },
   async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push(m.body);
+    for (const m of msgs) {
+      sent.push(m.body);
+      sentSchedules.push({ body: m.body });
+    }
   },
 };
 
@@ -198,6 +203,7 @@ afterAll(() => restoreFetch());
 
 afterEach(() => {
   sent.length = 0;
+  sentSchedules.length = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -211,6 +217,7 @@ describe('review policy', () => {
       guideRequired: false,
       blockingFindings: 'high-confirmed',
       dangerAckRequired: false,
+      nudgeAfterMinutes: null,
       configured: false,
       updatedBy: null,
       updatedAt: null,
@@ -225,12 +232,15 @@ describe('review policy', () => {
     expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, {})).status).toBe(422);
     expect((await setPolicy('policy-unset', 11)).json.code).toBe('INVALID_REQUIRED_REVIEWS');
     expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, { requiredReviews: 1.5 })).status).toBe(400);
+    expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, { nudgeAfterMinutes: 14 })).json.code).toBe('INVALID_NUDGE_AFTER_MINUTES');
+    expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, { nudgeAfterMinutes: 10081 })).json.code).toBe('INVALID_NUDGE_AFTER_MINUTES');
     const set = await setPolicy('policy-unset', 2);
     expect([set.status, set.json]).toEqual([200, {
       requiredReviews: 2,
       guideRequired: false,
       blockingFindings: 'high-confirmed',
       dangerAckRequired: false,
+      nudgeAfterMinutes: null,
       configured: true,
       updatedBy: OWNER,
       updatedAt: expect.any(String),
@@ -293,6 +303,123 @@ describe('review policy', () => {
     expect([generic.status, generic.json.review.verdict]).toEqual([201, 'request-changes']);
     await call('PATCH', api('bad-review', '/changes/1'), tok.owner, { state: 'closed' });
     expect((await approve('bad-review', 1, tok.human3)).json.code).toBe('CHANGE_NOT_OPEN');
+  });
+});
+
+describe('review nudges', () => {
+  it('suggests a different-family reviewer once, records two sequences, and costs bounded D1 work', async () => {
+    const { repo } = await setup('nudge-sequence');
+    await call('PUT', api('nudge-sequence', '/review-policy'), tok.owner, { requiredReviews: 1, nudgeAfterMinutes: 15 });
+    const author = await agent('nudge-sequence', 'nudge-author', 'claude');
+    const candidate = await agent('nudge-sequence', 'nudge-reviewer', 'gpt');
+    expect((await createChange('nudge-sequence', 'agents/b1', author.token)).status).toBe(201);
+    const change = await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ?1 AND number = 1')
+      .bind(repoIds['nudge-sequence']).first<{ id: string; head_sha: string }>();
+    const first = sent.find((item) => (item as { kind?: string }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id) as Record<string, unknown>;
+    expect(first).toMatchObject({ waitingOn: 'reviewers', seq: 1 });
+
+    const consumeWithCost = async (body: unknown) => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      await deliver(body);
+      const costLine = log.mock.calls.map((args) => String(args[0])).find((line) => line.startsWith('{"cost"') && line.includes('"outcome":"nudge"'));
+      log.mockRestore();
+      expect(costLine).toBeDefined();
+      return (JSON.parse(costLine!) as { cost: { d1: number; art: number } }).cost;
+    };
+    const coldCost = await consumeWithCost({ ...first, notBefore: Date.now() - 1 });
+    expect(coldCost).toMatchObject({ art: 0 });
+    expect(coldCost.d1).toBeLessThanOrEqual(6);
+
+    const eventRows = () => env.DB.prepare(
+      `SELECT payload FROM events WHERE type = 'review.nudged' AND json_extract(payload, '$.changeId') = ?1 ORDER BY created_at`,
+    ).bind(change!.id).all<{ payload: string }>();
+    const firstEvents = (await eventRows()).results ?? [];
+    expect(firstEvents).toHaveLength(1);
+    const payload = JSON.parse(firstEvents[0]!.payload) as { suggestedReviewer: { principal: string; modelFamily: string; modelFamilyEvidence: string; differentFamily: boolean; differentFamilyEvidence: string } };
+    expect(payload.suggestedReviewer).toMatchObject({
+      principal: `agent:${candidate.id}`,
+      modelFamily: 'gpt',
+      modelFamilyEvidence: 'declared',
+      differentFamily: true,
+      differentFamilyEvidence: 'declared',
+    });
+    const nudgeRow = await env.DB.prepare(
+      'SELECT suggested_principal FROM review_nudges WHERE change_set_id = ?1 AND seq = 1',
+    ).bind(change!.id).first<{ suggested_principal: string }>();
+    expect(nudgeRow?.suggested_principal).toBe(`agent:${candidate.id}`);
+
+    const seq2Count = sent.filter((item) => (item as { kind?: string; changeId?: string; seq?: number }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id && (item as { seq?: number }).seq === 2).length;
+    const warmCost = await consumeWithCost({ ...first, notBefore: Date.now() - 1 });
+    expect((await eventRows()).results).toHaveLength(1);
+    expect(sent.filter((item) => (item as { kind?: string; changeId?: string; seq?: number }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id && (item as { seq?: number }).seq === 2)).toHaveLength(seq2Count);
+    console.log(JSON.stringify({ reviewNudgeConsumerColdCost: coldCost, reviewNudgeConsumerWarmCost: warmCost }));
+
+    const second = sent.find((item) => (item as { kind?: string; changeId?: string; seq?: number }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id && (item as { seq?: number }).seq === 2) as Record<string, unknown>;
+    await deliver({ ...second, notBefore: Date.now() - 1 });
+    await deliver({ ...second, notBefore: Date.now() - 1 });
+    expect((await eventRows()).results).toHaveLength(2);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM review_nudges WHERE change_set_id = ?1').bind(change!.id).first<{ n: number }>().then((r) => r?.n)).toBe(2);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_escalations WHERE change_set_id = ?1').bind(change!.id).first<{ n: number }>().then((r) => r?.n)).toBe(0);
+    expect(repo.refs.get('refs/heads/agents/b1')).toBe(change!.head_sha);
+  });
+
+  it('suppresses reminders after a head move, a waitingOn change, closure, or policy disable', async () => {
+    const scenarios = ['nudge-head-moved', 'nudge-waiting-changed', 'nudge-closed', 'nudge-disabled'] as const;
+    for (const name of scenarios) {
+      await setup(name);
+      await call('PUT', api(name, '/review-policy'), tok.owner, { requiredReviews: 1, nudgeAfterMinutes: 15 });
+      expect((await createChange(name, 'b1')).status).toBe(201);
+      const change = await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ?1 AND number = 1')
+        .bind(repoIds[name]).first<{ id: string; head_sha: string }>();
+      const message = sent.find((item) => (item as { kind?: string }).kind === 'review.nudge' &&
+        (item as { changeId?: string }).changeId === change!.id) as Record<string, unknown>;
+      if (name === 'nudge-head-moved') {
+        await env.DB.prepare('UPDATE change_sets SET head_sha = ?2 WHERE id = ?1').bind(change!.id, 'f'.repeat(40)).run();
+      } else if (name === 'nudge-waiting-changed') {
+        await env.DB.prepare('UPDATE review_policies SET required_reviews = 0 WHERE repo_id = ?1').bind(repoIds[name]).run();
+      } else if (name === 'nudge-closed') {
+        await env.DB.prepare("UPDATE change_sets SET state = 'closed' WHERE id = ?1").bind(change!.id).run();
+      } else {
+        await env.DB.prepare('UPDATE review_policies SET nudge_after_minutes = NULL WHERE repo_id = ?1').bind(repoIds[name]).run();
+      }
+      await deliver({ ...message, notBefore: Date.now() - 1 });
+      const count = await env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM events WHERE type = 'review.nudged' AND json_extract(payload, '$.changeId') = ?1`,
+      ).bind(change!.id).first<{ n: number }>();
+      expect(count?.n, name).toBe(0);
+    }
+  });
+
+  it('schedules an enabled reminder when a change head moves', async () => {
+    const { repo } = await setup('nudge-head-schedule');
+    await call('PUT', api('nudge-head-schedule', '/review-policy'), tok.owner, { requiredReviews: 1, nudgeAfterMinutes: 15 });
+    expect((await createChange('nudge-head-schedule', 'b1')).status).toBe(201);
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = 1')
+      .bind(repoIds['nudge-head-schedule']).first<{ id: string }>();
+    const headSha = await moveHead(repo, 'nudge-head-schedule', 1);
+    expect(sent.filter((item) => (item as { kind?: string }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id &&
+      (item as { headSha?: string }).headSha === headSha)).toHaveLength(1);
+  });
+
+  it('caps queue delays and reschedules a long-window remainder', async () => {
+    await setup('nudge-long-window');
+    await call('PUT', api('nudge-long-window', '/review-policy'), tok.owner, { requiredReviews: 1, nudgeAfterMinutes: 10080 });
+    expect((await createChange('nudge-long-window', 'b1')).status).toBe(201);
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = 1')
+      .bind(repoIds['nudge-long-window']).first<{ id: string }>();
+    const message = sent.find((item) => (item as { kind?: string }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id) as Record<string, unknown>;
+    const scheduled = sentSchedules.find((item) => (item.body as { kind?: string; changeId?: string }).kind === 'review.nudge' &&
+      (item.body as { changeId?: string }).changeId === change!.id);
+    expect(scheduled?.delaySeconds).toBe(43_200);
+    const before = sentSchedules.length;
+    await deliver({ ...message, notBefore: Date.now() + 86_400_000 });
+    expect(sentSchedules.slice(before).map((item) => item.delaySeconds)).toEqual([43_200]);
   });
 });
 

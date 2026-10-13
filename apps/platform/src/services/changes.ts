@@ -19,6 +19,7 @@
 import { ZERO_OID, type MergeResolution } from '@kvarm/gitops';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
+import { enqueueReviewNudge } from './reviewNudges';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
@@ -134,6 +135,7 @@ export interface ChangeRow {
   created_at: number;
   updated_at: number | null;
   merge_policy: MergePolicy;
+  nudge_after_minutes: number | null;
   risk_score: number | null;
   risk_level: string | null;
   risk_reasons: string | null;
@@ -151,6 +153,7 @@ const CHANGE_SELECT = `SELECT c.id, c.repo_id, c.number, c.title, c.body, c.base
        c.state, c.author_id, u.login AS author_login, c.agent_meta, c.merge_commit, c.merged_at, c.created_at,
        c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.conflicts,
        (SELECT q.state FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queue_state,
+       (SELECT p.nudge_after_minutes FROM review_policies p WHERE p.repo_id = c.repo_id) AS nudge_after_minutes,
        (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1) AS workspace_id
   FROM change_sets c LEFT JOIN users u ON u.id = c.author_id`;
 
@@ -838,6 +841,9 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       }
     }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
+    if (row.state === 'open' && row.head_sha && row.nudge_after_minutes !== null) {
+      await enqueueReviewNudge(cx.env, cx.repo.id, row.id, row.head_sha);
+    }
     return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks } };
   });
 }
@@ -968,6 +974,9 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
       );
     }
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
+    if ((p.state === 'open' || p.mergePolicy !== undefined) && row.state === 'open' && row.head_sha && row.nudge_after_minutes !== null) {
+      await enqueueReviewNudge(cx.env, cx.repo.id, row.id, row.head_sha);
+    }
     return { ok: true, value: changeView(row) };
   });
 }
@@ -1537,6 +1546,7 @@ export interface ChangeOnRef {
   state?: ChangeState;
   policy: MergePolicy;
   headSha: string | null;
+  nudgeAfterMinutes?: number | null;
   /** The head its active merge-queue entry approved, when the change is queued. */
   queuedHead?: string | null;
 }
@@ -1561,6 +1571,11 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
   async (e) => {
     const repo = await e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId).first<RepoRow>();
     if (repo) await queueChangeCi(e.env, repo, e.change.id, e.headSha);
+  },
+  async (e) => {
+    if (e.change.nudgeAfterMinutes !== null && e.change.nudgeAfterMinutes !== undefined) {
+      await enqueueReviewNudge(e.env, e.repoId, e.change.id, e.headSha);
+    }
   },
 ];
 

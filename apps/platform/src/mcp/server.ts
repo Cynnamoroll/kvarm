@@ -69,6 +69,7 @@ function paramSchema(p: Param): z.ZodType {
       s = p.enum ? z.enum(p.enum as [string, ...string[]]) : z.string();
   }
   s = s.describe(p.description);
+  if (p.nullable) s = s.nullable();
   return p.required ? s : s.optional();
 }
 

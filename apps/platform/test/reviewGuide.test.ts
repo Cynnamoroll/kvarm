@@ -618,7 +618,16 @@ describe('guided review endpoints', () => {
     })).status).toBe(200);
     const carried = await call('GET', childPath, tokens.reviewer);
     expect((carried.json.units as Array<{ path: string; acked: boolean }>).find((unit) => unit.path === 'src/a.ts')?.acked).toBe(true);
-    expect((await call('POST', api('review-stack-flow', '/changes/2/approve'), tokens.reviewer, { headSha: bHead })).status).toBe(201);
+    const verdictWithParent = await call('POST', api('review-stack-flow', '/changes/2/approve'), tokens.reviewer, { headSha: bHead });
+    expect(verdictWithParent.status).toBe(201);
+    costs['POST verdict with parent'] = verdictWithParent.cost;
+    expect(verdictWithParent.cost).toMatchObject({ art: 0 });
+    expect(verdictWithParent.cost.d1).toBeLessThanOrEqual(3);
+    const warmVerdictWithParent = await call('POST', api('review-stack-flow', '/changes/2/approve'), tokens.reviewer, { headSha: bHead });
+    expect(warmVerdictWithParent.status).toBe(200);
+    costs['POST verdict with parent warm'] = warmVerdictWithParent.cost;
+    expect(warmVerdictWithParent.cost).toMatchObject({ art: 0 });
+    expect(warmVerdictWithParent.cost.d1).toBeLessThanOrEqual(3);
     const parentWithChild = await call('GET', guidePath, tokens.owner);
     expect(parentWithChild.json.stack.children).toEqual([expect.objectContaining({ number: 2, waitingOn: expect.any(String) })]);
 
@@ -639,6 +648,8 @@ describe('guided review endpoints', () => {
       'GET review guide': expect.any(Object),
       'GET review guide with stack cold': expect.any(Object),
       'GET review guide with stack warm': expect.any(Object),
+      'POST verdict with parent': expect.any(Object),
+      'POST verdict with parent warm': expect.any(Object),
       'POST submit guide': expect.any(Object),
       'POST review ack': expect.any(Object),
       'POST submit findings': expect.any(Object),

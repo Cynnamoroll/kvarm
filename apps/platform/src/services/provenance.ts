@@ -266,6 +266,14 @@ export function modelFamilyEvidence(family: string | null, human: boolean): Evid
   return human ? 'authenticated' : 'declared';
 }
 
+const LEVEL_RANK: Record<EvidenceLevel, number> = { declared: 0, authenticated: 1, verified: 2 };
+
+/** The weaker of two evidence levels; null when either side has no family. */
+export function weakerEvidence(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
+  if (a === null || b === null) return null;
+  return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
+}
+
 // ---------------------------------------------------------------------------
 // Repository keys (admin)
 // ---------------------------------------------------------------------------
