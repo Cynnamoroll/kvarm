@@ -210,7 +210,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0023_snapshot_encoding` | stored-object encoding and compressed size on snapshot trees (§11.5) |
 | `0024_publication_intents` | durable merge-queue publication intents and their reconciled outcomes (§11.4) |
 | `0026_branch_rule_guard_completeness` | per-rule `guardCompleteness` (`advisory` default, `required` blocks an incomplete `kvarm/guard`) (§0.3, §11.1) |
-| `0028_issue_automation` | issue sources, fingerprints, occurrences and close records, issue links to changes and workspaces, and comment attribution |
+| `0034_issue_automation` | issue sources, fingerprints, occurrences and close records, issue links to changes and workspaces, and comment attribution |
 
 ## 7. Testing
 
