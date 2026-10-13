@@ -23,6 +23,12 @@ declare global {
      * webhooks API answers 503 WEBHOOKS_NOT_CONFIGURED.
      */
     WEBHOOK_SECRET_KEY?: string;
+    /**
+     * Optional: instance-wide trusted execution-service public keys for
+     * verified provenance (raw Ed25519, base64url, comma- or
+     * whitespace-separated). Public keys, so a var or a secret both work.
+     */
+    KVARM_PROVENANCE_KEYS?: string;
     /** Workers Rate Limiting: 600 requests/min per key. */
     READ_LIMITER: RateLimit;
     /** Workers Rate Limiting: 120 requests/min per key. */

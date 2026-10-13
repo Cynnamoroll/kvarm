@@ -178,8 +178,9 @@ All repository routes live under `/api/v1/repos/:owner/:repo/...`. The README's 
 | workspaces and Nexus | `POST workspaces {task, agent}`, `GET workspaces`, `POST workspaces/:id/change-set`, `POST workspaces/:id/abandon`, `GET/POST workspaces/:id/intent`, `GET forecast`, `GET workspaces/overlap` (the only overlap surface, §0.1) |
 | candidates | `GET candidates?base=&workspaces=a,b,c` (the list is the explicit candidate set), `POST candidates/compose`, arenas |
 | tasks | `GET tasks`, `POST tasks/:id/claim`, `POST tasks/:id/heartbeat`, `POST tasks/:id/complete` |
-| attribution | `GET/POST commits/:sha/attribution`, `POST decisions`, `GET context?task=\|path=` |
+| attribution | `GET/POST commits/:sha/attribution` (with `evidence`, §9), `POST decisions`, `GET context?task=\|path=` |
 | webhooks | `GET/POST webhooks {url, events}`, `GET/PATCH/DELETE webhooks/:id`, `POST webhooks/:id/rotate-secret`, `POST webhooks/:id/ping`, `GET webhooks/:id/deliveries` (human repo admins) |
+| provenance | `GET audit?since=&until=&format=json\|ndjson` (repo admins), `GET/POST provenance-keys`, `DELETE provenance-keys/:id` (§9) |
 | MCP | `POST /mcp`, stateless Streamable HTTP; every registry operation is a tool |
 
 ## 6. Data model
@@ -210,6 +211,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0023_snapshot_encoding` | stored-object encoding and compressed size on snapshot trees (§11.5) |
 | `0024_publication_intents` | durable merge-queue publication intents and their reconciled outcomes (§11.4) |
 | `0025_ci_flakes` | the flake registry and per-name check quarantine (retry-then-classify, §0.3) |
+| `0030_provenance_audit` | attribution evidence levels, the `ref_updates` ledger of gate pushes, merges and train publications, the `audit_commits` export index and trusted provenance keys (§9) |
 | `0026_branch_rule_guard_completeness` | per-rule `guardCompleteness` (`advisory` default, `required` blocks an incomplete `kvarm/guard`) (§0.3, §11.1) |
 | `0027_hosted_ci` | the per-repository hosted CI opt-in flag (§0.5) |
 | `0028_train_exits` | the partial index behind the train view's exit history (§11.4, §11.6) |
@@ -234,6 +236,28 @@ The README's "Deploy from zero" and "Redeploy an existing deployment" sections a
 - **Merge policy and the queue.** Enqueueing a `review` change approves its current head only; configured separate-review requirements remain additional gates. A draft cannot be enqueued (`409`). A head change stales approvals. A fast-forward merge reports `mergeCommit` equal to the head.
 - **Workspaces.** The workspace ref is created server-side at the base head when the workspace is created. Abandoning a workspace deletes its ref and sets its status to `abandoned`; nothing is deleted automatically. Tasks are repository-scoped.
 - **Attribution and decisions.** An attribution note is `{agent, session, promptHash, model?, actor, at}` on `refs/notes/kvarm-attribution`. Decision records and `get_context` are described in §0.4.
+- **Provenance evidence levels.** The note records what a caller asserted. Kvarm cannot observe which model produced a commit, so every attribution reply (`GET`/`POST commits/:sha/attribution`, the audit export) carries `evidence {level, reasons, principal, tokenKind, tokenPrefix, runId, keyId}`, computed server-side at write time (`services/provenance.ts`) and stored in D1, never taken from the request:
+
+  | level | what it proves |
+  | --- | --- |
+  | `declared` | The agent or caller asserts a model and session. Nothing binds the record to the submitter: a human credential writing agent metadata, agent A naming agent B, or a note on the ref that Kvarm did not write. |
+  | `authenticated` | The credential proves which Kvarm principal submitted the record: an agent token of the agent it names, or a human naming themself. It proves who submitted it, not which model ran or what the prompt was. |
+  | `verified` | A trusted execution service signed evidence linking run, model, input identity (the prompt hash) and the produced commit, and the record is also authenticated. |
+
+  The levels are a ladder: evidence that fails verification (unknown or revoked key, bad signature, a field that differs from the signed one) leaves the record `authenticated` or `declared`, and `reasons` says why (`no-signed-evidence`, `unknown-key`, `bad-signature`, `agent-not-submitter`, `human-submitted-agent-metadata`, `note-written-outside-kvarm`, …). The stored row keeps the principal id and the credential's public prefix only. A reader compares the SHA-256 of the note bytes with the stored digest, so a note pushed to the notes ref around Kvarm reads as `declared`.
+
+  Signed evidence is `{keyId, runId, signature}` in the attribution write. The signature is Ed25519 (WebCrypto) over the UTF-8 bytes of exactly five newline-terminated lines, with the record's `model` and `promptHash` and the target commit:
+
+  ```
+  kvarm-provenance-v1
+  run:<runId>
+  model:<model>
+  input:<promptHash>
+  commit:<40-hex commit sha>
+  ```
+
+  Fields may not contain control characters. Trusted keys are raw 32-byte Ed25519 public keys (base64url) whose id is the first 16 hex characters of their SHA-256: per repository through `add_provenance_key` (repo admins; revoked keys verify nothing new) or per instance through the `KVARM_PROVENANCE_KEYS` variable (comma- or whitespace-separated). Agent `modelFamily` values are self-declared at principal creation, so reviews and reviewer assignment report `modelFamilyEvidence: declared` for agents (`authenticated` for the `human` family) and label the cross-model preference with the weaker of the two levels.
+- **Audit export.** `GET audit` (repo admins; anonymous `401`, otherwise the shared concealment rule) returns one record per commit Kvarm has seen through an attribution write or a ref update: agent, session, prompt hash, model, evidence level and basis, the attribution credential's token prefix, the gate pushes that made it a ref tip and the merges (`merge` for an explicit merge, `queue` for a train publication) that published it. Records are ordered by first-seen time and sha with an opaque `(time, sha)` cursor, so pages stay stable while new commits arrive; `since` (inclusive) and `until` (exclusive) filter on first-seen time. `format=ndjson` writes one record per line and then a `{"page": {…}}` line. The ledger is written by the git gate in the same D1 batch as `pushed_at` (confirmed refs only), by the explicit merge in its record batch, and for train publications by a trigger on the queue's own `published` transition, which carries the enqueuing principal (and an agent's token prefix; the queue does not record a human enqueuer's PAT id). Full tokens are never stored or exported.
 - **Agent review policy.** See §0.4. Approvals are revalidated immediately before publication; agent approvals never satisfy a protected target's human-approval requirement.
 - **Semantic conflict.** A composition that merges cleanly but fails a required check on the composed tree is a semantic conflict, distinct from a textual one.
 
@@ -242,7 +266,7 @@ The README's "Deploy from zero" and "Redeploy an existing deployment" sections a
 - **Meter.** `cost/meter.ts` wraps bindings in counting proxies for every request. It counts D1 round trips with rows read and written, Artifacts RPCs, Durable Object calls, R2 class A and class B operations, queue sends, outbound subrequests and the Cache API result. The counters are application work counts, not a bill: CPU, duration, storage and post-response background work are not included.
 - **Header.** Every response carries `x-kvarm-cost: d1=…;rr=…;rw=…;art=…;do=…;r2a=…;r2b=…;q=…;sub=…;cache=hit|miss|none|bypass`, with counts only.
 - **Background work.** The queue consumer, Workflows and the `MergeLock` Durable Object log the same counters per message, step or run, and store the last run's counters where an API exposes them (for example a snapshot's `buildCost`).
-- **Authority before metadata and content.** Every repository metadata and content response (REST, git gate, pages, compare, snapshots and MCP repository tools) runs one bounded indexed D1 authority lookup before returning anything, including a cached hit (§11.1). That lookup is the authority component (`d1 ≤ 1`, `rr ≤ 8`, `do = 0`), not a cap on the whole request. A fully cached body totals `d1 ≤ 1`; a response that also reads its own service row (snapshot metadata or download, workspace list, queue read, cold compare) totals `d1 ≤ 2`; a bounded paginated service read (the dependency list) totals `d1 ≤ 3`. Writes authorize authoritatively and are not served from cache.
+- **Authority before metadata and content.** Every repository metadata and content response (REST, git gate, pages, compare, snapshots and MCP repository tools) runs one bounded indexed D1 authority lookup before returning anything, including a cached hit (§11.1). That lookup is the authority component (`d1 ≤ 1`, `rr ≤ 8`, `do = 0`), not a cap on the whole request. A fully cached body totals `d1 ≤ 1`; a response that also reads its own service row (snapshot metadata or download, workspace list, queue read, cold compare) totals `d1 ≤ 2`; a bounded paginated service read (the dependency list) totals `d1 ≤ 3`; an audit export page (§9) is the authority lookup plus one indexed read, `d1 = 2`. Writes authorize authoritatively and are not served from cache.
 - **Other budgets.** The git gate makes no Durable Object call (`do = 0`). A cold compare costs at most `treeReads + blobReads + 3` Artifacts calls, with one documented exception of `+4` for a first-ever compare against a base off the head's first-parent chain in a colo with no cached token. Write endpoints batch their D1 statements; the queue consumer uses one D1 batch per message plus required work; an MCP tool call costs the same as the equivalent REST call. PAT `last_used_at` stamping is throttled to one write per token every 10 minutes.
 - **Measured values.** [`docs/benchmarks/README.md`](benchmarks/README.md) records the median counters per endpoint, and `scripts/cost-sweep.mjs` re-checks every budget row against a deployed worker.
 

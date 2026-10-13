@@ -22,6 +22,7 @@ import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal'
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
+import { mergeAuditStatement } from './audit';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
@@ -1355,7 +1356,9 @@ async function performMerge(
       const pv = prepared.value;
       const mergedAt = Date.now();
       const record = mergedRecordStatements(cx.env.DB, cx.repo.id, row, { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha }, mergedAt);
-      const recorded = await cx.env.DB.batch([...record, changeSelect(cx.env.DB, cx.repo.id, row.number)]);
+      // The ref moved whether or not the change row records it, so the audit ledger notes the publication either way.
+      const audit = mergeAuditStatement(cx.env.DB, cx.repo.id, cx.actor, { ref: targetRef, previous: pv.targetSha, mergeCommit: pv.mergeCommit, change: row.number }, mergedAt);
+      const recorded = await cx.env.DB.batch([...record, audit, changeSelect(cx.env.DB, cx.repo.id, row.number)]);
       const update = recorded[0];
       const read = recorded[recorded.length - 1];
       await settleLanded(

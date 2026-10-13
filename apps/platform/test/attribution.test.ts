@@ -140,7 +140,10 @@ describe('commit attribution notes', () => {
     const main = await based(repo);
     const r = await setAttr('set', main.sha, { agent: 'claude-code-1', session: 'sess-abc', promptHash: HASH, model: 'm-1' });
     expect(r.status).toBe(201);
-    expect(Object.keys(r.json)).toEqual(['agent', 'session', 'promptHash', 'model', 'actor', 'at']);
+    // The reply is the note plus the server-computed evidence (services/provenance.ts).
+    expect(Object.keys(r.json)).toEqual(['agent', 'session', 'promptHash', 'model', 'actor', 'at', 'evidence']);
+    const { evidence, ...record } = r.json;
+    expect(evidence).toMatchObject({ level: 'declared', reasons: ['human-submitted-agent-metadata', 'no-signed-evidence'], tokenKind: 'pat' });
     expect(r.json).toMatchObject({ agent: 'claude-code-1', session: 'sess-abc', promptHash: HASH, model: 'm-1', actor: OWNER });
     expect(new Date(r.json.at).toISOString()).toBe(r.json.at);
 
@@ -148,7 +151,7 @@ describe('commit attribution notes', () => {
     const tip = repo.refs.get(KVARM_NOTES_REF)!;
     expect(repo.calls).toContain(`receivePack:${KVARM_NOTES_REF}:${'0'.repeat(40)}->${tip}`);
     const note = await gitNote(repo, main.sha);
-    expect(JSON.parse(note!)).toEqual(r.json);
+    expect(JSON.parse(note!)).toEqual(record);
     expect(note!.endsWith('\n')).toBe(true);
 
     const got = await getAttr('set', main.sha);
@@ -159,11 +162,11 @@ describe('commit attribution notes', () => {
     const second = await commit(repo, { 'README.md': 'two\n' }, [main.sha]);
     const r2 = await setAttr('set', second.sha, { agent: 'a2', session: 's2', promptHash: HASH });
     expect(r2.status).toBe(201);
-    expect(Object.keys(r2.json)).toEqual(['agent', 'session', 'promptHash', 'actor', 'at']);
+    expect(Object.keys(r2.json)).toEqual(['agent', 'session', 'promptHash', 'actor', 'at', 'evidence']);
     // The second note commit sits on the first; both notes stay readable.
     const tip2 = repo.refs.get(KVARM_NOTES_REF)!;
     expect(decode(repo.objects.get(tip2)!.content)).toContain(`parent ${tip}\n`);
-    expect(JSON.parse((await gitNote(repo, main.sha))!)).toEqual(r.json);
+    expect(JSON.parse((await gitNote(repo, main.sha))!)).toEqual(record);
     expect((await getAttr('set', second.sha)).json).toEqual(r2.json);
   });
 
@@ -274,7 +277,8 @@ describe('commit attribution notes', () => {
     const a = await getAttr('merge', sha);
     expect(a.status).toBe(200);
     expect(a.json).toMatchObject({ agent: 'claude-code-1', session: 'sess-merge', promptHash: HASH, model: 'm-2', actor: OWNER });
-    expect(JSON.parse((await gitNote(repo, sha))!)).toEqual(a.json);
+    const { evidence: _evidence, ...note } = a.json;
+    expect(JSON.parse((await gitNote(repo, sha))!)).toEqual(note);
 
     // Without request fields the merging principal names itself.
     const f2 = await commit(repo, { 'README.md': 'readme\n', 'a.txt': 'A\n', 'b.txt': 'B\n', 'c.txt': 'C\n' }, [feature.sha]);
