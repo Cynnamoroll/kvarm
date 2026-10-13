@@ -165,6 +165,27 @@ interface JobRow {
   status: string;
 }
 
+/**
+ * What the platform knows about whose code a claimed job runs, so a runner
+ * can decide before executing it whether to trust it (apps/cli runner trust
+ * policy). The pusher of the head commit is not recorded anywhere, so this is
+ * the change's author and head ref, not the identity that pushed `sha`.
+ */
+export interface JobProvenance {
+  /** The change the job belongs to, or null for a job without one. */
+  changeNumber: number | null;
+  /** The change's head branch (without refs/heads/). */
+  headRef: string | null;
+  /** 'head' when `sha` is the change's current head; 'prepared' for a platform-built merge commit or a superseded head. */
+  commit: 'head' | 'prepared';
+  /** 'agent' when an agent token opened the change or its head is an agent workspace ref. */
+  authorKind: 'human' | 'agent' | 'unknown';
+  authorLogin: string | null;
+  agent: { id: string; name: string } | null;
+  /** The head ref is in the agent workspace namespace, which only agents may push. */
+  agentWorkspaceRef: boolean;
+}
+
 export interface ClaimedJob {
   id: string;
   name: string;
@@ -177,6 +198,45 @@ export interface ClaimedJob {
   leaseSeconds: number;
   timeoutSeconds: number;
   required: boolean;
+  /** Present on claim responses only. */
+  provenance?: JobProvenance;
+}
+
+interface ProvenanceRow {
+  change_number: number | null;
+  change_head_ref: string | null;
+  change_head_sha: string | null;
+  change_agent_meta: string | null;
+  change_author_login: string | null;
+}
+
+const WORKSPACE_HEAD_PREFIX = 'agents/';
+
+function agentOf(meta: string | null): { id: string; name: string } | null {
+  if (!meta) return null;
+  try {
+    const v = JSON.parse(meta) as { agentId?: unknown; agentName?: unknown };
+    return typeof v.agentId === 'string' ? { id: v.agentId, name: typeof v.agentName === 'string' ? v.agentName : v.agentId } : null;
+  } catch {
+    return null;
+  }
+}
+
+function provenanceOf(r: JobRow & ProvenanceRow): JobProvenance {
+  const headRef = r.change_head_ref;
+  const agentWorkspaceRef = headRef !== null && (headRef.startsWith(WORKSPACE_HEAD_PREFIX) || headRef.startsWith(`refs/heads/${WORKSPACE_HEAD_PREFIX}`));
+  const agent = agentOf(r.change_agent_meta);
+  // Unparseable agent metadata still means an agent opened the change.
+  const authorKind = r.change_number === null ? 'unknown' : agent || r.change_agent_meta || agentWorkspaceRef ? 'agent' : r.change_author_login ? 'human' : 'unknown';
+  return {
+    changeNumber: r.change_number,
+    headRef,
+    commit: r.change_head_sha !== null && r.change_head_sha === r.head_sha ? 'head' : 'prepared',
+    authorKind,
+    authorLogin: r.change_author_login,
+    agent,
+    agentWorkspaceRef,
+  };
 }
 
 function jobView(r: JobRow): ClaimedJob {
@@ -230,12 +290,17 @@ export async function claimJob(env: Env, repo: RepoRow, input: unknown): Promise
        ON CONFLICT(repo_id, sha) DO NOTHING`,
     ).bind(repo.id, now, claimId),
     env.DB.prepare(
-      `SELECT id, name, command, head_sha, tree_sha, generation, claimed_by, lease_until, timeout_seconds, required, status
-         FROM ci_jobs WHERE repo_id = ?1 AND claim_id = ?2`,
+      `SELECT j.id, j.name, j.command, j.head_sha, j.tree_sha, j.generation, j.claimed_by, j.lease_until, j.timeout_seconds, j.required, j.status,
+              c.number AS change_number, c.head_ref AS change_head_ref, c.head_sha AS change_head_sha, c.agent_meta AS change_agent_meta,
+              u.login AS change_author_login
+         FROM ci_jobs j
+         LEFT JOIN change_sets c ON c.id = j.change_set_id
+         LEFT JOIN users u ON u.id = c.author_id
+        WHERE j.repo_id = ?1 AND j.claim_id = ?2`,
     ).bind(repo.id, claimId),
   ]);
   if ((claimed?.results?.length ?? 0) === 0) return { ok: true, value: null };
-  const row = (read?.results as JobRow[] | undefined)?.[0];
+  const row = (read?.results as Array<JobRow & ProvenanceRow> | undefined)?.[0];
   if (!row) return fail(500, 'claimed CI job could not be read', 'CLAIM_FAILED');
   const snapshotId = `snap-${repo.id}-${row.head_sha}`;
   try {
@@ -244,7 +309,7 @@ export async function claimJob(env: Env, repo: RepoRow, input: unknown): Promise
     // A push, workflow, checkout, or earlier claim may already own the same immutable build.
     await env.SNAPSHOT_BUILDER.get(snapshotId).catch(() => undefined);
   }
-  return { ok: true, value: jobView(row) };
+  return { ok: true, value: { ...jobView(row), provenance: provenanceOf(row) } };
 }
 
 interface FenceInput {
