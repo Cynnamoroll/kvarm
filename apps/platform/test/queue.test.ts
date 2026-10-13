@@ -238,7 +238,7 @@ describe('enqueue, dequeue and the queue read', () => {
       [one, 1, 'queued'],
       [two, 2, 'queued'],
     ]);
-    expect(q.json.limits).toEqual({ window: 8, runnerCapacity: TRAIN_LIMITS.runnerCapacity, admissionCapacity: TRAIN_LIMITS.admissionCapacity });
+    expect(q.json.limits).toEqual({ window: TRAIN_LIMITS.window, runnerCapacity: TRAIN_LIMITS.runnerCapacity, admissionCapacity: TRAIN_LIMITS.admissionCapacity });
     expect((await getChange('order', one)).json.queueState).toBe('queued');
 
     const d = await dequeue('order', one);
@@ -403,34 +403,35 @@ describe('integration train', () => {
     expect(checks.some((e) => e.baseSha === first)).toBe(true);
   });
 
-  it('keeps speculation within the window of eight and checking within runner capacity, with observable states', async () => {
-    const { repo, main, numbers } = await setup('window', 10);
+  it(`keeps speculation within the window of ${TRAIN_LIMITS.window} and checking within runner capacity, with observable states`, async () => {
+    const count = TRAIN_LIMITS.window + 2;
+    const { repo, main, numbers } = await setup('window', count);
     for (const n of numbers) expect((await enqueue('window', n)).status).toBe(201);
     const gate = scriptedGate('pending');
     const deps = trainDeps({ gate: () => gate.gate });
     const waiting = await runTrain(env, repoIds.window!, MAIN, deps);
     expect(waiting.state).toBe('waiting');
     expect(waiting.maxPrepared).toBe(TRAIN_LIMITS.window);
-    expect(waiting.maxPrepared).toBeLessThanOrEqual(8);
+    expect(waiting.maxPrepared).toBeLessThanOrEqual(TRAIN_LIMITS.window);
     expect(waiting.maxChecking).toBe(TRAIN_LIMITS.runnerCapacity);
     expect(repo.refs.get(MAIN)).toBe(main);
     // The waiting train asked for a bounded backstop kick, not a poll loop.
     expect(sent.filter((m) => m.body.reason === 'checks-backstop')).toEqual([expect.objectContaining({ delaySeconds: expect.any(Number) })]);
 
-    const q = await queueOf('window', '?limit=20');
+    const q = await queueOf('window', `?limit=${count + 5}`);
     const states = q.json.entries.map((e: any) => e.state);
     expect(states.filter((s: string) => s === 'checking')).toHaveLength(TRAIN_LIMITS.runnerCapacity);
-    expect(states.filter((s: string) => s === 'preparing')).toHaveLength(8 - TRAIN_LIMITS.runnerCapacity);
-    expect(states.filter((s: string) => s === 'queued')).toHaveLength(2);
+    expect(states.filter((s: string) => s === 'preparing')).toHaveLength(TRAIN_LIMITS.window - TRAIN_LIMITS.runnerCapacity);
+    expect(states.filter((s: string) => s === 'queued')).toHaveLength(count - TRAIN_LIMITS.window);
     expect(q.json.entries[0].composition).toMatchObject({ baseSha: main, treeSha: await treeWith(repo, [1]), checks: 'pending' });
 
     gate.fallback = 'success';
     const done = await runTrain(env, repoIds.window!, MAIN, deps);
     expect(done.published).toEqual(numbers);
-    expect(done.maxPrepared).toBeLessThanOrEqual(8);
-    for (const e of deps.events) if (e.type === 'window') expect(e.prepared).toBeLessThanOrEqual(8);
-    expect(firstParents(repo, main)).toHaveLength(10);
-    expect(commitOf(repo, repo.refs.get(MAIN)!).tree).toBe(await treeWith(repo, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+    expect(done.maxPrepared).toBeLessThanOrEqual(TRAIN_LIMITS.window);
+    for (const e of deps.events) if (e.type === 'window') expect(e.prepared).toBeLessThanOrEqual(TRAIN_LIMITS.window);
+    expect(firstParents(repo, main)).toHaveLength(count);
+    expect(commitOf(repo, repo.refs.get(MAIN)!).tree).toBe(await treeWith(repo, numbers.map((_, i) => i + 1)));
   });
 
   it('ejects a failing candidate alone; the next proceeds and a later change still lands (lease free)', async () => {
@@ -558,7 +559,7 @@ describe('integration train', () => {
     expect(checks.at(-1)!.treeSha).toBe(commitOf(repo, published).tree);
   });
 
-  it('runs no checks or preparation under the publication lease, and spends two DO calls per publication', async () => {
+  it('runs no checks or preparation under the publication lease, and spends two DO calls per publication chain', async () => {
     const { numbers } = await setup('timeline', 2);
     for (const n of numbers) await enqueue('timeline', n);
     const deps = trainDeps();
@@ -570,9 +571,10 @@ describe('integration train', () => {
       if (e.type === 'lease') held = e.op === 'acquire' ? e.ok : false;
       if (e.type === 'checks' || e.type === 'window') expect(held, JSON.stringify(e)).toBe(false);
     }
+    // Both ready candidates were one chain: one lease cycle for the pass.
     const leaseOps = deps.events.filter((e) => e.type === 'lease');
-    expect(leaseOps.map((e) => (e as { op: string }).op)).toEqual(['acquire', 'release', 'acquire', 'release']);
-    expect(meter.snapshot().do).toBe(4);
+    expect(leaseOps.map((e) => (e as { op: string }).op)).toEqual(['acquire', 'release']);
+    expect(meter.snapshot().do).toBe(2);
 
     for (const row of await entries('timeline')) {
       const cost = JSON.parse(row.cost!) as CostCounters;
@@ -580,7 +582,7 @@ describe('integration train', () => {
       expect(cost.rr).toBeLessThanOrEqual(12);
       expect(cost.rw).toBeLessThanOrEqual(8);
       expect(cost.art).toBeLessThanOrEqual(4);
-      expect(cost.do).toBe(2);
+      expect(cost.do).toBeLessThanOrEqual(2);
     }
   });
 
@@ -993,6 +995,99 @@ describe('integration train', () => {
     expect(result.explicitAcks).toHaveLength(1);
     expect(firstParents(repo, main)).toHaveLength(1);
     expect((await getChange('consumer', numbers[0]!)).json.state).toBe('merged');
+  });
+
+  // -------------------------------------------------------------------------
+
+  /** The published rows with their merge commits, in arrival order. */
+  async function publishedRows(name: string): Promise<Array<{ change_number: number; state: string; reason_code: string | null; merge_commit: string | null }>> {
+    return (
+      (
+        await env.DB.prepare('SELECT change_number, state, reason_code, merge_commit FROM merge_queue WHERE repo_id = ? ORDER BY seq')
+          .bind(repoIds[name])
+          .all<{ change_number: number; state: string; reason_code: string | null; merge_commit: string | null }>()
+      ).results ?? []
+    );
+  }
+
+  it('publishes a ready run of three as one chain: one lease, one push, one notes push', async () => {
+    const { repo, main, numbers } = await setup('chain3', 3);
+    for (const n of numbers) expect((await enqueue('chain3', n)).status).toBe(201);
+    const deps = trainDeps();
+    const meter = new CostMeter();
+    const run = await runWithMeter(meter, () => runTrain(meter.wrapEnv(env), repoIds.chain3!, MAIN, deps));
+    expect(run.published).toEqual(numbers);
+    // One receive-pack moved the ref across all three candidates, under one lease.
+    expect(repo.calls.filter((c) => c.startsWith(`receivePack:${MAIN}:`))).toHaveLength(1);
+    expect(deps.events.filter((e) => e.type === 'lease').map((e) => (e as { op: string }).op)).toEqual(['acquire', 'release']);
+    expect(firstParents(repo, main)).toHaveLength(3);
+    // Each candidate recorded its own merge commit; the registry matches the stacked history.
+    const rows = await publishedRows('chain3');
+    expect(rows.map((r) => [r.change_number, r.state])).toEqual(numbers.map((n) => [n, 'published']));
+    let tip = repo.refs.get(MAIN)!;
+    for (const row of [...rows].reverse()) {
+      expect(row.merge_commit).toBe(tip);
+      tip = commitOf(repo, tip).parents[0]!;
+    }
+    // Two merge commits (the first change fast-forwards): one notes push carries both attributions.
+    const merges = rows.filter((r) => r.change_number !== numbers[0]!);
+    expect(merges.length).toBe(2);
+    expect(repo.calls.filter((c) => c.startsWith('receivePack:refs/notes/kvarm-attribution:'))).toHaveLength(1);
+    for (const row of merges) {
+      const note = await call('GET', api('chain3', `/commits/${row.merge_commit}/attribution`));
+      expect(note.status, JSON.stringify(note.json)).toBe(200);
+      expect(note.json).toMatchObject({ session: `kvarm:merge/change-${row.change_number}` });
+    }
+    for (const row of rows) {
+      const entry = (await entries('chain3')).find((e) => e.change_number === row.change_number)!;
+      const cost = JSON.parse(entry.cost!) as CostCounters;
+      expect(cost.do).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('a change that closes while the chain is prepared truncates it: the prefix publishes, the rest recompose', async () => {
+    const { repo, main, numbers } = await setup('chain-close', 3);
+    for (const n of numbers) expect((await enqueue('chain-close', n)).status).toBe(201);
+    const run = await runTrain(
+      env,
+      repoIds['chain-close']!,
+      MAIN,
+      preparing(async () => {
+        expect((await call('PATCH', api('chain-close', `/changes/${numbers[1]}`), tok.owner, { state: 'closed' })).status).toBe(200);
+      }),
+    );
+    // The prefix published in the chain's push; the closed candidate exited and nothing stacked on it was sent.
+    // The run's next pass recomposed the third candidate on the published prefix and published it in its own push.
+    expect(run.published).toEqual([numbers[0]!, numbers[2]!]);
+    expect(run.ejected).toEqual([{ number: numbers[1]!, code: 'CHANGE_CLOSED' }]);
+    expect(repo.calls.filter((c) => c.startsWith(`receivePack:${MAIN}:`))).toHaveLength(2);
+    expect(commitOf(repo, repo.refs.get(MAIN)!).tree).toBe(await treeWith(repo, [1, 3]));
+    expect(firstParents(repo, main)).toHaveLength(2);
+    const rows = await publishedRows('chain-close');
+    expect(rows.map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [numbers[0]!, 'published', null],
+      [numbers[1]!, 'ejected', 'CHANGE_CLOSED'],
+      [numbers[2]!, 'published', null],
+    ]);
+  });
+
+  it('a head that moves while the chain is prepared truncates it: the prefix still publishes', async () => {
+    const { repo, main, numbers } = await setup('chain-head', 2);
+    for (const n of numbers) expect((await enqueue('chain-head', n)).status).toBe(201);
+    const rewritten = await commit(repo, { 'README.md': 'readme\n', 'f2.txt': 'rewritten\n' }, [main]);
+    const run = await runTrain(
+      env,
+      repoIds['chain-head']!,
+      MAIN,
+      preparing(async () => {
+        repo.refs.set('refs/heads/b2', rewritten.sha);
+      }),
+    );
+    expect(run.published).toEqual([numbers[0]!]);
+    expect(run.ejected).toEqual([{ number: numbers[1]!, code: 'HEAD_MOVED' }]);
+    expect(repo.calls.filter((c) => c.startsWith(`receivePack:${MAIN}:`))).toHaveLength(1);
+    expect(commitOf(repo, repo.refs.get(MAIN)!).tree).toBe(await treeWith(repo, [1]));
+    expect((await getChange('chain-head', numbers[1]!)).json).toMatchObject({ state: 'open', mergeCommit: null });
   });
 });
 

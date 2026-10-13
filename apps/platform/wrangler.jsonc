@@ -34,6 +34,11 @@
       "bucket_name": "kvarm-snapshots"
     }
   ],
+  // The consumer's latency is the push-event path's latency (push -> guard,
+  // train kick -> pass), so batches do not wait to fill: every message is
+  // delivered as soon as it arrives (max_batch_timeout 0), in small batches
+  // (each processed in order within one invocation) that the queue spreads
+  // over concurrent invocations to drain bursts.
   "queues": {
     "producers": [
       {
@@ -44,8 +49,8 @@
     "consumers": [
       {
         "queue": "kvarm-events",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5,
+        "max_batch_size": 5,
+        "max_batch_timeout": 0,
         "max_retries": 3,
         "dead_letter_queue": "kvarm-events-dlq"
       }

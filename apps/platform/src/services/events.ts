@@ -148,7 +148,8 @@ export interface Ingested {
 
 const BRANCH_PREFIX = 'refs/heads/';
 
-function parseChanges(json: string | null): ChangeOnRef[] {
+/** The ingest readback's change list (services/pushFastPath.ts reads the same shape). */
+export function parseChanges(json: string | null): ChangeOnRef[] {
   if (!json) return [];
   try {
     const parsed = JSON.parse(json) as ChangeOnRef[];

@@ -29,10 +29,10 @@ import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
 import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type WorkspaceOwner } from '../services/workspaces';
 import { agentReservedRefDenial, directHumanPushDenial, directPushDenial, INVALID_REF_REASON, type BranchRule } from '../services/branchRules';
-import { isSafeRefName } from '@kvarm/gitops';
+import { isSafeRefName, type RefCommand } from '@kvarm/gitops';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
 import { recordPushAudit } from '../services/audit';
-import type { RefCommand } from '@kvarm/gitops';
+import { branchPushUpdates, dispatchConfirmedPush } from '../services/pushFastPath';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -280,11 +280,24 @@ export async function handleGitRequest(
     // The client's push completes only after a confirmed update has moved the
     // view generation, so the next read cannot be served a pre-push entry.
     const body = relayReceivePackReply(upstreamRes.body, {
-      // The audit ledger records who moved which confirmed refs (services/audit.ts) in the background: the reply
-      // waits only for the freshness writes.
-      onConfirmed: (refs) => {
+      // The audit ledger records who moved which confirmed refs (services/audit.ts), and the push-side fast path
+      // (services/pushFastPath.ts) starts the guard and CI dispatch from the push the gate itself confirmed, both
+      // in the background: the reply waits only for the freshness writes.
+      onConfirmed: async (refs) => {
         c.executionCtx.waitUntil(recordPushAudit(env, repo.id, actor, pushCommands, refs));
-        return recordConfirmedPush(env, repo.id);
+        await recordConfirmedPush(env, repo.id);
+        // The guard and CI dispatch start here instead of waiting seconds for
+        // the Artifacts event. Background work only: the reply is already
+        // complete, and the event remains the reliable, idempotent path for
+        // every effect.
+        const updates = branchPushUpdates(pushCommands, refs);
+        if (updates.length > 0) {
+          c.executionCtx.waitUntil(
+            dispatchConfirmedPush(env, repo.id, updates).catch((err: unknown) =>
+              console.warn(JSON.stringify({ pushFastPathFailed: String(err).slice(0, 200) })),
+            ),
+          );
+        }
       },
       waitUntil: (p) => c.executionCtx.waitUntil(p),
     });

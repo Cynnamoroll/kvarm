@@ -12,6 +12,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { mergeLockAlarm, type Lease, type MergeLock } from '../src/do/mergeLock';
 import worker from '../src/index';
@@ -449,16 +450,20 @@ describe('injected failures converge to registry == ref', () => {
     await expectConsistent('crash-after-push', repo, numbers);
   });
 
-  it('(c) a crash after the record, before the lease release: the next entry publishes once the lease expires', async () => {
+  it('(c) a crash after the first record of a chain, before the lease release: the rest completes once the lease expires', async () => {
     const { repo, numbers } = await setup('crash-after-record', 2, { merge: true });
     const deps = trainDeps({ crashAt: 'recorded' });
     await expect(runTrain(env, repoIds['crash-after-record']!, MAIN, deps)).rejects.toThrow(Crash);
-    // The record landed with the push: registry == ref for the first change.
+    // The chain's one push landed both merge commits, and the first record
+    // landed with it: registry == ref for the first change, the second is
+    // still claimed with its intent pending.
     const first = await getChange('crash-after-record', numbers[0]!);
-    expect(first).toMatchObject({ state: 'merged', mergeCommit: repo.refs.get(MAIN) });
+    expect(first).toMatchObject({ state: 'merged' });
+    expect(await getChange('crash-after-record', numbers[1]!)).toMatchObject({ state: 'open' });
+    expect(pushesTo(repo, MAIN)).toHaveLength(1);
     expect(await leaseOf('crash-after-record')).not.toBeNull();
 
-    // While the dead publisher's lease is live, the train backs off instead of publishing around it.
+    // While the dead publisher's lease is live, the train backs off instead of reconciling around it.
     await env.DB.prepare('UPDATE merge_trains SET runner_until = 0 WHERE repo_id = ?1').bind(repoIds['crash-after-record']).run();
     const blocked = await runTrain(env, repoIds['crash-after-record']!, MAIN, trainDeps());
     expect(blocked.state).toBe('backoff');
@@ -466,9 +471,11 @@ describe('injected failures converge to registry == ref', () => {
 
     await deliver(await letTimePass('crash-after-record'));
     await expectConsistent('crash-after-record', repo, numbers);
-    expect(pushesTo(repo, MAIN)).toHaveLength(2);
-    expect((await intents('crash-after-record')).map((i) => i.state)).toEqual(['published', 'published']);
-    expect(await reconciledEvents('crash-after-record')).toEqual([]);
+    expect(pushesTo(repo, MAIN)).toHaveLength(1);
+    // The chain's two intents were recorded in one batch at one instant, so
+    // their ledger order is a tie: the recorded one published, the crashed one reconciled.
+    expect((await intents('crash-after-record')).map((i) => i.state).sort()).toEqual(['published', 'reconciled']);
+    expect(await reconciledEvents('crash-after-record')).toEqual([expect.objectContaining({ outcome: 'completed', change: numbers[1] })]);
   });
 
   it('(d) a crash during reconciliation itself: reconciling again converges, still exactly once', async () => {
@@ -603,8 +610,9 @@ describe('injected failures converge to registry == ref', () => {
     expect((await reconciledEvents('lost-unread')).map((e) => e.outcome)).toEqual(['completed']);
   });
 
-  it('a lost reply read back under a later commit completes, and the next candidate composes on that commit', async () => {
-    const { repo, numbers } = await setup('lost-built-on', 2, { merge: true });
+  it('a lost reply read back under a later commit completes the chain under it, and the next candidate composes on that commit', async () => {
+    const { repo, main, numbers } = await setup('lost-built-on', 2, { merge: true });
+    const root = /^parent ([0-9a-f]{40})$/m.exec(decode(repo.objects.get(main)!.content).split('\n\n')[0]!)![1]!;
     let onTop: string | null = null;
     const deps = trainDeps({
       pusher(e, r) {
@@ -618,8 +626,8 @@ describe('injected failures converge to registry == ref', () => {
               async send() {
                 const r = await prepared.send();
                 if (onTop !== null || command.ref !== MAIN) return r;
-                // The reply is lost, and before the read-back someone builds on the landed publication.
-                onTop = (await commit(repo, { 'README.md': 'readme\n', 'base.txt': 'base\n', 'f1.txt': 'file 1\n', 'later.txt': 'l\n' }, [repo.refs.get(MAIN)!])).sha;
+                // The chain's one reply is lost, and before the read-back someone builds on the landed chain.
+                onTop = (await commit(repo, { 'README.md': 'readme\n', 'base.txt': 'base\n', 'f1.txt': 'file 1\n', 'f2.txt': 'file 2\n', 'later.txt': 'l\n' }, [repo.refs.get(MAIN)!])).sha;
                 repo.refs.set(MAIN, onTop);
                 return { ...r, status: 'unknown' as const, reason: 'connection reset' };
               },
@@ -630,14 +638,26 @@ describe('injected failures converge to registry == ref', () => {
     });
     const run = await runTrain(env, repoIds['lost-built-on']!, MAIN, deps);
     expect(run.published).toEqual(numbers);
-    // The second candidate was never sent against the stale tip.
+    // Both candidates were sent in the chain's one push; both reconcile under the commit built on it.
     const statuses = deps.events.filter((e): e is Extract<TrainEvent, { type: 'publish' }> => e.type === 'publish').map((e) => e.status);
-    expect(statuses).toEqual(['unknown', 'reconciled', 'ok', 'recorded']);
+    expect(statuses).toEqual(['unknown', 'unknown', 'reconciled', 'reconciled']);
+    expect(pushesTo(repo, MAIN)).toHaveLength(1);
+    expect(repo.refs.get(MAIN)).toBe(onTop);
+    expect((await entries('lost-built-on')).map((e) => e.reason_code)).toEqual(['PUBLICATION_RECONCILED', 'PUBLICATION_RECONCILED']);
+
+    // A later candidate composes on the commit built on the chain and publishes fresh on it.
+    const b3 = await commit(repo, { 'README.md': 'readme\n', 'f3.txt': 'file 3\n' }, [root]);
+    repo.refs.set('refs/heads/b3', b3.sha);
+    const third = await call('POST', api('lost-built-on', '/changes'), { title: 'Change b3', base: 'main', head: 'b3', mergePolicy: 'review' });
+    expect(third.status, JSON.stringify(third.json)).toBe(201);
+    expect((await call('POST', api('lost-built-on', `/changes/${third.json.number}/enqueue`))).status).toBe(201);
+    const later = trainDeps();
+    const runLater = await runTrain(env, repoIds['lost-built-on']!, MAIN, later);
+    expect(runLater.published).toEqual([third.json.number]);
     expect(pushesTo(repo, MAIN)).toHaveLength(2);
     const tip = repo.refs.get(MAIN)!;
-    expect(new TextDecoder().decode(repo.objects.get(tip)!.content)).toContain(`parent ${onTop}`);
-    await expectConsistent('lost-built-on', repo, numbers);
-    expect((await entries('lost-built-on')).map((e) => e.reason_code)).toEqual(['PUBLICATION_RECONCILED', null]);
+    expect(/^parent ([0-9a-f]{40})$/m.exec(decode(repo.objects.get(tip)!.content).split('\n\n')[0]!)![1]).toBe(onTop);
+    await expectConsistent('lost-built-on', repo, [...numbers, third.json.number]);
   });
 
   it('a publisher with too little lease left sends nothing and spends no attempt', async () => {
@@ -724,7 +744,7 @@ describe('injected failures converge to registry == ref', () => {
     expect((await reconciledEvents('moved-by-other')).map((e) => e.outcome)).toEqual(['moved']);
   });
 
-  it('(g) a publisher that resumes after a newer generation reconciled its entry and published the next one changes nothing', async () => {
+  it('(g) a publisher that resumes after a newer run reconciled its chain changes nothing', async () => {
     const { repo, numbers } = await setup('zombie', 2, { merge: true });
     let reached!: () => void;
     const atPushed = new Promise<void>((r) => (reached = r));
@@ -733,31 +753,33 @@ describe('injected failures converge to registry == ref', () => {
     const a = trainDeps({ hold: { at: 'pushed', reached, release } });
     const runA = runTrain(env, repoIds.zombie!, MAIN, a);
     await atPushed;
-    const firstLanded = repo.refs.get(MAIN)!;
+    // The chain's one push landed both candidates; A stalls before any record.
+    const landed = repo.refs.get(MAIN)!;
     const leaseA = await leaseOf('zombie');
     expect(leaseA).not.toBeNull();
 
-    // A stalls past its lease; a newer run reconciles A's entry and publishes the next under a newer lease generation.
+    // A stalls past its lease; a newer run reconciles both of A's entries from the landed chain.
     await letTimePass('zombie');
     const b = trainDeps();
     const runB = await runTrain(env, repoIds.zombie!, MAIN, b);
     expect(runB.published).toEqual(numbers);
-    const leaseOps = b.events.filter((e): e is Extract<TrainEvent, { type: 'lease' }> => e.type === 'lease' && e.op === 'acquire');
-    expect(leaseOps[0]!.generation).toBeGreaterThan(leaseA!.generation);
     const tipAfterB = repo.refs.get(MAIN)!;
 
     letGo();
     const resultA = await runA;
-    // A's late success is fenced out: no second record, no event, no lease release over B's generation.
+    // A's late records are fenced out: no second record, no event, no lease release over the newer resolution.
     expect(resultA.published).toEqual([]);
     expect(a.events.filter((e) => e.type === 'publish' && (e as { status: string }).status === 'recorded')).toEqual([]);
     const releaseA = a.events.find((e): e is Extract<TrainEvent, { type: 'lease' }> => e.type === 'lease' && e.op === 'release');
     expect(releaseA?.ok).toBe(false);
     expect(repo.refs.get(MAIN)).toBe(tipAfterB);
-    expect(pushesTo(repo, MAIN)).toHaveLength(2);
+    expect(pushesTo(repo, MAIN)).toHaveLength(1);
     await expectConsistent('zombie', repo, numbers);
-    expect((await entries('zombie'))[0]!.merge_commit).toBe(firstLanded);
-    expect((await reconciledEvents('zombie')).map((e) => [e.outcome, e.change])).toEqual([['completed', numbers[0]]]);
+    expect((await entries('zombie'))[1]!.merge_commit).toBe(landed);
+    expect((await reconciledEvents('zombie')).map((e) => [e.outcome, e.change])).toEqual([
+      ['completed', numbers[0]],
+      ['completed', numbers[1]],
+    ]);
   });
 
   it('a publisher whose entry was rolled back while its push was in flight: the late landing is recorded, not lost', async () => {

@@ -16,7 +16,10 @@
  * - the committed 100-workspace fleet run (docs/benchmarks/fleet-100.json)
  * - dev-loop turnaround: explicit merge, mergeability cold/warm, push ->
  *   kvarm/guard recorded, push -> CI job claimable, runner claim -> report
- *   (scripts/runner-warm-bench.mjs) and Container CI cold vs snapshot-warm
+ *   (scripts/runner-warm-bench.mjs) and Container CI cold vs snapshot-warm.
+ *   The push spans are published per stage too: push -> guard run started
+ *   (head dispatch), guard run started -> finished (the verdict itself), and
+ *   guard verdict -> CI check run created
  *
  * Every timing is a client Date.now() span around one request or child
  * process; push-triggered spans start before `git push` and end at the
@@ -410,6 +413,9 @@ await phase('push -> kvarm/guard recorded and push -> CI job claimable', async (
   await l.checkout('loop', 'loop');
   const guardServer = [];
   const guardSeen = [];
+  const guardStart = [];
+  const guardVerdict = [];
+  const ciAfterGuard = [];
   const jobCreated = [];
   const claimSeen = [];
   const pushMs = [];
@@ -430,10 +436,15 @@ await phase('push -> kvarm/guard recorded and push -> CI job claimable', async (
           guardDone = true;
           guardSeen.push(Date.now() - t0);
           guardServer.push(Date.parse(g.finishedAt ?? g.createdAt) - t0);
+          if (g.startedAt) {
+            guardStart.push(Date.parse(g.startedAt) - t0);
+            if (g.finishedAt) guardVerdict.push(Date.parse(g.finishedAt) - Date.parse(g.startedAt));
+          }
         }
         const job = runs.find((k) => k.name === 'bench' && k.headSha === sha);
         if (guardDone && job) {
           jobCreated.push(Date.parse(job.createdAt) - t0);
+          if (g?.finishedAt) ciAfterGuard.push(Date.parse(job.createdAt) - Date.parse(g.finishedAt));
           return;
         }
         if (Date.now() > deadline) {
@@ -460,13 +471,26 @@ await phase('push -> kvarm/guard recorded and push -> CI job claimable', async (
       }
     })();
     await Promise.all([guard, claim]);
-    say(`   sample ${i}: push ${pushMs.at(-1)} ms, guard recorded +${guardServer.at(-1)} ms (seen +${guardSeen.at(-1)}), CI job claimed +${claimSeen.at(-1)} ms`);
+    say(
+      `   sample ${i}: push ${pushMs.at(-1)} ms, guard started +${guardStart.at(-1) ?? '?'} ms, verdict ${guardVerdict.at(-1) ?? '?'} ms (recorded +${guardServer.at(-1)} ms, seen +${guardSeen.at(-1)}), CI job claimed +${claimSeen.at(-1)} ms`,
+    );
   }
+  loop.guardDispatch = {
+    stats: spanStats(guardStart),
+    method: 'the same pushes, ending at the server-recorded `startedAt` of that guard run: the head-dispatch stage. The push-side fast path pays only the push request here; the Artifacts-event path also pays its event transport',
+  };
+  loop.guardVerdict = {
+    stats: spanStats(guardVerdict),
+    method: 'the same pushes, the `startedAt -> finishedAt` span of that guard run: the verdict stage itself, independent of how its hook was dispatched',
+  };
   loop.guardServer = {
     stats: spanStats(guardServer),
     method: `Date.now() before \`git push\` to the server-recorded \`finishedAt\` of the guard run at the pushed head (host clock NTP-synchronized); ${N} pushes of a one-file change to an open change's head branch; \`git push\` itself took p50 ${spanStats(pushMs).p50} ms`,
   };
   loop.guardSeen = { stats: spanStats(guardSeen), method: 'the same pushes, ending at the first `GET …/changes/:n/checks` (polled every 250 ms) that shows the verdict' };
+  loop.ciAfterGuard = ciAfterGuard.length
+    ? { stats: spanStats(ciAfterGuard), method: 'the same pushes, from the `finishedAt` of that guard run to the `createdAt` of its CI check run: the guard-to-CI sequencing stage of one head-hook pass' }
+    : null;
   loop.ciCreated = jobCreated.length
     ? { stats: spanStats(jobCreated), method: 'the same pushes, ending at the server-recorded `createdAt` of the queued CI check run (the job is claimable from then)' }
     : null;
@@ -594,8 +618,11 @@ report.loop = [
   loop.merge && { metric: 'explicit merge (`POST …/merge` -> 200)', ...loop.merge },
   loop.mergeCold && { metric: 'mergeability, cold', ...loop.mergeCold },
   loop.mergeWarm && { metric: 'mergeability, warm', ...loop.mergeWarm },
+  loop.guardDispatch && { metric: 'push -> guard run started (head dispatch)', ...loop.guardDispatch },
+  loop.guardVerdict && { metric: 'guard run started -> verdict recorded', ...loop.guardVerdict },
   loop.guardServer && { metric: 'push -> kvarm/guard verdict recorded', ...loop.guardServer },
   loop.guardSeen && { metric: 'push -> kvarm/guard verdict visible to the client', ...loop.guardSeen },
+  loop.ciAfterGuard && { metric: 'guard verdict -> CI check run created', ...loop.ciAfterGuard },
   loop.ciCreated && { metric: 'push -> CI job created (claimable)', ...loop.ciCreated },
   loop.ciClaim && { metric: 'push -> CI job claimed by a polling client', ...loop.ciClaim },
   runnerStats && { metric: 'runner claim -> report, cold install (`--fresh`)', stats: runnerStats.cold, method: runnerMethod('empty workdir, full install from the machine npm cache, checkout by clone fallback') },
