@@ -17,7 +17,6 @@
 
 import { readdirSync, rmSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { Readable } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { gitEnv, runGit } from './git.js';
 import { nodeFetch } from './http.js';
@@ -68,6 +67,11 @@ export function parseRepo(repo) {
 /** zstd snapshot encoding: zlib exposes it on Node >= 22.15; older runtimes get plain tar. */
 const ZSTD = typeof zlib.createZstdDecompress === 'function';
 const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
+
+/** @param {Uint8Array} head */
+function isZstdMagic(head) {
+  return head.length >= 4 && ZSTD_MAGIC.every((m, i) => head[i] === m);
+}
 
 /**
  * Frame boundaries in a zstd object (RFC 8878 frame format): magic + frame header
@@ -191,50 +195,79 @@ class ZstdFramer {
 }
 
 /**
- * Splits a wire stream into whole zstd frames. One frame is at most one
- * build step's compressed output, so buffering it stays bounded.
- * @param {AsyncIterable<Uint8Array>} wire
- * @returns {AsyncIterable<Uint8Array>}
- */
-async function* zstdFrames(wire) {
-  const framer = new ZstdFramer();
-  /** @type {Uint8Array[]} */
-  let frame = [];
-  let len = 0;
-  for await (const chunk of wire) {
-    let off = 0;
-    while (off < chunk.length) {
-      const { consumed, ended } = framer.eat(chunk.subarray(off));
-      if (consumed > 0) {
-        frame.push(chunk.subarray(off, off + consumed));
-        len += consumed;
-      }
-      off += consumed;
-      if (ended) {
-        const whole = new Uint8Array(len);
-        let w = 0;
-        for (const p of frame) {
-          whole.set(p, w);
-          w += p.length;
-        }
-        yield whole;
-        frame = [];
-        len = 0;
-      }
-    }
-  }
-  if (framer.inFrame || frame.length > 0) throw new Error('truncated zstd snapshot download');
-}
-
-/**
- * Decompresses a stored zstd object frame by frame: Node's zlib would hand
- * back only the first frame of the concatenation.
+ * Decompresses a stored zstd object frame by frame: Node's zlib stops after
+ * the first frame of a concatenated object, so the framer hands each frame's
+ * pieces to a fresh decoder as they arrive. Decoded output is yielded as the
+ * decoder produces it — memory stays bounded by chunk size, never a whole
+ * frame (one frame is a whole build step's compressed output).
  * @param {AsyncIterable<Uint8Array>} wire
  * @returns {AsyncIterable<Uint8Array>}
  */
 async function* zstdDecodeAll(wire) {
-  for await (const frame of zstdFrames(wire)) {
-    yield* Readable.from([frame]).pipe(zlib.createZstdDecompress());
+  const framer = new ZstdFramer();
+  /** @type {Uint8Array[]} */
+  const out = [];
+  /** @type {Error | null} */
+  let failed = null;
+  /** @type {Promise<never>} */
+  let broken;
+  /** @returns {import('node:zlib').ZstdDecompress} */
+  const newDecoder = () => {
+    const d = zlib.createZstdDecompress();
+    d.on('data', (c) => out.push(c));
+    broken = new Promise((_, reject) => {
+      d.once('error', (e) => {
+        failed = e instanceof Error ? e : new Error(String(e));
+        reject(failed);
+      });
+    });
+    broken.catch(() => {});
+    return d;
+  };
+  let z = newDecoder();
+  // A decode failure can stall the write/end callback itself, so every wait
+  // races the decoder's own 'error' event.
+  /** @param {Uint8Array} piece */
+  const write = async (piece) => {
+    await Promise.race([
+      /** @type {Promise<void>} */ (
+        new Promise((resolve) => {
+          if (z.write(piece)) resolve();
+          else z.once('drain', resolve);
+        })
+      ),
+      broken,
+    ]);
+    if (failed) throw failed;
+  };
+  // The flush error can surface a tick after end()'s callback; both are checked.
+  const end = async () => {
+    await Promise.race([/** @type {Promise<void>} */ (new Promise((resolve) => z.end(resolve))), broken]);
+    await new Promise((resolve) => setImmediate(resolve));
+    if (failed) throw failed;
+  };
+  try {
+    for await (const chunk of wire) {
+      let off = 0;
+      while (off < chunk.length) {
+        const { consumed, ended } = framer.eat(chunk.subarray(off));
+        if (consumed > 0) {
+          await write(chunk.subarray(off, off + consumed));
+          while (out.length > 0) yield /** @type {Uint8Array} */ (out.shift());
+        }
+        off += consumed;
+        if (ended) {
+          await end();
+          while (out.length > 0) yield /** @type {Uint8Array} */ (out.shift());
+          z = newDecoder();
+        }
+      }
+    }
+    if (framer.inFrame) throw new Error('truncated zstd snapshot download');
+    await end();
+    while (out.length > 0) yield /** @type {Uint8Array} */ (out.shift());
+  } finally {
+    z.destroy();
   }
 }
 
@@ -332,7 +365,7 @@ async function downloadSnapshot(o, path, meta, dir) {
   const first = await it.next();
   if (!first.done) {
     head = first.value instanceof Uint8Array ? first.value : new Uint8Array(first.value);
-    if (!zstd && head.length >= 4) { const h = head; zstd = ZSTD_MAGIC.every((m, i) => h[i] === m); }
+    if (!zstd) zstd = isZstdMagic(head);
   }
   if (zstd && !ZSTD) {
     discard(res.body);

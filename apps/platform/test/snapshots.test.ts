@@ -15,7 +15,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { snapshotInstanceId } from '../src/services/events';
 import { tarEnd, tarHeader, tarPadding } from '@kvarm/gitops';
-import { matchSnapshot, streamAndStore, zstdDecompressAll } from '../src/cache/snapshot';
+import { matchSnapshot, snapshotCacheKey, streamAndStore, zstdDecompressAll } from '../src/cache/snapshot';
 import { acceptsZstd } from '../src/routes/api/snapshots';
 import {
   BLOBS_PER_STEP,
@@ -24,7 +24,10 @@ import {
   READ_BUDGET,
   STALE_BUILD_MS,
   buildSnapshot,
+  decodeBatch,
+  encodeBatch,
   snapshotKey,
+  type BatchState,
   type BuildCost,
   type SnapshotParams,
   type StepRunner,
@@ -772,6 +775,36 @@ describe('SnapshotBuilder', () => {
     expect(await treeRow(id, c.tree)).toMatchObject({ encoding: null, encoded_size: null, r2_key: snapshotKey(id, c.tree), size: bytes.length });
   });
 
+  it('a batch state persisted before encodings resumes with correct tar size', async () => {
+    const { id, repo } = await seedRepo('legacystate');
+    const files = manyFiles(12, 2_000, '-ls');
+    const c = await commit(repo, files);
+    const runner = new Runner();
+    const orig = runner.do.bind(runner);
+    runner.do = (async (name: string, fn: (ctx?: { attempt: number }) => Promise<unknown>) => {
+      const r = await orig(name, fn);
+      // A build started by pre-encoding code resumes with a v1-key resolve
+      // output and batch states that have no tarBytes/storedSize.
+      if (name === 'resolve' && (r as { action?: string }).action === 'build') {
+        const { encoding: _gone, ...rest } = r as { encoding?: string };
+        return { ...rest, key: snapshotKey(id, c.tree) };
+      }
+      if (name === 'batch-1') {
+        const decoded = await decodeBatch(r as ReadableStream<Uint8Array>);
+        const legacy = decoded.state as Partial<BatchState>;
+        delete legacy.tarBytes;
+        delete legacy.storedSize;
+        return encodeBatch(decoded.state, decoded.carry);
+      }
+      return r;
+    }) as StepRunner['do'];
+    const out = await buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-legacystate' }, runner, { blobsPerStep: 5 });
+    expect(out.outcome).toBe('built');
+    const bytes = await tarball(id, c.tree, 'identity');
+    checkTar(readTar(bytes), files);
+    expect(await treeRow(id, c.tree)).toMatchObject({ encoding: null, encoded_size: null, size: bytes.length });
+  });
+
   it('a commit-not-found result from a superseded attempt leaves the active attempt alone', async () => {
     const { id } = await seedRepo('gone');
     const sha = 'a'.repeat(40);
@@ -1084,6 +1117,31 @@ describe('snapshot API', () => {
     const z2 = await call(dl, { token: tok.owner, accept: 'application/zstd' });
     expect(z2.cost).toMatchObject({ r2b: 0, cache: 'hit' });
     expect(z2.bytes).toEqual(z1.bytes);
+
+    // The cache entry stores the stored representation with its own type.
+    const entry = await caches.default.match(snapshotCacheKey(id, c.sha));
+    expect(entry?.headers.get('content-type')).toBe('application/zstd');
+  });
+
+  it('a corrupted stored object never answers a clean tar', async () => {
+    const { id, repo } = await seedRepo('corrupt');
+    const c = await commit(repo, SMALL);
+    repo.refs.set('refs/heads/main', c.sha);
+    await call(snap('corrupt', 'main'), { method: 'POST', token: tok.owner });
+    await builder.drain();
+    const stored = await storedObject(id, c.tree);
+    // Flip a byte in the last frame's 4-byte content checksum.
+    stored[stored.length - 2] = (stored[stored.length - 2] ?? 0) ^ 0xff;
+    await env.SNAPSHOTS.put(snapshotKey(id, c.tree, 'zstd'), stored);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch!(
+      new Request(`${ORIGIN}${snap('corrupt', c.sha)}/download`, { headers: { Authorization: `Bearer ${tok.owner}` } }) as Request<unknown, IncomingRequestCfProperties>,
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    await expect(res.arrayBuffer()).rejects.toThrow();
+    await waitOnExecutionContext(ctx);
   });
 
   it('a legacy identity snapshot row downloads as a plain tar with or without Accept zstd', async () => {

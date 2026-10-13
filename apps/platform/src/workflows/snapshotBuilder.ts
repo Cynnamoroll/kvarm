@@ -669,6 +669,11 @@ async function batchStep(
   opts: Required<BuildOptions>,
 ): Promise<{ state: BatchState; carry: Uint8Array }> {
   const state: BatchState = structuredClone(input);
+  // A build resumed from a step output persisted before encodings has no
+  // tarBytes/storedSize; such builds are always identity, where stored bytes
+  // equal tar bytes and every stored byte so far is flushed or carried.
+  if (typeof state.tarBytes !== 'number') state.tarBytes = state.flushed + carry.length;
+  if (typeof state.storedSize !== 'number') state.storedSize = 0;
   const log = { step: `batch-${index}`, instance: target.instanceId, tree: target.tree };
   return metered(env, state.cost, log, async (env) => {
     const writer = new PartWriter(env.SNAPSHOTS, target.key, opts.partSize, contentType(target.encoding), state, carry);

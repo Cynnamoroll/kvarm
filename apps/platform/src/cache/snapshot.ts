@@ -192,18 +192,34 @@ export function zstdDecompressAll(stream: ReadableStream<Uint8Array>): ReadableS
     // gets a fresh decoder whose queue is drained after every awaited write.
     const queue: Uint8Array[] = [];
     let failed: Error | null = null;
+    let broken: Promise<never>;
     const newDecoder = () => {
       const d = createZstdDecompress();
       d.on('data', (chunk) => queue.push(chunk));
-      d.on('error', (err) => {
-        failed = err ?? new Error('zstd decode failed');
+      broken = new Promise<never>((_, reject) => {
+        d.once('error', (err) => {
+          failed = err ?? new Error('zstd decode failed');
+          reject(failed);
+        });
       });
+      broken.catch(() => undefined);
       return d;
     };
     let z = newDecoder();
+    // A decode failure can stall the write/end callback itself, so every
+    // wait races the decoder's own 'error' event.
     const write = (piece: Uint8Array) =>
-      new Promise<void>((resolve, reject) => z.write(piece, () => (failed ? reject(failed) : resolve())));
-    const end = () => new Promise<void>((resolve) => z.end(() => resolve()));
+      Promise.race([
+        new Promise<void>((resolve) => z.write(piece, () => resolve())),
+        broken,
+      ]).then(() => {
+        if (failed) throw failed;
+      });
+    const end = () =>
+      Promise.race([new Promise<void>((resolve) => z.end(() => resolve())), broken]).then(
+        () =>
+          new Promise<void>((resolve, reject) => queueMicrotask(() => (failed ? reject(failed) : resolve()))),
+      );
     const drain = async () => {
       while (queue.length > 0) await writer.write(queue.shift()!);
     };
@@ -273,7 +289,7 @@ export function streamAndStore(
   const store = new FixedLengthStream(object.size);
   const stored = new Response(store.readable, {
     headers: {
-      'content-type': 'application/x-tar',
+      'content-type': opts.encoding === 'zstd' ? 'application/zstd' : 'application/x-tar',
       // Stored under the internal host, which no client request can address;
       // the max-age only tells the Cache API how long to keep the entry.
       'cache-control': `max-age=${IMMUTABLE_TTL_SECONDS}, immutable`,

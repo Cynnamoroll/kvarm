@@ -19,7 +19,7 @@ const BASE = 'https://kvarm.test';
 const SNAP = `${BASE}/api/v1/repos/alice/demo/snapshots`;
 
 type Call = { method: string; url: string; auth: string | null; accept: string | null };
-type Download = Uint8Array | { status: number; body: unknown } | { status: 200; bytes: Uint8Array; contentType: string };
+type Download = Uint8Array | { status: number; body: unknown } | { status: 200; bytes: Uint8Array; contentType: string; chunk?: number };
 
 /** A fake platform: `snapshots` maps a ref or sha to its metadata response. */
 function fakeFetch(snapshots: Record<string, { status: number; body: unknown }>, downloads: Record<string, Download>) {
@@ -38,7 +38,19 @@ function fakeFetch(snapshots: Record<string, { status: number; body: unknown }>,
         return new Response(new Uint8Array(d), { status: 200, headers: { 'content-type': 'application/x-tar', 'x-kvarm-snapshot-sha': sha } });
       }
       if ('bytes' in d) {
-        return new Response(new Uint8Array(d.bytes), { status: 200, headers: { 'content-type': d.contentType, 'x-kvarm-snapshot-sha': sha } });
+        const headers = { 'content-type': d.contentType, 'x-kvarm-snapshot-sha': sha };
+        if (d.chunk !== undefined) {
+          let off = 0;
+          const body = new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (off >= d.bytes.length) return controller.close();
+              controller.enqueue(d.bytes.subarray(off, off + d.chunk!));
+              off += d.chunk!;
+            },
+          });
+          return new Response(body, { status: 200, headers });
+        }
+        return new Response(new Uint8Array(d.bytes), { status: 200, headers });
       }
       return Response.json(d.body, { status: d.status });
     }
@@ -211,4 +223,30 @@ describe('kvarm checkout', () => {
     await expect(r.promise).resolves.toMatchObject({ source: 'clone', sha: repo.main });
     expect(diffTrees(dir, expectedMain)).toEqual({ code: 0, out: '' });
   });
+
+  it('decodes a multi-frame zstd object delivered in 7-byte chunks', async () => {
+    const f = fakeFetch(
+      { main: ready(repo.main, tarMain.length, { encoding: 'zstd', encodedSize: zstdObj.length }) },
+      { [repo.main]: { status: 200, bytes: zstdObj, contentType: 'application/zstd', chunk: 7 } },
+    );
+    const dir = join(root, 'snap-zstd-tiny');
+    const r = run(f.impl, { ref: 'main', dir, pat: 'p' });
+    await expect(r.promise).resolves.toMatchObject({ source: 'snapshot', bytes: tarMain.length, transferBytes: zstdObj.length });
+    expect(diffTrees(dir, expectedMain)).toEqual({ code: 0, out: '' });
+  });
+
+  it('falls back to clone when a zstd frame is corrupt, without hanging', async () => {
+    const corrupt = new Uint8Array(zstdObj);
+    // Break the second frame's magic so the decode path errors mid-object.
+    const frame2 = zstdCompressSync(tarMain.subarray(0, half)).length;
+    corrupt[frame2] = (corrupt[frame2] ?? 0) ^ 0xff;
+    const f = fakeFetch(
+      { main: ready(repo.main, tarMain.length, { encoding: 'zstd', encodedSize: corrupt.length }) },
+      { [repo.main]: { status: 200, bytes: corrupt, contentType: 'application/zstd' } },
+    );
+    const dir = join(root, 'snap-zstd-corrupt');
+    const r = run(f.impl, { ref: 'main', dir, pat: 'p' });
+    await expect(r.promise).resolves.toMatchObject({ source: 'clone', sha: repo.main });
+    expect(diffTrees(dir, expectedMain)).toEqual({ code: 0, out: '' });
+  }, 15_000);
 });
