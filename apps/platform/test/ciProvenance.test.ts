@@ -137,23 +137,51 @@ describe('CI claim provenance', () => {
     )
       .bind(agentId, ownerId, OWNER, `agent-${agentId.slice(0, 8)}`, ownerId, Date.now())
       .run();
-    const grant = (refs: string[], role = 'write', revoked: number | null = null) =>
+    const grant = (refs: string[] | string, role = 'write', revoked: number | null = null) =>
       env.DB.prepare(
         `INSERT INTO agent_tokens (id, agent_id, prefix, hash, repo_id, role, refs, created_by, created_at, expires_at, revoked_at)
          VALUES (?, ?, 'kvarm_agt_x', ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-        .bind(crypto.randomUUID(), agentId, crypto.randomUUID(), repoIds['prov-granted'], role, JSON.stringify(refs), ownerId, Date.now(), Date.now() - 1, revoked)
+        .bind(crypto.randomUUID(), agentId, crypto.randomUUID(), repoIds['prov-granted'], role, typeof refs === 'string' ? refs : JSON.stringify(refs), ownerId, Date.now(), Date.now() - 1, revoked)
         .run();
-    await grant(['refs/heads/other/*']);
+    const writable = async () => {
+      const claimed = await claim('prov-granted');
+      await env.DB.prepare("UPDATE ci_jobs SET status = 'queued' WHERE id = ?").bind(claimed.json.job.id).run();
+      expect(claimed.json.job.provenance.authorKind).toBe('human');
+      expect(claimed.cost.d1).toBeLessThanOrEqual(2);
+      return claimed.json.job.provenance.agentWritableRef as boolean;
+    };
+    // Other refs, a prefix that stops mid-segment, the bare prefix itself and read tokens never match.
+    await grant(['refs/heads/other/*', 'refs/heads/feat/*', 'refs/heads/feature/x/*', 'refs/heads/feature']);
     await grant(['refs/heads/feature/*'], 'read');
-    const unrelated = await claim('prov-granted');
-    expect(unrelated.json.job.provenance).toMatchObject({ authorKind: 'human', agentWritableRef: false });
-    await env.DB.prepare("UPDATE ci_jobs SET status = 'queued' WHERE id = ?").bind(unrelated.json.job.id).run();
+    for (let i = 0; i < 250; i++) await grant([`refs/heads/bulk-${i}/*`], 'write', Date.now());
+    expect(await writable()).toBe(false);
     // Expired and revoked: the head may still be one the agent pushed before.
     await grant(['refs/heads/feature/*'], 'write', Date.now());
-    const granted = await claim('prov-granted');
-    expect(granted.json.job.provenance).toMatchObject({ authorKind: 'human', agentWritableRef: true });
-    expect(granted.cost.d1).toBeLessThanOrEqual(2);
+    expect(await writable()).toBe(true);
+  });
+
+  it('treats an exact grant and an unreadable grant as agent-writable', async () => {
+    await changeWithJob('prov-exact', 'release');
+    const agentId = crypto.randomUUID();
+    const ownerId = await env.DB.prepare('SELECT id FROM users WHERE login = ?').bind(OWNER).first<string>('id');
+    await env.DB.prepare(`INSERT INTO agents (id, owner_kind, owner_id, owner_login, name, created_by, created_at) VALUES (?, 'user', ?, ?, ?, ?, ?)`)
+      .bind(agentId, ownerId, OWNER, `agent-${agentId.slice(0, 8)}`, ownerId, Date.now())
+      .run();
+    const token = (refs: string) =>
+      env.DB.prepare(
+        `INSERT INTO agent_tokens (id, agent_id, prefix, hash, repo_id, role, refs, created_by, created_at, expires_at)
+         VALUES (?, ?, 'kvarm_agt_x', ?, ?, 'write', ?, ?, ?, ?)`,
+      )
+        .bind(crypto.randomUUID(), agentId, crypto.randomUUID(), repoIds['prov-exact'], refs, ownerId, Date.now(), Date.now() + 60_000)
+        .run();
+    await token('not json');
+    const unreadable = await claim('prov-exact');
+    expect(unreadable.json.job.provenance.agentWritableRef).toBe(true);
+    await env.DB.prepare("UPDATE ci_jobs SET status = 'queued' WHERE id = ?").bind(unreadable.json.job.id).run();
+    await env.DB.prepare('DELETE FROM agent_tokens WHERE repo_id = ?').bind(repoIds['prov-exact']).run();
+    await token(JSON.stringify(['refs/heads/release']));
+    expect((await claim('prov-exact')).json.job.provenance.agentWritableRef).toBe(true);
   });
 
   it('marks a job whose commit is not the change head as prepared', async () => {

@@ -6,7 +6,6 @@
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
-import { refMatchesAny } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import { CHECK_RUN_COLUMNS, checkRunView, type CheckRunRow, type CheckRunView } from './checks';
 import { CI_CONFIG_PATH, CI_LIMITS, parseCiConfig, type CiConfig } from './ciConfig';
@@ -189,8 +188,7 @@ export interface JobProvenance {
   /**
    * Some write agent token of the repository (revoked and expired ones
    * included: the head may predate the revocation) was granted a pattern
-   * matching the head ref, so an agent may have pushed the head. True when
-   * the grants could not all be read within budget.
+   * matching the head ref, so an agent may have pushed the head.
    */
   agentWritableRef: boolean;
 }
@@ -217,15 +215,29 @@ interface ProvenanceRow {
   change_head_sha: string | null;
   change_agent_meta: string | null;
   change_author_login: string | null;
-  /** JSON array of the `refs` JSON of up to AGENT_GRANT_BUDGET + 1 write agent tokens. */
-  agent_grants: string | null;
+  /** 1 when some write agent token's grant matches the head ref. */
+  agent_granted: number | null;
 }
 
-// Same namespace as services/workspaces.ts, which reaches this module
-// through changes.ts, so importing it here would be a cycle.
+// The stable agent workspace namespace (AGENTS.md), as in
+// services/workspaces.ts, which reaches this module through changes.ts, so
+// importing it here would be a cycle.
 const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
-/** Agent token grants read per claim; past it every head counts as agent-writable. */
-export const AGENT_GRANT_BUDGET = 200;
+/**
+ * Whether any write agent token of the job's repository has a ref grant
+ * matching the change's head ref: exact, or a trailing `/*` prefix with a
+ * non-empty rest, the same rule as refMatchesPattern in packages/gitops.
+ * Revoked and expired tokens count, because the head may predate the
+ * revocation, and an unreadable grant matches every ref. Evaluated in SQL
+ * so the claim reads no grant rows back and has no row budget to exceed.
+ */
+const AGENT_GRANT_MATCH = `EXISTS (
+  SELECT 1 FROM agent_tokens t, json_each(CASE WHEN json_valid(t.refs) THEN t.refs ELSE '["refs/*"]' END) g
+   WHERE t.repo_id = j.repo_id AND t.role = 'write' AND c.head_ref IS NOT NULL AND g.type = 'text'
+     AND (g.value = 'refs/heads/' || c.head_ref
+          OR (substr(g.value, -2) = '/*'
+              AND length('refs/heads/' || c.head_ref) > length(g.value) - 1
+              AND substr('refs/heads/' || c.head_ref, 1, length(g.value) - 1) = substr(g.value, 1, length(g.value) - 1))))`;
 
 // The same reading of change_sets.agent_meta as changes.ts parseAgent (a
 // cycle again keeps it local).
@@ -237,27 +249,6 @@ function agentOf(meta: string | null): { id: string; name: string } | null {
   } catch {
     return null;
   }
-}
-
-function agentWritable(grants: string | null, ref: string): boolean {
-  let tokens: unknown;
-  try {
-    tokens = JSON.parse(grants ?? '[]');
-  } catch {
-    return true;
-  }
-  if (!Array.isArray(tokens) || tokens.length > AGENT_GRANT_BUDGET) return true;
-  for (const refs of tokens) {
-    let patterns: unknown;
-    try {
-      patterns = typeof refs === 'string' ? JSON.parse(refs) : refs;
-    } catch {
-      return true;
-    }
-    if (!Array.isArray(patterns)) return true;
-    if (refMatchesAny(patterns.filter((p): p is string => typeof p === 'string'), ref)) return true;
-  }
-  return false;
 }
 
 function provenanceOf(r: JobRow & ProvenanceRow): JobProvenance {
@@ -275,7 +266,7 @@ function provenanceOf(r: JobRow & ProvenanceRow): JobProvenance {
     authorLogin: r.change_author_login,
     agent,
     agentWorkspaceRef,
-    agentWritableRef: fullRef === null || agentWorkspaceRef || agentWritable(r.agent_grants, fullRef),
+    agentWritableRef: fullRef === null || agentWorkspaceRef || r.agent_granted === 1,
   };
 }
 
@@ -333,8 +324,7 @@ export async function claimJob(env: Env, repo: RepoRow, input: unknown): Promise
       `SELECT j.id, j.name, j.command, j.head_sha, j.tree_sha, j.generation, j.claimed_by, j.lease_until, j.timeout_seconds, j.required, j.status,
               c.number AS change_number, c.head_ref AS change_head_ref, c.head_sha AS change_head_sha, c.agent_meta AS change_agent_meta,
               u.login AS change_author_login,
-              (SELECT json_group_array(t.refs)
-                 FROM (SELECT refs FROM agent_tokens WHERE repo_id = ?1 AND role = 'write' LIMIT ${AGENT_GRANT_BUDGET + 1}) t) AS agent_grants
+              ${AGENT_GRANT_MATCH} AS agent_granted
          FROM ci_jobs j
          LEFT JOIN change_sets c ON c.id = j.change_set_id
          LEFT JOIN users u ON u.id = c.author_id
