@@ -780,7 +780,7 @@ export const OPERATIONS = Object.freeze([
     path: '/repos/{repo}/forecast',
     params: [
       REPO,
-      query('paths', 'string[]', 'Paths to forecast (at most 20; a trailing / marks a prefix)', { required: true }),
+      query('paths', 'string[]', 'Paths to forecast (at most 20; a trailing / marks a prefix)', { required: true, literal: true }),
       query('base', 'string', 'Only workspaces on this base branch'),
       query('exclude', 'string', 'Workspace id to leave out (usually your own); its own import edges are also matched semantically'),
       query('semantic', 'boolean', 'Include the advisory semantic dependency layer on the first page (default true)'),

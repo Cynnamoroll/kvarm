@@ -677,8 +677,8 @@ describe('forecast', () => {
     expect(seen).toEqual(full.json.matches.map((m: any) => m.workspace));
     expect(new Set(seen).size).toBe(seen.length);
 
-    const over = Array.from({ length: INTENT_LIMITS.forecastPathsMax + 1 }, (_, i) => `p${i}.ts`).join(',');
-    const capped = await forecast('fc-page', `paths=${over}`);
+    const over = Array.from({ length: INTENT_LIMITS.forecastPathsMax + 1 }, (_, i) => `p${i}.ts`).map((p) => `paths=${p}`).join('&');
+    const capped = await forecast('fc-page', over);
     expect([capped.status, capped.json.code]).toEqual([422, 'TOO_MANY_PATHS']);
     expect(capped.json.error).toContain(String(INTENT_LIMITS.forecastPathsMax));
     expect((await forecast('fc-page', '')).json.code).toBe('INVALID_PATHS');
@@ -703,8 +703,8 @@ describe('forecast', () => {
         [...repo.refs.entries()].sort(),
       ]);
     const before = await snapshot();
-    const one = await forecast('fc-empty', 'paths=src/a.ts,docs/guide.md&base=main');
-    const two = await forecast('fc-empty', 'paths=src/a.ts,docs/guide.md&base=main');
+    const one = await forecast('fc-empty', 'paths=src/a.ts&paths=docs/guide.md&base=main');
+    const two = await forecast('fc-empty', 'paths=src/a.ts&paths=docs/guide.md&base=main');
     expect(one.text).toBe(two.text);
     expect(one.json.matches).toHaveLength(1);
     expect(one.cost.rw).toBe(0);

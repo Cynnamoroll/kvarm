@@ -259,14 +259,14 @@ await phase('scratch repo, workspaces, overlap forecast and composition', async 
   const fc = [];
   let fcCost = null;
   for (let i = 0; i < N; i++) {
-    const r = await http(`${R(A)}/forecast?paths=src/util.js,docs/guide.md&exclude=${w2.json.id}`, { token: tokB });
+    const r = await http(`${R(A)}/forecast?paths=src/util.js&paths=docs/guide.md&exclude=${w2.json.id}`, { token: tokB });
     expect(r.status === 200 && r.json?.matches?.some((m) => m.workspace === w1.json.id), `forecast -> ${r.status} ${r.text.slice(0, 160)}`);
     fc.push(r.ms);
     fcCost = r.cost;
   }
   report.forecast = {
     stats: spanStats(fc),
-    method: `${N} identical calls (\`paths=src/util.js,docs/guide.md\`, excluding the caller's workspace) over 2 active agent workspaces with declared and observed paths overlapping on \`src/util.js\`, in a 6-file repo; the forecast has no response cache (\`cache=${fcCost?.cache ?? 'none'}\`), so every call reads the Nexus index (\`d1=${fcCost?.d1 ?? 0}\`)`,
+    method: `${N} identical calls (\`paths=src/util.js&paths=docs/guide.md\`, excluding the caller's workspace) over 2 active agent workspaces with declared and observed paths overlapping on \`src/util.js\`, in a 6-file repo; the forecast has no response cache (\`cache=${fcCost?.cache ?? 'none'}\`), so every call reads the Nexus index (\`d1=${fcCost?.d1 ?? 0}\`)`,
   };
   say(`   forecast ${fmtStats(report.forecast.stats)}`);
 

@@ -425,7 +425,7 @@ await scenario('forecast', async (repo) => {
     workspaces: (await http(`${api}/workspaces`)).text,
   });
   const before = await snap();
-  const q5 = `${api}/forecast?paths=src/b.ts,docs/guide.md&base=main`;
+  const q5 = `${api}/forecast?paths=src/b.ts&paths=docs/guide.md&base=main`;
   const x1 = await http(q5);
   const x2 = await http(q5);
   const after = await snap();
@@ -499,7 +499,7 @@ await scenario('paging', async (repo) => {
       pages.at(-1).nextCursor === null,
   );
   check('VAL-FORECAST-002', 'union of pages == the large-limit set, no duplicates', eq(union, full) && new Set(union).size === union.length, `${union.length} vs ${full.length}`);
-  const over = await http(`${api}/forecast?paths=${Array.from({ length: 21 }, (_, i) => `p${i}.ts`).join(',')}`);
+  const over = await http(`${api}/forecast?${Array.from({ length: 21 }, (_, i) => `paths=p${i}.ts`).join('&')}`);
   console.log(`21 paths -> ${over.status} ${over.text}`);
   check('VAL-FORECAST-002', 'over-cap paths (21 > 20) → 422 TOO_MANY_PATHS with the limit', over.status === 422 && over.json?.code === 'TOO_MANY_PATHS' && over.json?.limit === 20);
   const badLimit = await http(`${api}/forecast?paths=a.ts&limit=101`);

@@ -62,7 +62,7 @@ intentsApi.get('/repos/:owner/:repo/forecast', async (c) => {
   return reply(
     c,
     await svc.forecast(rd.cx, {
-      paths: c.req.query('paths'),
+      paths: c.req.queries('paths'),
       base: c.req.query('base'),
       limit: c.req.query('limit'),
       cursor: c.req.query('cursor'),
