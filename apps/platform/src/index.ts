@@ -25,6 +25,7 @@ import { handleFleetScheduled } from './services/sandboxes/sweeps';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
+import { fleetPages, fleetRepoPages } from './routes/fleetPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -86,9 +87,11 @@ app.route('/api/v1', containerRunnerApi);
 app.route('/api/v1', fleetApi);
 // MCP tool calls are dispatched back through this router to their REST routes.
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
+app.route('/fleet', fleetPages);
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
+app.route('/:owner/:repo', fleetRepoPages);
 app.route('/:owner/:repo', repoPages);
 
 // Static assets (public/*) as the final fallback.

@@ -85,6 +85,7 @@ ${opts.script ? `<script type="module" defer>${opts.script}</script>` : ''}
     ${
       opts.userLogin
         ? `<a href="/${escapeHtml(opts.userLogin)}">${escapeHtml(opts.userLogin)}</a>
+           <a href="/fleet">Fleet</a>
            <a href="/settings/tokens">Tokens</a>
            <a href="/auth/sign-out">Sign out</a>`
         : '<a href="/auth/sign-in">Sign in</a>'
