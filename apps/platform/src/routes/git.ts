@@ -31,7 +31,7 @@ import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type Works
 import { agentReservedRefDenial, directHumanPushDenial, directPushDenial, INVALID_REF_REASON, type BranchRule } from '../services/branchRules';
 import { isSafeRefName } from '@kvarm/gitops';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
-import { pushAuditStatements } from '../services/audit';
+import { recordPushAudit } from '../services/audit';
 import type { RefCommand } from '@kvarm/gitops';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
@@ -280,8 +280,10 @@ export async function handleGitRequest(
     // The client's push completes only after a confirmed update has moved the
     // view generation, so the next read cannot be served a pre-push entry.
     const body = relayReceivePackReply(upstreamRes.body, {
-      // The audit ledger records who moved which confirmed refs (services/audit.ts).
-      onConfirmed: (refs) => recordConfirmedPush(env, repo.id, { audit: pushAuditStatements(env.DB, repo.id, actor, pushCommands, refs) }),
+      // The audit ledger records who moved which confirmed refs (services/audit.ts), apart from the freshness write.
+      onConfirmed: async (refs) => {
+        await Promise.all([recordConfirmedPush(env, repo.id), recordPushAudit(env, repo.id, actor, pushCommands, refs)]);
+      },
       waitUntil: (p) => c.executionCtx.waitUntil(p),
     });
     return scoped(relay(new Response(body, upstreamRes)));

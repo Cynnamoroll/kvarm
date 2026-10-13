@@ -22,6 +22,7 @@
  * say why a record is not higher.
  */
 
+import { sha256Hex } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
@@ -151,12 +152,6 @@ export function base64urlEncode(bytes: Uint8Array): string {
   let bin = '';
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-const hex = (buf: ArrayBuffer) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  return hex(await crypto.subtle.digest('SHA-256', bytes));
 }
 
 /** A key's id: the first 16 hex characters of the SHA-256 of its raw bytes. */
@@ -297,7 +292,9 @@ function keyView(r: KeyRow): ProvenanceKeyView {
 /** GET provenance-keys: the repository's keys (revoked included) and the instance keys. */
 export async function listProvenanceKeys(env: Env, repo: RepoRow): Promise<ServiceResult<{ keys: ProvenanceKeyView[] }>> {
   const { results } = await env.DB.prepare(
-    `SELECT id, name, public_key, created_at, revoked_at FROM provenance_keys WHERE repo_id = ?1 ORDER BY created_at, id LIMIT ${PROVENANCE_LIMITS.repoKeysMax * 4}`,
+    // Live keys first: at most repoKeysMax of them, so every key that still verifies is always listed.
+    `SELECT id, name, public_key, created_at, revoked_at FROM provenance_keys WHERE repo_id = ?1
+      ORDER BY revoked_at IS NOT NULL, created_at, id LIMIT ${PROVENANCE_LIMITS.repoKeysMax * 4}`,
   )
     .bind(repo.id)
     .all<KeyRow>();
@@ -326,6 +323,7 @@ export async function addProvenanceKey(env: Env, repo: RepoRow, actor: Actor, in
     `INSERT INTO provenance_keys (id, repo_id, name, public_key, created_by, created_at)
      SELECT ?1, ?2, ?3, ?4, ?5, ?6
       WHERE (SELECT COUNT(*) FROM provenance_keys WHERE repo_id = ?2 AND revoked_at IS NULL) < ${PROVENANCE_LIMITS.repoKeysMax}
+         OR EXISTS (SELECT 1 FROM provenance_keys WHERE repo_id = ?2 AND id = ?1 AND revoked_at IS NULL)
      ON CONFLICT (repo_id, id) DO UPDATE SET name = excluded.name, revoked_at = NULL
      RETURNING id, name, public_key, created_at, revoked_at`,
   )

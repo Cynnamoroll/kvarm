@@ -264,6 +264,39 @@ describe('attribution evidence levels', () => {
     expect(revoked.json.evidence).toMatchObject({ level: 'authenticated', reasons: ['unknown-key'] });
   });
 
+  it('reads the evidence of the note the ref holds when concurrent writers stored theirs out of order', async () => {
+    const repo = await seedRepo('lvl-race');
+    const c1 = await commit(repo, { 'a.txt': 'a\n' });
+    const a = await mintAgent('lvl-race', 'race-agent-a');
+    const b = await mintAgent('lvl-race', 'race-agent-b');
+    await setAttr('lvl-race', c1.sha, { agent: 'race-agent-a', session: 's', promptHash: HASH }, a.token);
+    const second = await setAttr('lvl-race', c1.sha, { agent: 'race-agent-a', session: 's', promptHash: HASH }, b.token);
+    expect(second.json.evidence).toMatchObject({ level: 'declared', principal: `agent:${b.id}` });
+    // The first writer's evidence row lands last (its D1 write raced behind the second note).
+    await env.DB.prepare('UPDATE attribution_evidence SET recorded_at = recorded_at + 60000 WHERE repo_id = ?1 AND principal = ?2')
+      .bind(repoIds['lvl-race'], `agent:${a.id}`)
+      .run();
+    expect((await getAttr('lvl-race', c1.sha)).json.evidence).toMatchObject({ level: 'declared', principal: `agent:${b.id}` });
+  });
+
+  it('caps live repository keys but lets an admin rename a live key at the cap, and lists live keys first', async () => {
+    await seedRepo('lvl-cap');
+    const keys = [];
+    for (let i = 0; i < 33; i++) keys.push(await keyPair());
+    for (const k of keys.slice(0, 32)) expect((await call('POST', repoPath('lvl-cap', '/provenance-keys'), tok.owner, { name: 'k', publicKey: k.publicKey })).status).toBe(201);
+    const over = await call('POST', repoPath('lvl-cap', '/provenance-keys'), tok.owner, { name: 'k', publicKey: keys[32]!.publicKey });
+    expect([over.status, over.json.code]).toEqual([409, 'TOO_MANY_KEYS']);
+    const renamed = await call('POST', repoPath('lvl-cap', '/provenance-keys'), tok.owner, { name: 'renamed', publicKey: keys[0]!.publicKey });
+    expect([renamed.status, renamed.json.name]).toEqual([201, 'renamed']);
+    expect((await call('DELETE', repoPath('lvl-cap', `/provenance-keys/${keys[1]!.id}`), tok.owner)).status).toBe(200);
+    expect((await call('POST', repoPath('lvl-cap', '/provenance-keys'), tok.owner, { name: 'k', publicKey: keys[32]!.publicKey })).status).toBe(201);
+    const list = await call('GET', repoPath('lvl-cap', '/provenance-keys'), tok.owner);
+    const live = (list.json.keys as Array<Record<string, any>>).filter((k) => k.revokedAt === null);
+    expect(live).toHaveLength(32);
+    expect(list.json.keys[list.json.keys.length - 1]).toMatchObject({ id: keys[1]!.id });
+    expect(list.json.keys[list.json.keys.length - 1].revokedAt).not.toBeNull();
+  });
+
   it('accepts instance keys from KVARM_PROVENANCE_KEYS', async () => {
     const repo = await seedRepo('lvl-inst');
     const c1 = await commit(repo, { 'a.txt': 'a\n' });
@@ -394,7 +427,7 @@ describe('audit export', () => {
     const shas = records.map((r) => r.commit);
     expect(new Set(shas).size).toBe(shas.length);
     expect(new Set(shas)).toEqual(new Set([c1.sha, c2.sha, c3.sha, mergeCommit]));
-    const firstSeen = records.map((r) => `${r.firstSeenAt}|${r.commit}`);
+    const firstSeen = records.map((r) => r.firstSeenAt as string);
     expect(firstSeen).toEqual([...firstSeen].sort());
 
     // One full page equals the concatenated pages (stable order).
@@ -487,6 +520,24 @@ describe('audit export', () => {
     expect(third.json.nextCursor).toBeNull();
   });
 
+  it('never fails a queue publication over malformed agent metadata', async () => {
+    await seedRepo('aud-queue-bad');
+    const repoId = repoIds['aud-queue-bad']!;
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO merge_queue (id, repo_id, target_ref, seq, change_set_id, change_number, state, head_sha, merge_policy, agent_meta, enqueued_at, updated_at)
+       VALUES ('qb', ?1, 'refs/heads/main', 1, 'csb', 3, 'publishing', ?2, 'review', '{not json', ?3, ?3)`,
+    )
+      .bind(repoId, 'e'.repeat(40), now)
+      .run();
+    const published = await env.DB.prepare(`UPDATE merge_queue SET state = 'published', merge_commit = ?1 WHERE repo_id = ?2 AND id = 'qb'`)
+      .bind('f'.repeat(40), repoId)
+      .run();
+    expect(published.success).toBe(true);
+    expect((await env.DB.prepare("SELECT state FROM merge_queue WHERE repo_id = ?1 AND id = 'qb'").bind(repoId).first<{ state: string }>())?.state).toBe('published');
+    expect((await audit('aud-queue-bad')).json.records[0].merges[0]).toMatchObject({ via: 'queue', change: 3, principal: null, agent: null, tokenPrefix: null });
+  });
+
   it('records a merge-train publication from the queue ledger with the enqueuing agent', async () => {
     await seedRepo('aud-queue');
     const a = await mintAgent('aud-queue', 'queue-agent');
@@ -497,10 +548,10 @@ describe('audit export', () => {
     const mergeCommit = 'd'.repeat(40);
     await env.DB.prepare(
       `INSERT INTO merge_queue (id, repo_id, target_ref, seq, change_set_id, change_number, state, head_sha, merge_policy,
-                                enqueued_by, enqueuer_login, agent_meta, enqueued_at, updated_at)
-       VALUES ('q1', ?1, 'refs/heads/main', 1, 'cs1', 7, 'publishing', ?2, 'review', ?3, ?4, ?5, ?6, ?6)`,
+                                enqueued_by, enqueuer_login, agent_meta, principal, enqueued_at, updated_at)
+       VALUES ('q1', ?1, 'refs/heads/main', 1, 'cs1', 7, 'publishing', ?2, 'review', ?3, ?4, ?5, ?7, ?6, ?6)`,
     )
-      .bind(repoId, head, userIds[OWNER], OWNER, JSON.stringify({ agentId: a.id, agentName: 'queue-agent', tokenId }), now)
+      .bind(repoId, head, userIds[OWNER], OWNER, JSON.stringify({ agentId: a.id, agentName: 'queue-agent', tokenId }), now, `agent:${a.id}`)
       .run();
     await env.DB.prepare(`UPDATE merge_queue SET state = 'published', active = 0, merge_commit = ?1, previous_sha = ?2, updated_at = ?3 WHERE repo_id = ?4 AND id = 'q1'`)
       .bind(mergeCommit, head, now + 1, repoId)

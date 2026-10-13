@@ -1166,7 +1166,7 @@ export const OPERATIONS = Object.freeze([
     command: ['audit', 'export'],
     family: 'provenance',
     description:
-      'Audit export (repo admins): one record per commit with agent, session, promptHash, model, evidence level, token prefix, pushes and merges, oldest first. Bounded pages with nextCursor.',
+      'Audit export (repo admins): one record per commit with agent, session, promptHash, model, evidence level, token prefix, pushes and merges, in first-recorded order. Bounded pages with nextCursor.',
     method: 'GET',
     path: '/repos/{repo}/audit',
     params: [

@@ -18,7 +18,7 @@
  * checks access.
  */
 
-import { KVARM_NOTES_REF, NotesTreeError, ZERO_OID, buildNotesCommit, encode, findNote } from '@kvarm/gitops';
+import { KVARM_NOTES_REF, NotesTreeError, ZERO_OID, buildNotesCommit, encode, findNote, sha256Hex } from '@kvarm/gitops';
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -29,7 +29,6 @@ import { RefStoreUnavailable, isFullSha, lsRefs, readCommitInfo, type ResolveCon
 import {
   assessEvidence,
   parseSignedEvidence,
-  sha256Hex,
   undeclaredEvidence,
   type Evidence,
   type EvidenceLevel,
@@ -218,18 +217,19 @@ interface LedgerEntry {
 }
 
 /**
- * Appends to the events ledger and stores the evidence in one batch. The
- * note already landed, so a failure is logged and the write reports the
- * level readers will then see: declared, since no evidence row matches the
- * note.
+ * Appends to the events ledger and stores the evidence in one batch. The note
+ * already landed, so a failure is logged; if the batch fails, the ledger row
+ * is retried alone so the evidence write cannot lose it, and the write
+ * reports the level readers will then see: declared, since no evidence row
+ * matches the note.
  */
 async function recordLedger(env: Env, e: LedgerEntry): Promise<Evidence> {
   const now = Date.now();
   const { evidence, submitter } = e.assessed;
   const r = e.attribution;
-  try {
-    const [, stored] = await env.DB.batch([
-      env.DB.prepare('INSERT INTO events (id, type, payload, processed_at, created_at) VALUES (?1, ?2, ?3, ?4, ?4)').bind(
+  const ledger = () =>
+    env.DB.prepare('INSERT INTO events (id, type, payload, processed_at, created_at) VALUES (?1, ?2, ?3, ?4, ?4)')
+      .bind(
         crypto.randomUUID(),
         'attribution.set',
         JSON.stringify({
@@ -242,46 +242,55 @@ async function recordLedger(env: Env, e: LedgerEntry): Promise<Evidence> {
           evidence: { level: evidence.level, reasons: evidence.reasons, principal: evidence.principal, tokenKind: evidence.tokenKind, runId: evidence.runId, keyId: evidence.keyId },
         }),
         now,
-      ),
-      // The token prefix is read from the credential row by id, so no token material passes through here.
+      );
+  try {
+    const [, stored] = await env.DB.batch([
+      ledger(),
+      // Keyed by the note digest: concurrent writers of one commit each store their own row, and a reader picks the
+      // row of the note the ref holds. The token prefix is read from the credential row by id, so no token
+      // material passes through here.
       env.DB.prepare(
         `INSERT INTO attribution_evidence (repo_id, commit_sha, note_digest, notes_commit, source, agent, session, prompt_hash, model, actor,
-                                           level, reasons, principal, token_kind, token_prefix, run_id, key_id, at)
+                                           level, reasons, principal, token_kind, token_prefix, run_id, key_id, at, recorded_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                  CASE ?14 WHEN 'pat' THEN (SELECT prefix FROM pat WHERE id = ?15)
                           WHEN 'agent' THEN (SELECT prefix FROM agent_tokens WHERE id = ?15) END,
-                 ?16, ?17, ?18)
-         ON CONFLICT (repo_id, commit_sha) DO UPDATE SET
-           note_digest = excluded.note_digest, notes_commit = excluded.notes_commit, source = excluded.source, agent = excluded.agent,
-           session = excluded.session, prompt_hash = excluded.prompt_hash, model = excluded.model, actor = excluded.actor,
-           level = excluded.level, reasons = excluded.reasons, principal = excluded.principal, token_kind = excluded.token_kind,
-           token_prefix = excluded.token_prefix, run_id = excluded.run_id, key_id = excluded.key_id, at = excluded.at
+                 ?16, ?17, ?18, ?19)
+         ON CONFLICT (repo_id, commit_sha, note_digest) DO UPDATE SET
+           notes_commit = excluded.notes_commit, source = excluded.source, level = excluded.level, reasons = excluded.reasons,
+           principal = excluded.principal, token_kind = excluded.token_kind, token_prefix = excluded.token_prefix,
+           run_id = excluded.run_id, key_id = excluded.key_id, recorded_at = excluded.recorded_at
          RETURNING token_prefix`,
-      ).bind(
-        e.repoId,
-        e.commit,
-        e.noteDigest,
-        e.notesCommit,
-        e.source,
-        r.agent,
-        r.session,
-        r.promptHash,
-        r.model ?? null,
-        r.actor,
-        evidence.level,
-        JSON.stringify(evidence.reasons),
-        submitter.principal,
-        submitter.tokenKind,
-        submitter.tokenId,
-        evidence.runId,
-        evidence.keyId,
-        Date.parse(r.at),
-      ),
+      )
+        .bind(
+          e.repoId,
+          e.commit,
+          e.noteDigest,
+          e.notesCommit,
+          e.source,
+          r.agent,
+          r.session,
+          r.promptHash,
+          r.model ?? null,
+          r.actor,
+          evidence.level,
+          JSON.stringify(evidence.reasons),
+          submitter.principal,
+          submitter.tokenKind,
+          submitter.tokenId,
+          evidence.runId,
+          evidence.keyId,
+          Date.parse(r.at),
+          now,
+        ),
     ]);
     const prefix = (stored?.results as Array<{ token_prefix: string | null }> | undefined)?.[0]?.token_prefix ?? null;
     return { ...evidence, tokenPrefix: prefix };
   } catch (err) {
-    console.warn(JSON.stringify({ attributionLedgerFailed: String(err).slice(0, 200), commit: e.commit }));
+    console.warn(JSON.stringify({ attributionEvidenceFailed: String(err).slice(0, 200), commit: e.commit }));
+    await ledger()
+      .run()
+      .catch((again: unknown) => console.warn(JSON.stringify({ attributionLedgerFailed: String(again).slice(0, 200), commit: e.commit })));
     return undeclaredEvidence('evidence-not-recorded');
   }
 }
@@ -338,17 +347,16 @@ interface EvidenceRow {
   key_id: string | null;
 }
 
-/** The stored evidence when it was recorded for exactly these note bytes. */
+/** The stored evidence recorded for exactly these note bytes. */
 async function noteEvidence(env: Env, repoId: string, sha: string, bytes: Uint8Array): Promise<Evidence> {
-  const [row, digest] = await Promise.all([
-    env.DB.prepare(
-      `SELECT note_digest, level, reasons, principal, token_kind, token_prefix, run_id, key_id
-         FROM attribution_evidence WHERE repo_id = ?1 AND commit_sha = ?2`,
-    )
-      .bind(repoId, sha)
-      .first<EvidenceRow>(),
-    sha256Hex(bytes),
-  ]);
+  const digest = await sha256Hex(bytes);
+  const { results } = await env.DB.prepare(
+    `SELECT note_digest, level, reasons, principal, token_kind, token_prefix, run_id, key_id
+       FROM attribution_evidence WHERE repo_id = ?1 AND commit_sha = ?2 ORDER BY note_digest = ?3 DESC, recorded_at DESC LIMIT 1`,
+  )
+    .bind(repoId, sha, digest)
+    .all<EvidenceRow>();
+  const row = results[0];
   if (!row) return undeclaredEvidence('no-evidence-record');
   // The notes ref is an ordinary ref: a note pushed around Kvarm carries none of the stored evidence.
   if (row.note_digest !== digest) return undeclaredEvidence('note-written-outside-kvarm');

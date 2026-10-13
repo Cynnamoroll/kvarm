@@ -17,7 +17,7 @@
 
 import { confirmedRefs, ReportStatusReader } from '@kvarm/gitops';
 import { bumpRefGeneration, refGeneration } from '../cache/compare';
-import { touchRepoPushed, touchRepoPushedStatement, type RepoRow } from '../db/repos';
+import { touchRepoPushed, type RepoRow } from '../db/repos';
 
 /** Upper bound on how long a confirmed push reply waits for the freshness writes. */
 export const PUSH_FRESHNESS_TIMEOUT_MS = 3000;
@@ -30,23 +30,10 @@ export async function repoViewGeneration(repo: Pick<RepoRow, 'id' | 'pushed_at'>
 /**
  * Moves the view generation after a confirmed push. `deferPushedAt` leaves the
  * `pushed_at` write to the caller, which records it in its own next D1 batch
- * (`touchRepoPushedStatement`). `audit` statements (services/audit.ts) ride
- * in the same D1 round trip as the `pushed_at` write.
+ * (`touchRepoPushedStatement`).
  */
-export async function recordConfirmedPush(
-  env: Env,
-  repoId: string,
-  opts: { deferPushedAt?: boolean; audit?: D1PreparedStatement[] } = {},
-): Promise<void> {
-  const audit = opts.audit ?? [];
-  const writes = opts.deferPushedAt
-    ? audit.length > 0
-      ? env.DB.batch(audit)
-      : null
-    : audit.length > 0
-      ? env.DB.batch([touchRepoPushedStatement(env.DB, repoId), ...audit])
-      : touchRepoPushed(env.DB, repoId);
-  await Promise.all([bumpRefGeneration(repoId), writes]);
+export async function recordConfirmedPush(env: Env, repoId: string, opts: { deferPushedAt?: boolean } = {}): Promise<void> {
+  await Promise.all([bumpRefGeneration(repoId), opts.deferPushedAt ? null : touchRepoPushed(env.DB, repoId)]);
 }
 
 export interface RelayOptions {

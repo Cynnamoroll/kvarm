@@ -4,8 +4,8 @@
  * in D1 from the attribution evidence (services/provenance.ts), confirmed
  * pushes at the git gate and merge publications (`ref_updates`).
  *
- * A page is one indexed D1 read over `audit_commits` (first-seen time, then
- * sha), so with the authority lookup a page costs two D1 round trips. Records
+ * A page is one indexed D1 read over `audit_commits` in insertion order, so
+ * with the authority lookup a page costs two D1 round trips. Records
  * never carry a token or secret: credentials appear as their public prefix,
  * read from the credential row at write time.
  *
@@ -93,23 +93,32 @@ const iso = (ms: number) => new Date(ms).toISOString();
 // ---------------------------------------------------------------------------
 
 /**
- * One `ref_updates` row per ref a gate push confirmed. The credential prefix
- * is read by id inside the statement, so no token material is handled here.
+ * Records one `ref_updates` row per ref a gate push confirmed. Best effort:
+ * the push already landed, and the audit ledger must never fail it. The
+ * credential prefix is read by id inside the statement, so no token material
+ * is handled here.
  */
-export function pushAuditStatements(db: D1Database, repoId: string, actor: Actor | null, commands: readonly RefCommand[], confirmed: readonly string[], at = Date.now()): D1PreparedStatement[] {
+export async function recordPushAudit(env: Env, repoId: string, actor: Actor | null, commands: readonly RefCommand[], confirmed: readonly string[]): Promise<void> {
   const ok = new Set(confirmed);
-  return commands.filter((c) => ok.has(c.ref)).map((c) => refUpdateStatement(db, { repoId, ref: c.ref, oldSha: c.oldOid, newSha: c.newOid, via: 'push', change: null, actor, at }));
+  const at = Date.now();
+  const rows = commands
+    .filter((c) => ok.has(c.ref))
+    .map((c) => refUpdateStatement(env.DB, { repoId, ref: c.ref, oldSha: c.oldOid, newSha: c.newOid, via: 'push', change: null, actor, at }));
+  if (rows.length === 0) return;
+  await env.DB.batch(rows).catch((err: unknown) => console.warn(JSON.stringify({ pushAuditFailed: String(err).slice(0, 200), repo: repoId })));
 }
 
-/** The `ref_updates` row of a direct merge's publication. */
-export function mergeAuditStatement(
-  db: D1Database,
+/** Records a direct merge's publication; best effort, like the push record. */
+export async function recordMergeAudit(
+  env: Env,
   repoId: string,
   actor: Actor | null,
   m: { ref: string; previous: string; mergeCommit: string; change: number },
   at: number,
-): D1PreparedStatement {
-  return refUpdateStatement(db, { repoId, ref: m.ref, oldSha: m.previous, newSha: m.mergeCommit, via: 'merge', change: m.change, actor, at });
+): Promise<void> {
+  await refUpdateStatement(env.DB, { repoId, ref: m.ref, oldSha: m.previous, newSha: m.mergeCommit, via: 'merge', change: m.change, actor, at })
+    .run()
+    .catch((err: unknown) => console.warn(JSON.stringify({ mergeAuditFailed: String(err).slice(0, 200), repo: repoId, mergeCommit: m.mergeCommit })));
 }
 
 function refUpdateStatement(
@@ -159,16 +168,14 @@ function parseTime(raw: string | undefined, name: string): number | null | Fail 
 
 const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as Fail).ok === false;
 
-function encodeCursor(at: number, sha: string): string {
-  return btoa(JSON.stringify([at, sha])).replace(/=+$/, '');
+function encodeCursor(seq: number): string {
+  return btoa(JSON.stringify(['a', seq])).replace(/=+$/, '');
 }
 
-function decodeCursor(raw: string): { at: number; sha: string } | null {
+function decodeCursor(raw: string): number | null {
   try {
     const v: unknown = JSON.parse(atob(raw));
-    if (Array.isArray(v) && v.length === 2 && Number.isSafeInteger(v[0]) && typeof v[1] === 'string' && /^[0-9a-f]{40}$/.test(v[1])) {
-      return { at: v[0] as number, sha: v[1] };
-    }
+    if (Array.isArray(v) && v.length === 2 && v[0] === 'a' && Number.isSafeInteger(v[1]) && (v[1] as number) >= 0) return v[1] as number;
   } catch {
     // not one of ours
   }
@@ -177,6 +184,7 @@ function decodeCursor(raw: string): { at: number; sha: string } | null {
 
 interface AuditRow {
   commit_sha: string;
+  seq: number;
   first_at: number;
   agent: string | null;
   session: string | null;
@@ -255,7 +263,7 @@ function toRecord(r: AuditRow): AuditRecord {
   };
 }
 
-/** GET audit?since=&until=&limit=&cursor= — one record per commit, oldest first. */
+/** GET audit?since=&until=&limit=&cursor= — one record per commit, in the order Kvarm first recorded them. */
 export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise<ServiceResult<AuditPage>> {
   const since = parseTime(q.since, 'since');
   if (isFail(since)) return since;
@@ -268,16 +276,19 @@ export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise
     if (!Number.isInteger(n) || n < 1 || n > AUDIT_LIMITS.pageMax) return fail(400, 'INVALID_LIMIT', `limit must be an integer from 1 to ${AUDIT_LIMITS.pageMax}`);
     limit = n;
   }
-  let after: { at: number; sha: string } | null = null;
+  let after = 0;
   if (q.cursor) {
-    after = decodeCursor(q.cursor);
-    if (!after) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this endpoint');
+    const seq = decodeCursor(q.cursor);
+    if (seq === null) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this endpoint');
+    after = seq;
   }
 
-  // One statement: a seek on (repo_id, first_at, commit_sha) that stops after one page plus one, the
-  // evidence row by primary key, and each commit's first updates + 1 by the (repo_id, new_sha, at, id) index.
+  // One statement. Pages follow the insertion sequence, so a commit recorded after a page was read sorts after
+  // it. The time window becomes a sequence range by one seek at each end of the (repo_id, first_at, seq) index;
+  // first_at is filtered again because the database clock is only nearly monotonic. Each page row then reads
+  // the commit's newest evidence row and its first updates + 1 by index.
   const { results } = await env.DB.prepare(
-    `SELECT a.commit_sha, a.first_at,
+    `SELECT a.commit_sha, a.seq, a.first_at,
             e.agent, e.session, e.prompt_hash, e.model, e.actor, e.at, e.source, e.level, e.reasons, e.principal,
             e.token_kind, e.token_prefix, e.run_id, e.key_id,
             (SELECT json_group_array(json_object('via', u.via, 'ref', u.ref, 'before', u.old_sha, 'change', u.change_number, 'at', u.at,
@@ -285,13 +296,17 @@ export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise
                                                  'tokenKind', u.token_kind, 'tokenPrefix', u.token_prefix))
                FROM (SELECT * FROM ref_updates u WHERE u.repo_id = a.repo_id AND u.new_sha = a.commit_sha
                       ORDER BY u.at, u.id LIMIT ${AUDIT_LIMITS.updatesPerCommit + 1}) u) AS updates
-       FROM (SELECT repo_id, commit_sha, first_at FROM audit_commits
-              WHERE repo_id = ?1 AND first_at >= ?2 AND first_at < ?3 AND (first_at, commit_sha) > (?4, ?5)
-              ORDER BY first_at, commit_sha LIMIT ?6) a
+       FROM (SELECT repo_id, commit_sha, seq, first_at FROM audit_commits
+              WHERE repo_id = ?1 AND first_at >= ?2 AND first_at < ?3 AND seq > ?4
+                AND seq >= COALESCE((SELECT seq FROM audit_commits WHERE repo_id = ?1 AND first_at >= ?2 ORDER BY first_at, seq LIMIT 1), 0)
+                AND seq <= COALESCE((SELECT seq FROM audit_commits WHERE repo_id = ?1 AND first_at < ?3 ORDER BY first_at DESC, seq DESC LIMIT 1), 0)
+              ORDER BY seq LIMIT ?5) a
        LEFT JOIN attribution_evidence e ON e.repo_id = a.repo_id AND e.commit_sha = a.commit_sha
-      ORDER BY a.first_at, a.commit_sha`,
+             AND e.note_digest = (SELECT x.note_digest FROM attribution_evidence x WHERE x.repo_id = a.repo_id AND x.commit_sha = a.commit_sha
+                                   ORDER BY x.recorded_at DESC, x.note_digest DESC LIMIT 1)
+      ORDER BY a.seq`,
   )
-    .bind(repo.id, since ?? 0, until ?? Number.MAX_SAFE_INTEGER, after?.at ?? -1, after?.sha ?? '', limit + 1)
+    .bind(repo.id, since ?? 0, until ?? Number.MAX_SAFE_INTEGER, after, limit + 1)
     .all<AuditRow>();
   const truncated = results.length > limit;
   const kept = results.slice(0, limit);
@@ -303,7 +318,7 @@ export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise
       until: until === null ? null : iso(until),
       records: kept.map(toRecord),
       truncated,
-      nextCursor: truncated && last ? encodeCursor(last.first_at, last.commit_sha) : null,
+      nextCursor: truncated && last ? encodeCursor(last.seq) : null,
     },
   };
 }
