@@ -210,6 +210,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0025_ci_flakes` | the flake registry and per-name check quarantine (retry-then-classify, §0.3) |
 | `0026_branch_rule_guard_completeness` | per-rule `guardCompleteness` (`advisory` default, `required` blocks an incomplete `kvarm/guard`) (§0.3, §11.1) |
 | `0027_hosted_ci` | the per-repository hosted CI opt-in flag (§0.5) |
+| `0028_train_exits` | the partial index behind the train view's exit history (§11.4, §11.6) |
 
 ## 7. Testing
 
@@ -288,6 +289,8 @@ The README's "Deploy from zero" and "Redeploy an existing deployment" sections a
 ### 11.6 Human and agent surfaces
 
 REST, MCP and the CLI are thin adapters over the same services, generated from one operation registry (§0.1). They cover organizations, members and grants, agent credentials, reviews and escalations, workspaces, intents, forecasts and dependencies, the train and queue, tasks, candidates, compositions and arenas, attribution and decisions. CLI errors exit non-zero with an actionable message; MCP returns the same state and errors as REST.
+
+The server-rendered human surfaces sit on the same services, never beside them. The repository pages (tree, blob, commits, branches) are joined by the coordination pages — repository activity (`services/activity.ts`: active workspaces with agent model families, declared intents, pin chains and the Nexus overlap pairs of one base), candidate comparison (arenas and any 1–8 workspaces, ranked, diffed against the base and each other, with duplication reported separately; selection is one form POST over the same service the REST route uses) and the train view (`services/trainView.ts`: the live entries per target, recent exits with their reasons over `idx_mq_exits`, and the open resolve-conflict tasks), which polls by reload. The compare page (`routes/comparePages.ts`) renders the changed-file list server-side from `services/compare.ts` — structure first, JavaScript-disabled users still get the list — and a small hand-written module (`public/assets/diffClient.js`, geometry probed headlessly in `apps/platform/test/diffClient.test.ts`) expands per-file diffs in a virtualized viewport of fixed 20 px rows: about 96 mounted rows for any file size, deterministic scroll anchoring, and lazy per-file fetches from the content-addressed file-diff API. Every coordination page is composed of bounded indexed reads and conceals private repositories through the shared authority lookup; anonymous public compare views are edge-cached like the tree pages, pinned immutably for SHA…SHA ranges and keyed by the repo view generation otherwise.
 
 ### 11.7 Arenas and deferred experiments
 

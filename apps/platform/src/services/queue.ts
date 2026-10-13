@@ -130,6 +130,8 @@ export const TRAIN_LIMITS = {
   maxAttempts: 6,
   listDefault: 50,
   listMax: 100,
+  /** Entries shown of the exit history (ejected, stale, dequeued), newest first. */
+  exitsDefault: 20,
 };
 
 export function backoffSeconds(attempts: number): number {
@@ -759,6 +761,51 @@ export async function trainStatus(env: Env, repo: RepoRow, q: { limit?: string; 
       dependencies: all,
       truncated: (entriesRes?.results?.length ?? 0) > limit,
       limits: { window: TRAIN_LIMITS.window, runnerCapacity: TRAIN_LIMITS.runnerCapacity, admissionCapacity: TRAIN_LIMITS.admissionCapacity },
+    },
+  };
+}
+
+/** An entry that left the train without publishing, with the reason recorded on exit. */
+export interface TrainExitView extends QueueEntryView {
+  exitedAt: string;
+}
+
+export interface TrainExits {
+  exits: TrainExitView[];
+  truncated: boolean;
+}
+
+/**
+ * GET train exits (the train view's history): entries of `ejected`, `stale`
+ * and `dequeued` state, newest first — one indexed range scan over
+ * idx_mq_exits, bounded by its limit, independent of the exit history's
+ * length. Published entries stay out: landing is success, not an exit.
+ */
+export async function listTrainExits(env: Env, repo: RepoRow, q: { limit?: string; base?: string }): Promise<ServiceResult<TrainExits>> {
+  let limit = TRAIN_LIMITS.exitsDefault;
+  if (q.limit !== undefined) {
+    if (!/^\d{1,3}$/.test(q.limit) || Number(q.limit) < 1 || Number(q.limit) > TRAIN_LIMITS.listMax) {
+      return fail(400, `limit must be 1-${TRAIN_LIMITS.listMax}`, 'INVALID_LIMIT');
+    }
+    limit = Number(q.limit);
+  }
+  const base = q.base ? (q.base.startsWith('refs/heads/') ? q.base : branchRef(q.base)) : null;
+  const rows =
+    (
+      await env.DB.prepare(
+        `SELECT ${ENTRY_COLUMNS} FROM merge_queue q INDEXED BY idx_mq_exits
+          WHERE q.repo_id = ?1 AND q.active = 0 AND q.state IN ('ejected', 'stale', 'dequeued')
+            AND (?2 IS NULL OR q.target_ref = ?2)
+          ORDER BY q.updated_at DESC LIMIT ?3`,
+      )
+        .bind(repo.id, base, limit + 1)
+        .all<EntryRow>()
+    ).results ?? [];
+  return {
+    ok: true,
+    value: {
+      exits: rows.slice(0, limit).map((r) => ({ ...entryView(r), exitedAt: iso(r.updated_at) })),
+      truncated: rows.length > limit,
     },
   };
 }

@@ -87,6 +87,10 @@ async function resolveRepo(c: Context<App>, need: RepoNeed = 'read'): Promise<Re
   return { repo: access.repo, viewer: access.actor, role: access.role };
 }
 
+/** The resolve/finish/not-found helpers, shared by the coordination and compare page routers. */
+export { finish, notFound, resolveRepo };
+export type { Resolved };
+
 /** Settings pages are concealed from viewers without admin on the repo. */
 function canAdminister(resolved: Resolved): resolved is Resolved & { viewer: ApiActor } {
   return resolved.viewer !== null && resolved.role === 'admin';
@@ -565,11 +569,20 @@ repoPages.get('/branches', async (c) => {
     throw err;
   }
   const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  const defaultRef = resolved.repo.default_branch || 'main';
   const rows = refs.branches
     .map((b) => {
       const short = b.name.replace('refs/heads/', '');
       const href = `${base}/tree/${encodeURIComponent(short)}`;
-      return html`<div class="commit-row"><div><a href="${raw(href)}"><strong>${short}</strong></a></div></div>`;
+      const compareHref = short !== defaultRef ? `${base}/compare/${encodeURIComponent(`${defaultRef}...${short}`)}` : '';
+      return html`
+        <div class="commit-row">
+          <div>
+            <a href="${raw(href)}"><strong>${short}</strong></a>
+            ${short !== defaultRef ? raw(` <a class="muted" href="${compareHref}">compare with ${escapeHtml(defaultRef)}</a>`) : ''}
+          </div>
+        </div>
+      `;
     })
     .join('');
   const viewerLogin = resolved.viewer?.user.login ?? null;
