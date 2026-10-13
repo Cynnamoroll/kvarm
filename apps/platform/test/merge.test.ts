@@ -355,6 +355,86 @@ describe('prepareMerge + publishMerge', () => {
     });
   });
 
+  it('a criss-cross merges through the virtual merge base and publishes only objects the remote can resolve', async () => {
+    const store = new Store();
+    const ten = (c: Record<number, string> = {}) => Array.from({ length: 10 }, (_, i) => `${c[i + 1] ?? `line ${i + 1}`}\n`).join('');
+    const o = await store.commit([], { 'f.txt': ten(), 'README.md': 'r\n' });
+    const b1 = await store.commit([o], { 'f.txt': ten({ 5: 'B1' }), 'README.md': 'r\n' });
+    const b2 = await store.commit([o], { 'f.txt': ten({ 5: 'B2' }), 'README.md': 'r\n' });
+    // Both criss-cross merges settled line 5 the same way, then edited opposite ends.
+    const main = await store.commit([b1, b2], { 'f.txt': ten({ 1: 'main', 5: 'settled' }), 'README.md': 'r\n' }, 'main');
+    const head = await store.commit([b2, b1], { 'f.txt': ten({ 5: 'settled', 10: 'head' }), 'README.md': 'r head\n' }, 'feature');
+    const mergedTree = await new Store().tree({ 'f.txt': ten({ 1: 'main', 5: 'settled', 10: 'head' }), 'README.md': 'r head\n' });
+
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({ status: 'clean', mergeable: true, treeSha: mergedTree, mergeBase: [b1, b2].sort()[0], mergeBases: [b1, b2].sort() });
+
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', main);
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'Merge feature', now: 1_790_000_500 });
+    expect(prepared).toMatchObject({ ok: true, value: { kind: 'merge', treeSha: mergedTree, mergeBases: [b1, b2].sort() } });
+    if (!prepared.ok) return;
+    // Virtual-base objects (the markers blob) are merge inputs only and never published.
+    for (const obj of prepared.value.objects) expect(decode(obj.raw)).not.toContain('Temporary merge branch');
+    const published = await publishMerge({ pusher, gate: checksGate([]) }, { repo: REPO, ref: 'refs/heads/main' }, prepared.value);
+    expect(published).toMatchObject({ ok: true, value: { kind: 'merge', treeSha: mergedTree } });
+    const after = await store.readTree(mergedTree);
+    expect(after?.map((e) => e.name).sort()).toEqual(['README.md', 'f.txt']);
+  });
+
+  it('a criss-cross whose merges kept different sides conflicts instead of picking one base', async () => {
+    const store = new Store();
+    const o = await store.commit([], { 'f.txt': 'one\n' });
+    const b1 = await store.commit([o], { 'f.txt': 'B1\n' });
+    const b2 = await store.commit([o], { 'f.txt': 'B2\n' });
+    const main = await store.commit([b1, b2], { 'f.txt': 'B1\n' });
+    const head = await store.commit([b2, b1], { 'f.txt': 'B2\n' });
+    const r = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'MERGE_CONFLICT', conflicts: [{ path: 'f.txt', kind: 'content' }] });
+  });
+
+  it('a criss-cross over the bases or depth budget, or with a rename conflict between its bases, is 422 MULTIPLE_MERGE_BASES with the reason', async () => {
+    const store = new Store();
+    const o = await store.commit([], { 'a.txt': 'a\n', 'f.txt': 'one\n' });
+    const b1 = await store.commit([o], { 'a.txt': 'a\n', 'f.txt': 'B1\n' });
+    const b2 = await store.commit([o], { 'a.txt': 'a\n', 'f.txt': 'two\n', 'g.txt': 'g\n' });
+    const main = await store.commit([b1, b2], { 'a.txt': 'a\n', 'f.txt': 'B1\n', 'g.txt': 'g\n' });
+    const head = await store.commit([b2, b1], { 'a.txt': 'a\n', 'f.txt': 'B1\n', 'g.txt': 'g\n', 'h.txt': 'h\n' });
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' })).toMatchObject({ ok: true });
+
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxMergeBases: 1 } })).toMatchObject({
+      ok: false,
+      status: 422,
+      code: 'MULTIPLE_MERGE_BASES',
+      reason: 'maxMergeBases',
+    });
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxVirtualDepth: 0 } })).toMatchObject({
+      ok: false,
+      status: 422,
+      code: 'MULTIPLE_MERGE_BASES',
+      reason: 'maxVirtualDepth',
+    });
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head, budgets: { maxMergeBases: 1 } });
+    expect(m).toMatchObject({ status: 'unknown', unknownReason: 'maxMergeBases', mergeable: false, mergeBases: [b1, b2].sort() });
+    // The inner merges spend the shared read budget: a tiny one is MERGE_TOO_LARGE, as for any merge.
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxTreeReads: 1 } })).toMatchObject({
+      ok: false,
+      status: 422,
+      code: 'MERGE_TOO_LARGE',
+    });
+
+    const r1 = await store.commit([o], { 'x/a.txt': 'a\n', 'f.txt': 'one\n' });
+    const r2 = await store.commit([o], { 'y/a.txt': 'a\n', 'f.txt': 'one\n' });
+    const t = await store.commit([r1, r2], { 'x/a.txt': 'a\n', 'f.txt': 'one\n' });
+    const h = await store.commit([r2, r1], { 'y/a.txt': 'a\n', 'f.txt': 'one\n' });
+    expect(await prepareMerge(store, { targetSha: t, headSha: h, message: 'm' })).toMatchObject({
+      ok: false,
+      status: 422,
+      code: 'MULTIPLE_MERGE_BASES',
+      reason: 'virtualConflict',
+    });
+  });
+
   it('many individually permitted merged blobs over the aggregate budget are MERGE_TOO_LARGE, with nothing to publish', async () => {
     const store = new Store();
     const files = (edit: (lines: string[]) => string[]) => {

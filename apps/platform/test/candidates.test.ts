@@ -653,6 +653,37 @@ describe('composition', () => {
     expect([unmatched.status, unmatched.json.code, unmatched.json.unmatched]).toEqual([422, 'SELECTION_UNMATCHED', [{ workspace: a.id, path: 'docs/' }]]);
   });
 
+  it('composes a candidate that criss-crosses the base through a virtual merge base', async () => {
+    const name = 'compose-cc';
+    const repo = await seedRepo(name);
+    const main0 = await based(repo);
+    const a = (await createWs(name, 'a')).json;
+    const b = (await createWs(name, 'b')).json;
+    // main and workspace a each merge the same two commits, in opposite orders: their merge bases are x1 and x2.
+    const x1 = await commit(repo, { ...BASE, 'src/app.ts': APP('X1') }, [main0.sha]);
+    const x2 = await commit(repo, { ...BASE, 'docs/guide.md': 'guide x2\n' }, [main0.sha]);
+    const merged = { ...BASE, 'src/app.ts': APP('X1'), 'docs/guide.md': 'guide x2\n' };
+    const mainM = await commit(repo, merged, [x1.sha, x2.sha]);
+    repo.refs.set('refs/heads/main', mainM.sha);
+    const aHead = await commit(repo, { ...merged, 'src/a.ts': 'a\n' }, [x2.sha, x1.sha]);
+    expect(await gitPush(name, await workspaceToken(name), [`${main0.sha} ${aHead.sha} ${a.ref}`])).toEqual(['unpack ok', `ok ${a.ref}`]);
+    await deliver(name, a.ref, main0.sha, aHead.sha);
+    const bHead = await commit(repo, { ...merged, 'docs/b.md': 'b\n' }, [mainM.sha]);
+    expect(await gitPush(name, await workspaceToken(name), [`${main0.sha} ${bHead.sha} ${b.ref}`])).toEqual(['unpack ok', `ok ${b.ref}`]);
+    await deliver(name, b.ref, main0.sha, bHead.sha);
+
+    const r = await call('POST', `${R(name)}/candidates/compose`, tok.owner, { base: 'main', workspaces: [a.id, b.id] });
+    expect(r.status, JSON.stringify(r.json)).toBe(201);
+    // Budget row "POST …/candidates/compose (clean)" holds with the virtual merge base: its reads go to Artifacts, not D1.
+    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(8);
+    expect(r.cost.sub).toBeLessThanOrEqual(3);
+    expect(r.json.treeSha).toBe(await writeTree(repo, { ...merged, 'src/a.ts': 'a\n', 'docs/b.md': 'b\n' }));
+    expect(r.json.sources).toMatchObject([
+      { workspace: a.id, mergeBase: [x1.sha, x2.sha].sort()[0] },
+      { workspace: b.id, mergeBase: mainM.sha },
+    ]);
+  });
+
   it('validates input before any work', async () => {
     const { a, b } = await setup('compose-v', { ...BASE, 'x.txt': 'x\n' }, { ...BASE, 'y.txt': 'y\n' });
     const post = (body: unknown) => call('POST', `${R('compose-v')}/candidates/compose`, tok.owner, body);
