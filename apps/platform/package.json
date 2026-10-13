@@ -15,6 +15,7 @@
   "dependencies": {
     "@kvarm/diffcore": "*",
     "@kvarm/gitops": "*",
+    "@kvarm/issues": "*",
     "@kvarm/ops": "*",
     "@kvarm/review": "*",
     "@kvarm/ui": "*",

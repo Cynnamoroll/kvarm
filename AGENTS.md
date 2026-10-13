@@ -18,6 +18,7 @@ Kvarm is a git platform for teams of people and coding agents, built as one Clou
 | `packages/gitops` | packfile writer, receive-pack client, merge base, three-way merge, tar writer, notes |
 | `packages/diffcore` | tree and line diffs with work budgets |
 | `packages/review` | risk classification, change rating and the `kvarm/guard` rules |
+| `packages/issues` | issue references in change text and branch names, issue fingerprints |
 | `packages/ops` | the operation registry: each entry is a REST endpoint, an MCP tool and a CLI command |
 | `packages/ui` | server-side rendering helpers for the existing pages |
 | `scripts` | ops scripts (`bootstrap.mjs`, `mint-pat.mjs`, `wrangler-target.mjs`), live drivers (`*-e2e.mjs`, `dogfood-ci.mjs`), benchmarks; pure helpers in `scripts/lib`, Node tests in `scripts/test` |

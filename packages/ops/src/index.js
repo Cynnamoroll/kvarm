@@ -87,6 +87,8 @@ const numberArg = (name, description) => ({ name, type: 'integer', in: 'path', r
 /** @type {Param} */
 const CHANGE = numberArg('number', 'Change set number within the repository');
 /** @type {Param} */
+const ISSUE = numberArg('number', 'Issue number within the repository');
+/** @type {Param} */
 const WORKSPACE = pathArg('workspace', 'Workspace id (16 hex characters)');
 /** @type {Param} */
 const TASK = pathArg('task', 'Task id from list_tasks');
@@ -335,6 +337,7 @@ export const OPERATIONS = Object.freeze([
       body('agent', 'string', 'Agent display name (default: the token agent or your login)'),
       body('base', 'string', 'Base branch (default: the default branch)'),
       body('intent', 'json', 'Optional intent declaration {paths: string[], prefixes?: string[], ttlSeconds?: number}'),
+      body('issue', 'integer', 'Open issue the workspace resolves: the change it opens closes the issue when it merges into the default branch'),
     ],
   }),
   define({
@@ -1146,6 +1149,92 @@ export const OPERATIONS = Object.freeze([
       query('path', 'string[]', 'Repository paths (at most 20)', { literal: true }),
       LIMIT(50),
       CURSOR,
+    ],
+  }),
+
+  // --- issues ---------------------------------------------------------------
+  define({
+    name: 'create_issue',
+    command: ['issue', 'create'],
+    family: 'issues',
+    description:
+      'File an issue, e.g. a bug found outside the current task. With a fingerprint, a repeat report while an issue with that fingerprint is open counts one more occurrence on it (200, created false) instead of filing a duplicate (201).',
+    method: 'POST',
+    path: '/repos/{repo}/issues',
+    params: [
+      REPO,
+      body('title', 'string', 'Title (1-256 characters)', { required: true }),
+      body('body', 'string', 'Description: what happens, how to reproduce it'),
+      body('paths', 'string[]', 'Repository paths the issue is about (at most 100)', { literal: true }),
+      body('fingerprint', 'string', 'Stable identity of the problem (e.g. a failing test id) used to deduplicate reports'),
+      body('evidence', 'json', 'Evidence {sha?, check?, runId?, workspace?, url?}'),
+    ],
+  }),
+  define({
+    name: 'list_issues',
+    command: ['issue', 'list'],
+    family: 'issues',
+    description: 'Issues of the repository, newest first, filtered by state (default open) and by source (human, agent, ci, flake, guard).',
+    method: 'GET',
+    path: '/repos/{repo}/issues',
+    params: [
+      REPO,
+      query('state', 'string', 'Issue state (default open)', { enum: ['open', 'closed', 'all'] }),
+      query('source', 'string', 'Who filed it', { enum: ['human', 'agent', 'ci', 'flake', 'guard'] }),
+      LIMIT(100),
+      CURSOR,
+    ],
+  }),
+  define({
+    name: 'get_issue',
+    command: ['issue', 'get'],
+    family: 'issues',
+    description: 'One issue with its occurrences, evidence, how it was closed and its links to changes and workspaces.',
+    method: 'GET',
+    path: '/repos/{repo}/issues/{number}',
+    params: [REPO, ISSUE],
+  }),
+  define({
+    name: 'update_issue',
+    command: ['issue', 'update'],
+    family: 'issues',
+    description: 'Edit an issue, close it (closedReason completed, not_planned or duplicate) or reopen it.',
+    method: 'PATCH',
+    path: '/repos/{repo}/issues/{number}',
+    params: [
+      REPO,
+      ISSUE,
+      body('title', 'string', 'New title'),
+      body('body', 'string', 'New description'),
+      body('paths', 'string[]', 'Repository paths the issue is about (replaces the list)', { literal: true }),
+      body('state', 'string', 'open or closed', { enum: ['open', 'closed'] }),
+      body('closedReason', 'string', 'Why it is closed (with state closed)', { enum: ['completed', 'not_planned', 'duplicate'] }),
+    ],
+  }),
+  define({
+    name: 'list_change_issues',
+    command: ['issue', 'linked'],
+    family: 'issues',
+    description:
+      "Issues linked to a change: closing keywords in its title or body (confirmed), an issue number in its branch name (proposed), its workspace's issue, and manual links; willClose tells which close when it merges into the default branch.",
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/issues',
+    params: [REPO, CHANGE],
+  }),
+  define({
+    name: 'link_issue',
+    command: ['issue', 'link'],
+    family: 'issues',
+    description:
+      'Confirm or reject a link between a change and an issue, e.g. accept a proposed link from the branch name. A confirmed closes link closes the issue when the change merges into the default branch; a manual decision is never recomputed away.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/issues',
+    params: [
+      REPO,
+      CHANGE,
+      body('issue', 'integer', 'Issue number', { required: true }),
+      body('kind', 'string', 'closes (default) or refs', { enum: ['closes', 'refs'] }),
+      body('state', 'string', 'confirmed (default) or rejected', { enum: ['confirmed', 'rejected'] }),
     ],
   }),
 

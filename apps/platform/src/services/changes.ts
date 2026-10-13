@@ -91,6 +91,7 @@ import {
 import type { ChangeRating } from './risk';
 import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
+import { actorName, changeLinkStatements, mergeCloseStatement } from './issues';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -797,6 +798,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
         branchRef(p.head),
         observedAt,
       ),
+      ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
       ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
       // A change into a ref covered by a branch rule asks a human from the start.
@@ -924,6 +926,9 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (row.state === 'merged') return fail(409, 'a merged change cannot be updated', 'CHANGE_MERGED');
+    if (p.title !== undefined || p.body !== undefined) {
+      await cx.env.DB.batch(changeLinkStatements(cx.env.DB, cx.repo, row.id, { title: row.title, body: row.body, head: row.head_ref }, actorName(cx.actor), now));
+    }
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
     return { ok: true, value: changeView(row) };
   });
@@ -1128,6 +1133,7 @@ export function mergedRecordStatements(
       .bind(repoId, row.id, mergedAt, pub.headSha, pub.mergeCommit),
     changeSignalCleanup(db, repoId, row.id),
     retireConflictTaskStatement(db, repoId, row.number, mergedAt),
+    mergeCloseStatement(db, repoId, row.id, pub.mergeCommit, mergedAt),
     // Pins of the landed head are satisfied with the merge (each with its dependent's wake mark, written first under the
     // same predicate); the last statement finds the rest and the marks.
     ...(opts.dependents === false

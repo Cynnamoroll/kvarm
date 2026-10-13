@@ -65,13 +65,15 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 **Merging and CI.** An explicit merge publishes inside the request. The merge queue runs a bounded integration train: candidates are prepared and checked in parallel against their exact composed tree, and only the final publication holds a short generation-fenced lease. CI is user-owned: a repository's `.kvarm/ci.json` creates check runs and jobs; `kvarm runner` claims them on the user's machine, runs them from a snapshot checkout in a warm working directory and reports back. A Container CI runner (Cloudflare Containers, public beta) is an opt-in showcase of the same claim, run and report loop.
 
+**Issues.** Issues are filed by people, by agents (`create_issue`, for example a bug noticed outside the current task) and by platform signals. A report with a fingerprint lands on the open issue with that fingerprint as one more occurrence instead of a duplicate. A change closes issues without anyone remembering to tag them: closing keywords in its title or body (`fixes #12`, `Closes: #4`) link it, an issue number in its branch name (`fix/12-crash`) proposes a link that one `link_issue` call confirms or rejects, and a workspace created for an issue (`create_workspace {issue}`) links whatever change it opens. Confirmed links close their issues in the same batch that records the change merged into the default branch, from an explicit merge or the train; `list_change_issues` shows beforehand which will close.
+
 **Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), zstd-compressed snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
 
 ## Interfaces
 
 | surface | name |
 | --- | --- |
-| npm workspaces | `@kvarm/platform`, `@kvarm/cli`, `@kvarm/ops`, `@kvarm/gitops`, `@kvarm/diffcore`, `@kvarm/review`, `@kvarm/ui` |
+| npm workspaces | `@kvarm/platform`, `@kvarm/cli`, `@kvarm/ops`, `@kvarm/gitops`, `@kvarm/diffcore`, `@kvarm/review`, `@kvarm/issues`, `@kvarm/ui` |
 | CLI and its environment | `kvarm` (`apps/cli/bin/kvarm.js`), `KVARM_BASE_URL`, `KVARM_PAT` |
 | tokens | `kvarm_pat_<64 hex>` (personal access), `kvarm_agt_<64 hex>` (agent) |
 | CI configuration | `.kvarm/ci.json` |
@@ -275,6 +277,7 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | workspaces and Nexus | `POST/GET …/workspaces`, `GET …/workspaces/:id`, `POST …/workspaces/:id/change-set`, `POST …/workspaces/:id/abandon`, `GET/POST …/workspaces/:id/intent`, `GET …/forecast`, `GET …/workspaces/overlap` |
 | dependencies | `POST/GET …/workspaces/:id/dependencies`, `POST …/workspaces/:id/dependencies/:dep/repin`, `DELETE …/workspaces/:id/dependencies/:dep` |
 | candidates | `GET …/candidates`, `POST …/candidates/compose`, `GET …/compositions`, `GET …/compositions/:id`, `POST/GET …/arenas`, `GET …/arenas/:id`, `GET …/arenas/:id/candidates`, `POST …/arenas/:id/select` |
+| issues | `POST/GET …/issues`, `GET/PATCH …/issues/:n`, `GET/POST …/changes/:n/issues` (linked issues; confirm or reject a link) |
 | tasks | `GET …/tasks`, `GET …/tasks/:id`, `POST …/tasks/:id/claim`, `…/heartbeat`, `…/complete` |
 | attribution | `GET/POST …/commits/:sha/attribution`, `POST …/decisions`, `GET …/context?task=\|path=` |
 | organizations | `POST /orgs`, `GET /orgs/:org`, `GET /user/orgs`, `GET /orgs/:org/members`, `PUT/DELETE /orgs/:org/members/:login` (`owner`/`maintainer`/`member`), `GET/POST /orgs/:org/repos` |

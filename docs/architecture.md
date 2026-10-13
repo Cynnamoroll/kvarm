@@ -137,6 +137,7 @@ The platform adds no avoidable wall-clock latency to merge, validation or CI pat
   - `treediff.ts`: pruned tree diff with one global read limit.
 - **`packages/diffcore`**: line diffs and hunks with work budgets.
 - **`packages/review`**: `classifyFile` and `rateChange` (risk score, level and tags such as `ci-config`, `test-deletion`, `lockfile`, `new-dependency`, `generated`, `mechanical`, `security-sensitive`, `large`), and `guard`, the `kvarm/guard` rules: secrets (known token formats including `kvarm_pat_`/`kvarm_agt_`, private keys, high-entropy assignments), CI gaming (`|| true`, `continue-on-error: true`, deleted or skipped tests) and suspicious new dependencies. Its result reports `complete` and the paths it did not fully inspect (§0.3).
+- **`packages/issues`**: issue references in change text (closing keywords, lists, trailers, `owner/repo#N`; negated fixes and code are mentions only), the issue number a branch name carries, and issue fingerprints, including `checkFingerprint(name)`, the one fingerprint of a check.
 - **`packages/ops`**: the shared operation registry (§0.1): every operation's REST route, MCP tool name, CLI command and JSON schema.
 - **`packages/ui`**: server-rendering helpers for the existing pages.
 
@@ -159,6 +160,7 @@ When two tips have several best common ancestors (agents merging from each other
 - **Merge queue:** `services/queue.ts` with `do/mergeLock.ts` and `services/trainKick.ts` runs the bounded integration train (§11.4). It never holds a publication lease while checks run.
 - **Events:** `services/events.ts` and the Worker's `queue()` handler process push events with independently replayable effects (§11.5); `services/pushFreshness.ts` makes a confirmed push visible before its reply ends (§9).
 - **Agents and coordination:** `services/workspaces.ts` (workspace lifecycle on `refs/heads/agents/<workspaceId>/<slug>`, §9), `services/intents/*` (the Nexus index and forecast, §11.2), `services/candidates.ts` and `services/compositions.ts` (candidate diffs, ranking, arenas and composition, §0.4, §11.7), `services/dependencies.ts` and `services/dependencyGate.ts` (pinned dependencies, §11.3), `services/tasks.ts` (agent tasks claimed under fenced leases), `services/reviews.ts` and `services/reviewGate.ts` (§0.4), `services/attribution.ts` and `services/decisions.ts`.
+- **Issues:** `services/issues.ts` files issues (fingerprinted reports count occurrences on the open issue), links them to changes from the change's title, body and head branch and to workspaces created for them, and closes confirmed `closes` links inside the merge record (`mergedRecordStatements`) only for merges into the default branch. Signal owners (CI, flakes, guard) file and verify-close issues with `issueSignalStatements` and `resolveSignalStatement` inside their own batches.
 - **MCP:** `mcp/server.ts` builds an `McpServer` with the stateless `WebStandardStreamableHTTPServerTransport`, one server and transport per request, authenticated by Bearer token. Every tool comes from the operation registry and calls the same services as REST.
 - **Cost:** `cost/meter.ts` (§10).
 - **CLI (`apps/cli`):** snapshot checkout with git clone fallback, the user-owned CI runner with warm working directories, `kvarm status`, and every registry operation as `kvarm <group> <verb>`.
@@ -176,6 +178,7 @@ All repository routes live under `/api/v1/repos/:owner/:repo/...`. The README's 
 | merge queue | `POST/DELETE changes/:n/enqueue`, `GET queue`, `GET train` |
 | workspaces and Nexus | `POST workspaces {task, agent}`, `GET workspaces`, `POST workspaces/:id/change-set`, `POST workspaces/:id/abandon`, `GET/POST workspaces/:id/intent`, `GET forecast`, `GET workspaces/overlap` (the only overlap surface, §0.1) |
 | candidates | `GET candidates?base=&workspaces=a,b,c` (the list is the explicit candidate set), `POST candidates/compose`, arenas |
+| issues | `POST/GET issues`, `GET/PATCH issues/:n`, `GET/POST changes/:n/issues` |
 | tasks | `GET tasks`, `POST tasks/:id/claim`, `POST tasks/:id/heartbeat`, `POST tasks/:id/complete` |
 | attribution | `GET/POST commits/:sha/attribution`, `POST decisions`, `GET context?task=\|path=` |
 | MCP | `POST /mcp`, stateless Streamable HTTP; every registry operation is a tool |
@@ -207,6 +210,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0023_snapshot_encoding` | stored-object encoding and compressed size on snapshot trees (§11.5) |
 | `0024_publication_intents` | durable merge-queue publication intents and their reconciled outcomes (§11.4) |
 | `0026_branch_rule_guard_completeness` | per-rule `guardCompleteness` (`advisory` default, `required` blocks an incomplete `kvarm/guard`) (§0.3, §11.1) |
+| `0027_issue_automation` | issue sources, fingerprints, occurrences and close records, and issue links to changes and workspaces |
 
 ## 7. Testing
 

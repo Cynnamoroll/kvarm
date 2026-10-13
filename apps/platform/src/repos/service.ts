@@ -16,6 +16,7 @@ import { purgeGitTokens } from '../artifacts/tokens';
 import { deleteSnapshotObjects, snapshotCleanupStatements } from '../services/snapshots';
 import { changeCleanupStatements } from '../services/changes';
 import { workspaceCleanupStatements } from '../services/workspaces';
+import { issueCleanupStatements } from '../services/issues';
 import { arenaCleanupStatements } from '../services/candidates';
 import { compositionCleanupStatements } from '../services/compositions';
 
@@ -163,6 +164,7 @@ export async function deleteRepo(
     ...arenaCleanupStatements(env.DB, repo.id),
     ...workspaceCleanupStatements(env.DB, repo.id),
     ...changeCleanupStatements(env.DB, repo.id),
+    ...issueCleanupStatements(env.DB, repo.id),
   ];
   const results = await env.DB.batch<{ r2_key: string }>([
     ...before,
