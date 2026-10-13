@@ -1,8 +1,11 @@
 /**
  * SnapshotBuilder (architecture §11.5): a commit's working tree as a tar in R2.
  *
- * Tarballs are keyed by (repo, root tree), so commits with identical trees
- * share one object; commit metadata stays per commit. Steps:
+ * Tarballs are keyed by (repo, root tree) and encoding, so commits with
+ * identical trees share one object; commit metadata stays per commit. New
+ * builds store zstd frames (one per batch step, concatenated in the object)
+ * under the v2 key; a build resumed from a resolve output that predates
+ * encodings stays a plain tar under its persisted v1 key. Steps:
  *
  *   resolve   commit -> tree, then claim the tree build in one D1 batch. A
  *             tree that is already built marks the commit ready (reuse); a
@@ -34,6 +37,7 @@
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
+import { constants as ZSTD, createZstdCompress } from 'node:zlib';
 import { decode, encode, gitModeToTar, tarEnd, tarHeader, tarPadding, type TarEntry } from '@kvarm/gitops';
 import { withRepo } from '../artifacts/repo';
 import { CostMeter, runWithMeter } from '../cost/meter';
@@ -47,6 +51,11 @@ export const STALE_BUILD_MS = 30 * 60 * 1000;
 export const READ_AHEAD = 8;
 /** Bytes of returned and expected blobs a step lets the read-ahead hold. */
 export const READ_BUDGET = 16 * 1024 * 1024;
+/** Compression level new snapshot objects are built with. */
+export const SNAPSHOT_ZSTD_LEVEL = 3;
+
+/** How the stored object's bytes relate to the tar: plain, or concatenated zstd frames. */
+export type SnapshotEncoding = 'identity' | 'zstd';
 
 export interface SnapshotParams {
   repoId: string;
@@ -69,7 +78,10 @@ export interface BuildCost {
   parts: number;
   /** R2 objects written: 1 for a fresh tarball, 0 when an existing one was reused. */
   objects: number;
+  /** Stored object bytes (compressed when the build encodes). */
   bytes: number;
+  /** Uncompressed tar bytes fed to the object. */
+  tarBytes: number;
   /** Size of the largest blob the binding returned (held whole while it streams). */
   largestBlob: number;
   /** Most unflushed tar bytes buffered at once before a part upload. */
@@ -94,6 +106,7 @@ export function emptyCost(): BuildCost {
     parts: 0,
     objects: 0,
     bytes: 0,
+    tarBytes: 0,
     largestBlob: 0,
     peakBuffer: 0,
     peakHeld: 0,
@@ -101,8 +114,12 @@ export function emptyCost(): BuildCost {
   };
 }
 
-export function snapshotKey(repoId: string, tree: string): string {
-  return `trees/v1/${repoId}/${tree}.tar`;
+export function snapshotKey(repoId: string, tree: string, encoding: SnapshotEncoding = 'identity'): string {
+  return encoding === 'zstd' ? `trees/v2/${repoId}/${tree}.tar.zst` : `trees/v1/${repoId}/${tree}.tar`;
+}
+
+function contentType(encoding: SnapshotEncoding): string {
+  return encoding === 'zstd' ? 'application/zstd' : 'application/x-tar';
 }
 
 /** The subset of WorkflowStep the builder uses, so tests can drive it directly. */
@@ -184,7 +201,9 @@ function isMissingObject(err: unknown): boolean {
 
 type Resolved =
   | { action: 'done'; reason: string; cost: BuildCost }
-  | { action: 'build'; tree: string; key: string; artifactsName: string; mtime: number; cost: BuildCost };
+  // `encoding` is absent in a persisted resolve output from before encodings
+  // existed; such a build must stay a plain tar at its persisted v1 key.
+  | { action: 'build'; tree: string; key: string; encoding?: 'zstd'; artifactsName: string; mtime: number; cost: BuildCost };
 
 interface ClaimRow {
   tree_state: string | null;
@@ -237,7 +256,8 @@ async function resolveStep(env: Env, p: Required<SnapshotParams> & { instanceId:
       return { action: 'done', reason: 'commit not found', cost };
     }
     const tree = commit.treeHash;
-    const key = snapshotKey(p.repoId, tree);
+    const encoding: SnapshotEncoding = 'zstd';
+    const key = snapshotKey(p.repoId, tree, encoding);
     // Placeholder until the measured cost replaces it: what is metered so far plus the claim batch.
     const settled = JSON.stringify(settledCost(meter, 1));
     const db = env.DB;
@@ -249,7 +269,8 @@ async function resolveStep(env: Env, p: Required<SnapshotParams> & { instanceId:
           `INSERT INTO snapshot_trees (repo_id, tree, state, builder, r2_key, created_at)
            VALUES (?1, ?2, 'building', ?3, ?4, ?5)
            ON CONFLICT (repo_id, tree) DO UPDATE SET
-             state = 'building', builder = excluded.builder, created_at = excluded.created_at, error = NULL
+             state = 'building', builder = excluded.builder, r2_key = excluded.r2_key,
+             created_at = excluded.created_at, error = NULL
            WHERE snapshot_trees.state = 'failed'
               OR (snapshot_trees.state = 'building' AND snapshot_trees.created_at < ?6)`,
         )
@@ -284,7 +305,7 @@ async function resolveStep(env: Env, p: Required<SnapshotParams> & { instanceId:
     const row = (results[3]?.results as ClaimRow[] | undefined)?.[0];
     if (row && row.tree_state === 'building' && row.builder === p.instanceId && row.commit_state !== 'ready') {
       // The cost is stored when the build finishes.
-      return { action: 'build', tree, key, artifactsName: repo.artifacts_name, mtime: commit.committedAt, cost };
+      return { action: 'build', tree, key, encoding, artifactsName: repo.artifacts_name, mtime: commit.committedAt, cost };
     }
     // This attempt claimed the commit and needs nothing more (reuse, or a
     // wait on another builder): store its measured cost over the placeholder.
@@ -317,12 +338,16 @@ export interface BatchState {
   stack: Frame[];
   uploadId: string | null;
   parts: R2UploadedPart[];
-  /** Bytes already uploaded as parts. */
+  /** Stored bytes already uploaded as parts. */
   flushed: number;
   files: number;
   done: boolean;
-  /** Total tar size, set by the final batch. */
+  /** Total uncompressed tar size, set by the final batch. */
   size: number;
+  /** Total stored object size, set by the final batch (equals size for identity). */
+  storedSize: number;
+  /** Uncompressed tar bytes fed to the encoder so far. */
+  tarBytes: number;
   cost: BuildCost;
 }
 
@@ -331,6 +356,7 @@ interface BuildTarget {
   repoId: string;
   tree: string;
   key: string;
+  encoding: SnapshotEncoding;
   artifactsName: string;
   mtime: number;
 }
@@ -351,6 +377,7 @@ class PartWriter {
     private readonly bucket: R2Bucket,
     private readonly key: string,
     private readonly partSize: number,
+    private readonly contentType: string,
     readonly state: BatchState,
     carry: Uint8Array,
   ) {
@@ -362,19 +389,6 @@ class PartWriter {
     this.chunks.push(bytes);
     this.length += bytes.length;
     if (this.length > this.state.cost.peakBuffer) this.state.cost.peakBuffer = this.length;
-  }
-
-  /** Streams a blob's bytes in, uploading each full part as soon as it fills; returns the byte count. */
-  async pipe(stream: ReadableStream<Uint8Array>): Promise<number> {
-    const reader = stream.getReader();
-    let n = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) return n;
-      n += value.length;
-      this.push(value);
-      await this.flushFull();
-    }
   }
 
   private take(n: number): Uint8Array {
@@ -400,7 +414,7 @@ class PartWriter {
   private upload(): R2MultipartUpload | Promise<R2MultipartUpload> {
     if (this.state.uploadId) return this.bucket.resumeMultipartUpload(this.key, this.state.uploadId);
     return this.bucket
-      .createMultipartUpload(this.key, { httpMetadata: { contentType: 'application/x-tar' } })
+      .createMultipartUpload(this.key, { httpMetadata: { contentType: this.contentType } })
       .then((u) => {
         this.state.uploadId = u.uploadId;
         return u;
@@ -422,7 +436,7 @@ class PartWriter {
   async finish(): Promise<number> {
     const size = this.state.flushed + this.length;
     if (!this.state.uploadId) {
-      await this.bucket.put(this.key, this.take(this.length), { httpMetadata: { contentType: 'application/x-tar' } });
+      await this.bucket.put(this.key, this.take(this.length), { httpMetadata: { contentType: this.contentType } });
       return size;
     }
     const upload = await this.upload();
@@ -443,6 +457,107 @@ class PartWriter {
 
   rest(): Uint8Array {
     return this.take(this.length);
+  }
+}
+
+/**
+ * The tar producer's output path into the PartWriter. `push` counts
+ * uncompressed tar bytes and hands the writer stored bytes; `end` closes the
+ * step's zstd frame (identity builds have nothing to close). A retried step
+ * rebuilds its frame from the same input, so no compressor state ever
+ * crosses steps.
+ */
+interface TarEncoder {
+  push(bytes: Uint8Array): Promise<void>;
+  pipe(stream: ReadableStream<Uint8Array>): Promise<number>;
+  end(): Promise<void>;
+}
+
+/** Identity encoding: tar bytes are the stored bytes. */
+class PlainEncoder implements TarEncoder {
+  constructor(
+    private readonly writer: PartWriter,
+    private readonly state: BatchState,
+  ) {}
+
+  async push(bytes: Uint8Array): Promise<void> {
+    this.state.tarBytes += bytes.length;
+    this.writer.push(bytes);
+    await this.writer.flushFull();
+  }
+
+  async pipe(stream: ReadableStream<Uint8Array>): Promise<number> {
+    const reader = stream.getReader();
+    let n = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return n;
+      n += value.length;
+      await this.push(value);
+    }
+  }
+
+  async end(): Promise<void> {}
+}
+
+/**
+ * Zstd encoding: everything a step feeds in forms one zstd frame. workerd's
+ * zlib delivers compressed output through 'data' events, not read(); the
+ * write callback resolves once the chunk is processed, so draining the
+ * collected output after each awaited write keeps ordering deterministic.
+ */
+class ZstdEncoder implements TarEncoder {
+  private readonly z = createZstdCompress({
+    params: { [ZSTD.ZSTD_c_compressionLevel]: SNAPSHOT_ZSTD_LEVEL, [ZSTD.ZSTD_c_checksumFlag]: 1 },
+  });
+  private pending: Uint8Array[] = [];
+  private failed: Error | null = null;
+
+  constructor(
+    private readonly writer: PartWriter,
+    private readonly state: BatchState,
+  ) {
+    this.z.on('data', (chunk) => this.pending.push(chunk));
+    this.z.on('error', (err) => {
+      this.failed = err ?? new Error('zstd compression failed');
+    });
+  }
+
+  private write(chunk: Uint8Array): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.z.write(chunk, () => (this.failed ? reject(this.failed) : resolve()));
+    });
+  }
+
+  private drain(): void {
+    for (const c of this.pending) this.writer.push(c);
+    this.pending = [];
+  }
+
+  async push(bytes: Uint8Array): Promise<void> {
+    this.state.tarBytes += bytes.length;
+    await this.write(bytes);
+    this.drain();
+    await this.writer.flushFull();
+  }
+
+  async pipe(stream: ReadableStream<Uint8Array>): Promise<number> {
+    const reader = stream.getReader();
+    let n = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return n;
+      n += value.length;
+      await this.push(value);
+    }
+  }
+
+  async end(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      this.z.end(() => (this.failed ? reject(this.failed) : resolve()));
+    });
+    this.drain();
+    await this.writer.flushFull();
   }
 }
 
@@ -556,7 +671,8 @@ async function batchStep(
   const state: BatchState = structuredClone(input);
   const log = { step: `batch-${index}`, instance: target.instanceId, tree: target.tree };
   return metered(env, state.cost, log, async (env) => {
-    const writer = new PartWriter(env.SNAPSHOTS, target.key, opts.partSize, state, carry);
+    const writer = new PartWriter(env.SNAPSHOTS, target.key, opts.partSize, contentType(target.encoding), state, carry);
+    const encoder: TarEncoder = target.encoding === 'zstd' ? new ZstdEncoder(writer, state) : new PlainEncoder(writer, state);
     await withRepo(env, target.artifactsName, async (h) => {
       const trees = new Map<string, ArtifactsTreeEntry[]>();
       const readTree = async (hash: string): Promise<ArtifactsTreeEntry[]> => {
@@ -613,29 +729,33 @@ async function batchStep(
       );
       for (const p of pending) {
         if (!p.hash) {
-          writer.push(tarHeader(p.entry));
+          await encoder.push(tarHeader(p.entry));
           continue;
         }
         const blob = await reader.take();
         if (p.entry.type === 'symlink') {
-          writer.push(tarHeader({ ...p.entry, linkname: await blob.text() }));
+          await encoder.push(tarHeader({ ...p.entry, linkname: await blob.text() }));
         } else {
-          writer.push(tarHeader({ ...p.entry, size: blob.size }));
-          const n = await writer.pipe(blob.stream());
+          await encoder.push(tarHeader({ ...p.entry, size: blob.size }));
+          const n = await encoder.pipe(blob.stream());
           if (n !== blob.size) throw new Error(`blob ${p.hash} (${p.entry.path}) streamed ${n} of ${blob.size} bytes`);
-          writer.push(new Uint8Array(tarPadding(blob.size)));
+          await encoder.push(new Uint8Array(tarPadding(blob.size)));
         }
         reader.release();
-        await writer.flushFull();
       }
       state.done = stack.length === 0;
     });
-    if (!state.done) return { state, carry: writer.rest() };
-    writer.push(tarEnd());
-    await writer.flushFull();
-    state.size = await writer.finish();
+    if (!state.done) {
+      await encoder.end();
+      return { state, carry: writer.rest() };
+    }
+    await encoder.push(tarEnd());
+    await encoder.end();
+    state.storedSize = await writer.finish();
+    state.size = state.tarBytes;
     state.cost.objects = 1;
-    state.cost.bytes = state.size;
+    state.cost.bytes = state.storedSize;
+    state.cost.tarBytes = state.tarBytes;
     return { state, carry: new Uint8Array(0) };
   });
 }
@@ -675,10 +795,22 @@ async function finishStep(
     const [treeReady] = await db.batch([
       db
         .prepare(
-          `UPDATE snapshot_trees SET state = 'ready', size = ?4, files = ?5, built_at = ?6, build_cost = ?7, error = NULL
+          `UPDATE snapshot_trees SET state = 'ready', size = ?4, files = ?5, built_at = ?6, build_cost = ?7, error = NULL,
+             r2_key = ?8, encoding = ?9, encoded_size = ?10
            WHERE repo_id = ?1 AND tree = ?2 AND builder = ?3 AND state = 'building'`,
         )
-        .bind(p.repoId, target.tree, p.instanceId, state.size, state.files, now, before),
+        .bind(
+          p.repoId,
+          target.tree,
+          p.instanceId,
+          state.size,
+          state.files,
+          now,
+          before,
+          target.key,
+          target.encoding === 'zstd' ? 'zstd' : null,
+          target.encoding === 'zstd' ? state.storedSize : null,
+        ),
       db
         .prepare(
           `UPDATE snapshot_commits SET state = 'ready', built_at = ?4, error = NULL,
@@ -804,6 +936,7 @@ export async function buildSnapshot(
       repoId: p.repoId,
       tree: resolved.tree,
       key: resolved.key,
+      encoding: resolved.encoding ?? 'identity',
       artifactsName: resolved.artifactsName,
       mtime: resolved.mtime,
     };
@@ -815,6 +948,8 @@ export async function buildSnapshot(
       files: 0,
       done: false,
       size: 0,
+      storedSize: 0,
+      tarBytes: 0,
       cost: resolved.cost,
     };
     let carry: Uint8Array = new Uint8Array(0);

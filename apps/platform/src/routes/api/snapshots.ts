@@ -18,7 +18,7 @@
 import { Hono, type Context } from 'hono';
 import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import { withLazyRepo } from '../../artifacts/repo';
-import { matchSnapshot, streamAndStore } from '../../cache/snapshot';
+import { matchSnapshot, streamAndStore, zstdToTar } from '../../cache/snapshot';
 import type { RepoRow } from '../../db/repos';
 import { isFullSha, type ResolveContext } from '../../services/refs';
 import {
@@ -61,6 +61,22 @@ function demandPath(repo: RepoRow, ref: string): string {
   return `/api/v1/repos/${repo.owner_login}/${repo.name}/snapshots/${ref}`;
 }
 
+/** Does the request's Accept header admit the stored zstd representation (q > 0)? */
+export function acceptsZstd(header: string | null | undefined): boolean {
+  if (!header) return false;
+  for (const part of header.split(',')) {
+    const [type, ...params] = part.split(';');
+    if (type?.trim().toLowerCase() !== 'application/zstd') continue;
+    let q = 1;
+    for (const p of params) {
+      const m = /^\s*q\s*=\s*([\d.]+)/.exec(p);
+      if (m) q = Number(m[1]);
+    }
+    if (q > 0) return true;
+  }
+  return false;
+}
+
 function resolveContext(c: Context<App>, repo: RepoRow, artifacts: ResolveContext['artifacts']): ResolveContext {
   return { env: c.env, repo, artifacts, bypass: false, waitUntil: (p) => c.executionCtx.waitUntil(p) };
 }
@@ -83,8 +99,9 @@ snapshotsApi.get('/repos/:owner/:repo/snapshots/*', async (c) => {
     }
     if (!sha) return notFound(c);
     if (parsed.download) {
+      const wantsZstd = acceptsZstd(c.req.header('accept'));
       const cached = await matchSnapshot(repo.id, sha);
-      if (cached) return tarResponse(c, repo, sha, cached.tree, cached.size, cached.body);
+      if (cached) return downloadResponse(c, repo, sha, cached, wantsZstd);
     }
     const row = await readSnapshot(c.env, repo.id, sha);
     if (!row && isFullSha(parsed.ref) && !(await commitExists(ctx, sha))) return notFound(c);
@@ -99,28 +116,43 @@ snapshotsApi.get('/repos/:owner/:repo/snapshots/*', async (c) => {
     }
     const object = await c.env.SNAPSHOTS.get(row.r2_key);
     if (!object) return c.json({ error: 'snapshot bytes missing', code: 'SNAPSHOT_MISSING', sha }, 409);
+    const encoding: 'identity' | 'zstd' = row.encoding === 'zstd' ? 'zstd' : 'identity';
     const tree = row.tree ?? sha;
-    const body = streamAndStore(c.executionCtx, repo.id, sha, tree, object);
-    return tarResponse(c, repo, sha, tree, object.size, body);
+    const stored = {
+      body: streamAndStore(c.executionCtx, repo.id, sha, tree, object, { encoding, tarSize: row.size }),
+      size: object.size,
+      tree,
+      encoding,
+      tarSize: row.size,
+    };
+    return downloadResponse(c, repo, sha, stored, acceptsZstd(c.req.header('accept')));
   });
 });
 
-function tarResponse(
+/**
+ * Serves the stored representation as-is to a zstd-capable client,
+ * decompresses it for one that is not, and passes identity objects through.
+ * `x-kvarm-snapshot-encoding` names the representation sent.
+ */
+function downloadResponse(
   c: Context<App>,
   repo: RepoRow,
   sha: string,
-  tree: string,
-  size: number,
-  body: ReadableStream<Uint8Array>,
+  stored: { body: ReadableStream<Uint8Array>; size: number; tree: string; encoding: 'identity' | 'zstd'; tarSize: number },
+  wantsZstd: boolean,
 ): Response {
+  const zstd = stored.encoding === 'zstd' && wantsZstd;
+  const body = stored.encoding === 'zstd' && !wantsZstd ? zstdToTar(stored.body, stored.tarSize) : stored.body;
   const res = new Response(body, {
     headers: {
-      'content-type': 'application/x-tar',
-      'content-length': String(size),
-      'content-disposition': `attachment; filename="${repo.name}-${sha.slice(0, 12)}.tar"`,
-      etag: `"${tree}"`,
+      'content-type': zstd ? 'application/zstd' : 'application/x-tar',
+      'content-length': String(zstd ? stored.size : stored.tarSize),
+      'content-disposition': `attachment; filename="${repo.name}-${sha.slice(0, 12)}.tar${zstd ? '.zst' : ''}"`,
+      etag: zstd ? `"${stored.tree}.zst"` : `"${stored.tree}"`,
+      vary: 'accept',
       'cache-control': 'no-store',
       'x-kvarm-snapshot-sha': sha,
+      'x-kvarm-snapshot-encoding': zstd ? 'zstd' : 'identity',
     },
   });
   for (const cookie of c.get('refreshCookies') ?? []) res.headers.append('Set-Cookie', cookie);
