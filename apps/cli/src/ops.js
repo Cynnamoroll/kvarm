@@ -120,7 +120,11 @@ export function parseOperationArgs(op, argv) {
         }
         return;
       case 'boolean':
-        args[p.name] = raw !== 'false';
+        // Only the two spellings mean anything; "0", "no" or any other value
+        // is a usage error, not a truthy coercion that silently flips a flag.
+        if (raw === 'true') args[p.name] = true;
+        else if (raw === 'false') args[p.name] = false;
+        else throw usage(`argument "${p.name}" must be true or false, got "${raw}"`);
         return;
       default:
         args[p.name] = raw;
