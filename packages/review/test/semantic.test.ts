@@ -90,6 +90,10 @@ module.exports.legacy = 1;
 `;
     expect(extractExports(text)).toEqual(['C', 'E', 'I', 'Ty', 'a', 'bee', 'default', 'f', 'g', 'k', 'legacy', 'ns']);
   });
+
+  it('names a const enum by its name, not the enum keyword', () => {
+    expect(extractExports('export const enum Direction { Up }\nexport declare const enum Mode { A }\n')).toEqual(['Direction', 'Mode']);
+  });
 });
 
 describe('import extraction (Python, Go)', () => {
@@ -182,6 +186,15 @@ describe('analyzeDependencies (bounded walk)', () => {
     expect(byTarget.get('apps/py/helpers.py')).toMatchObject({ depth: 1 });
     expect(byTarget.get('pkg/api/')).toMatchObject({ depth: 1, chain: ['cmd/tool/main.go', 'pkg/api/'] });
     expect(r.contracts).toEqual([{ family: 'proto:api/v1/', path: 'api/v1/user.proto' }]);
+  });
+
+  it('resolves every module of a relative Python from-import, not just the first', async () => {
+    const t = memoryTree({ 'pkg/__init__.py': '', 'pkg/api.py': 'from . import models, views\n', 'pkg/models.py': '', 'pkg/views.py': '' });
+    const r = await analyzeDependencies(t.source, { headTree: t.root, changed: ['pkg/api.py'] });
+    expect(r.edges.map((e) => [e.target, e.names])).toEqual([
+      ['pkg/models.py', ['models']],
+      ['pkg/views.py', ['views']],
+    ]);
   });
 
   it('honors a smaller depth limit', async () => {

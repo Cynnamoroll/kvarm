@@ -28,6 +28,12 @@ ALTER TABLE workspaces ADD COLUMN semantic_at INTEGER;
 ALTER TABLE workspaces ADD COLUMN semantic_truncated TEXT;
 CREATE INDEX idx_ws_semantic_incomplete ON workspaces(repo_id, id) WHERE status = 'active' AND semantic_truncated IS NOT NULL;
 
+-- Active workspaces with observed changes from before this migration have no
+-- semantic rows yet; say so until their next push analyzes them, so forecasts
+-- disclose them instead of reporting an empty layer as complete.
+UPDATE workspaces SET semantic_truncated = 'not analyzed yet: observed before the semantic signal existed; the next push analyzes it'
+ WHERE status = 'active' AND observed_paths IS NOT NULL AND observed_paths != '[]';
+
 -- A workspace that leaves active (abandon, merge, expiry) or is deleted with
 -- its repo drops its semantic rows in the same transaction, so every reader
 -- sees only active workspaces' signal without new cleanup calls.

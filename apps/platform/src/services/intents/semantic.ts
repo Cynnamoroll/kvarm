@@ -15,6 +15,7 @@
 
 import { analyzeDependencies, contractFamily, type DependencyAnalysis, type SemanticBlob, type SemanticTreeSource } from '@kvarm/review';
 import type { LazyRepo } from '../../artifacts/repo';
+import { readBlobBytes } from '../compare';
 import { isPrefix, prefixUpper } from './paths';
 
 export const SEMANTIC_READ_LIMITS = {
@@ -53,17 +54,8 @@ class ArtifactsSemanticSource implements SemanticTreeSource {
     return entries ? entries.map((e) => ({ name: e.name, mode: e.mode, hash: e.hash })) : null;
   }
 
-  async readBlob(hash: string, maxBytes: number): Promise<SemanticBlob> {
-    let blob: Blob | null;
-    try {
-      blob = await (await this.artifacts.get()).readBlob(hash);
-    } catch (err) {
-      if ((err as { code?: unknown } | null)?.code === 'MEMORY_LIMIT') return { tooLarge: true };
-      throw err;
-    }
-    if (!blob) return null;
-    if (blob.size > maxBytes) return { tooLarge: true };
-    return { bytes: new Uint8Array(await blob.arrayBuffer()) };
+  readBlob(hash: string, maxBytes: number): Promise<SemanticBlob> {
+    return readBlobBytes(this.artifacts, hash, undefined, maxBytes);
   }
 }
 
@@ -305,14 +297,16 @@ function settle(all: SemanticEvidence[]): Pick<SemanticMatch, 'confidence' | 'ev
   return out;
 }
 
-function incompleteStatement(db: D1Database, repoId: string, base: string | null): D1PreparedStatement {
+/** Active workspaces (on `base` when given, other than `exclude`) whose semantic rows are incomplete. */
+function incompleteStatement(db: D1Database, repoId: string, base: string | null, exclude: string | null): D1PreparedStatement {
   return db
     .prepare(
       `SELECT w.id AS workspace, w.semantic_truncated AS reason FROM workspaces w INDEXED BY idx_ws_semantic_incomplete
         WHERE w.repo_id = ?1 AND w.status = 'active' AND w.semantic_truncated IS NOT NULL AND (?2 IS NULL OR w.base_ref = ?2)
+          AND (?3 IS NULL OR w.id != ?3)
         ORDER BY w.id LIMIT ${SEMANTIC_READ_LIMITS.matchMax + 1}`,
     )
-    .bind(repoId, base);
+    .bind(repoId, base, exclude);
 }
 
 function incompleteOf(result: D1Result | undefined, reasons: string[]): SemanticIncomplete[] | null {
@@ -325,7 +319,12 @@ function incompleteOf(result: D1Result | undefined, reasons: string[]): Semantic
   return rows.slice(0, max).map((r) => ({ workspace: r.workspace, reason: r.reason }));
 }
 
-/** Rows of another workspace's observed entries that an import key of `m` names (exact, Go package, or a collapsed prefix above it). */
+/**
+ * Rows of another workspace's observed entries that an import key of `m`
+ * names: the path itself, a file directly in a Go package directory (files
+ * in its subdirectories belong to other packages), or a collapsed prefix
+ * above it.
+ */
 const OBSERVED_FOR_KEY = (m: string) => `
   SELECT ${m}.key AS key, ${m}.detail AS detail, ${m}.workspace_id AS consumer, p.path AS path, p.workspace_id AS changer
     FROM M ${m} CROSS JOIN workspace_paths p ON p.repo_id = ?1 AND p.kind = 'observed' AND p.path = ${m}.key AND p.workspace_id != ${m}.workspace_id
@@ -333,6 +332,7 @@ const OBSERVED_FOR_KEY = (m: string) => `
   SELECT ${m}.key, ${m}.detail, ${m}.workspace_id, p.path, p.workspace_id
     FROM M ${m} CROSS JOIN workspace_paths p ON p.repo_id = ?1 AND p.kind = 'observed' AND p.workspace_id != ${m}.workspace_id
          AND p.path > ${m}.key AND p.path < substr(${m}.key, 1, length(${m}.key) - 1) || '0'
+         AND instr(substr(p.path, length(${m}.key) + 1), '/') = 0
    WHERE substr(${m}.key, -1) = '/'
   UNION ALL
   SELECT a.key, a.detail, a.workspace_id, p.path, p.workspace_id
@@ -386,7 +386,7 @@ export function forecastSemanticPlan(
   }
   const filter = `w.repo_id = ?1 AND w.status = 'active' AND (?3 IS NULL OR w.base_ref = ?3) AND (?4 IS NULL OR w.id != ?4)`;
   // Named slots, so probes with nothing to look up are left out of the batch.
-  type Slot = 'consumers' | 'range' | 'families' | 'ownImports' | 'ownContracts' | 'ownExports' | 'incomplete';
+  type Slot = 'consumers' | 'range' | 'families' | 'ownImports' | 'ownContracts' | 'ownExports' | 'ownState' | 'incomplete';
   const slots: Array<{ slot: Slot; what: string; stmt: D1PreparedStatement }> = [];
   slots.push({
     slot: 'consumers',
@@ -467,9 +467,15 @@ export function forecastSemanticPlan(
           .prepare(`SELECT key, detail FROM workspace_semantic WHERE repo_id = ?1 AND workspace_id = ?2 AND kind = 'export' LIMIT ${L.forecastHitMax + 1}`)
           .bind(q.repoId, own),
       },
+      {
+        // Your own record's completeness: it bounds the edges matched on your behalf, so it is a reason, not an `incomplete` entry.
+        slot: 'ownState',
+        what: 'your workspace',
+        stmt: db.prepare(`SELECT semantic_truncated AS reason FROM workspaces WHERE repo_id = ?1 AND id = ?2 AND status = 'active'`).bind(q.repoId, own),
+      },
     );
   }
-  slots.push({ slot: 'incomplete', what: 'incomplete workspaces', stmt: incompleteStatement(db, q.repoId, q.base) });
+  slots.push({ slot: 'incomplete', what: 'incomplete workspaces', stmt: incompleteStatement(db, q.repoId, q.base, q.exclude) });
 
   return {
     statements: slots.map((x) => x.stmt),
@@ -497,6 +503,8 @@ export function forecastSemanticPlan(
       };
       type ImportRow = { key: string; detail: string; wj: string };
       const mineExports = new Map(rowsOf<{ key: string; detail: string }>('ownExports').map((r) => [r.key, r.detail]));
+      const ownReason = rowsOf<{ reason: string | null }>('ownState')[0]?.reason ?? null;
+      if (ownReason !== null) reasons.push(`your workspace's semantic rows are incomplete (${ownReason}), so dependencies of your changes may be missing`);
       for (const row of [...rowsOf<ImportRow>('consumers'), ...rowsOf<ImportRow>('range')]) {
         const detail = parseDetail<ImportDetail>(row.detail);
         if (!detail) continue;
@@ -568,29 +576,33 @@ export interface SemanticOverlapPlan {
 /**
  * Semantic pairs among active workspaces on `base`: one workspace's changed
  * files import (within the depth limit) a path another changed, or both
- * change contract files of one family. Import rows are scanned in key order
- * up to `overlapScanMax` across the repository, so a repository with more
- * reports `truncated` rather than reading every row.
+ * change contract files of one family. The import rows of active workspaces
+ * on `base` are scanned in key order up to `overlapScanMax`, so a base with
+ * more reports `truncated` rather than reading every row.
  */
 export function overlapSemanticPlan(db: D1Database, repoId: string, base: string): SemanticOverlapPlan {
   const L = SEMANTIC_READ_LIMITS;
   const statements = [
     db
       .prepare(
-        `WITH M AS (SELECT key, detail, workspace_id FROM workspace_semantic WHERE repo_id = ?1 AND kind = 'import' ORDER BY key, workspace_id LIMIT ${L.overlapScanMax}),
+        // M0 reads one row past the scan budget so the trailing sentinel row can say whether the scan was cut.
+        `WITH M0 AS (SELECT s.key, s.detail, s.workspace_id FROM workspace_semantic s
+                       CROSS JOIN workspaces w ON w.id = s.workspace_id AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
+                      WHERE s.repo_id = ?1 AND s.kind = 'import' ORDER BY s.key, s.workspace_id LIMIT ${L.overlapScanMax + 1}),
+              M AS (SELECT * FROM M0 LIMIT ${L.overlapScanMax}),
               ${ANCESTORS},
               H AS (${OBSERVED_FOR_KEY('m')})
-         SELECT h.key, h.detail, h.path, e.detail AS export, ${WS_JSON('wc')} AS consumer, ${WS_JSON('wx')} AS changer
-           FROM H h
-           CROSS JOIN workspaces wc ON wc.id = h.consumer AND wc.repo_id = ?1 AND wc.status = 'active' AND wc.base_ref = ?2
-           CROSS JOIN workspaces wx ON wx.id = h.changer AND wx.repo_id = ?1 AND wx.status = 'active' AND wx.base_ref = ?2
-           LEFT JOIN workspace_semantic e ON e.repo_id = ?1 AND e.kind = 'export' AND e.key = h.path AND e.workspace_id = h.changer
-          ORDER BY h.key, wc.id, wx.id, h.path LIMIT ${L.overlapHitMax + 1}`,
+         SELECT * FROM (
+           SELECT h.key, h.detail, h.path, e.detail AS export, ${WS_JSON('wc')} AS consumer, ${WS_JSON('wx')} AS changer, NULL AS scanned
+             FROM H h
+             CROSS JOIN workspaces wc ON wc.id = h.consumer AND wc.repo_id = ?1 AND wc.status = 'active' AND wc.base_ref = ?2
+             CROSS JOIN workspaces wx ON wx.id = h.changer AND wx.repo_id = ?1 AND wx.status = 'active' AND wx.base_ref = ?2
+             LEFT JOIN workspace_semantic e ON e.repo_id = ?1 AND e.kind = 'export' AND e.key = h.path AND e.workspace_id = h.changer
+            ORDER BY h.key, wc.id, wx.id, h.path LIMIT ${L.overlapHitMax + 1})
+         UNION ALL
+         SELECT NULL, NULL, NULL, NULL, NULL, NULL, (SELECT COUNT(*) FROM M0)`,
       )
       .bind(repoId, base),
-    db
-      .prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM workspace_semantic WHERE repo_id = ?1 AND kind = 'import' LIMIT ${L.overlapScanMax + 1})`)
-      .bind(repoId),
     db
       .prepare(
         `SELECT s.key, json_group_array(json_array(s.detail, json(${WS_JSON('w')}))) AS members
@@ -599,7 +611,7 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
           GROUP BY s.key HAVING COUNT(*) > 1 ORDER BY s.key LIMIT ${L.overlapFamilyMax + 1}`,
       )
       .bind(repoId, base),
-    incompleteStatement(db, repoId, base),
+    incompleteStatement(db, repoId, base, null),
   ];
   return {
     statements,
@@ -617,10 +629,12 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
         }
         p.ev.push(ev);
       };
-      const hits = (results[0]?.results as Array<{ key: string; detail: string; path: string; export: string | null; consumer: string; changer: string }> | undefined) ?? [];
+      type Hit = { key: string; detail: string; path: string; export: string | null; consumer: string; changer: string; scanned: number | null };
+      const rows = (results[0]?.results as Hit[] | undefined) ?? [];
+      const scanned = rows.find((r) => r.scanned !== null)?.scanned ?? 0;
+      const hits = rows.filter((r) => r.scanned === null);
       if (hits.length > L.overlapHitMax) reasons.push(`more than ${L.overlapHitMax} semantic import hits; pairs beyond them are not reported`);
-      const scanned = (results[1]?.results as Array<{ n: number }> | undefined)?.[0]?.n ?? 0;
-      if (scanned > L.overlapScanMax) reasons.push(`more than ${L.overlapScanMax} import edges in the repository; edges beyond the first ${L.overlapScanMax} by path are not compared`);
+      if (scanned > L.overlapScanMax) reasons.push(`more than ${L.overlapScanMax} import edges on ${base}; edges beyond the first ${L.overlapScanMax} by path are not compared`);
       for (const h of hits.slice(0, L.overlapHitMax)) {
         const detail = parseDetail<ImportDetail>(h.detail);
         if (!detail) continue;
@@ -629,7 +643,7 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
         const changer = wsOf(h.changer);
         add(consumer, changer, importEvidence(detail, h.path, changer.workspace, consumer.workspace, h.export));
       }
-      const fams = (results[2]?.results as Array<{ key: string; members: string }> | undefined) ?? [];
+      const fams = (results[1]?.results as Array<{ key: string; members: string }> | undefined) ?? [];
       if (fams.length > L.overlapFamilyMax) reasons.push(`more than ${L.overlapFamilyMax} shared contract families; the rest are not reported`);
       for (const f of fams.slice(0, L.overlapFamilyMax)) {
         const members = (JSON.parse(f.members) as Array<[string, WsTuple]>).map(([d, t]) => ({
@@ -651,7 +665,7 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
           }
         }
       }
-      const incomplete = incompleteOf(results[3], reasons);
+      const incomplete = incompleteOf(results[2], reasons);
       const keys = [...pairs.keys()].sort();
       if (keys.length > L.pairMax) reasons.push(`more than ${L.pairMax} semantic pairs; the first ${L.pairMax} by id are reported`);
       const out: SemanticOverlap = {

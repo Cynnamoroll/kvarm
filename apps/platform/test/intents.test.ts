@@ -15,6 +15,7 @@ import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/met
 import { INTENT_LIMITS, collapseObserved, minimalCover, normalizeDeclaration } from '../src/services/intents/paths';
 import { collectPairs, setOverlap, setOverlapStatements } from '../src/services/intents/forecast';
 import { COMPARE_BUDGETS } from '../src/services/compare';
+import { SEMANTIC_READ_LIMITS } from '../src/services/intents/semantic';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -1144,6 +1145,59 @@ describe('semantic dependency signal (advisory)', () => {
     const none = (await forecast('sem-budget', 'paths=docs/guide.md')).json;
     expect(none.semantic).toMatchObject({ matches: [], truncated: true, incomplete: [{ workspace: g.id }] });
     expect((await overlap('sem-budget')).json.semantic).toMatchObject({ truncated: true, incomplete: [{ workspace: g.id }] });
+    // Asked by the incomplete workspace itself: not listed as another's gap, but still named as a reason.
+    const self = (await forecast('sem-budget', `paths=docs/guide.md&exclude=${g.id}`)).json.semantic;
+    expect(self.incomplete).toBeUndefined();
+    expect(self.truncatedReason).toMatch(/your workspace's semantic rows are incomplete \(more than 40 changed source files/);
+  });
+
+  it('a Go import names the files of its package directory, not of its subpackages', async () => {
+    const repo = await seedRepo('sem-go');
+    const files: Files = {
+      'go.mod': 'module example.com/m\n\ngo 1.22\n',
+      'cmd/tool/main.go': 'package main\n\nimport (\n  "fmt"\n  "example.com/m/internal/store"\n)\n',
+      'internal/store/store.go': 'package store\n',
+      'internal/store/sub/sub.go': 'package sub\n',
+    };
+    const main = await based(repo, files);
+    const consumer = (await createWs('sem-go', { task: 'tool', agent: 'x' })).json;
+    const pkg = (await createWs('sem-go', { task: 'store', agent: 'y' })).json;
+    const sub = (await createWs('sem-go', { task: 'sub', agent: 'z' })).json;
+    await push('sem-go', repo, consumer, main.sha, { ...files, 'cmd/tool/main.go': `${files['cmd/tool/main.go']}// x\n` });
+    await push('sem-go', repo, pkg, main.sha, { ...files, 'internal/store/store.go': 'package store\n\nfunc Get() {}\n' });
+    await push('sem-go', repo, sub, main.sha, { ...files, 'internal/store/sub/sub.go': 'package sub\n\nfunc S() {}\n' });
+    const pairs = (await overlap('sem-go')).json.semantic.pairs;
+    expect(pairs.map((p: any) => p.workspaces)).toEqual([[consumer.id, pkg.id].sort()]);
+    expect(pairs[0].evidence[0]).toMatchObject({ chain: ['cmd/tool/main.go', 'internal/store/'], changed: 'internal/store/store.go', confidence: 'semantic:import' });
+    expect((await forecast('sem-go', 'paths=internal/store/store.go')).json.semantic.matches.map((m: any) => m.workspace)).toEqual([consumer.id]);
+    expect((await forecast('sem-go', 'paths=internal/store/sub/sub.go')).json.semantic.matches).toEqual([]);
+  });
+
+  it("the overlap scan budget counts only the requested base's import rows", async () => {
+    const { a, b } = await apiAndConsumer('sem-scan');
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('sem-scan').first<{ id: string }>())!.id;
+    const now = Date.now();
+    // A workspace on another base whose import keys all sort before the main pair's.
+    await env.DB.prepare(
+      `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at)
+       VALUES ('semscanrelease', ?1, 'x', 'r', 'r', 'active', 'refs/heads/agents/semscanrelease/t', 'release', ?2, ?3, ?3)`,
+    )
+      .bind(repoId, '1'.repeat(40), now)
+      .run();
+    const keys = Array.from({ length: SEMANTIC_READ_LIMITS.overlapScanMax + 5 }, (_, i) => `aaa/f${String(i).padStart(5, '0')}.ts`);
+    for (let i = 0; i < keys.length; i += 500) {
+      await env.DB.batch(
+        keys
+          .slice(i, i + 500)
+          .map((k) =>
+            env.DB.prepare(`INSERT INTO workspace_semantic (repo_id, kind, key, workspace_id, detail) VALUES (?, 'import', ?, 'semscanrelease', '{"depth":1,"chain":["x.ts"]}')`).bind(repoId, k),
+          ),
+      );
+    }
+    const main = (await overlap('sem-scan')).json.semantic;
+    expect(main).toMatchObject({ truncated: false, pairs: [{ workspaces: [a.id, b.id].sort() }] });
+    const release = (await overlap('sem-scan', 'base=release')).json.semantic;
+    expect(release.truncatedReason).toMatch(/more than 2000 import edges on release/);
   });
 
   it('contract files of one API family meet even when the files differ', async () => {

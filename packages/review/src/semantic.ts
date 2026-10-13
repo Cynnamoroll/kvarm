@@ -276,7 +276,7 @@ export function extractImports(path: string, text: string): { specs: ImportSpec[
 }
 
 const JS_EXPORT_DECL = new RegExp(
-  `${NOT_MEMBER}export\\s+(?:declare\\s+)?(default\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:function\\s*\\*?|class|const|let|var|interface|type|enum|namespace|module)\\s+([A-Za-z_$][\\w$]*)`,
+  `${NOT_MEMBER}export\\s+(?:declare\\s+)?(default\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:function\\s*\\*?|class|const\\s+enum|const|let|var|interface|type|enum|namespace|module)\\s+([A-Za-z_$][\\w$]*)`,
   'g',
 );
 const JS_EXPORT_DEFAULT = new RegExp(`${NOT_MEMBER}export\\s+(?:default\\b|=)`, 'g');
@@ -621,20 +621,24 @@ export async function analyzeDependencies(source: SemanticTreeSource, input: Dep
     const out: Array<{ target: string; names?: string[] }> = [];
     for (const s of specs) {
       if (w.stopped) break;
-      let target: string | null = null;
       if (lang === 'go') {
         const mod = await goModuleOf(dirOf(path));
-        target = mod ? goImportTarget(s.spec, mod) : null;
-      } else {
-        for (const c of resolveCandidates(path, s.spec, lang, s.names)) {
+        const target = mod ? goImportTarget(s.spec, mod) : null;
+        if (target !== null) out.push({ target });
+        continue;
+      }
+      // `from . import a, b` names one module per name, so each resolves on its own.
+      const named = lang === 'py' && /^\.+$/.test(s.spec) ? (s.names ?? []).filter((n) => n !== '*') : [];
+      const groups = named.length > 0 ? named.map((n) => [n]) : [s.names];
+      for (const names of groups) {
+        for (const c of resolveCandidates(path, s.spec, lang, names)) {
           if (await w.file(input.headTree, c)) {
-            target = c;
+            if (c !== path) out.push({ target: c, ...(names ? { names } : {}) });
             break;
           }
           if (w.stopped) break;
         }
       }
-      if (target !== null && target !== path) out.push({ target, ...(s.names ? { names: s.names } : {}) });
     }
     return out;
   };
