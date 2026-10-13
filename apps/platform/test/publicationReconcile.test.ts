@@ -569,6 +569,8 @@ describe('injected failures converge to registry == ref', () => {
 
   it('(e) a lost reply whose read-back also fails stays pending, then a later pass completes it', async () => {
     const { repo, numbers } = await setup('lost-unread', 1, { merge: true });
+    // Even an entry whose attempts are spent gets the wake-up that reconciles it.
+    await env.DB.prepare('UPDATE merge_queue SET attempts = ?2 WHERE repo_id = ?1').bind(repoIds['lost-unread'], TRAIN_LIMITS.maxAttempts).run();
     let armed = false;
     repo.hook = async (c) => {
       if (c.startsWith('receivePack:')) armed = true;
@@ -592,11 +594,94 @@ describe('injected failures converge to registry == ref', () => {
     // The run's own delayed backoff kick (the publisher released its lease, so no alarm is involved) drives the recovery.
     const kicks = sent.filter((m) => m.body.reason === 'backoff' && m.delaySeconds !== undefined);
     expect(kicks).toHaveLength(1);
+    // Timed for when the entry counts as abandoned, not for the entry's attempt backoff.
+    expect(kicks[0]!.delaySeconds).toBeGreaterThan((2 * TRAIN_LIMITS.leaseTtlMs) / 1000);
     await letTimePass('lost-unread');
     await deliver(kicks);
     await expectConsistent('lost-unread', repo, numbers);
     expect(pushesTo(repo, MAIN)).toHaveLength(1);
     expect((await reconciledEvents('lost-unread')).map((e) => e.outcome)).toEqual(['completed']);
+  });
+
+  it('a lost reply read back under a later commit completes, and the next candidate composes on that commit', async () => {
+    const { repo, numbers } = await setup('lost-built-on', 2, { merge: true });
+    let onTop: string | null = null;
+    const deps = trainDeps({
+      pusher(e, r) {
+        const real = defaultTrainDeps.pusher(e, r);
+        return {
+          listRefs: () => real.listRefs(),
+          updateRef: (command, objects) => real.updateRef(command, objects),
+          async prepareUpdate(command, objects) {
+            const prepared = await real.prepareUpdate(command, objects);
+            return {
+              async send() {
+                const r = await prepared.send();
+                if (onTop !== null || command.ref !== MAIN) return r;
+                // The reply is lost, and before the read-back someone builds on the landed publication.
+                onTop = (await commit(repo, { 'README.md': 'readme\n', 'base.txt': 'base\n', 'f1.txt': 'file 1\n', 'later.txt': 'l\n' }, [repo.refs.get(MAIN)!])).sha;
+                repo.refs.set(MAIN, onTop);
+                return { ...r, status: 'unknown' as const, reason: 'connection reset' };
+              },
+            };
+          },
+        };
+      },
+    });
+    const run = await runTrain(env, repoIds['lost-built-on']!, MAIN, deps);
+    expect(run.published).toEqual(numbers);
+    // The second candidate was never sent against the stale tip.
+    const statuses = deps.events.filter((e): e is Extract<TrainEvent, { type: 'publish' }> => e.type === 'publish').map((e) => e.status);
+    expect(statuses).toEqual(['unknown', 'reconciled', 'ok', 'recorded']);
+    expect(pushesTo(repo, MAIN)).toHaveLength(2);
+    const tip = repo.refs.get(MAIN)!;
+    expect(new TextDecoder().decode(repo.objects.get(tip)!.content)).toContain(`parent ${onTop}`);
+    await expectConsistent('lost-built-on', repo, numbers);
+    expect((await entries('lost-built-on')).map((e) => e.reason_code)).toEqual(['PUBLICATION_RECONCILED', null]);
+  });
+
+  it('a publisher with too little lease left sends nothing and spends no attempt', async () => {
+    const { repo, main, numbers } = await setup('lease-margin', 1, { merge: true });
+    let short = true;
+    const deps = trainDeps({
+      lease(e, repoId, ref) {
+        const real = mergeLockLease(e, repoId, ref);
+        return {
+          async acquire(owner, ttl) {
+            const a = await real.acquire(owner, ttl);
+            if (!a.acquired || !short) return a;
+            short = false;
+            // A lease almost spent by a slow preparation.
+            return { ...a, expiresAt: Date.now() + 10 };
+          },
+          release: (owner, generation) => real.release(owner, generation),
+        };
+      },
+    });
+    const run = await runTrain(env, repoIds['lease-margin']!, MAIN, deps);
+    expect(pushesTo(repo, MAIN).filter((c) => c.includes(`:${main}->`)).length).toBe(run.published.length);
+    const first = (await intents('lease-margin'))[0]!;
+    expect(first).toMatchObject({ state: 'withdrawn', attempt: 0 });
+    if (run.published.length === 0) await runTrain(env, repoIds['lease-margin']!, MAIN, trainDeps());
+    await expectConsistent('lease-margin', repo, numbers);
+    // The refused try cost no attempt: the publication that followed was still attempt 0.
+    expect((await intents('lease-margin')).map((i) => [i.state, i.attempt])).toEqual([
+      ['withdrawn', 0],
+      ['published', 0],
+    ]);
+  });
+
+  it('a crashed merge publication whose commit never reached the store goes stale once its attempts are spent', async () => {
+    const { repo, numbers } = await setup('never-sent', 1, { merge: true });
+    await expect(runTrain(env, repoIds['never-sent']!, MAIN, trainDeps({ crashAt: 'intent-recorded' }))).rejects.toThrow(Crash);
+    const foreign = await commit(repo, { 'README.md': 'readme\n', 'base.txt': 'base\n', 'foreign.txt': 'x\n' }, [repo.refs.get(MAIN)!]);
+    repo.refs.set(MAIN, foreign.sha);
+    await env.DB.prepare('UPDATE merge_queue SET attempts = ?2 WHERE repo_id = ?1').bind(repoIds['never-sent'], TRAIN_LIMITS.maxAttempts - 1).run();
+    await deliver(await letTimePass('never-sent'));
+    expect(await entries('never-sent')).toEqual([expect.objectContaining({ state: 'stale', active: 0, reason_code: 'BASE_KEPT_MOVING' })]);
+    expect((await intents('never-sent')).map((i) => [i.state, i.observed_sha])).toEqual([['moved', foreign.sha]]);
+    expect(repo.refs.get(MAIN)).toBe(foreign.sha);
+    expect((await getChange('never-sent', numbers[0]!)).state).toBe('open');
   });
 
   it('(f) a lost reply with the ref not moved releases the entry to retry with backoff, then publishes once', async () => {

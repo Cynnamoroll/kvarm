@@ -1165,7 +1165,8 @@ async function trainPass(
     if (!p.ok) {
       if (p.code === 'MERGE_READ_FAILED') throw new RefStoreUnavailable(p.error);
       // Only with no batched write pending for the entry, so the record's fence names what is stored.
-      if (p.code === 'UP_TO_DATE' && base === target && plan.generation === plan.stored.generation) {
+      // Every reconciliation that sends an entry back spends an attempt, so an entry with none has no intent to find.
+      if (p.code === 'UP_TO_DATE' && base === target && plan.generation === plan.stored.generation && e.attempts > 0) {
         if (await lateLanding(env, ctx, repo, sources, plan, target, deps)) {
           plan.next = 'published';
           out.published.push(e.change_number);
@@ -1362,7 +1363,8 @@ async function trainPass(
     if (r.kind === 'published') {
       out.published.push(plan.e.change_number);
       out.progress = true;
-      tip = plan.prepared.mergeCommit;
+      // A publication reconciled under a later commit leaves the ref there: the next candidate recomposes on it.
+      tip = r.tip ?? plan.prepared.mergeCommit;
       continue;
     }
     if (r.kind === 'exited') {
@@ -1377,6 +1379,9 @@ async function trainPass(
       if (plan.e.attempts < 1) out.progress = true;
     } else if (r.kind === 'pending') {
       out.waiting = true;
+    } else if (r.kind === 'unresolved') {
+      // Not charged to the entry's attempts: this kick is what reconciles the pending intent.
+      out.retryAfterSeconds = Math.ceil((TRAIN_LIMITS.leaseTtlMs * 2) / 1000) + 1;
     } else {
       out.progress = true;
     }
@@ -1646,11 +1651,25 @@ async function afterPublication(
   }
 }
 
-/** The follow-up of a publication this caller completed by reconciliation (`late`: recognized under a later tip). */
-async function afterReconciled(env: Env, ctx: ResolveContext, repo: RepoRow, e: EntryRow, i: IntentRow, rec: Recorded, deps: TrainDeps, late = false): Promise<void> {
+/**
+ * The follow-up of a publication this caller completed by reconciliation
+ * (`late`: recognized under a later tip). `actor`: the enqueuer the caller
+ * already read; otherwise it is read when a merge commit is noted.
+ */
+async function afterReconciled(
+  env: Env,
+  ctx: ResolveContext,
+  repo: RepoRow,
+  e: EntryRow,
+  i: IntentRow,
+  rec: Recorded,
+  deps: TrainDeps,
+  late = false,
+  actor?: Actor | null,
+): Promise<void> {
   deps.observe?.({ type: 'publish', number: e.change_number, status: 'reconciled', mergeCommit: i.new_sha, previous: i.old_sha });
   console.log(JSON.stringify({ trainPublicationReconciled: { repo: repo.id, ref: i.target_ref, number: e.change_number, outcome: 'completed', generation: i.generation, ...(late ? { late } : {}) } }));
-  await afterPublication(env, ctx, repo, e, i, rec, () => enqueuerOf(env.DB, repo, e, deps.now()), deps);
+  await afterPublication(env, ctx, repo, e, i, rec, async () => (actor !== undefined ? actor : enqueuerOf(env.DB, repo, e, deps.now())), deps);
 }
 
 type Reconciled =
@@ -1674,7 +1693,8 @@ async function reconcileIntent(env: Env, reader: CommitReader, e: EntryRow, i: I
   const db = env.DB;
   let landed = observed === i.new_sha;
   let unverified = false;
-  if (!landed && observed !== null && observed !== i.old_sha) {
+  // A new value the store does not have was never published (its pack never arrived): no walk can find it.
+  if (!landed && observed !== null && observed !== i.old_sha && (await reader.readCommit(i.new_sha)) !== null) {
     const v = await isAncestor(reader, i.new_sha, observed, { maxCommitReads: RECONCILE_LIMITS.maxCommitReads, concurrency: 4 });
     landed = v.ancestor;
     unverified = v.truncated;
@@ -1759,11 +1779,13 @@ async function lateLanding(env: Env, ctx: ResolveContext, repo: RepoRow, sources
 }
 
 type PublishResult =
-  | { kind: 'published' }
+  | { kind: 'published'; tip?: string }
   | { kind: 'exited'; code: string }
   | { kind: 'busy'; retryAfterSeconds: number }
   | { kind: 'retry' }
   | { kind: 'pending' }
+  /** Sent, but neither the reply nor a read-back settled it: the entry keeps its claim with the intent pending. */
+  | { kind: 'unresolved' }
   | { kind: 'lost' };
 
 interface FactsRow extends Omit<UserRow, 'is_admin'> {
@@ -2064,8 +2086,9 @@ async function publishCandidate(
     } else if (tips.get(ref) !== pv.targetSha) {
       status = 'stale';
     } else if (Date.now() >= acq.expiresAt - Math.min(RECONCILE_LIMITS.sendMarginMs, TRAIN_LIMITS.leaseTtlMs / 2)) {
-      // Too little lease left to send: a push should not outlive the lease that fences it. Nothing was sent.
-      status = 'unavailable';
+      // Too little lease left to send: a push should not outlive the lease that fences it. Nothing was sent, and
+      // the slow preparation is not the entry's failure, so it costs no attempt.
+      status = 'expiring';
     } else {
       await deps.checkpoint?.('intent-recorded', e.change_number);
       sent = true;
@@ -2112,8 +2135,8 @@ async function publishCandidate(
   if (reconciled) {
     if (reconciled.outcome === 'completed') {
       if (!reconciled.recorded.entryWritten) return { kind: 'lost' };
-      await afterReconciled(env, ctx, repo, e, intent!, reconciled.recorded, deps);
-      return { kind: 'published' };
+      await afterReconciled(env, ctx, repo, e, intent!, reconciled.recorded, deps, false, who.actor);
+      return { kind: 'published', ...(observed ? { tip: observed } : {}) };
     }
     if (reconciled.exited) return { kind: 'exited', code: reconciled.exited };
     // Not applied or moved: the entry is back in the train with one more attempt (or another writer resolved it first).
@@ -2121,7 +2144,7 @@ async function publishCandidate(
   }
   if (sent && status === 'unknown') {
     // The ref could not be read back: the entry keeps its claim with the intent pending, and a later pass reconciles it.
-    return { kind: 'retry' };
+    return { kind: 'unresolved' };
   }
   if (recorded) {
     if (!recorded.entryWritten) {
@@ -2143,7 +2166,7 @@ async function publishCandidate(
     return { kind: 'retry' };
   }
   if (status === 'rejected') return exit('PUBLISH_REJECTED', 'the git store rejected the update', settle);
-  await db.batch([...settle, backStatement('queued', 1)]);
+  await db.batch([...settle, backStatement('queued', status === 'expiring' ? 0 : 1)]);
   return { kind: 'retry' };
 }
 
