@@ -404,7 +404,12 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
       body: csrf === undefined ? body : `_csrf=${encodeURIComponent(csrf)}${body ? `&${body}` : ''}`,
     });
 
-  const tokenFields = (text: string) => text.split(`name="_csrf" value="${payload.csrf}"`).length - 1;
+  /** The page renders each of `actions` as a post form, and every post form on it carries this session's token. */
+  function expectTokenForms(text: string, actions: string[]) {
+    const forms = text.match(/<form method="post"[\s\S]*?<\/form>/g) ?? [];
+    for (const action of actions) expect(forms.some((f) => f.includes(`action="${action}"`)), action).toBe(true);
+    for (const f of forms) expect(f).toContain(`name="_csrf" value="${payload.csrf}"`);
+  }
 
   beforeAll(async () => {
     authEnv = {
@@ -433,7 +438,7 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
   it('refuses an environment create without the session token and writes nothing', async () => {
     const page = await browser(`${BASE}/environments/new`);
     expect(page.status).toBe(200);
-    expect(tokenFields(page.text)).toBe(1);
+    expectTokenForms(page.text, [`${BASE}/environments`]);
     const name = `csrf-${crypto.randomUUID().slice(0, 8)}`;
     const rows = async () =>
       (await env.DB.prepare('SELECT COUNT(*) AS n FROM environments WHERE repo_id = ? AND name = ?').bind(repo.id, name).first<{ n: number }>())?.n;
@@ -464,8 +469,8 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
 
     const detail = await browser(envBase);
     expect(detail.status).toBe(200);
-    expect(tokenFields(detail.text)).toBe(2);
-    expect(tokenFields((await browser(`${envBase}/edit`)).text)).toBe(1);
+    expectTokenForms(detail.text, [`${envBase}/rebuild`, `${envBase}/archive`]);
+    expectTokenForms((await browser(`${envBase}/edit`)).text, [envBase]);
 
     const edit = 'baseRef=main&instance=standard-2&idleMinutes=30&maxBuildAgeHours=72';
     for (const [path, body] of [[envBase, edit], [`${envBase}/rebuild`, ''], [`${envBase}/archive`, '']] as const) {
@@ -486,10 +491,8 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
     const { id } = await seedRunningSandbox();
     const page = await browser(`${BASE}/sandboxes/${id}`);
     expect(page.status).toBe(200);
-    expect(tokenFields(page.text)).toBe(2);
-    const fleet = await browser('/fleet');
-    expect(fleet.text).toContain(`action="${BASE}/sandboxes/${id}/discard"`);
-    expect(tokenFields(fleet.text)).toBeGreaterThan(0);
+    expectTokenForms(page.text, [`${BASE}/sandboxes/${id}/stop`, `${BASE}/sandboxes/${id}/discard`]);
+    expectTokenForms((await browser('/fleet')).text, [`${BASE}/sandboxes/${id}/stop`, `${BASE}/sandboxes/${id}/discard`]);
 
     for (const action of ['stop', 'discard']) {
       expect((await post(`${BASE}/sandboxes/${id}/${action}`, '')).status, action).toBe(403);
@@ -498,7 +501,14 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
     }
     expect(await sandboxStatus(id)).toBe('running');
 
-    expect((await post(`${BASE}/sandboxes/${id}/discard`, '', payload.csrf)).status).toBe(302);
+    // A malformed Referer must not turn the completed discard into an error.
+    const discarded = await browser(`${BASE}/sandboxes/${id}/discard`, {
+      method: 'POST',
+      headers: { ...form, origin: ORIGIN, referer: 'not a url' },
+      body: `_csrf=${encodeURIComponent(payload.csrf)}`,
+    });
+    expect(discarded.status).toBe(302);
+    expect(discarded.location).toBe('/fleet');
     expect(await sandboxStatus(id)).toBe('stopped');
   });
 
@@ -510,13 +520,8 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
     const status = async () =>
       (await env.DB.prepare('SELECT status FROM sandbox_approvals WHERE id = ?').bind(approvalId).first<{ status: string }>())?.status;
 
-    const fleet = await browser('/fleet');
-    expect(fleet.text).toContain(`action="/fleet/approvals/${approvalId}"`);
-    expect(tokenFields(fleet.text)).toBeGreaterThan(0);
-    const sandboxPage = await browser(`${BASE}/sandboxes/${sandboxId}`);
-    expect(sandboxPage.text).toContain(`action="/fleet/approvals/${approvalId}"`);
-    // Sleep, discard and the approval form.
-    expect(tokenFields(sandboxPage.text)).toBe(3);
+    expectTokenForms((await browser('/fleet')).text, [`/fleet/approvals/${approvalId}`]);
+    expectTokenForms((await browser(`${BASE}/sandboxes/${sandboxId}`)).text, [`/fleet/approvals/${approvalId}`]);
 
     const body = `repo=${encodeURIComponent(`${OWNER}/fleet`)}&decision=approve`;
     expect((await post(`/fleet/approvals/${approvalId}`, body)).status).toBe(403);

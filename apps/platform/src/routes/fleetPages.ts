@@ -85,6 +85,23 @@ async function postedForm(c: Context<App>, viewer: ApiActor): Promise<Record<str
   return (await sessionFormRefused(c, viewer, form)) ?? form;
 }
 
+/**
+ * postedForm for handlers that use no form fields: a bearer post's body is
+ * never read, so these routes accept any body from it as they did before.
+ */
+async function csrfRefused(c: Context<App>, viewer: ApiActor): Promise<Response | null> {
+  if (viewer.via !== 'session') return null;
+  const posted = await postedForm(c, viewer);
+  return posted instanceof Response ? posted : null;
+}
+
+/** A same-origin Referer to return to; a missing, foreign or malformed one falls back to `/fleet`. */
+function sameOriginReferer(c: Context<App>): string {
+  const back = c.req.header('referer');
+  if (!back || !URL.canParse(back)) return '/fleet';
+  return new URL(back).origin === new URL(c.req.url).origin ? back : '/fleet';
+}
+
 function sandboxContext(c: Context<App>, repo: RepoRow, actor: ApiActor | null): sandboxes.SandboxContext {
   return {
     env: c.env,
@@ -656,8 +673,8 @@ fleetRepoPages.post('/environments/:name', async (c) => {
 fleetRepoPages.post('/environments/:name/rebuild', async (c) => {
   const loaded = await loadEnvironment(c);
   if (!loaded || !loaded.resolved.viewer) return notFound(c);
-  const posted = await postedForm(c, loaded.resolved.viewer);
-  if (posted instanceof Response) return posted;
+  const refused = await csrfRefused(c, loaded.resolved.viewer);
+  if (refused) return refused;
   const { resolved, env } = loaded;
   const result = await environments.rebuildEnvironment({ env: c.env, repo: resolved.repo, actor: resolved.viewer }, env.id);
   if (!result.ok) return notFound(c);
@@ -667,8 +684,8 @@ fleetRepoPages.post('/environments/:name/rebuild', async (c) => {
 fleetRepoPages.post('/environments/:name/archive', async (c) => {
   const loaded = await loadEnvironment(c);
   if (!loaded || !loaded.resolved.viewer) return notFound(c);
-  const posted = await postedForm(c, loaded.resolved.viewer);
-  if (posted instanceof Response) return posted;
+  const refused = await csrfRefused(c, loaded.resolved.viewer);
+  if (refused) return refused;
   const { resolved, env } = loaded;
   const result = await environments.archiveEnvironment({ env: c.env, repo: resolved.repo, actor: resolved.viewer }, env.id);
   if (!result.ok) return notFound(c);
@@ -809,12 +826,12 @@ function stopForms(action: string, status: string, csrf: string): string {
 async function stopFromPage(c: Context<App>, discard: boolean): Promise<Response> {
   const resolved = await resolveRepo(c);
   if (!resolved || !resolved.viewer) return notFound(c);
-  const posted = await postedForm(c, resolved.viewer);
-  if (posted instanceof Response) return posted;
+  const refused = await csrfRefused(c, resolved.viewer);
+  if (refused) return refused;
   const result = await sandboxes.stopSandbox(sandboxContext(c, resolved.repo, resolved.viewer), c.req.param('id') ?? '', { discard });
   if (!result.ok) return notFound(c);
-  const back = c.req.header('referer');
-  return finish(c, c.redirect(back && new URL(back).origin === new URL(c.req.url).origin ? back : '/fleet'));
+  // The sandbox has already changed state: a bad Referer must not turn that into a 500.
+  return finish(c, c.redirect(sameOriginReferer(c)));
 }
 
 fleetRepoPages.post('/sandboxes/:id/stop', (c) => stopFromPage(c, false));
