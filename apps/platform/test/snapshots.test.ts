@@ -22,6 +22,7 @@ import {
   PART_SIZE,
   READ_AHEAD,
   READ_BUDGET,
+  SNAPSHOT_ZSTD_FRAME_BYTES,
   STALE_BUILD_MS,
   buildSnapshot,
   decodeBatch,
@@ -34,7 +35,6 @@ import {
 } from '../src/workflows/snapshotBuilder';
 import worker from '../src/index';
 import {
-  FAKE_STREAM_CHUNK,
   FakeRepo,
   blobHash,
   commit,
@@ -394,8 +394,11 @@ describe('SnapshotBuilder', () => {
     expect(cost.blobReads).toBe(1001);
     expect(cost.objects).toBe(1);
     const stored = await storedObject(id, c.tree);
-    // One zstd frame per batch step; decoders read the concatenation frame by frame.
-    expect(zstdMagicCount(stored)).toBe(3);
+    // One zstd frame per SNAPSHOT_ZSTD_FRAME_BYTES of tar input, plus each
+    // step's final partial frame; decoders read the concatenation frame by frame.
+    const frames = zstdMagicCount(stored);
+    expect(frames).toBeGreaterThanOrEqual(Math.floor(cost.tarBytes / SNAPSHOT_ZSTD_FRAME_BYTES));
+    expect(frames).toBeLessThanOrEqual(Math.ceil(cost.tarBytes / SNAPSHOT_ZSTD_FRAME_BYTES) + 3);
     const bytes = await decompressAll(stored);
     expect(cost.bytes).toBe(stored.length);
     expect(cost.tarBytes).toBe(bytes.length);
@@ -457,10 +460,10 @@ describe('SnapshotBuilder', () => {
     expect(cost.tarBytes).toBe(bytes.length);
     expect(cost.parts).toBe(stored.length > partSize ? Math.ceil(stored.length / partSize) : 0);
     expect(cost.largestBlob).toBe((files['big/large.txt'] as string).length);
-    // Unflushed compressed bytes stay within one part plus the chunk the
-    // compressor emits for one stream slice (its buffer is larger than the
-    // input slice).
-    expect(cost.peakBuffer).toBeLessThan(partSize + 2 * FAKE_STREAM_CHUNK + 2048);
+    // Unflushed bytes stay within one part plus one whole frame: a frame is at
+    // most SNAPSHOT_ZSTD_FRAME_BYTES (a refused frame's raw-block form carries
+    // the same payload).
+    expect(cost.peakBuffer).toBeLessThan(partSize + SNAPSHOT_ZSTD_FRAME_BYTES + 2048);
     expect(cost.peakHeld).toBeGreaterThanOrEqual(repo.maxOpenBytes);
     expect(cost.peakHeld).toBeLessThanOrEqual(READ_BUDGET);
   });
