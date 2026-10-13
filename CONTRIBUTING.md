@@ -59,6 +59,8 @@ node scripts/dogfood-ci.mjs --repo kvarm --create --base origin/main --head HEAD
 
 It pushes `--base` to the Kvarm repository's `main` (fast-forward only) and `--head` to a `dogfood/<sha>` branch, opens a change request, waits for the platform to queue the jobs, runs `kvarm runner --once` until they finish, and prints the check runs, the commit status and the mergeability. It exits 0 only when every check succeeded and the change is mergeable. Pass `--workdir <dir>` to keep the runner's warm working directory between runs.
 
+The runner keeps its default execution trust, `--trust humans`: the change is opened with your `KVARM_PAT`, so with a personal access token its head runs on your machine. A change opened by an agent token is untrusted and runs in a container, or is refused and reported as a failure when neither docker nor podman is running. `--trust` and `--executor` are passed through to the runner; `--executor container` runs the whole gate isolated in the `node:24-bookworm` image. See [SECURITY.md](SECURITY.md#ci-runner-threat-model) for what each mode protects.
+
 Pull requests on GitHub do not trigger Kvarm CI automatically yet. Until they do, a maintainer runs each pull request's head through `scripts/dogfood-ci.mjs` and posts the result on the pull request.
 
 ## Commits and pull requests

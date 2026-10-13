@@ -45,6 +45,13 @@ const result = await runRunner({
   runnerId: env.KVARM_RUNNER_ID,
   workRoot: env.KVARM_WORK_ROOT,
   once: true,
+  // The throwaway container is the isolation boundary: it holds no host
+  // files. The command does not inherit this exec's credentials, but runs
+  // as the same user as this process, so it could read them from /proc;
+  // see SECURITY.md (CI runner threat model).
+  trust: 'all',
+  executor: 'host',
+  hostWarning: false,
   stdout: (line) => process.stdout.write(line + '\\n'),
   stderr: (line) => process.stderr.write(line + '\\n'),
   prepared: go

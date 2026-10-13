@@ -4,35 +4,30 @@
  * in the runner's persistent per-repository workdir — a fresh snapshot
  * checkout for the first job in a slot, then warm delta syncs that fetch
  * only the paths changed since the recorded commit (see workdir.js) —
- * execute the repository command in a shell with a timeout, and report
- * through the fenced claim generation. Idle claim polls back off
+ * execute the repository command under the execution-trust policy (on the
+ * host or in an isolated container, see executor.js) with a timeout, and
+ * report through the fenced claim generation. Idle claim polls back off
  * adaptively (2 s doubling to a 10 s cap) instead of polling at a fixed
  * rate, resetting as soon as a job is claimed.
  */
 
-import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkout } from './checkout.js';
 import { CliError } from './checkout.js';
+import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution } from './executor.js';
 import { materialize, openWorkdir } from './workdir.js';
 
-const OUTPUT_LIMIT = 16 * 1024;
+export { executeShell } from './executor.js';
+
 const SUMMARY_SERVER_LIMIT = 64 * 1024;
 const SUMMARY_SAFETY_MARGIN = 1024;
 const SUMMARY_LIMIT = SUMMARY_SERVER_LIMIT - SUMMARY_SAFETY_MARGIN;
-const TRUNCATED = '\n[output truncated]\n';
 const IDLE_MIN_MS = 2_000;
 const IDLE_MAX_MS = 10_000;
 /** Past this many changed paths a whole-tree checkout is cheaper than the delta. */
 const MAX_DELTA_CHANGES = 1_000;
 const utf8 = new TextEncoder();
-
-/** @param {string} text */
-function bounded(text) {
-  const points = [...text];
-  return points.length <= OUTPUT_LIMIT ? text : `${points.slice(0, OUTPUT_LIMIT).join('')}${TRUNCATED}`;
-}
 
 /** @param {unknown} value */
 function jsonBytes(value) {
@@ -77,61 +72,14 @@ function boundedSummary(summary) {
   return /** @type {T} */ (result);
 }
 
-function repositoryEnvironment() {
-  const portable = new Set(['PATH', 'HOME', 'LANG', 'TZ', 'TMPDIR']);
-  const windows = new Set(['SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE']);
-  /** @type {NodeJS.ProcessEnv} */
-  const env = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    const upper = key.toUpperCase();
-    if (portable.has(upper) || upper.startsWith('LC_') || (process.platform === 'win32' && windows.has(upper))) env[key] = value;
-  }
-  env.GIT_TERMINAL_PROMPT = '0';
-  return env;
-}
+/** A job the execution-trust policy will not run on this runner. */
+class JobRefused extends Error {}
 
-/**
- * @param {string} command
- * @param {string} cwd
- * @param {number} timeoutSeconds
- * @returns {Promise<{code:number|null,stdout:string,stderr:string,timedOut:boolean,durationMs:number}>}
- */
-export function executeShell(command, cwd, timeoutSeconds) {
-  return new Promise((resolve, reject) => {
-    const started = Date.now();
-    const grouped = process.platform !== 'win32';
-    const env = repositoryEnvironment();
-    const child = spawn(command, { cwd, shell: true, detached: grouped, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => {
-      if (stdout.length < OUTPUT_LIMIT + 1) stdout += String(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      if (stderr.length < OUTPUT_LIMIT + 1) stderr += String(chunk);
-    });
-    let timedOut = false;
-    /** @param {NodeJS.Signals} name */
-    const signal = (name) => {
-      try {
-        if (grouped && child.pid) process.kill(-child.pid, name);
-        else child.kill(name);
-      } catch (err) {
-        if (!(err && typeof err === 'object' && 'code' in err && err.code === 'ESRCH')) throw err;
-      }
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      signal('SIGTERM');
-      setTimeout(() => signal('SIGKILL'), 5_000).unref();
-    }, timeoutSeconds * 1000);
-    child.on('error', reject);
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout: bounded(stdout), stderr: bounded(stderr), timedOut, durationMs: Date.now() - started });
-    });
-  });
-}
+/** How long a failed container-runtime probe is remembered. */
+const RUNTIME_RETRY_MS = 60_000;
+
+const REFUSAL_HINT =
+  'A runner with a container runtime (docker or podman) and --executor auto or container can run it isolated; a runner started with --trust all runs it on the host.';
 
 /** @param {number} ms */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -340,7 +288,13 @@ async function fetchDelta(o) {
  * @property {string} [runnerId]
  * @property {typeof fetch} [apiFetch]
  * @property {typeof checkout} [checkoutFn]
- * @property {(command:string,cwd:string,timeoutSeconds:number)=>Promise<{code:number|null,stdout:string,stderr:string,timedOut:boolean,durationMs:number}>} [execute]
+ * @property {(command:string,cwd:string,timeoutSeconds:number)=>Promise<import('./executor.js').ExecResult>} [execute] the host executor
+ * @property {import('./executor.js').TrustMode} [trust] which jobs may run on the host (default 'humans')
+ * @property {boolean} [hostWarning] warn on every host job under --trust all (default true; off only where the host itself is a throwaway sandbox)
+ * @property {import('./executor.js').ExecutorMode} [executor] default 'auto': trusted jobs on the host, the rest in a container
+ * @property {Partial<import('./executor.js').ContainerConfig>} [container] container settings; `runtime` unset auto-detects docker, then podman
+ * @property {(command:string,cwd:string,timeoutSeconds:number,info:{jobId:string}&import('./executor.js').RuntimeProbe)=>Promise<import('./executor.js').ExecResult>} [executeContainer]
+ * @property {(preferred?: import('./executor.js').ContainerRuntime) => Promise<import('./executor.js').RuntimeProbe | null>} [detectRuntimeFn]
  * @property {(line:string)=>void} stdout
  * @property {(line:string)=>void} stderr
  * @property {string} [tempRoot]
@@ -360,17 +314,46 @@ export async function runRunner(options) {
   const apiFetch = options.apiFetch ?? fetch;
   const checkoutFn = options.checkoutFn ?? checkout;
   const execute = options.execute ?? executeShell;
+  const trust = options.trust ?? 'humans';
+  const executorMode = options.executor ?? 'auto';
+  const containerConfig = options.container ?? {};
+  const runInContainer =
+    options.executeContainer ??
+    ((command, cwd, timeoutSeconds, info) =>
+      executeContainer(command, cwd, timeoutSeconds, { ...containerConfig, runtime: info.runtime, rootless: info.rootless, name: containerName(info.jobId) }));
+  const detect = options.detectRuntimeFn ?? ((preferred) => detectRuntime({ preferred }));
+  /** @type {Promise<import('./executor.js').RuntimeProbe | null> | undefined} */
+  let runtimeProbe;
+  let probedAt = 0;
+  // A runtime that answered stays known; a missing one is asked again after
+  // a while, so a long-running runner notices a daemon that started later.
+  const runtime = async () => {
+    if (runtimeProbe && Date.now() - probedAt >= RUNTIME_RETRY_MS && (await runtimeProbe.catch(() => null)) === null) runtimeProbe = undefined;
+    if (!runtimeProbe) {
+      probedAt = Date.now();
+      runtimeProbe = detect(containerConfig.runtime);
+    }
+    return runtimeProbe;
+  };
   const deltaFn =
     options.deltaFn ?? ((previous, sha) => fetchDelta({ baseUrl: options.baseUrl, repo: options.repo, pat: options.pat, apiFetch, previous, sha }));
   const runnerId = options.runnerId ?? `kvarm-runner-${crypto.randomUUID()}`;
   const tempRoot = options.tempRoot ?? tmpdir();
   const workRoot = options.workRoot ?? join(tempRoot, 'kvarm-runner');
+  // Container jobs get their own workdir: an isolated job must not be able to
+  // plant files (node_modules/.bin, hooks) that a later host job executes.
+  const containerWorkRoot = `${workRoot}-container`;
   /** @type {import('./workdir.js').Slot | undefined} */
-  let slot;
+  let hostSlot;
+  /** @type {import('./workdir.js').Slot | undefined} */
+  let containerSlot;
   let claimed = 0;
   let reported = 0;
   let idle = 0;
   try {
+    if (executorMode === 'container' && !(await runtime())) {
+      throw new CliError(`--executor container needs a running ${containerConfig.runtime ?? 'docker or podman'}, and none answered`, 2);
+    }
     for (;;) {
       const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
       if (got.status === 204) {
@@ -387,6 +370,9 @@ export async function runRunner(options) {
       let heartbeat;
       let reportBody;
       try {
+        const plan = await planExecution({ trust, executor: executorMode, provenance: job.provenance, runtime });
+        // Refused before any byte of the job's code reaches this machine.
+        if (plan.run === null) throw new JobRefused(plan.reason);
         const every = Math.max(10_000, Math.floor(120_000 / 3));
         heartbeat = setInterval(() => {
           void post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
@@ -394,7 +380,10 @@ export async function runRunner(options) {
           );
         }, every);
         heartbeat.unref();
-        slot ??= openWorkdir({ workRoot, repo: options.repo, tempRoot, stderr: options.stderr });
+        const isolated = plan.run === 'container';
+        const slot = isolated
+          ? (containerSlot ??= openWorkdir({ workRoot: containerWorkRoot, repo: options.repo, tempRoot, stderr: options.stderr }))
+          : (hostSlot ??= openWorkdir({ workRoot, repo: options.repo, tempRoot, stderr: options.stderr }));
         const quiet = () => {};
         const materialized = await materialize(slot, {
           sha: job.sha,
@@ -416,7 +405,16 @@ export async function runRunner(options) {
         if (options.prepared) {
           await options.prepared({ job: { id: job.id, name: job.name, sha: job.sha }, work: slot.work, workdir: materialized.workdir, source: materialized.source });
         }
-        const result = await execute(job.command, slot.work, job.timeoutSeconds);
+        let result;
+        if (isolated) {
+          const rt = /** @type {import('./executor.js').RuntimeProbe} */ (plan.runtime);
+          options.stdout(`executor: container (${rt.runtime}${rt.rootless ? ' rootless' : ''}, ${containerConfig.image ?? DEFAULT_IMAGE}): ${plan.reason}`);
+          result = await runInContainer(job.command, slot.work, job.timeoutSeconds, { jobId: job.id, ...rt });
+        } else {
+          if (trust === 'all' && options.hostWarning !== false) options.stderr(`warning: running ${job.name} on the host with --trust all; its code has this user's files and network`);
+          else if (trust !== 'all') options.stdout(`executor: host: ${plan.reason}`);
+          result = await execute(job.command, slot.work, job.timeoutSeconds);
+        }
         const conclusion = result.code === 0 && !result.timedOut ? 'success' : 'failure';
         const summary = boundedSummary({
           command: job.command,
@@ -427,17 +425,24 @@ export async function runRunner(options) {
           stderr: result.stderr,
           source: materialized.source,
           sha: materialized.sha,
+          executor: plan.run,
+          ...(isolated ? { image: containerConfig.image ?? DEFAULT_IMAGE } : {}),
         });
         reportBody = { runnerId, generation: job.generation, conclusion, summary };
       } catch (err) {
+        const refused = err instanceof JobRefused;
+        if (refused) options.stderr(`refused ${job.name} (${job.id}): ${err.message}`);
         const summary = boundedSummary({
           command: job.command,
           exitCode: null,
           timedOut: false,
           durationMs: 0,
           stdout: '',
-          stderr: bounded(err instanceof Error ? err.message : String(err)),
+          stderr: refused
+            ? bounded(`kvarm runner refused to run this job: ${err.message}. ${REFUSAL_HINT}`)
+            : bounded(err instanceof Error ? err.message : String(err)),
           sha: job.sha,
+          ...(refused ? { refused: true, trust, executor: executorMode } : {}),
         });
         reportBody = { runnerId, generation: job.generation, conclusion: 'failure', summary };
       }
@@ -462,6 +467,7 @@ export async function runRunner(options) {
       if (options.once) return { claimed, reported };
     }
   } finally {
-    slot?.release();
+    hostSlot?.release();
+    containerSlot?.release();
   }
 }

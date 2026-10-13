@@ -9,6 +9,7 @@
  *   set -a; . ./.env.local; set +a        # KVARM_BASE_URL, KVARM_USER, KVARM_PAT (read, write, api, ci)
  *   node scripts/dogfood-ci.mjs --repo <name> [--create] [--base <rev>] [--head <rev>]
  *                               [--workdir <dir>] [--timeout-min 45]
+ *                               [--trust humans|all|none] [--executor auto|host|container]
  *
  * --base (default HEAD~1) is pushed to the Kvarm repository's main as a fast
  * forward; --head (default HEAD) goes to `dogfood/<sha12>` and becomes the
@@ -18,6 +19,11 @@
  * passed by environment and never printed. Exit status: 0 when every check of
  * the change head succeeded and the change is mergeable, 1 otherwise, 2 on a
  * usage error.
+ *
+ * The runner keeps its default execution trust (`humans`): the change is
+ * opened with KVARM_PAT, so a human token's change head runs on this host.
+ * --trust and --executor are passed through to `kvarm runner` (for example
+ * `--executor container` to run the gate isolated in docker or podman).
  */
 
 import { spawnSync } from 'node:child_process';
@@ -36,6 +42,8 @@ try {
       head: { type: 'string', default: 'HEAD' },
       workdir: { type: 'string' },
       'timeout-min': { type: 'string', default: '45' },
+      trust: { type: 'string' },
+      executor: { type: 'string' },
     },
   }));
 } catch (e) {
@@ -106,10 +114,11 @@ async function main() {
   log(`platform queued ${jobs.length} CI check runs from .kvarm/ci.json: ${checks.map((c) => `${c.name}=${c.status}`).join(', ')}`);
 
   const workdir = opts.workdir ?? join(live.work, 'runner');
+  const policy = [...(opts.trust ? ['--trust', opts.trust] : []), ...(opts.executor ? ['--executor', opts.executor] : [])];
   for (let i = 0; i < jobs.length * 2 && !jobs.every((j) => checks.some((c) => c.name === j && terminal(c))); i++) {
     if (Date.now() > deadline) break;
     log(`kvarm runner --once (${i + 1})`);
-    const r = spawnSync(process.execPath, ['apps/cli/bin/kvarm.js', 'runner', '--repo', `${OWNER}/${opts.repo}`, '--once', '--workdir', workdir], {
+    const r = spawnSync(process.execPath, ['apps/cli/bin/kvarm.js', 'runner', '--repo', `${OWNER}/${opts.repo}`, '--once', '--workdir', workdir, ...policy], {
       cwd: ROOT,
       env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
       encoding: 'utf8',
@@ -117,6 +126,7 @@ async function main() {
     });
     for (const line of `${r.stdout}`.trim().split('\n').filter(Boolean)) console.log(`    ${line}`);
     if (r.status !== 0) console.log(`    runner exit ${r.status}: ${(r.stderr ?? '').trim().slice(0, 400)}`);
+    else for (const line of `${r.stderr ?? ''}`.split('\n').filter((l) => /^(refused|warning:)/.test(l))) console.log(`    ${line}`);
     checks = await checksNow();
   }
 
