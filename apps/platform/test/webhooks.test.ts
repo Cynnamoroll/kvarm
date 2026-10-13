@@ -387,6 +387,10 @@ describe('recording platform events', () => {
     await env.DB.prepare(`INSERT INTO check_runs (id, repo_id, head_sha, name, status, created_at) VALUES ('cr-2', ?, ?, 'ci/test', 'queued', ?)`).bind(repo, SHA, now).run();
     await env.DB.prepare("UPDATE check_runs SET status = 'running' WHERE id = 'cr-2'").run();
     await env.DB.prepare("UPDATE check_runs SET status = 'success', conclusion = 'success' WHERE id = 'cr-2'").run();
+    // A rewrite to the same status is no new completion; a correction to another terminal status is.
+    await env.DB.prepare("UPDATE check_runs SET status = 'success', summary = '{}' WHERE id = 'cr-2'").run();
+    await new Promise((r) => setTimeout(r, 2));
+    await env.DB.prepare("UPDATE check_runs SET status = 'failure', conclusion = 'failure' WHERE id = 'cr-2'").run();
     // Escalation opened.
     await env.DB.prepare(
       `INSERT INTO change_escalations (id, repo_id, change_set_id, change_number, reason, state, head_sha, opened_at) VALUES ('esc-1', ?, ?, 2, 'review-blocked', 'open', ?, ?)`,
@@ -399,6 +403,7 @@ describe('recording platform events', () => {
     expect(rows.map((r) => r.event_type).sort()).toEqual([
       'kvarm.change.ejected',
       'kvarm.change.merged',
+      'kvarm.check_run.completed',
       'kvarm.check_run.completed',
       'kvarm.check_run.completed',
       'kvarm.escalation.opened',
@@ -428,6 +433,7 @@ describe('recording platform events', () => {
     const checks = (payloads.results ?? []).filter((p) => p.type === 'kvarm.check_run.completed').map((p) => JSON.parse(p.payload).data);
     expect(checks.map((c: any) => [c.name, c.status, c.change]).sort()).toEqual([
       ['ci/lint', 'failure', 2],
+      ['ci/test', 'failure', null],
       ['ci/test', 'success', null],
     ]);
   });
@@ -628,6 +634,66 @@ describe('delivering', () => {
     expect((await deliveries(hook.id))[0]).toMatchObject({ state: 'delivered', attempts: 1 });
   });
 
+  it('re-sends a stale delivery once per stale window, not on every pump of a backlog', async () => {
+    const { delivery } = await pendingDelivery();
+    const t0 = Date.now();
+    await pumpWebhookDeliveries(env, t0);
+    const sends = () => sent.filter((s) => s.body.deliveryId === delivery).length;
+    expect(sends()).toBe(1);
+    const late = t0 + WEBHOOK_LIMITS.staleMs + 1000;
+    await pumpWebhookDeliveries(env, late);
+    expect(sends()).toBe(2);
+    // The queue is backlogged: the message has not run yet. Later pumps inside the window do not add copies.
+    for (const dt of [1000, 60_000, WEBHOOK_LIMITS.staleMs - 1000]) await pumpWebhookDeliveries(env, late + dt);
+    expect(sends()).toBe(2);
+    await pumpWebhookDeliveries(env, late + WEBHOOK_LIMITS.staleMs + 1000);
+    expect(sends()).toBe(3);
+  });
+
+  it('an attempt that lost its lease records nothing against the hook', async () => {
+    const { hook, delivery } = await pendingDelivery();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const stalled = (async () => {
+      await gate;
+      return new Response('late failure', { status: 500 });
+    }) as typeof fetch;
+    const t0 = Date.now();
+    const first = deliverWebhook(env, delivery, { fetch: stalled, now: () => t0 });
+    await new Promise((r) => setTimeout(r, 20));
+    // The lease ran out while the first attempt hung; another copy of the message succeeds.
+    const takeover = t0 + WEBHOOK_LIMITS.leaseMs + 1000;
+    expect((await deliverWebhook(env, delivery, { fetch: endpoint([200]).fetch, now: () => takeover })).outcome).toBe('delivered');
+    release();
+    expect((await first).outcome).toBe('skipped');
+    const h = await env.DB.prepare('SELECT consecutive_failures, last_status FROM webhooks WHERE id = ?').bind(hook.id).first();
+    expect(h).toEqual({ consecutive_failures: 0, last_status: 200 });
+    expect((await deliveries(hook.id))[0]).toMatchObject({ state: 'delivered', attempts: 2 });
+  });
+
+  it('a missing signing key fails the attempt without sending and never counts against the hook', async () => {
+    const { hook, delivery } = await pendingDelivery();
+    const ep = endpoint([200]);
+    const noKey = { ...env, WEBHOOK_SECRET_KEY: undefined } as Env;
+    const r = await deliverWebhook(noKey, delivery, { fetch: ep.fetch, now: () => Date.now() });
+    expect(r.outcome).toBe('retry');
+    expect(r.detail).toContain('signing secret unavailable');
+    expect(ep.calls).toHaveLength(0);
+    expect(await env.DB.prepare('SELECT consecutive_failures FROM webhooks WHERE id = ?').bind(hook.id).first('consecutive_failures')).toBe(0);
+    const { pingWebhook } = await import('../src/services/webhooks');
+    const repo = { id: repoIds[await repoOfHook(hook.id)]!, owner_login: logins.owner, name: await repoOfHook(hook.id) } as never;
+    expect(await pingWebhook(noKey, repo, { user: { id: 'u', login: logins.owner } } as never, hook.id)).toMatchObject({ ok: false, status: 503 });
+  });
+
+  it('opens a secret only with the key version it was sealed under', async () => {
+    const { sealWebhookSecret, openWebhookSecret } = await import('../src/services/webhookSafety');
+    const sealed = await sealWebhookSecret(env, 'hook-a', 'the secret');
+    expect(await openWebhookSecret(env, 'hook-a', { ...sealed, keyVersion: 1 })).toBe('the secret');
+    await expect(openWebhookSecret(env, 'hook-a', { ...sealed, keyVersion: 2 })).rejects.toThrow();
+    await expect(openWebhookSecret(env, 'hook-b', { ...sealed, keyVersion: 1 })).rejects.toThrow();
+    await expect(openWebhookSecret({ ...env, WEBHOOK_SECRET_KEY: 'another-key-of-at-least-thirty-two-chars' } as Env, 'hook-a', { ...sealed, keyVersion: 1 })).rejects.toThrow();
+  });
+
   it('bounds the stored response and cancels deliveries of deleted or disabled hooks', async () => {
     const { hook, delivery } = await pendingDelivery();
     const big = 'x'.repeat(100_000);
@@ -745,6 +811,42 @@ describe('the queue consumer and request paths', () => {
     expect((await deliveries(hook.id))[0]).toMatchObject({ state: 'pending', attempts: 1 });
     // The retry went out as a delayed message of its own.
     expect(sent).toContainEqual({ body: { type: WEBHOOK_DELIVERY_MESSAGE, deliveryId: d!.id }, delaySeconds: 30 });
+  });
+
+  it('runs the attempts of one batch concurrently, beside the other messages', async () => {
+    const name = `concurrent-${crypto.randomUUID().slice(0, 8)}`;
+    await seedRepo(name);
+    const hook = await createHook(name, ['kvarm.change.merged']);
+    for (const n of [1, 2]) {
+      const change = await seedChange(name, n);
+      await env.DB.prepare("UPDATE change_sets SET state = 'merged' WHERE id = ?").bind(change).run();
+    }
+    const ids = (await deliveries(hook.id)).map((d) => d.id);
+    // Each endpoint call waits until both have started: sequential attempts would never finish.
+    let started = 0;
+    let both!: () => void;
+    const barrier = new Promise<void>((r) => (both = r));
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      if (++started === 2) both();
+      await Promise.race([barrier, new Promise((_, reject) => setTimeout(() => reject(new Error('attempts ran one at a time')), 2000))]);
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    try {
+      const batch = createMessageBatch('kvarm-events', [
+        { id: 'w1', timestamp: new Date(), attempts: 1, body: { type: WEBHOOK_DELIVERY_MESSAGE, deliveryId: ids[0]! } },
+        { id: 'x1', timestamp: new Date(), attempts: 1, body: { type: 'not-a-known-message' } },
+        { id: 'w2', timestamp: new Date(), attempts: 1, body: { type: WEBHOOK_DELIVERY_MESSAGE, deliveryId: ids[1]! } },
+      ]);
+      const ctx = createExecutionContext();
+      await worker.queue!(batch, env, ctx);
+      const result = await getQueueResult(batch, ctx);
+      await waitOnExecutionContext(ctx);
+      expect([...result.explicitAcks].sort()).toEqual(['w1', 'w2', 'x1']);
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect((await deliveries(hook.id)).map((d) => d.state)).toEqual(['delivered', 'delivered']);
   });
 
   it('a request that records an event never calls the endpoint and answers as before', async () => {

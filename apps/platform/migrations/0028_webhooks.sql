@@ -122,8 +122,8 @@ BEGIN
     FROM repos r WHERE r.id = NEW.repo_id;
 END;
 
--- Check run completed: recorded already finished, or moved from queued or
--- running to a terminal status.
+-- Check run completed: recorded already finished, moved to a terminal
+-- status, or corrected from one terminal status to another.
 CREATE TRIGGER webhook_check_run_completed_insert AFTER INSERT ON check_runs
 WHEN NEW.status IN ('success', 'failure', 'skipped')
  AND EXISTS (SELECT 1 FROM webhooks h WHERE h.repo_id = NEW.repo_id AND h.active = 1
@@ -143,7 +143,7 @@ BEGIN
 END;
 
 CREATE TRIGGER webhook_check_run_completed_update AFTER UPDATE OF status ON check_runs
-WHEN NEW.status IN ('success', 'failure', 'skipped') AND OLD.status IN ('queued', 'running')
+WHEN NEW.status IN ('success', 'failure', 'skipped') AND OLD.status != NEW.status
  AND EXISTS (SELECT 1 FROM webhooks h WHERE h.repo_id = NEW.repo_id AND h.active = 1
                 AND EXISTS (SELECT 1 FROM json_each(h.events) j WHERE j.value = 'kvarm.check_run.completed'))
 BEGIN

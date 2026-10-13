@@ -303,8 +303,8 @@ export async function updateWebhook(
 }
 
 /**
- * Deletes a hook. Its pending deliveries are cancelled when their messages
- * run, and its log ages out with the retention prune.
+ * Deletes a hook and cancels its pending deliveries in the same batch; its
+ * log ages out with the retention prune.
  */
 export async function deleteWebhook(env: Env, repo: RepoRow, actor: Actor, id: string): Promise<ServiceResult<WebhookView>> {
   const [read, , del] = await env.DB.batch([
@@ -348,6 +348,7 @@ export async function rotateWebhookSecret(
  * hook receives it.
  */
 export async function pingWebhook(env: Env, repo: RepoRow, actor: Actor, id: string): Promise<ServiceResult<DeliveryView>> {
+  if (!webhookKeyConfigured(env)) return NOT_CONFIGURED();
   const now = Date.now();
   const eventId = `webhook-ping-${crypto.randomUUID()}`;
   const deliveryId = crypto.randomUUID().replace(/-/g, '');
@@ -540,21 +541,29 @@ async function enqueueDeliveries(env: Env, ids: string[]): Promise<void> {
 /**
  * Enqueues due deliveries that have no live message: new ones (never
  * enqueued) and ones whose message is overdue by `staleMs` (lost send, or an
- * attempt that died holding its lease). One D1 statement and at most one
- * sendBatch. Rows are marked before the send, so a failed send is retried
- * by a later pump once stale; a duplicate message is absorbed by the claim.
+ * attempt that died holding its lease). One indexed read, plus one write and
+ * one sendBatch when something is due. Rows are marked before the send, so a
+ * failed send is retried by a later pump once stale; a duplicate message is
+ * absorbed by the claim.
  */
 export async function pumpWebhookDeliveries(env: Env, now = Date.now()): Promise<{ enqueued: number }> {
+  // Overdue by staleMs and last sent more than staleMs ago: a message that
+  // is merely late in a backlog is not sent again on every pump.
+  const due = `state = 'pending' AND next_attempt_at <= ?1 AND COALESCE(lease_until, 0) < ?1
+    AND (enqueued_at IS NULL OR (next_attempt_at < ?1 - ?2 AND enqueued_at < ?1 - ?2))`;
+  // A read first: the common case (nothing due) writes nothing.
+  const found = await env.DB.prepare(`SELECT id FROM webhook_deliveries WHERE ${due} ORDER BY next_attempt_at LIMIT ?3`)
+    .bind(now, WEBHOOK_LIMITS.staleMs, WEBHOOK_LIMITS.pumpBatch)
+    .all<{ id: string }>();
+  const candidates = (found.results ?? []).map((r) => r.id);
+  if (candidates.length === 0) return { enqueued: 0 };
+  // Re-checked in the write so two concurrent pumps do not both send a row.
   const rows = await env.DB.prepare(
     `UPDATE webhook_deliveries SET enqueued_at = ?1
-      WHERE id IN (SELECT id FROM webhook_deliveries
-                    WHERE state = 'pending' AND next_attempt_at <= ?1
-                      AND (enqueued_at IS NULL OR next_attempt_at < ?1 - ?2)
-                      AND COALESCE(lease_until, 0) < ?1
-                    ORDER BY next_attempt_at LIMIT ?3)
+      WHERE id IN (SELECT value FROM json_each(?3)) AND ${due}
       RETURNING id`,
   )
-    .bind(now, WEBHOOK_LIMITS.staleMs, WEBHOOK_LIMITS.pumpBatch)
+    .bind(now, WEBHOOK_LIMITS.staleMs, JSON.stringify(candidates))
     .all<{ id: string }>();
   const ids = (rows.results ?? []).map((r) => r.id);
   await enqueueDeliveries(env, ids);
@@ -612,6 +621,7 @@ interface ClaimRow {
   active: number | null;
   secret_ciphertext: string | null;
   secret_iv: string | null;
+  key_version: number | null;
   consecutive_failures: number | null;
   payload: string | null;
 }
@@ -672,7 +682,7 @@ export async function deliverWebhook(env: Env, deliveryId: string, deps: Deliver
     ).bind(deliveryId, lease, now, WEBHOOK_LIMITS.earlyMs),
     env.DB.prepare(
       `SELECT d.id, d.webhook_id, d.repo_id, d.event_id, d.event_type, d.attempts, d.lease_until,
-              h.url, h.active, h.secret_ciphertext, h.secret_iv, h.consecutive_failures, e.payload
+              h.url, h.active, h.secret_ciphertext, h.secret_iv, h.key_version, h.consecutive_failures, e.payload
          FROM webhook_deliveries d
          LEFT JOIN webhooks h ON h.id = d.webhook_id
          LEFT JOIN events e ON e.id = d.event_id
@@ -700,6 +710,8 @@ export async function deliverWebhook(env: Env, deliveryId: string, deps: Deliver
   let error: string | null = null;
   let excerpt: string | null = null;
   let permanent = false;
+  // A failure on the platform's side (the signing key) is not the endpoint's: it never counts toward disabling the hook.
+  let platformFault = false;
   const started = Date.now();
   const target = checkWebhookUrl(row.url, selfHost(env));
   if (!target.ok) {
@@ -709,9 +721,10 @@ export async function deliverWebhook(env: Env, deliveryId: string, deps: Deliver
   } else {
     let secret: string | null = null;
     try {
-      secret = await openWebhookSecret(env, row.webhook_id, { ciphertext: row.secret_ciphertext, iv: row.secret_iv });
+      secret = await openWebhookSecret(env, row.webhook_id, { ciphertext: row.secret_ciphertext, iv: row.secret_iv, keyVersion: row.key_version ?? 1 });
     } catch {
-      error = 'signing secret unavailable';
+      error = 'signing secret unavailable (WEBHOOK_SECRET_KEY missing or changed); nothing was sent';
+      platformFault = true;
     }
     if (secret !== null) {
       const timestamp = Math.floor(now / 1000);
@@ -759,10 +772,19 @@ export async function deliverWebhook(env: Env, deliveryId: string, deps: Deliver
         WHERE id = ?1 AND lease_until = ?2`,
     ).bind(deliveryId, lease, state, status, latency, error, excerpt, entry, done, nextAt);
 
+  // Hook counters move only for the attempt whose outcome was recorded: one
+  // that outlived its lease (another copy took over) changes nothing.
+  const recorded = `EXISTS (SELECT 1 FROM webhook_deliveries d WHERE d.id = ?4 AND d.attempts = ?5 AND d.updated_at = ?2 AND d.lease_until IS NULL)`;
   if (error === null) {
     await env.DB.batch([
       record('delivered', now),
-      env.DB.prepare('UPDATE webhooks SET consecutive_failures = 0, last_delivery_at = ?2, last_status = ?3 WHERE id = ?1').bind(row.webhook_id, done, status),
+      env.DB.prepare(`UPDATE webhooks SET consecutive_failures = 0, last_delivery_at = ?2, last_status = ?3 WHERE id = ?1 AND ${recorded}`).bind(
+        row.webhook_id,
+        done,
+        status,
+        deliveryId,
+        attempt,
+      ),
     ]);
     return { outcome: 'delivered', attempt, status };
   }
@@ -773,8 +795,8 @@ export async function deliverWebhook(env: Env, deliveryId: string, deps: Deliver
   const results = await env.DB.batch([
     record(final ? 'failed' : 'pending', final ? now : done + delay * 1000),
     env.DB.prepare(
-      'UPDATE webhooks SET consecutive_failures = consecutive_failures + 1, last_delivery_at = ?2, last_status = ?3 WHERE id = ?1',
-    ).bind(row.webhook_id, done, status),
+      `UPDATE webhooks SET consecutive_failures = consecutive_failures + ?6, last_delivery_at = ?2, last_status = ?3 WHERE id = ?1 AND ${recorded}`,
+    ).bind(row.webhook_id, done, status, deliveryId, attempt, platformFault ? 0 : 1),
     env.DB.prepare(
       `UPDATE webhooks SET active = 0, disabled_at = ?2, disabled_reason = 'consecutive delivery failures', updated_at = ?2
         WHERE id = ?1 AND active = 1 AND consecutive_failures >= ?3`,
@@ -795,6 +817,7 @@ export async function deliverWebhook(env: Env, deliveryId: string, deps: Deliver
     cancelPendingStatement(env.DB, row.webhook_id, 'webhook disabled after repeated failures', done),
   ]);
   const disabled = (results[2]?.meta.changes ?? 0) > 0;
+  if (!results[0]?.meta.changes) return { outcome: 'skipped', attempt, status, detail: 'lease lost; the other attempt records the outcome' };
   if (final || disabled) return { outcome: 'failed', attempt, status, detail: disabled ? 'webhook disabled' : error };
   try {
     await env.EVENTS.send({ type: WEBHOOK_DELIVERY_MESSAGE, deliveryId } satisfies WebhookDeliveryMessage, { delaySeconds: delay });

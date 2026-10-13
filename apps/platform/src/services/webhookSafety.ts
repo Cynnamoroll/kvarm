@@ -189,28 +189,49 @@ export function webhookKeyConfigured(env: Env): boolean {
   return typeof env.WEBHOOK_SECRET_KEY === 'string' && env.WEBHOOK_SECRET_KEY.length >= MASTER_KEY_MIN;
 }
 
-async function dataKey(env: Env): Promise<CryptoKey> {
-  if (!webhookKeyConfigured(env)) throw new Error('WEBHOOK_SECRET_KEY is not configured');
-  const ikm = await crypto.subtle.importKey('raw', enc.encode(env.WEBHOOK_SECRET_KEY), 'HKDF', false, ['deriveKey']);
-  return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('kvarm-webhook-secrets'), info: enc.encode(`v${WEBHOOK_KEY_VERSION}`) },
-    ikm,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt'],
-  );
+// Derived keys per (master secret, version), so an attempt does not repeat
+// the import and HKDF; a changed secret derives a new entry.
+const derived = new Map<string, Promise<CryptoKey>>();
+
+/**
+ * The AES-GCM key for one key version. Each hook records the version it was
+ * sealed under, so a later version can be introduced (new seals use it) while
+ * existing ciphertexts still open; changing WEBHOOK_SECRET_KEY itself needs
+ * every hook's secret rotated.
+ */
+function dataKey(env: Env, version: number): Promise<CryptoKey> {
+  if (!webhookKeyConfigured(env)) return Promise.reject(new Error('WEBHOOK_SECRET_KEY is not configured'));
+  const master = env.WEBHOOK_SECRET_KEY!;
+  const cacheKey = `${version}:${master}`;
+  let key = derived.get(cacheKey);
+  if (!key) {
+    key = crypto.subtle
+      .importKey('raw', enc.encode(master), 'HKDF', false, ['deriveKey'])
+      .then((ikm) =>
+        crypto.subtle.deriveKey(
+          { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('kvarm-webhook-secrets'), info: enc.encode(`v${version}`) },
+          ikm,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['encrypt', 'decrypt'],
+        ),
+      );
+    key.catch(() => derived.delete(cacheKey));
+    derived.set(cacheKey, key);
+  }
+  return key;
 }
 
 export async function sealWebhookSecret(env: Env, hookId: string, secret: string): Promise<{ ciphertext: string; iv: string }> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(`webhook:${hookId}`) }, await dataKey(env), enc.encode(secret));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(`webhook:${hookId}`) }, await dataKey(env, WEBHOOK_KEY_VERSION), enc.encode(secret));
   return { ciphertext: b64(new Uint8Array(ct)), iv: b64(iv) };
 }
 
-export async function openWebhookSecret(env: Env, hookId: string, sealed: { ciphertext: string; iv: string }): Promise<string> {
+export async function openWebhookSecret(env: Env, hookId: string, sealed: { ciphertext: string; iv: string; keyVersion: number }): Promise<string> {
   const pt = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: unb64(sealed.iv), additionalData: enc.encode(`webhook:${hookId}`) },
-    await dataKey(env),
+    await dataKey(env, sealed.keyVersion),
     unb64(sealed.ciphertext),
   );
   return new TextDecoder().decode(pt);
