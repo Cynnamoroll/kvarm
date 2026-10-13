@@ -72,8 +72,12 @@ missing or empty.
    checkout only reads the metadata (`GET`) and never starts a build.
 2. If the snapshot is ready, checkout downloads
    `…/snapshots/<sha>/download` by commit SHA, so a branch that moves mid-run
-   cannot swap the content. It checks that the byte count equals the metadata
-   `size` and extracts the tarball. Output: `source: snapshot`.
+   cannot swap the content. Snapshot tarballs are stored zstd-compressed;
+   checkout advertises `application/zstd` and decodes the stored frames when
+   the platform serves them (Node ≥ 22.15; older runtimes receive the plain
+   tar). It checks that the tar byte count equals the metadata `size` (and
+   the wire bytes equal `encodedSize` when compressed) and extracts the
+   tarball. Output: `source: snapshot`.
 3. Otherwise it runs `git clone --no-checkout` + `git checkout <ref>`.
    Output: `source: clone`. This covers a build in progress (including the one
    this checkout just demanded), an absent or failed snapshot, a refused
@@ -82,7 +86,8 @@ missing or empty.
    snapshot once the demanded build is ready.
 
 stdout always starts with the pinned `source:` line, followed by `sha:
-<commit>` (plus `files:` and `bytes:` for a snapshot). The reason for a
+<commit>` (plus `files:`, `bytes:` (tar bytes), `transfer:` (wire bytes)
+and `encoding:` (`zstd` or `identity`) for a snapshot). The reason for a
 fallback goes to stderr. Exit status: 0 on success, 1 on failure (for
 example an unknown ref or a private repo without a token), 2 on usage errors.
 

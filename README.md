@@ -65,7 +65,7 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 **Merging and CI.** An explicit merge publishes inside the request. The merge queue runs a bounded integration train: candidates are prepared and checked in parallel against their exact composed tree, and only the final publication holds a short generation-fenced lease. CI is user-owned: a repository's `.kvarm/ci.json` creates check runs and jobs; `kvarm runner` claims them on the user's machine, runs them from a snapshot checkout in a warm working directory and reports back. A Container CI runner (Cloudflare Containers, public beta) is an opt-in showcase of the same claim, run and report loop.
 
-**Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
+**Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), zstd-compressed snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
 
 ## Interfaces
 
@@ -265,7 +265,7 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | repositories | `GET/POST /repos`, `POST /import`, `GET/PATCH/DELETE /repos/:owner/:repo`, `POST …/forks` |
 | content | `GET …/tree`, `GET …/contents` (path and `ref` as query parameters), `GET …/events` |
 | compare | `GET …/compare/:base...:head` (`order=path\|risk`, `limit`, `cursor`), `GET …/compare/:base...:head/file?path=`, `GET …/commits/:sha/diff` |
-| snapshots | `GET/POST …/snapshots/:ref`, `GET …/snapshots/:sha/download` |
+| snapshots | `GET/POST …/snapshots/:ref`, `GET …/snapshots/:sha/download` (zstd-compressed tar; `Accept: application/zstd` serves stored bytes, otherwise the Worker decompresses) |
 | changes | `POST/GET …/changes`, `GET/PATCH …/changes/:n`, `POST …/changes/:n/merge`, `GET …/changes/:n/mergeability`, `GET …/changes/:n/checks` |
 | merge queue | `POST/DELETE …/changes/:n/enqueue`, `GET …/queue`, `GET …/train` |
 | checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope) |
@@ -333,7 +333,7 @@ Not built in this version, recorded for after the submission:
 - WorkOS sign-in (configured by the secrets above; personal access tokens are the supported path today).
 - Flaky-test retry and quarantine, revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
 - Contract capsules, semantic packets, hotspot suggestions, priority credits, resource lifecycle and crash reconciliation after a ref move.
-- Advisory low-signal test flags, snapshot compression and an auto-updating repository wiki.
+- Advisory low-signal test flags and an auto-updating repository wiki.
 - Adopting Effect TS across the codebase.
 
 ## License

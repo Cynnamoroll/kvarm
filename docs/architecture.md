@@ -19,7 +19,7 @@ These decisions shape the whole codebase. Later sections refer back to them.
 
 ### 0.2 Out of scope for this version
 
-The following are designed but not built; the README lists them under "Deferred roadmap": flaky-test retry and quarantine, revert change sets, inbound incident webhooks and outbound webhook delivery, audit export (`get_audit`), contract capsules, semantic packets, hotspot suggestions, priority credits, resource lifecycle, crash reconciliation after a ref move, advisory low-signal test flags, snapshot compression, the collaborative UI pass and WorkOS sign-in. Code paths that would serve them either do not exist or are documented as inert.
+The following are designed but not built; the README lists them under "Deferred roadmap": flaky-test retry and quarantine, revert change sets, inbound incident webhooks and outbound webhook delivery, audit export (`get_audit`), contract capsules, semantic packets, hotspot suggestions, priority credits, resource lifecycle, crash reconciliation after a ref move, advisory low-signal test flags, the collaborative UI pass and WorkOS sign-in. Code paths that would serve them either do not exist or are documented as inert.
 
 ### 0.3 The checks gate
 
@@ -156,7 +156,7 @@ All repository routes live under `/api/v1/repos/:owner/:repo/...`. The README's 
 | area | shape |
 | --- | --- |
 | compare | `GET compare/:base...:head` (`order=path\|risk`, `limit`, `cursor`) returns base and head `{ref, sha, tree}`, `files[]` with status, modes, blob hashes, optional line stats and risk, `totals`, `totalsComplete`, a change `rating`, `truncated` and `nextCursor`; `GET compare/:base...:head/file?path=` returns hunks; `GET commits/:sha/diff` compares a commit with its first parent |
-| snapshots | `GET snapshots/:ref` (metadata, `202` while building, `404`), `POST snapshots/:ref` (explicit demand), `GET snapshots/:sha/download` (tar stream from R2) |
+| snapshots | `GET snapshots/:ref` (metadata, `202` while building, `404`), `POST snapshots/:ref` (explicit demand), `GET snapshots/:sha/download` (stored bytes; negotiates zstd via `Accept`) |
 | changes | `POST changes {title, body?, base, head, mergePolicy?}`, `GET changes?state=`, `GET/PATCH changes/:n`, `POST changes/:n/merge`, `GET changes/:n/mergeability`, `GET changes/:n/checks` |
 | checks and CI | `GET commits/:sha/status`, `POST check-runs`, `PATCH check-runs/:id`, `POST ci/jobs/claim`, `POST ci/jobs/:id/heartbeat`, `POST ci/jobs/:id/report` (`ci` scope) |
 | merge queue | `POST/DELETE changes/:n/enqueue`, `GET queue`, `GET train` |
@@ -190,6 +190,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0019_dependencies` | pinned draft dependencies (§11.3) |
 | `0020_check_runs_identity` | check-run tree, attempt, required, quarantined and summary (§0.3) |
 | `0021_ci_jobs` | user-owned CI runner jobs with generation and owner fencing |
+| `0023_snapshot_encoding` | stored-object encoding and compressed size on snapshot trees (§11.5) |
 
 ## 7. Testing
 
@@ -258,6 +259,7 @@ The README's "Deploy from zero" and "Redeploy an existing deployment" sections a
 
 - Artifacts `repo.pushed` events reach the `kvarm-events` queue through one account-level subscription. For each message, one ingest D1 batch records the event, advances `pushed_at` monotonically, moves the ref position only for a newer event and refreshes the heads of open changes on that branch. Each downstream effect (cache invalidation, snapshot build, `kvarm/guard`, CI dispatch, Nexus index, train kicks) runs and is recorded independently, so a redelivery runs only what is missing. Out-of-order pushes cannot roll state back; a genuine repeated transition (A→B→A→B) is still processed.
 - Snapshots are addressed by commit: per-commit metadata points at an immutable per-tree tarball in R2, so commits with identical trees share bytes. `SnapshotBuilder` walks the tree in bounded Workflow steps. Reading metadata never starts a build.
+- Tarballs are stored zstd-compressed: each bounded build step emits one zstd frame of the tar bytes it produced, and the stored object is the concatenation of the step frames (one frame is always a whole step's output, so a retried step never rewrites an earlier frame). The tree row records `encoding` and `encoded_size` next to the plain tar `size`; rows and objects written before compression carry `encoding` NULL and are served as plain tar. `GET snapshots/:sha/download` negotiates with `Accept`: a client listing `application/zstd` gets the stored bytes as `application/zstd` (the CLI decodes frame by frame), any other client gets the tar decompressed in the Worker through `FixedLengthStream(tarSize)`. The content-addressed cache entry holds the stored representation once and both branches serve from a hit.
 - Kvarm never deletes repository refs, user code or history automatically; an explicit abandon deletes only its workspace ref. Growing lists are paginated, comparisons and output are bounded, and runners poll with backoff.
 
 ### 11.6 Human and agent surfaces

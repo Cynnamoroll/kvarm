@@ -10,11 +10,10 @@
  *
  * Variants alternate within each run so drift affects all three alike. Wall
  * time is measured around the child process (process start included). Bytes:
- * the snapshot tarball size (printed by the CLI, equal to metadata `size`),
- * the received pack size for git (`.git/objects/pack/*.pack`), and the
- * checked-out tree size. The first run of each target checks that all three
- * trees are identical (`diff -r -x .git`). One extra untimed download per
- * target records how large the tarball would be gzip-compressed.
+ * the snapshot wire bytes (the CLI's `transfer:` line; the stored object is
+ * zstd-compressed, metadata `encodedSize`), the received pack size for git
+ * (`.git/objects/pack/*.pack`), and the checked-out tree size. The first run
+ * of each target checks that all three trees are identical (`diff -r -x .git`).
  *
  * Targets:
  * - fixture  <owner>/fixture-1m at bench-head (read-only; never pushed or deleted).
@@ -31,8 +30,6 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { request } from 'node:https';
-import { createGzip } from 'node:zlib';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -124,24 +121,6 @@ async function ensureReady(repo, ref) {
   return r.body;
 }
 
-/** Downloads the tarball once (untimed) and returns its gzip -6 size. */
-function gzipSize(repo, sha) {
-  return new Promise((resolve, reject) => {
-    const url = `${BASE}/api/v1/repos/${OWNER}/${repo}/snapshots/${sha}/download`;
-    const req = request(url, { headers: { authorization: `Bearer ${process.env.KVARM_PAT}` } }, (res) => {
-      if (res.statusCode !== 200) return reject(new Error(`download ${res.statusCode}`));
-      let n = 0;
-      const gz = createGzip({ level: 6 });
-      gz.on('data', (c) => (n += c.length));
-      gz.on('end', () => resolve(n));
-      gz.on('error', reject);
-      res.pipe(gz);
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
 const VARIANTS = {
   clone(t, dir) {
     const a = git(work, ['clone', '-q', '--no-checkout', t.url, dir]);
@@ -163,7 +142,8 @@ const VARIANTS = {
     const first = r.out.split('\n')[0];
     if (r.code !== 0 || first !== 'source: snapshot') throw new Error(`kvarm checkout did not use the snapshot (exit ${r.code}, ${first}): ${r.err}`);
     const field = (k) => r.out.split('\n').find((l) => l.startsWith(`${k}: `))?.slice(k.length + 2);
-    return { ms: r.ms, sha: field('sha'), transferBytes: Number(field('bytes')) };
+    // `transfer` is the wire bytes; older CLI builds printed only `bytes`.
+    return { ms: r.ms, sha: field('sha'), transferBytes: Number(field('transfer') ?? field('bytes')) };
   },
 };
 
@@ -207,13 +187,12 @@ async function bench(t) {
     const ms = rows.map((r) => r.ms);
     summary[v] = { minMs: Math.min(...ms), medianMs: median(ms), maxMs: Math.max(...ms), transferBytes: rows[0].transferBytes, treeBytes: rows[0].treeBytes };
   }
-  const gzipBytes = await gzipSize(t.repo, meta.sha);
   return {
     target: t.name,
     repo: `${OWNER}/${t.repo}`,
     ref: t.ref,
     sha: meta.sha,
-    snapshot: { size: meta.size, gzipBytes, files: meta.files, reused: meta.reused ?? false },
+    snapshot: { size: meta.size, encodedSize: meta.encodedSize ?? meta.size, encoding: meta.encoding ?? 'identity', files: meta.files, reused: meta.reused ?? false },
     summary,
     speedup: { vsClone: round(summary.clone.medianMs / summary.snapshot.medianMs), vsShallow: round(summary.shallow.medianMs / summary.snapshot.medianMs) },
     runs,
@@ -269,7 +248,7 @@ function markdown(record) {
     const s = t.summary;
     lines.push(`| ${t.target} (\`${t.repo}\`@\`${t.ref}\`) | ${t.snapshot.files} | ${fmtBytes(s.snapshot.treeBytes)} | ${s.clone.medianMs} ms | ${s.shallow.medianMs} ms | ${s.snapshot.medianMs} ms | ${t.speedup.vsClone}× | ${t.speedup.vsShallow}× |`);
   }
-  lines.push('', '## Bytes transferred', '', '| target | `git clone` pack | `git clone --depth=1` pack | snapshot tarball |', '| --- | ---: | ---: | ---: |');
+  lines.push('', '## Bytes transferred', '', '| target | `git clone` pack | `git clone --depth=1` pack | snapshot download |', '| --- | ---: | ---: | ---: |');
   for (const t of record.targets) {
     const s = t.summary;
     lines.push(`| ${t.target} | ${s.clone.transferBytes.toLocaleString('en-US')} B (${fmtBytes(s.clone.transferBytes)}) | ${s.shallow.transferBytes.toLocaleString('en-US')} B (${fmtBytes(s.shallow.transferBytes)}) | ${s.snapshot.transferBytes.toLocaleString('en-US')} B (${fmtBytes(s.snapshot.transferBytes)}) |`);
@@ -278,11 +257,12 @@ function markdown(record) {
   for (const t of record.targets) {
     const s = t.summary;
     const vsShallow = (s.snapshot.transferBytes / s.shallow.transferBytes).toFixed(1);
-    const gz = (t.snapshot.size / t.snapshot.gzipBytes).toFixed(1);
+    const enc = t.snapshot.encoding ?? 'identity';
+    const ratio = t.snapshot.encodedSize ? (t.snapshot.size / t.snapshot.encodedSize).toFixed(1) : '1.0';
     lines.push(
       `- **${t.target}:** the snapshot checkout is ${relative(s.snapshot.medianMs, s.clone.medianMs)} a full \`git clone\` + checkout and ${relative(s.snapshot.medianMs, s.shallow.medianMs)} a shallow clone (medians). ` +
-        `The tarball is plain ustar served uncompressed: ${fmtBytes(s.snapshot.transferBytes)} on the wire versus ${fmtBytes(s.shallow.transferBytes)} for the zlib-compressed shallow pack (${vsShallow}×). ` +
-        `gzip -6 of the same tarball is ${fmtBytes(t.snapshot.gzipBytes)} (${gz}× smaller).`,
+        `The snapshot tarball is stored and served ${enc === 'zstd' ? `zstd-compressed: ${fmtBytes(s.snapshot.transferBytes)} on the wire for the ${fmtBytes(t.snapshot.size)} tar (${ratio}×)` : `uncompressed: ${fmtBytes(s.snapshot.transferBytes)} on the wire`}, ` +
+        `versus ${fmtBytes(s.shallow.transferBytes)} for the zlib-compressed shallow pack (${vsShallow}×).`,
     );
   }
   lines.push('', '## All runs', '', '| target | run | variant | wall ms | transfer bytes |', '| --- | ---: | --- | ---: | ---: |');
@@ -308,7 +288,8 @@ function markdown(record) {
     '  (process start included). The three variants run back to back within a run, in reversed',
     '  order on even runs. Before timing, the script demands each snapshot and waits until it is',
     '  ready, so build time is not part of the snapshot numbers.',
-    '- **Bytes.** Snapshot transfer = tarball bytes (equal to the metadata `size`). Git transfer =',
+    '- **Bytes.** Snapshot transfer = wire bytes reported by the CLI (`transfer:`; the stored',
+    '  object is zstd-compressed, metadata `encodedSize`; `size` is the plain tar size). Git transfer =',
     '  the size of the received pack files under `.git/objects/pack` (protocol framing excluded).',
     '  Tree bytes = regular-file bytes in the checked-out tree, excluding `.git`.',
     '- **Correctness.** On the first run of each target, `diff -r -x .git` between the snapshot,',

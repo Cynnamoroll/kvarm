@@ -70,10 +70,12 @@ export interface SnapshotRow {
   size: number | null;
   files: number | null;
   r2_key: string | null;
+  encoding: string | null;
+  encoded_size: number | null;
 }
 
 const ROW_SELECT = `SELECT c.sha, c.tree, c.state, c.trigger, c.instance_id, c.attempt, c.reused, c.build_cost, c.error,
-         c.requested_at, c.built_at, t.size, t.files, t.r2_key
+         c.requested_at, c.built_at, t.size, t.files, t.r2_key, t.encoding, t.encoded_size
     FROM snapshot_commits c
     LEFT JOIN snapshot_trees t ON t.repo_id = c.repo_id AND t.tree = c.tree AND t.state = 'ready'
    WHERE c.repo_id = ?1 AND c.sha = ?2`;
@@ -131,6 +133,8 @@ export function snapshotView(ref: string, sha: string, row: SnapshotRow | null, 
         ...common,
         state: 'ready',
         size: row.size,
+        encoding: row.encoding ?? 'identity',
+        encodedSize: row.encoded_size ?? row.size,
         files: row.files,
         builtAt: iso(row.built_at),
         reused: row.reused === 1,
