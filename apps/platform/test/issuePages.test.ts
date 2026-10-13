@@ -8,6 +8,8 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
+import { newSessionPayload, sessionCookie } from '../src/auth/workos';
+import { toUserRow } from '../src/db/users';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
@@ -246,5 +248,46 @@ describe('issue pages', () => {
     expect((await request('GET', pages('secret', '/1'), { token: tok.reader })).status).toBe(404);
     expect((await request('GET', pages('secret', '/1'), { token: tok.owner })).status).toBe(200);
     expect((await request('GET', pages('guarded', '/99'))).status).toBe(404);
+  });
+
+  it('requires the session CSRF token and the same origin for a signed-in browser comment', async () => {
+    await seedRepo('csrf');
+    expect((await request('POST', api('csrf', '/issues'), { token: tok.owner, json: { title: 'Bug' } })).status).toBe(201);
+    const authEnv = {
+      ...env,
+      WORKOS_CLIENT_ID: 'client_fake',
+      WORKOS_API_KEY: 'sk_fake_not_a_real_key',
+      WORKOS_COOKIE_PASSWORD: 'test-cookie-password-0123456789abcdef',
+    } as Env;
+    const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userIds[OWNER]).first<Parameters<typeof toUserRow>[0]>();
+    const payload = newSessionPayload(toUserRow(row!), {
+      user: { id: row!.workos_user_id, email: row!.email, emailVerified: true, name: null, avatarUrl: null },
+      refreshToken: 'rt_unused',
+      sessionId: null,
+    });
+    const cookie = (await sessionCookie(authEnv, payload)).split(';')[0]!;
+    const browser = async (path: string, init: RequestInit = {}) => {
+      const ctx = createExecutionContext();
+      const headers = { cookie, ...(init.headers as Record<string, string>) };
+      const req = new Request(`${ORIGIN}${path}`, { ...init, headers, redirect: 'manual' });
+      const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, authEnv, ctx);
+      await waitOnExecutionContext(ctx);
+      return { status: res.status, text: await res.text() };
+    };
+    // The signed-in browser is the repository owner: the page renders the token with the comment form.
+    const at = pages('csrf', '/1');
+    const page = await browser(at);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('name="_csrf"');
+    const token = /name="_csrf" value="([^"]+)"/.exec(page.text)![1]!;
+    const form = { 'content-type': 'application/x-www-form-urlencoded' };
+    const missing = await browser(`${at}/comments`, { method: 'POST', headers: { ...form, origin: ORIGIN }, body: 'body=session note' });
+    expect(missing.status).toBe(403);
+    // Cross-origin: the session does not count, so the browser is anonymous and sees nothing.
+    const cross = await browser(`${at}/comments`, { method: 'POST', headers: { ...form, origin: 'https://evil.test' }, body: `body=x&_csrf=${token}` });
+    expect(cross.status).toBe(404);
+    const ok = await browser(`${at}/comments`, { method: 'POST', headers: { ...form, origin: ORIGIN }, body: `body=session note&_csrf=${token}` });
+    expect(ok.status).toBe(303);
+    expect((await request('GET', api('csrf', '/issues/1'), { token: tok.owner })).json.comments.map((c: any) => c.body)).toEqual(['session note']);
   });
 });

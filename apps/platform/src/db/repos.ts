@@ -15,6 +15,8 @@ export interface RepoRow {
   stars: number;
   created_at: number;
   pushed_at: number | null;
+  /** Opt-in hosted CI execution (services/hostedCi.ts); 0 unless a repo admin enabled it. */
+  hosted_ci: number;
   /** Owning organization for org repos; null (or absent in older cached rows) for personal repos. */
   owner_org_id?: string | null;
 }
@@ -31,9 +33,23 @@ export interface NewRepo {
   owner_org_id?: string | null;
 }
 
-/** Artifacts namespace is flat; owner/name is encoded deterministically. */
+/**
+ * Artifacts namespace is flat; owner/name is encoded deterministically. The
+ * encoding is injective: each component is sanitized, its dash runs collapsed
+ * and its edge dashes stripped, so no component contains `--` or an edge
+ * dash and the `--` separator splits the name in exactly one place. Without
+ * this, owner `a--b` with repo `c` and owner `a` with repo `b--c` would share
+ * one Artifacts repository (and deleting either would delete the other's
+ * objects).
+ */
 export function artifactsRepoName(owner: string, name: string): string {
-  return `${owner.toLowerCase()}--${name.toLowerCase()}`.replace(/[^a-z0-9._-]+/g, '-');
+  const part = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  return `${part(owner)}--${part(name)}`;
 }
 
 export function isValidRepoName(name: string): boolean {
@@ -75,6 +91,7 @@ export async function createRepoRow(env: Env, data: NewRepo): Promise<RepoRow> {
     stars: 0,
     created_at: now,
     pushed_at: null,
+    hosted_ci: 0,
     owner_org_id: data.owner_org_id ?? null,
   };
 }

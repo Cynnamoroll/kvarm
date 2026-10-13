@@ -55,6 +55,11 @@ describe('parseCiConfig', () => {
     expect(parse({ jobs: [job({ name: 'KVARM/x' })] })).toMatchObject({ ok: false, code: 'INVALID_CI_JOB_NAME' });
     expect(parse({ jobs: [job({ name: ' ' })] })).toMatchObject({ ok: false, code: 'INVALID_CI_JOB_NAME' });
     expect(parse({ jobs: [job(), job()] })).toMatchObject({ ok: false, code: 'DUPLICATE_CI_JOB' });
+    // Whitespace is trimmed before storage, so the reservation must hold on
+    // the trimmed name: a raw " kvarm/guard" must not become kvarm/guard.
+    for (const name of [' kvarm/guard', '\tkvarm/guard', '\u00a0kvarm/guard', '\u3000kvarm/ci-config']) {
+      expect(parse({ jobs: [job({ name })] }), JSON.stringify(name)).toMatchObject({ ok: false, code: 'INVALID_CI_JOB_NAME' });
+    }
   });
 
   it(`allows at most ${CI_LIMITS.jobs} jobs and ${CI_LIMITS.configBytes} bytes`, () => {

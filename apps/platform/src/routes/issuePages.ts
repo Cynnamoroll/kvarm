@@ -8,7 +8,9 @@
  * Issues change without a push, so these pages are never edge-cached.
  * Writes need the `write` role and come from same-origin forms only: the
  * browser's Origin and Sec-Fetch-Site headers are checked, because a session
- * cookie would otherwise ride along on a cross-site form post.
+ * cookie would otherwise ride along on a cross-site form post, and a
+ * session's post carries the page's CSRF token too (sessionFormRefused, as
+ * in repoPages.ts); requests authenticated by a token are exempt.
  *
  * Escaping convention (as in repoPages.ts): user data is interpolated bare
  * into html`` and escaped once; composed fragments and pre-encoded URLs go
@@ -18,14 +20,15 @@
 import { Hono, type Context } from 'hono';
 import { html, raw, timeAgo } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
-import { clientIp, requestCredential } from './api';
+import { clientIp, requestCredential, requestSession, type App } from './api';
+import { sessionFormRefused } from './repoPages';
+import { csrfInput } from '../web/render';
 import { repoPage } from '../render/repoShell';
 import { renderMarkdown } from '../render/markdown';
 import { resolveRepoAccess } from '../services/access';
 import type { Actor, RepoNeed, RepoRole } from '../services/authz';
 import * as svc from '../services/issues';
 
-type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const issuePages = new Hono<App>();
 
 interface Resolved {
@@ -68,7 +71,9 @@ async function resolveRepo(c: Context<App>, need: RepoNeed = 'read'): Promise<Re
   return { repo: access.repo, viewer: access.actor, role: access.role };
 }
 
-const canWrite = (r: Resolved) => r.viewer !== null && (r.role === 'write' || r.role === 'admin');
+function canWrite(r: Resolved): r is Resolved & { viewer: Actor } {
+  return r.viewer !== null && (r.role === 'write' || r.role === 'admin');
+}
 
 /** A form post that a browser sent from another site is refused. */
 function crossSite(c: Context<App>): boolean {
@@ -151,11 +156,13 @@ issuePages.get('/issues', async (c) => {
     )
     .join('');
   const next = listed.value.nextCursor ? html`<a class="btn" href="${raw(href({ cursor: listed.value.nextCursor }))}">Older</a>` : '';
+  const csrf = canWrite(r) ? csrfInput((await requestSession(c))?.csrfToken) : '';
   const form = canWrite(r)
     ? html`
     <details class="card new-issue" ${c.req.query('new') ? raw('open') : ''}>
       <summary class="btn primary">New issue</summary>
       <form method="post" action="${raw(`${base(r.repo)}/issues`)}">
+        ${raw(csrf)}
         <label for="title">Title</label>
         <input id="title" name="title" type="text" required maxlength="256" />
         <label for="body">Description (Markdown)</label>
@@ -202,6 +209,8 @@ issuePages.post('/issues', async (c) => {
   if (!r || !canWrite(r)) return notFound();
   if (crossSite(c)) return new Response('cross-site form posts are refused', { status: 403 });
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, r.viewer, form);
+  if (refused) return refused;
   const filed = await svc.createIssue(
     { env: c.env, repo: r.repo, actor: r.viewer },
     { title: form.title, body: formText(form.body) ?? null, paths: formPaths(form.paths), fingerprint: formText(form.fingerprint) },
@@ -215,12 +224,13 @@ issuePages.post('/issues', async (c) => {
 // One issue
 // ---------------------------------------------------------------------------
 
-function linkRow(r: Resolved, issue: number, l: svc.IssueLinkView, writable: boolean): string {
+function linkRow(r: Resolved, issue: number, l: svc.IssueLinkView, writable: boolean, csrf: string): string {
   const target = l.change !== null ? html`change <strong>#${l.change}</strong>` : html`workspace <code>${l.workspace ?? ''}</code>`;
   const actions =
     writable && l.change !== null && l.state !== 'rejected' && (l.state === 'proposed' || l.source !== 'manual')
       ? html`
         <form method="post" action="${raw(`${base(r.repo)}/issues/${issue}/links`)}" class="inline">
+          ${raw(csrf)}
           <input type="hidden" name="change" value="${l.change}" />
           ${l.state === 'proposed' ? raw('<button class="btn" name="state" value="confirmed" type="submit">Confirm</button>') : ''}
           <button class="btn" name="state" value="rejected" type="submit">Reject</button>
@@ -249,6 +259,7 @@ issuePages.get('/issues/:number', async (c) => {
   if (!got.ok) return notFound();
   const i = got.value;
   const writable = canWrite(r);
+  const csrf = writable ? csrfInput((await requestSession(c))?.csrfToken) : '';
   const at = `${base(r.repo)}/issues/${i.number}`;
   const tree = `${base(r.repo)}/tree/${encodeURIComponent(r.repo.default_branch)}`;
   const facts: string[] = [];
@@ -277,13 +288,14 @@ issuePages.get('/issues/:number', async (c) => {
     ].filter(Boolean);
     facts.push(html`<div><span class="muted">Closed by</span> ${raw(by.join(' at '))}${i.closedReason === 'verified' ? ' (the signal that filed it passed again)' : ''}</div>`);
   }
-  const links = i.links.map((l) => linkRow(r, i.number, l, writable)).join('');
+  const links = i.links.map((l) => linkRow(r, i.number, l, writable, csrf)).join('');
   const reasons = CLOSE_REASONS.map(([v, label]) => html`<option value="${v}">${label}</option>`).join('');
   const controls = writable
     ? html`
     <div class="card">
       <div class="card-title">${i.state === 'open' ? 'Close or edit' : 'Reopen or edit'}</div>
       <form method="post" action="${raw(at)}" class="inline">
+        ${raw(csrf)}
         ${
           i.state === 'open'
             ? raw(html`<input type="hidden" name="action" value="close" /><select name="closedReason">${raw(reasons)}</select> <button class="btn" type="submit">Close issue</button>`)
@@ -293,6 +305,7 @@ issuePages.get('/issues/:number', async (c) => {
       <details>
         <summary class="muted">Edit title and description</summary>
         <form method="post" action="${raw(at)}">
+          ${raw(csrf)}
           <input type="hidden" name="action" value="edit" />
           <label for="title">Title</label>
           <input id="title" name="title" type="text" required maxlength="256" value="${i.title}" />
@@ -312,7 +325,7 @@ issuePages.get('/issues/:number', async (c) => {
     .join('');
   const dispatch =
     writable && i.state === 'open' && !live
-      ? html`<form method="post" action="${raw(`${at}/dispatch`)}" class="inline"><button class="btn" type="submit">Hand to an agent</button>
+      ? html`<form method="post" action="${raw(`${at}/dispatch`)}" class="inline">${raw(csrf)}<button class="btn" type="submit">Hand to an agent</button>
           <span class="muted">creates a fix-issue task any agent can claim (<code>claim_task</code>)</span></form>`
       : '';
   const tasksCard =
@@ -331,6 +344,7 @@ issuePages.get('/issues/:number', async (c) => {
   const commentForm = writable
     ? html`
     <form method="post" action="${raw(`${at}/comments`)}">
+      ${raw(csrf)}
       <label for="comment">Comment (Markdown)</label>
       <textarea id="comment" name="body" rows="4" required></textarea>
       <p><button class="btn" type="submit">Comment</button></p>
@@ -368,6 +382,8 @@ issuePages.post('/issues/:number', async (c) => {
   if (crossSite(c)) return new Response('cross-site form posts are refused', { status: 403 });
   const at = `${base(r.repo)}/issues/${c.req.param('number')}`;
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, r.viewer, form);
+  if (refused) return refused;
   let patch: Record<string, unknown>;
   if (form.action === 'close') patch = { state: 'closed', closedReason: form.closedReason ?? 'completed' };
   else if (form.action === 'reopen') patch = { state: 'open' };
@@ -388,6 +404,8 @@ issuePages.post('/issues/:number/links', async (c) => {
   const number = c.req.param('number');
   const at = `${base(r.repo)}/issues/${number}`;
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, r.viewer, form);
+  if (refused) return refused;
   const change = typeof form.change === 'string' ? form.change : '';
   const linked = await svc.linkIssue({ env: c.env, repo: r.repo, actor: r.viewer }, change, {
     issue: Number(number),
@@ -404,6 +422,8 @@ issuePages.post('/issues/:number/comments', async (c) => {
   const number = c.req.param('number');
   const at = `${base(r.repo)}/issues/${number}`;
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, r.viewer, form);
+  if (refused) return refused;
   const posted = await svc.createComment({ env: c.env, repo: r.repo, actor: r.viewer }, number, { body: form.body });
   if (!posted.ok) {
     if (posted.status === 404) return notFound();
@@ -418,6 +438,9 @@ issuePages.post('/issues/:number/dispatch', async (c) => {
   if (crossSite(c)) return new Response('cross-site form posts are refused', { status: 403 });
   const number = c.req.param('number');
   const at = `${base(r.repo)}/issues/${number}`;
+  const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, r.viewer, form);
+  if (refused) return refused;
   const d = await svc.dispatchIssue({ env: c.env, repo: r.repo, actor: r.viewer }, number);
   if (!d.ok) {
     if (d.status === 404) return notFound();

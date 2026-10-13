@@ -176,7 +176,7 @@ class ArtifactsTreeReader implements TreeReader {
   }
 }
 
-type BlobRead = { bytes: Uint8Array } | { tooLarge: true } | null;
+export type BlobRead = { bytes: Uint8Array } | { tooLarge: true } | null;
 
 /** Counts readBlob RPCs for the compare body's `blobReads`. */
 interface BlobCounter {
@@ -187,7 +187,7 @@ function errorCode(err: unknown): unknown {
   return (err as { code?: unknown } | null)?.code;
 }
 
-async function readBlobBytes(
+export async function readBlobBytes(
   artifacts: LazyRepo,
   hash: string,
   counter?: BlobCounter,

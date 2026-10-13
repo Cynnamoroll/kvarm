@@ -130,6 +130,8 @@ export const TRAIN_LIMITS = {
   maxAttempts: 6,
   listDefault: 50,
   listMax: 100,
+  /** Entries shown of the exit history (ejected, stale, dequeued), newest first. */
+  exitsDefault: 20,
 };
 
 export function backoffSeconds(attempts: number): number {
@@ -763,6 +765,51 @@ export async function trainStatus(env: Env, repo: RepoRow, q: { limit?: string; 
   };
 }
 
+/** An entry that left the train without publishing, with the reason recorded on exit. */
+export interface TrainExitView extends QueueEntryView {
+  exitedAt: string;
+}
+
+export interface TrainExits {
+  exits: TrainExitView[];
+  truncated: boolean;
+}
+
+/**
+ * GET train exits (the train view's history): entries of `ejected`, `stale`
+ * and `dequeued` state, newest first — one indexed range scan over
+ * idx_mq_exits, bounded by its limit, independent of the exit history's
+ * length. Published entries stay out: landing is success, not an exit.
+ */
+export async function listTrainExits(env: Env, repo: RepoRow, q: { limit?: string; base?: string }): Promise<ServiceResult<TrainExits>> {
+  let limit = TRAIN_LIMITS.exitsDefault;
+  if (q.limit !== undefined) {
+    if (!/^\d{1,3}$/.test(q.limit) || Number(q.limit) < 1 || Number(q.limit) > TRAIN_LIMITS.listMax) {
+      return fail(400, `limit must be 1-${TRAIN_LIMITS.listMax}`, 'INVALID_LIMIT');
+    }
+    limit = Number(q.limit);
+  }
+  const base = q.base ? (q.base.startsWith('refs/heads/') ? q.base : branchRef(q.base)) : null;
+  const rows =
+    (
+      await env.DB.prepare(
+        `SELECT ${ENTRY_COLUMNS} FROM merge_queue q INDEXED BY idx_mq_exits
+          WHERE q.repo_id = ?1 AND q.active = 0 AND q.state IN ('ejected', 'stale', 'dequeued')
+            AND (?2 IS NULL OR q.target_ref = ?2)
+          ORDER BY q.updated_at DESC LIMIT ?3`,
+      )
+        .bind(repo.id, base, limit + 1)
+        .all<EntryRow>()
+    ).results ?? [];
+  return {
+    ok: true,
+    value: {
+      exits: rows.slice(0, limit).map((r) => ({ ...entryView(r), exitedAt: iso(r.updated_at) })),
+      truncated: rows.length > limit,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Train run
 // ---------------------------------------------------------------------------
@@ -1228,10 +1275,20 @@ async function trainPass(
                   )
                     .bind(repo.id, e.change_set_id, pv.treeSha)
                     .first<string>('head_sha');
-            if (live !== expected || !(await stagedIdentity(live))) {
-              throw new RefStoreUnavailable(`prepared CI ref ${checkRef} has an invalid commit identity`);
+            if (live === expected && (await stagedIdentity(live))) {
+              pv.mergeCommit = live;
+            } else if (pv.mergeCommit === live) {
+              // Only the queueing was lost (a crash between the staging push and
+              // the record): the ref already holds exactly this preparation.
+            } else {
+              // The staged commit belongs to another preparation of this tree
+              // (the base moved under an unchanged result tree). The namespace
+              // is platform-reserved: re-point it at this preparation with the
+              // stale commit as the expected old value, instead of failing
+              // the partition on every pass.
+              const restaged = await deps.pusher(env, repo).updateRef({ ref: checkRef, oldOid: live, newOid: pv.mergeCommit }, pv.objects);
+              if (restaged.status !== 'ok') throw new RefStoreUnavailable(`prepared CI ref could not be re-staged: ${restaged.reason ?? restaged.status}`);
             }
-            pv.mergeCommit = live;
           } else {
             const staged = await deps.pusher(env, repo).updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: pv.mergeCommit }, pv.objects);
             if (staged.status !== 'ok') throw new RefStoreUnavailable(`prepared CI ref could not be created: ${staged.reason ?? staged.status}`);
@@ -2299,7 +2356,11 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
   if (!queued || queued === e.headSha) return;
   const db = e.env.DB;
   const now = Date.now();
-  const active = `SELECT q.id FROM merge_queue q WHERE q.change_set_id = ?1 AND q.active = 1 AND q.state != 'publishing'`;
+  // Fenced to the entry that still records the head this event displaced
+  // (the head its own ingest observed as queued). A late redelivery whose
+  // hook runs after a newer push already moved or re-approved the entry
+  // must not stale the fresh approval or regress an auto entry's head.
+  const active = `SELECT q.id FROM merge_queue q WHERE q.change_set_id = ?1 AND q.active = 1 AND q.state != 'publishing' AND q.head_sha = ?5`;
   let ref: string | null;
   if (e.change.policy === 'auto') {
     const row = await db
@@ -2308,7 +2369,7 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
                 checks_state = NULL, updated_at = ?3
           WHERE repo_id = ?4 AND id = (${active}) RETURNING target_ref`,
       )
-      .bind(e.change.id, e.headSha, now, e.repoId)
+      .bind(e.change.id, e.headSha, now, e.repoId, queued)
       .first<{ target_ref: string }>();
     ref = row?.target_ref ?? null;
   } else {
@@ -2318,7 +2379,7 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
                 reason = ?3, updated_at = ?2
           WHERE repo_id = ?4 AND id = (${active}) RETURNING target_ref`,
       )
-      .bind(e.change.id, now, `the head moved from the approved ${queued} to ${e.headSha}; enqueue again to approve the new head`, e.repoId)
+      .bind(e.change.id, now, `the head moved from the approved ${queued} to ${e.headSha}; enqueue again to approve the new head`, e.repoId, queued)
       .first<{ target_ref: string }>();
     ref = row?.target_ref ?? null;
   }

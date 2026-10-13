@@ -57,7 +57,13 @@ if (!opts.repo || !BASE || !PAT || !OWNER) {
   console.error('usage: KVARM_BASE_URL, KVARM_USER and KVARM_PAT set; node scripts/dogfood-ci.mjs --repo <name> [--create] [--base <rev>] [--head <rev>]');
   process.exit(2);
 }
-const deadline = Date.now() + Number(opts['timeout-min']) * 60_000;
+// A NaN deadline makes every `Date.now() > deadline` check false and the run never ends.
+const timeoutMin = Number(opts['timeout-min']);
+if (!Number.isFinite(timeoutMin) || timeoutMin <= 0) {
+  console.error(`dogfood-ci: --timeout-min must be a positive number of minutes (got ${opts['timeout-min']})`);
+  process.exit(2);
+}
+const deadline = Date.now() + timeoutMin * 60_000;
 const live = createLive({ base: BASE, pat: PAT, timeoutMs: 120_000 });
 const R = `/api/v1/repos/${OWNER}/${opts.repo}`;
 const t0 = Date.now();

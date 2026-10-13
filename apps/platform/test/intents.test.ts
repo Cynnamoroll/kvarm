@@ -15,6 +15,7 @@ import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/met
 import { INTENT_LIMITS, collapseObserved, minimalCover, normalizeDeclaration } from '../src/services/intents/paths';
 import { collectPairs, setOverlap, setOverlapStatements } from '../src/services/intents/forecast';
 import { COMPARE_BUDGETS } from '../src/services/compare';
+import { SEMANTIC_READ_LIMITS } from '../src/services/intents/semantic';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
@@ -676,8 +677,8 @@ describe('forecast', () => {
     expect(seen).toEqual(full.json.matches.map((m: any) => m.workspace));
     expect(new Set(seen).size).toBe(seen.length);
 
-    const over = Array.from({ length: INTENT_LIMITS.forecastPathsMax + 1 }, (_, i) => `p${i}.ts`).join(',');
-    const capped = await forecast('fc-page', `paths=${over}`);
+    const over = Array.from({ length: INTENT_LIMITS.forecastPathsMax + 1 }, (_, i) => `p${i}.ts`).map((p) => `paths=${p}`).join('&');
+    const capped = await forecast('fc-page', over);
     expect([capped.status, capped.json.code]).toEqual([422, 'TOO_MANY_PATHS']);
     expect(capped.json.error).toContain(String(INTENT_LIMITS.forecastPathsMax));
     expect((await forecast('fc-page', '')).json.code).toBe('INVALID_PATHS');
@@ -702,8 +703,8 @@ describe('forecast', () => {
         [...repo.refs.entries()].sort(),
       ]);
     const before = await snapshot();
-    const one = await forecast('fc-empty', 'paths=src/a.ts,docs/guide.md&base=main');
-    const two = await forecast('fc-empty', 'paths=src/a.ts,docs/guide.md&base=main');
+    const one = await forecast('fc-empty', 'paths=src/a.ts&paths=docs/guide.md&base=main');
+    const two = await forecast('fc-empty', 'paths=src/a.ts&paths=docs/guide.md&base=main');
     expect(one.text).toBe(two.text);
     expect(one.json.matches).toHaveLength(1);
     expect(one.cost.rw).toBe(0);
@@ -931,7 +932,9 @@ describe('Nexus reads at fleet scale', () => {
     } while (cursor && costs.length < 20);
     expect(seen).toEqual(all);
     // 156 matching workspaces, 20 per page: each page reads its 21 hits and their workspaces, never all 156.
-    for (const rr of costs) expect(rr).toBeLessThanOrEqual(2 * 21 + 10);
+    // The first page also runs the semantic layer's index probes (nothing to find here beyond their key lists).
+    for (const [i, rr] of costs.entries()) expect(rr).toBeLessThanOrEqual(2 * 21 + 10 + (i === 0 ? 4 : 0));
+    expect((await forecast('fleet-hot', 'paths=hot.ts&limit=20&semantic=0')).cost.rr).toBeLessThanOrEqual(2 * 21 + 10);
   });
 
   it('a query prefix reads a bounded number of entries and says when it stopped', async () => {
@@ -1007,5 +1010,286 @@ describe('Nexus reads at fleet scale', () => {
     expect((await overlap('shares')).json.pairs).toHaveLength(1);
     expect((await call('DELETE', R('shares'), tok.owner)).status).toBe(200);
     expect(await counts()).toEqual([]);
+  });
+});
+
+describe('semantic dependency signal (advisory)', () => {
+  const API = 'packages/api/src/client.ts';
+  const SEM_FILES: Files = {
+    'README.md': 'readme\n',
+    'docs/guide.md': 'guide\n',
+    [API]: 'export function fetchUser() {}\n',
+    'packages/api/src/mid.ts': "export { fetchUser } from './client';\n",
+    'apps/web/src/page.ts': "import { fetchUser } from '../../../packages/api/src/client';\nexport const page = 1;\n",
+    'apps/web/src/deep.ts': "import { fetchUser } from '../../../packages/api/src/mid';\nexport const deep = 1;\n",
+    'apps/web/src/far.ts': "import { hop } from './hop1';\nexport const far = 1;\n",
+    'apps/web/src/hop1.ts': "export { hop } from './hop2';\n",
+    'apps/web/src/hop2.ts': "import { fetchUser } from '../../../packages/api/src/client';\nexport const hop = fetchUser;\n",
+    'api/v1/user.proto': 'syntax = "proto3";\n',
+    'api/v1/order.proto': 'syntax = "proto3";\n',
+  };
+  const RENAMED = 'export function fetchUserById() {}\n';
+
+  /** One workspace changing the API module's export and one editing a consumer in another directory. */
+  async function apiAndConsumer(name: string) {
+    const repo = await seedRepo(name);
+    const main = await based(repo, SEM_FILES);
+    const a = (await createWs(name, { task: 'rename fetchUser', agent: 'api' })).json;
+    const b = (await createWs(name, { task: 'edit page', agent: 'web' })).json;
+    const aHead = await push(name, repo, a, main.sha, { ...SEM_FILES, [API]: RENAMED });
+    const bHead = await push(name, repo, b, main.sha, { ...SEM_FILES, 'apps/web/src/page.ts': `${SEM_FILES['apps/web/src/page.ts']}// tweak\n` });
+    return { repo, main, a, b, aHead, bHead };
+  }
+
+  it('an API change and a consumer edit in different directories form a semantic match with the edge chain', async () => {
+    const { a, b, bHead } = await apiAndConsumer('sem-api');
+    // No path overlap at all: the path layer reports nothing.
+    const o = await overlap('sem-api');
+    expect(o.status).toBe(200);
+    expect(o.json.pairs).toEqual([]);
+    expect(o.cost).toMatchObject({ d1: 2, art: 0, do: 0, sub: 0 });
+    const pair = o.json.semantic.pairs[0];
+    expect(o.json.semantic).toMatchObject({ advisory: true, truncated: false, pairs: [{ workspaces: [a.id, b.id].sort(), confidence: 'semantic:export' }] });
+    expect(pair.evidence[0]).toMatchObject({
+      kind: 'import',
+      chain: ['apps/web/src/page.ts', API],
+      depth: 1,
+      names: ['fetchUser'],
+      changed: API,
+      changedBy: a.id,
+      consumer: b.id,
+      exportChange: { added: ['fetchUserById'], removed: ['fetchUser'] },
+    });
+
+    // The API owner asks who consumes what it changed.
+    const fa = await forecast('sem-api', `paths=${API}&exclude=${a.id}`);
+    expect(fa.status).toBe(200);
+    expect(fa.json.matches).toEqual([]);
+    expect(fa.cost).toMatchObject({ d1: 2, art: 0, do: 0, sub: 0 });
+    expect(fa.json.semantic.matches).toHaveLength(1);
+    expect(fa.json.semantic.matches[0]).toMatchObject({
+      workspace: b.id,
+      confidence: 'semantic:export',
+      semanticHeadSha: bHead,
+      observedHeadSha: bHead,
+      semanticTruncated: false,
+      evidence: [{ kind: 'import', chain: ['apps/web/src/page.ts', API], changed: API, changedBy: 'query', consumer: b.id }],
+    });
+    expect(fa.json.semantic.matches[0].semanticAt).toMatch(/Z$/);
+    // Without its own export record the same consumer ranks as a plain import.
+    expect((await forecast('sem-api', `paths=${API}`)).json.semantic.matches.map((m: any) => [m.workspace, m.confidence])).toEqual([
+      [b.id, 'semantic:import'],
+    ]);
+
+    // The consumer asks with its own workspace: its edges meet the API owner's observed change.
+    const fb = await forecast('sem-api', `paths=apps/web/src/page.ts&exclude=${b.id}`);
+    expect(fb.json.matches).toEqual([]);
+    expect(fb.json.semantic.matches).toMatchObject([
+      { workspace: a.id, confidence: 'semantic:export', evidence: [{ chain: ['apps/web/src/page.ts', API], changed: API, changedBy: a.id, consumer: b.id }] },
+    ]);
+
+    // The layer is optional and validated; it adds index rows read, never a D1 round trip or an Artifacts call.
+    const fOff = await forecast('sem-api', `paths=${API}&exclude=${a.id}&semantic=0`);
+    const oOff = await overlap('sem-api', 'base=main&semantic=false');
+    expect(fOff.json.semantic).toBeUndefined();
+    expect(oOff.json.semantic).toBeUndefined();
+    const fmt = (c: CostCounters) => `d1=${c.d1};rr=${c.rr};rw=${c.rw};art=${c.art}`;
+    console.log(JSON.stringify({ 'forecast semantic=0': fmt(fOff.cost), forecast: fmt(fa.cost), 'overlap semantic=0': fmt(oOff.cost), overlap: fmt(o.cost) }));
+    expect(fa.cost.d1).toBe(fOff.cost.d1);
+    expect(o.cost.d1).toBe(oOff.cost.d1);
+    expect(fa.cost.rr - fOff.cost.rr).toBeLessThanOrEqual(30);
+    expect(o.cost.rr - oOff.cost.rr).toBeLessThanOrEqual(30);
+    expect((await forecast('sem-api', `paths=${API}&semantic=maybe`)).json.code).toBe('INVALID_SEMANTIC');
+  });
+
+  it('unrelated workspaces have no semantic match, and the empty result says it is advisory', async () => {
+    const repo = await seedRepo('sem-none');
+    const main = await based(repo, SEM_FILES);
+    const c = (await createWs('sem-none', { task: 'docs', agent: 'c' })).json;
+    const d = (await createWs('sem-none', { task: 'readme', agent: 'd' })).json;
+    await push('sem-none', repo, c, main.sha, { ...SEM_FILES, 'docs/guide.md': 'guide 2\n' });
+    await push('sem-none', repo, d, main.sha, { ...SEM_FILES, 'README.md': 'readme 2\n' });
+    const o = (await overlap('sem-none')).json;
+    expect(o.semantic).toMatchObject({ advisory: true, pairs: [], truncated: false });
+    expect(o.semantic.note).toMatch(/not proof of compatibility/);
+    expect((await forecast('sem-none', `paths=docs/guide.md&exclude=${c.id}`)).json.semantic).toMatchObject({ matches: [], truncated: false });
+  });
+
+  it('follows imports to the depth limit and no further', async () => {
+    const repo = await seedRepo('sem-depth');
+    const main = await based(repo, SEM_FILES);
+    const two = (await createWs('sem-depth', { task: 'deep', agent: 'e' })).json;
+    const three = (await createWs('sem-depth', { task: 'far', agent: 'f' })).json;
+    await push('sem-depth', repo, two, main.sha, { ...SEM_FILES, 'apps/web/src/deep.ts': `${SEM_FILES['apps/web/src/deep.ts']}// x\n` });
+    await push('sem-depth', repo, three, main.sha, { ...SEM_FILES, 'apps/web/src/far.ts': `${SEM_FILES['apps/web/src/far.ts']}// x\n` });
+    const f = (await forecast('sem-depth', `paths=${API}`)).json;
+    expect(f.semantic.matches.map((m: any) => m.workspace)).toEqual([two.id]);
+    expect(f.semantic.matches[0].evidence[0]).toMatchObject({ depth: 2, chain: ['apps/web/src/deep.ts', 'packages/api/src/mid.ts', API] });
+    // far.ts → hop1 → hop2 → client is three hops: hop2 is as far as it reaches.
+    expect((await forecast('sem-depth', 'paths=apps/web/src/hop2.ts')).json.semantic.matches.map((m: any) => m.workspace)).toEqual([three.id]);
+  });
+
+  it('a spent analysis budget is reported as truncated with its reason, never as silence', async () => {
+    const repo = await seedRepo('sem-budget');
+    const main = await based(repo, SEM_FILES);
+    const g = (await createWs('sem-budget', { task: 'wide', agent: 'g' })).json;
+    const files: Files = { ...SEM_FILES };
+    for (let i = 0; i < 45; i++) files[`gen/f${String(i).padStart(2, '0')}.ts`] = "import { fetchUser } from '../packages/api/src/client';\n";
+    await push('sem-budget', repo, g, main.sha, files);
+    const f = (await forecast('sem-budget', `paths=${API}`)).json;
+    expect(f.semantic.matches.map((m: any) => [m.workspace, m.semanticTruncated])).toEqual([[g.id, true]]);
+    expect(f.semantic.truncated).toBe(true);
+    expect(f.semantic.truncatedReason).toMatch(/incomplete/);
+    expect(f.semantic.incomplete).toEqual([{ workspace: g.id, reason: expect.stringMatching(/more than 40 changed source files/) }]);
+    // An unrelated query still discloses the incomplete workspace.
+    const none = (await forecast('sem-budget', 'paths=docs/guide.md')).json;
+    expect(none.semantic).toMatchObject({ matches: [], truncated: true, incomplete: [{ workspace: g.id }] });
+    expect((await overlap('sem-budget')).json.semantic).toMatchObject({ truncated: true, incomplete: [{ workspace: g.id }] });
+    // Asked by the incomplete workspace itself: not listed as another's gap, but still named as a reason.
+    const self = (await forecast('sem-budget', `paths=docs/guide.md&exclude=${g.id}`)).json.semantic;
+    expect(self.incomplete).toBeUndefined();
+    expect(self.truncatedReason).toMatch(/your workspace's semantic rows are incomplete \(more than 40 changed source files/);
+  });
+
+  it('a Go import names the files of its package directory, not of its subpackages', async () => {
+    const repo = await seedRepo('sem-go');
+    const files: Files = {
+      'go.mod': 'module example.com/m\n\ngo 1.22\n',
+      'cmd/tool/main.go': 'package main\n\nimport (\n  "fmt"\n  "example.com/m/internal/store"\n)\n',
+      'internal/store/store.go': 'package store\n',
+      'internal/store/sub/sub.go': 'package sub\n',
+    };
+    const main = await based(repo, files);
+    const consumer = (await createWs('sem-go', { task: 'tool', agent: 'x' })).json;
+    const pkg = (await createWs('sem-go', { task: 'store', agent: 'y' })).json;
+    const sub = (await createWs('sem-go', { task: 'sub', agent: 'z' })).json;
+    await push('sem-go', repo, consumer, main.sha, { ...files, 'cmd/tool/main.go': `${files['cmd/tool/main.go']}// x\n` });
+    await push('sem-go', repo, pkg, main.sha, { ...files, 'internal/store/store.go': 'package store\n\nfunc Get() {}\n' });
+    await push('sem-go', repo, sub, main.sha, { ...files, 'internal/store/sub/sub.go': 'package sub\n\nfunc S() {}\n' });
+    const pairs = (await overlap('sem-go')).json.semantic.pairs;
+    expect(pairs.map((p: any) => p.workspaces)).toEqual([[consumer.id, pkg.id].sort()]);
+    expect(pairs[0].evidence[0]).toMatchObject({ chain: ['cmd/tool/main.go', 'internal/store/'], changed: 'internal/store/store.go', confidence: 'semantic:import' });
+    expect((await forecast('sem-go', 'paths=internal/store/store.go')).json.semantic.matches.map((m: any) => m.workspace)).toEqual([consumer.id]);
+    expect((await forecast('sem-go', 'paths=internal/store/sub/sub.go')).json.semantic.matches).toEqual([]);
+  });
+
+  it('ranks an added-only export change as semantic:import, a removed name the consumer imports as semantic:export', async () => {
+    const repo = await seedRepo('sem-added');
+    const main = await based(repo, SEM_FILES);
+    const adds = (await createWs('sem-added', { task: 'add helper', agent: 'a' })).json;
+    const page = (await createWs('sem-added', { task: 'edit page', agent: 'b' })).json;
+    await push('sem-added', repo, adds, main.sha, { ...SEM_FILES, [API]: `${SEM_FILES[API]}export function extra() {}\n` });
+    await push('sem-added', repo, page, main.sha, { ...SEM_FILES, 'apps/web/src/page.ts': `${SEM_FILES['apps/web/src/page.ts']}// tweak\n` });
+    const pair = (await overlap('sem-added')).json.semantic.pairs[0];
+    expect(pair).toMatchObject({ confidence: 'semantic:import', evidence: [{ exportChange: { added: ['extra'], removed: [] } }] });
+  });
+
+  it('a workspace whose observed set collapsed into prefixes is disclosed as semantically incomplete', async () => {
+    const repo = await seedRepo('sem-collapsed');
+    const main = await based(repo, SEM_FILES);
+    const wide = (await createWs('sem-collapsed', { task: 'wide', agent: 'w' })).json;
+    const files: Files = { ...SEM_FILES };
+    for (let i = 0; i < INTENT_LIMITS.observedMax + 10; i++) files[`gen/part${i % 3}/f${i}.txt`] = `${i}\n`;
+    await push('sem-collapsed', repo, wide, main.sha, files);
+    const f = (await forecast('sem-collapsed', 'paths=README.md')).json.semantic;
+    expect(f.incomplete).toEqual([{ workspace: wide.id, reason: expect.stringMatching(/collapsed into directory prefixes/) }]);
+  });
+
+  it('bounds the pairs of a widely shared contract family and says so', async () => {
+    const repo = await seedRepo('sem-family');
+    await based(repo, SEM_FILES);
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('sem-family').first<{ id: string }>())!.id;
+    const now = Date.now();
+    const n = SEMANTIC_READ_LIMITS.familyMembersMax + 5;
+    const ids = Array.from({ length: n }, (_, i) => `semfam${String(i).padStart(3, '0')}`);
+    await env.DB.batch(
+      ids.flatMap((id) => [
+        env.DB.prepare(
+          `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at)
+           VALUES (?1, ?2, 'x', ?1, 'a', 'active', 'refs/heads/agents/' || ?1 || '/t', 'main', ?3, ?4, ?4)`,
+        ).bind(id, repoId, '1'.repeat(40), now),
+        env.DB.prepare(`INSERT INTO workspace_semantic (repo_id, kind, key, workspace_id, detail) VALUES (?1, 'contract', 'migrations:db/migrations/', ?2, ?3)`).bind(
+          repoId,
+          id,
+          JSON.stringify({ paths: [`db/migrations/${id}.sql`] }),
+        ),
+      ]),
+    );
+    const o = await overlap('sem-family');
+    const m = SEMANTIC_READ_LIMITS.familyMembersMax;
+    expect(o.json.semantic.pairs).toHaveLength(Math.min(SEMANTIC_READ_LIMITS.pairMax, (m * (m - 1)) / 2));
+    expect(o.json.semantic.truncatedReason).toMatch(/more than 40 workspaces change contract family migrations:db\/migrations\//);
+    expect(o.cost).toMatchObject({ d1: 2, art: 0 });
+  });
+
+  it("the overlap scan budget counts only the requested base's import rows", async () => {
+    const { a, b } = await apiAndConsumer('sem-scan');
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('sem-scan').first<{ id: string }>())!.id;
+    const now = Date.now();
+    // A workspace on another base whose import keys all sort before the main pair's.
+    await env.DB.prepare(
+      `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at)
+       VALUES ('semscanrelease', ?1, 'x', 'r', 'r', 'active', 'refs/heads/agents/semscanrelease/t', 'release', ?2, ?3, ?3)`,
+    )
+      .bind(repoId, '1'.repeat(40), now)
+      .run();
+    const keys = Array.from({ length: SEMANTIC_READ_LIMITS.overlapScanMax + 5 }, (_, i) => `aaa/f${String(i).padStart(5, '0')}.ts`);
+    for (let i = 0; i < keys.length; i += 500) {
+      await env.DB.batch(
+        keys
+          .slice(i, i + 500)
+          .map((k) =>
+            env.DB.prepare(`INSERT INTO workspace_semantic (repo_id, kind, key, workspace_id, detail) VALUES (?, 'import', ?, 'semscanrelease', '{"depth":1,"chain":["x.ts"]}')`).bind(repoId, k),
+          ),
+      );
+    }
+    const main = (await overlap('sem-scan')).json.semantic;
+    expect(main).toMatchObject({ truncated: false, pairs: [{ workspaces: [a.id, b.id].sort() }] });
+    const release = (await overlap('sem-scan', 'base=release')).json.semantic;
+    expect(release.truncatedReason).toMatch(/more than 2000 import edges on release/);
+  });
+
+  it('contract files of one API family meet even when the files differ', async () => {
+    const repo = await seedRepo('sem-contract');
+    const main = await based(repo, SEM_FILES);
+    const h = (await createWs('sem-contract', { task: 'user api', agent: 'h' })).json;
+    const i = (await createWs('sem-contract', { task: 'order api', agent: 'i' })).json;
+    await push('sem-contract', repo, h, main.sha, { ...SEM_FILES, 'api/v1/user.proto': 'syntax = "proto3";\nmessage U {}\n' });
+    await push('sem-contract', repo, i, main.sha, { ...SEM_FILES, 'api/v1/order.proto': 'syntax = "proto3";\nmessage O {}\n' });
+    const o = (await overlap('sem-contract')).json;
+    expect(o.pairs).toEqual([]);
+    expect(o.semantic.pairs).toMatchObject([
+      { workspaces: [h.id, i.id].sort(), confidence: 'semantic:contract', evidence: [{ kind: 'contract', family: 'proto:api/v1/' }] },
+    ]);
+    const f = (await forecast('sem-contract', 'paths=api/v1/billing.proto')).json;
+    expect(f.semantic.matches.map((m: any) => `${m.workspace} ${m.confidence}`).sort()).toEqual([`${h.id} semantic:contract`, `${i.id} semantic:contract`].sort());
+    // Asked with h's own workspace: the query path's family and h's own contract rows both meet i.
+    const own = (await forecast('sem-contract', `paths=api/v1/user.proto&exclude=${h.id}`)).json.semantic.matches;
+    expect(own.map((m: any) => m.workspace)).toEqual([i.id]);
+    expect(own[0].evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ chain: ['api/v1/user.proto', 'api/v1/order.proto'], changedBy: i.id, consumer: h.id }),
+        expect.objectContaining({ chain: ['api/v1/user.proto', 'api/v1/order.proto'], changedBy: 'query', consumer: i.id }),
+      ]),
+    );
+  });
+
+  it('never blocks: pushes land, the queue admits and merges succeed with a semantic match standing', async () => {
+    const { repo, a, b, aHead } = await apiAndConsumer('sem-advisory');
+    expect((await overlap('sem-advisory')).json.semantic.pairs).toHaveLength(1);
+    // Another push on top of the conflicting API change lands.
+    await push('sem-advisory', repo, a, aHead, { ...SEM_FILES, [API]: `${RENAMED}export const more = 1;\n` });
+    const ca = await call('POST', `${R('sem-advisory')}/workspaces/${a.id}/change-set`, tok.owner, { title: 'api' });
+    const cb = await call('POST', `${R('sem-advisory')}/workspaces/${b.id}/change-set`, tok.owner, { title: 'page' });
+    expect([ca.status, cb.status]).toEqual([201, 201]);
+    const queued = await call('POST', `${R('sem-advisory')}/changes/${ca.json.number}/enqueue`, tok.owner, {});
+    expect(queued.status, JSON.stringify(queued.json)).toBe(201);
+    const merged = await call('POST', `${R('sem-advisory')}/changes/${cb.json.number}/merge`, tok.owner);
+    expect(merged.status, JSON.stringify(merged.json)).toBe(200);
+    expect(JSON.stringify([queued.json, merged.json])).not.toMatch(/semantic/i);
+    // The merged consumer left the active index, its semantic rows with it.
+    expect((await overlap('sem-advisory')).json.semantic.pairs).toEqual([]);
+    const left = await env.DB.prepare('SELECT COUNT(*) AS n FROM workspace_semantic WHERE workspace_id = ?').bind(b.id).first<{ n: number }>();
+    expect(left!.n).toBe(0);
   });
 });

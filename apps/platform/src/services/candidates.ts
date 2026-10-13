@@ -742,21 +742,39 @@ export async function selectArena(cx: CandidatesContext, id: string, input: unkn
   if (!a) return fail(404, 'arena not found', 'ARENA_NOT_FOUND');
   const member = a.workspaces.find((w) => w.id === ws);
   if (!member) return fail(422, `workspace ${ws} is not a candidate of this arena`, 'NOT_ARENA_CANDIDATE', { workspace: ws });
-  if (member.status === 'abandoned') {
-    return fail(409, `workspace ${ws} is abandoned`, 'WORKSPACE_NOT_ACTIVE', { workspace: ws, workspaceStatus: member.status });
+  if (member.status !== 'active') {
+    // A merged workspace already published; an abandoned one was withdrawn:
+    // neither can be recorded as the winner.
+    return fail(409, `workspace ${ws} is ${member.status}`, 'WORKSPACE_NOT_ACTIVE', { workspace: ws, workspaceStatus: member.status });
+  }
+  // A first selection records any candidate. Once one is recorded, only the
+  // same winner may be re-recorded (the supported ask-again flow); a different
+  // winner would orphan the recorded one's final-selection escalation on a
+  // change the arena no longer names.
+  if (a.row.state === 'selected' && a.row.selected_workspace !== ws) {
+    return fail(409, 'this arena already recorded a winner; resolve its final-selection escalation before selecting another', 'ARENA_ALREADY_SELECTED');
   }
   const by = JSON.stringify({ login: cx.actor?.user.login ?? null, agent: cx.actor?.agent?.agentName ?? null });
   const db = cx.env.DB;
   const now = Date.now();
   const [, , arena, rows] = await db.batch([
     db
-      .prepare(`UPDATE arenas SET state = 'selected', selected_workspace = ?3, selected_by = ?4, selected_at = ?5 WHERE repo_id = ?1 AND id = ?2`)
+      .prepare(
+        `UPDATE arenas SET state = 'selected', selected_workspace = ?3, selected_by = ?4, selected_at = ?5
+          WHERE repo_id = ?1 AND id = ?2 AND (state = 'open' OR selected_workspace = ?3)`,
+      )
       .bind(cx.repo.id, a.row.id, ws, by, now),
-    // A final selection is confirmed by a human before the winner's change set publishes.
-    finalSelectionEscalation(db, cx.repo.id, ws, now),
+    // Conditional on the fenced update above: a selection that lost a race to
+    // another winner opens no escalation for a change the arena does not name.
+    finalSelectionEscalation(db, cx.repo.id, ws, now, a.row.id),
     ...arenaStatements(db, cx.repo.id, a.row.id),
   ]);
   const row = (arena?.results as ArenaRow[] | undefined)?.[0] ?? a.row;
+  if (row.state === 'selected' && row.selected_workspace !== ws) {
+    return fail(409, 'this arena already recorded a winner; resolve its final-selection escalation before selecting another', 'ARENA_ALREADY_SELECTED', {
+      arena: arenaView(row, (rows?.results as WorkspaceRow[] | undefined) ?? a.workspaces, cx),
+    });
+  }
   return { ok: true, value: arenaView(row, (rows?.results as WorkspaceRow[] | undefined) ?? a.workspaces, cx) };
 }
 

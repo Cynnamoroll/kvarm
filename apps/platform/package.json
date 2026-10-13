@@ -20,7 +20,6 @@
     "@kvarm/review": "*",
     "@kvarm/ui": "*",
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "@workos/authkit-session": "^0.7.1",
     "hono": "^4.6.0",
     "markdown-it": "^15.0.2",
     "zod": "^4.4.3"

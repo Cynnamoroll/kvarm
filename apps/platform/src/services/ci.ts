@@ -10,6 +10,7 @@ import { withLazyRepo } from '../artifacts/repo';
 import { CHECK_RUN_COLUMNS, checkRunView, type CheckRunRow, type CheckRunView } from './checks';
 import { CI_CONFIG_PATH, CI_LIMITS, parseCiConfig, type CiConfig } from './ciConfig';
 import { flakeIssueStatement } from './issues';
+import { kickHostedCi } from './hostedCi';
 
 export const CI_LEASE_SECONDS = 120;
 export { CI_CONFIG_PATH, CI_LIMITS, type CiConfig } from './ciConfig';
@@ -56,9 +57,11 @@ export interface QueuedPipeline {
   workflowId: string | null;
 }
 
+type HostedCiRepo = Pick<RepoRow, 'id' | 'artifacts_name' | 'hosted_ci'>;
+
 async function queueJobs(
   env: Env,
-  repo: Pick<RepoRow, 'id' | 'artifacts_name'>,
+  repo: HostedCiRepo,
   changeId: string,
   configSha: string,
   headSha: string,
@@ -110,6 +113,10 @@ async function queueJobs(
     );
   }
   await env.DB.batch(statements);
+  // Repos with hosted CI drain themselves: one kick per queueing event, no
+  // matter how the jobs arrived (kickHostedCi never throws and the Durable
+  // Object coalesces kicks that arrive mid-drain).
+  await kickHostedCi(env, repo);
   const workflowId = `ci-${repo.id}-${headSha}`;
   const pipeline = env.CI_PIPELINE;
   if (!pipeline) return { ok: true, value: { jobs: config.value.jobs.length, workflowId: null } };
@@ -131,7 +138,7 @@ async function queueJobs(
 /** Queue jobs whose config and execution commit are the same change head. */
 export function queueChangeCi(
   env: Env,
-  repo: Pick<RepoRow, 'id' | 'artifacts_name'>,
+  repo: HostedCiRepo,
   changeId: string,
   headSha: string,
   treeSha?: string,
@@ -146,7 +153,7 @@ export function queueChangeCi(
  */
 export function queueExactTreeCi(
   env: Env,
-  repo: Pick<RepoRow, 'id' | 'artifacts_name'>,
+  repo: HostedCiRepo,
   changeId: string,
   configSha: string,
   executionSha: string,

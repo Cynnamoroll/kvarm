@@ -57,6 +57,62 @@ const result = await runRunner({
   prepared: go
     ? async () => {
         process.stdout.write(${JSON.stringify(PREPARED_LINE)} + '\\n');
+        // The Durable Object snapshots the prepared workspace while this wait
+        // runs, and a large save can outlast a fixed 180 s, so the wait budget
+        // follows the enclosing \`timeout\` process when it provides one.
+        const provided = Number(env.KVARM_GO_WAIT_MS);
+        const budget = Number.isSafeInteger(provided) && provided > 0 ? provided : ${GO_TIMEOUT_MS};
+        const deadline = Date.now() + budget;
+        while (!existsSync(go)) {
+          if (Date.now() > deadline) throw new Error(\`no go signal within \${Math.round(budget / 1000)} s after the workspace was prepared\`);
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+    : undefined,
+});
+process.exitCode = result.claimed === 0 ? 3 : result.reported === result.claimed ? 0 : 1;
+`;
+
+export function containerRunnerFiles(): Record<string, string> {
+  return { ...RUNNER_MODULES, 'run.mjs': RUN_ENTRY, 'drain.mjs': DRAIN_ENTRY, 'package.json': '{ "type": "module" }\n' };
+}
+
+/**
+ * The hosted drain entry: claim and run jobs until the repository's queue is
+ * empty, then exit. Only the first claimed job waits at the prepared point,
+ * where the Durable Object saves the container snapshot that makes the next
+ * drain resume without the runner install, toolchain or a checkout; later
+ * jobs run straight on. The Durable Object, not this entry, owns the go file
+ * and the stale slot locks of a restored workspace, so two workers of one
+ * drain never race over them.
+ */
+export const DRAIN_ENTRY_FILE = 'drain.mjs';
+const DRAIN_ENTRY = `import { existsSync } from 'node:fs';
+import { runRunner } from './runner.js';
+
+const env = process.env;
+const go = env.KVARM_GO_FILE;
+let first = true;
+const result = await runRunner({
+  baseUrl: env.KVARM_BASE_URL,
+  pat: env.KVARM_PAT,
+  repo: env.KVARM_REPO,
+  runnerId: env.KVARM_RUNNER_ID,
+  workRoot: env.KVARM_WORK_ROOT,
+  drainUntilEmpty: true,
+  // Same stance as run.mjs: this throwaway container is the isolation
+  // boundary (SECURITY.md, CI runner threat model), so every claimed job
+  // runs here regardless of its provenance.
+  trust: 'all',
+  executor: 'host',
+  hostWarning: false,
+  stdout: (line) => process.stdout.write(line + '\\n'),
+  stderr: (line) => process.stderr.write(line + '\\n'),
+  prepared: go
+    ? async () => {
+        if (!first) return;
+        first = false;
+        process.stdout.write(${JSON.stringify(PREPARED_LINE)} + '\\n');
         const deadline = Date.now() + ${GO_TIMEOUT_MS};
         while (!existsSync(go)) {
           if (Date.now() > deadline) throw new Error('no go signal within ${GO_TIMEOUT_MS / 1000} s after the workspace was prepared');
@@ -67,10 +123,6 @@ const result = await runRunner({
 });
 process.exitCode = result.claimed === 0 ? 3 : result.reported === result.claimed ? 0 : 1;
 `;
-
-export function containerRunnerFiles(): Record<string, string> {
-  return { ...RUNNER_MODULES, 'run.mjs': RUN_ENTRY, 'package.json': '{ "type": "module" }\n' };
-}
 
 /** `node -e` program that writes stdin `{dir, files}` below `dir`. */
 export const WRITE_FILES_SCRIPT = `const fs = require('node:fs');
@@ -95,6 +147,8 @@ export interface RunnerExecInput {
   runnerId: string;
   workRoot?: string;
   goFile?: string;
+  /** Prepared-wait budget for the runner; defaults to GO_TIMEOUT_MS inside it. */
+  goWaitMs?: number;
 }
 
 /**
@@ -110,5 +164,6 @@ export function runnerExecEnv(input: RunnerExecInput): Record<string, string> {
     KVARM_WORK_ROOT: input.workRoot ?? WORK_ROOT,
     HOME: '/root',
     ...(input.goFile ? { KVARM_GO_FILE: input.goFile } : {}),
+    ...(input.goWaitMs !== undefined ? { KVARM_GO_WAIT_MS: String(Math.round(input.goWaitMs)) } : {}),
   };
 }

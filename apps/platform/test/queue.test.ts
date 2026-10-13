@@ -19,6 +19,7 @@ import {
   TRAIN_LIMITS,
   defaultTrainDeps,
   mergeLockLease,
+  onQueuedHeadMoved,
   runTrain,
   type TrainDeps,
   type TrainEvent,
@@ -717,6 +718,76 @@ describe('integration train', () => {
     expect(firstParents(repo, main)).toHaveLength(2);
   });
 
+  it('a late head-move hook cannot stale or regress an entry approved for a newer head', async () => {
+    const { repo, numbers } = await setup('late-hook', 2);
+    const [review, auto] = numbers as [number, number];
+    await enqueue('late-hook', review);
+    await enqueue('late-hook', auto);
+    await env.DB.prepare(`UPDATE change_sets SET merge_policy = 'auto' WHERE repo_id = ? AND number = ?`).bind(repoIds['late-hook'], auto).run();
+    await env.DB.prepare(`UPDATE merge_queue SET merge_policy = 'auto' WHERE repo_id = ? AND change_number = ?`).bind(repoIds['late-hook'], auto).run();
+    const ids = new Map<number, string>();
+    for (const n of numbers) {
+      ids.set(n, (await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = ?').bind(repoIds['late-hook'], n).first<{ id: string }>())!.id);
+    }
+    const b1 = 'refs/heads/b1';
+    const b2 = 'refs/heads/b2';
+    const before1 = repo.refs.get(b1)!;
+    const before2 = repo.refs.get(b2)!;
+    const entryHead = async (n: number): Promise<string> =>
+      (
+        await env.DB
+          .prepare('SELECT head_sha FROM merge_queue WHERE repo_id = ? AND change_number = ? AND active = 1')
+          .bind(repoIds['late-hook'], n)
+          .first<{ head_sha: string }>()
+      )!.head_sha;
+
+    // Review: the push stales the entry; the reviewer approves the new head.
+    const next1 = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1 v2\n' }, [before1]);
+    repo.refs.set(b1, next1.sha);
+    await deliver(pushBody('late-hook', b1, before1, next1.sha, Date.now()));
+    expect((await entries('late-hook')).map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [review, 'stale', 'HEAD_MOVED'],
+      [auto, 'queued', null],
+    ]);
+    expect((await enqueue('late-hook', review, { headSha: next1.sha })).status).toBe(201);
+    expect((await entries('late-hook')).map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [review, 'stale', 'HEAD_MOVED'],
+      [auto, 'queued', null],
+      [review, 'queued', null],
+    ]);
+
+    // A late redelivery of the first push's hook carries the approved head it
+    // observed at its own ingest (before1) while the active entry already
+    // records the newer approval (next1): it must not stale the fresh entry.
+    await onQueuedHeadMoved({
+      env,
+      repoId: repoIds['late-hook']!,
+      change: { id: ids.get(review)!, number: review, policy: 'review', headSha: next1.sha, queuedHead: before1 },
+      headSha: next1.sha,
+    });
+    expect((await entries('late-hook')).map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [review, 'stale', 'HEAD_MOVED'],
+      [auto, 'queued', null],
+      [review, 'queued', null],
+    ]);
+
+    // Auto: the entry follows each delivered push. A late hook for the first
+    // of two pushes must not regress the head the entry already follows.
+    const next2a = await commit(repo, { 'README.md': 'readme\n', 'f2.txt': 'file 2 v2\n' }, [before2]);
+    const next2b = await commit(repo, { 'README.md': 'readme\n', 'f2.txt': 'file 2 v3\n' }, [next2a.sha]);
+    repo.refs.set(b2, next2b.sha);
+    await deliver(pushBody('late-hook', b2, before2, next2a.sha, Date.now()));
+    await deliver(pushBody('late-hook', b2, next2a.sha, next2b.sha, Date.now()));
+    expect(await entryHead(auto)).toBe(next2b.sha);
+    await onQueuedHeadMoved({
+      env,
+      repoId: repoIds['late-hook']!,
+      change: { id: ids.get(auto)!, number: auto, policy: 'auto', headSha: next2a.sha, queuedHead: before2 },
+      headSha: next2a.sha,
+    });
+    expect(await entryHead(auto)).toBe(next2b.sha);
+  });
+
   it('a head push whose event is not yet delivered never lets the train publish the previous head', async () => {
     const { repo, main, numbers } = await setup('live-head', 2);
     const [review, auto] = numbers as [number, number];
@@ -1120,19 +1191,75 @@ describe('train CI staging of composed merges', () => {
     expect(again.ciJobInserts).toBe(0);
   });
 
-  it('never reuses a recorded staged commit whose tree and parents are not the composition: the ref check refuses it', async () => {
-    const { repo, moved } = await ciSetup('ci-mismatch', true);
+  it('recovers a staged CI ref whose jobs were never queued (a crash between the staging push and the record)', async () => {
+    const { repo, n, head, moved } = await ciSetup('ci-crash', true);
+    const wf = new CountingWorkflow();
+    const gate = scriptedGate('pending');
+    const deps = trainDeps({ gate: () => gate.gate });
+
+    const first = await measured('ci-crash', repo, deps, wf);
+    expect(first.stagedRefWrites).toBe(1);
+    const [[stagedRef, stagedSha]] = stagedRefs(repo) as [[string, string]];
+    expect(commitOf(repo, stagedSha).parents).toEqual([moved, head]);
+
+    // The Worker died between the staging push and the write batch: the ref
+    // exists, but no check run or job names it (the entry's recorded staging
+    // derives from ci_jobs, so deleting them is exactly that crash).
+    // Previously every pass found the ref and threw RefStoreUnavailable
+    // forever (state unavailable).
+    await env.DB
+      .prepare(`UPDATE merge_queue SET state = 'queued', base_sha = NULL, tree_sha = NULL, generation = generation + 1 WHERE repo_id = ?`)
+      .bind(repoIds['ci-crash'])
+      .run();
+    await env.DB.prepare(`DELETE FROM ci_jobs WHERE repo_id = ?`).bind(repoIds['ci-crash']).run();
+    await env.DB.prepare(`DELETE FROM check_runs WHERE repo_id = ? AND name != 'kvarm/guard'`).bind(repoIds['ci-crash']).run();
+
+    const recovered = await measured('ci-crash', repo, deps, wf);
+    expect(recovered.run).toMatchObject({ state: 'waiting', passes: 1 });
+    expect(recovered.stagingLsRefs).toBe(1);
+    expect(recovered.ciJobInserts).toBe(1);
+    expect(recovered.workflowCreates).toBe(1);
+    // This preparation re-derives the same immutable commit; the ref keeps it
+    // and only the lost queueing is redone.
+    expect(repo.refs.get(stagedRef)).toBe(stagedSha);
+    expect(commitOf(repo, repo.refs.get(stagedRef)!).parents).toEqual([moved, head]);
+    expect(repo.refs.get(MAIN)).toBe(moved);
+
+    // The checks pass: the train publishes exactly the commit the CI jobs ran on.
+    gate.fallback = 'success';
+    const third = await measured('ci-crash', repo, deps, wf);
+    expect(third.run.published).toEqual([n]);
+    expect(repo.refs.get(MAIN)).toBe(stagedSha);
+    expect(stagedRefs(repo)).toEqual([]);
+  });
+
+  it('a staging ref from another preparation of the same tree is re-pointed, not reused or refused', async () => {
+    const { repo, head, moved } = await ciSetup('ci-repoint', true);
     const wf = new CountingWorkflow();
     const deps = trainDeps({ gate: () => scriptedGate('pending').gate });
-    await measured('ci-mismatch', repo, deps, wf);
-    const [[, stagedSha]] = stagedRefs(repo) as [[string, string]];
-    await env.DB.prepare('UPDATE ci_jobs SET head_sha = ?1 WHERE repo_id = ?2 AND head_sha = ?3').bind(moved, repoIds['ci-mismatch'], stagedSha).run();
+    await measured('ci-repoint', repo, deps, wf);
+    const [[stagedRef, stagedSha]] = stagedRefs(repo) as [[string, string]];
+    expect(commitOf(repo, stagedSha).parents).toEqual([moved, head]);
+    // The staging record is lost (a crash), and the ref holds a commit whose
+    // parents are not this composition's (the base moved under an unchanged
+    // result tree).
+    await env.DB
+      .prepare(`UPDATE merge_queue SET state = 'queued', base_sha = NULL, tree_sha = NULL, generation = generation + 1 WHERE repo_id = ?`)
+      .bind(repoIds['ci-repoint'])
+      .run();
+    await env.DB.prepare(`DELETE FROM ci_jobs WHERE repo_id = ?`).bind(repoIds['ci-repoint']).run();
+    await env.DB.prepare(`DELETE FROM check_runs WHERE repo_id = ? AND name != 'kvarm/guard'`).bind(repoIds['ci-repoint']).run();
+    repo.refs.set(stagedRef, head);
 
-    const refused = await measured('ci-mismatch', repo, deps, wf);
-    expect(refused.run.state).toBe('unavailable');
-    expect(refused.configReads).toBe(1);
-    expect(refused.stagingLsRefs).toBe(1);
-    expect(refused.ciJobInserts + refused.workflowCreates + refused.stagedRefWrites).toBe(0);
+    const recovered = await measured('ci-repoint', repo, deps, wf);
+    expect(recovered.run).toMatchObject({ state: 'waiting', passes: 1 });
+    expect(recovered.stagedRefWrites).toBe(1);
+    expect(recovered.ciJobInserts).toBe(1);
+    // The foreign commit was neither adopted nor refused: the ref is re-pointed
+    // at a commit of this composition's identity.
+    const nowStaged = repo.refs.get(stagedRef)!;
+    expect(nowStaged).not.toBe(head);
+    expect(commitOf(repo, nowStaged).parents).toEqual([moved, head]);
     expect(repo.refs.get(MAIN)).toBe(moved);
   });
 

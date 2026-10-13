@@ -22,6 +22,7 @@
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
+import { modelFamilyEvidence, type EvidenceLevel } from './provenance';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
 import { autoMerge, branchRef, fail, guarded, parseNumber, readChange, type ChangeContext } from './changes';
 import {
@@ -144,6 +145,8 @@ export interface AuthorView {
   login: string | null;
   agent: { id: string; name: string } | null;
   modelFamily: string | null;
+  /** Agent families are self-declared at principal creation (services/provenance.ts). */
+  modelFamilyEvidence: EvidenceLevel | null;
 }
 
 export interface ReviewView {
@@ -151,8 +154,11 @@ export interface ReviewView {
   principal: string;
   reviewer: { kind: 'user' | 'agent'; login: string; agent: { id: string; name: string } | null };
   modelFamily: string | null;
+  modelFamilyEvidence: EvidenceLevel | null;
   /** The reviewer's model family is known and differs from the author's. */
   differentFamily: boolean;
+  /** How well `differentFamily` is established: the weaker of the two families' evidence. */
+  differentFamilyEvidence: EvidenceLevel | null;
   verdict: ReviewVerdict;
   headSha: string;
   /** Reviews of an older head are stale and never count. */
@@ -197,17 +203,37 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 function authorView(row: PacketChangeRow): AuthorView {
   const agent = parseAgentMeta(row.agent_meta);
-  if (agent) return { principal: `agent:${agent.id}`, kind: 'agent', login: row.author_login, agent, modelFamily: row.author_family };
-  return { principal: row.author_id ? `user:${row.author_id}` : null, kind: 'user', login: row.author_login, agent: null, modelFamily: HUMAN_MODEL_FAMILY };
+  if (agent) {
+    return { principal: `agent:${agent.id}`, kind: 'agent', login: row.author_login, agent, modelFamily: row.author_family, modelFamilyEvidence: modelFamilyEvidence(row.author_family, false) };
+  }
+  return {
+    principal: row.author_id ? `user:${row.author_id}` : null,
+    kind: 'user',
+    login: row.author_login,
+    agent: null,
+    modelFamily: HUMAN_MODEL_FAMILY,
+    modelFamilyEvidence: modelFamilyEvidence(HUMAN_MODEL_FAMILY, true),
+  };
 }
 
-function reviewView(r: ReviewRow, headSha: string | null, authorFamily: string | null): ReviewView {
+const LEVEL_RANK: Record<EvidenceLevel, number> = { declared: 0, authenticated: 1, verified: 2 };
+
+/** The weaker of two evidence levels; null when either side has no family. */
+function weaker(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
+  if (a === null || b === null) return null;
+  return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
+}
+
+function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorView, 'modelFamily' | 'modelFamilyEvidence'>): ReviewView {
+  const evidence = modelFamilyEvidence(r.model_family, r.agent_id === null);
   return {
     id: r.id,
     principal: r.principal,
     reviewer: { kind: r.agent_id ? 'agent' : 'user', login: r.user_login, agent: r.agent_id ? { id: r.agent_id, name: r.agent_name ?? '' } : null },
     modelFamily: r.model_family,
-    differentFamily: differentFamily(r.model_family, authorFamily),
+    modelFamilyEvidence: evidence,
+    differentFamily: differentFamily(r.model_family, author.modelFamily),
+    differentFamilyEvidence: weaker(evidence, author.modelFamilyEvidence),
     verdict: r.verdict,
     headSha: r.head_sha,
     current: r.head_sha === headSha,
@@ -312,7 +338,7 @@ function buildPacket(p: PacketRead): ReviewPacket {
     approvals: { count: facts.approvals, required: facts.required, humans: facts.humans, humansRequired: policy.requiredApprovals },
     satisfied: gate.block === null,
     blockers: gate.blockers,
-    reviews: p.reviews.map((r) => reviewView(r, c.head_sha, author.modelFamily)),
+    reviews: p.reviews.map((r) => reviewView(r, c.head_sha, author)),
     escalations: p.escalations.map(escalationView),
   };
 }
@@ -534,7 +560,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     }
     let packet = buildPacket(await withRecordedEscalations(cx.env, cx.repo.id, read));
     packet = await proceedPerPolicy(cx, number, packet);
-    return { ok: true, value: { created: mine.created_at === now, review: reviewView(mine, headSha, packet.author.modelFamily), packet } };
+    return { ok: true, value: { created: mine.created_at === now, review: reviewView(mine, headSha, packet.author), packet } };
   });
 }
 
@@ -622,7 +648,9 @@ export interface ReviewerCandidate {
   principal: string;
   agent: { id: string; name: string; owner: string };
   modelFamily: string | null;
+  modelFamilyEvidence: EvidenceLevel | null;
   differentFamily: boolean;
+  differentFamilyEvidence: EvidenceLevel | null;
   eligible: boolean;
   ineligibleReason?: 'author' | 'already-reviewed';
 }
@@ -631,7 +659,8 @@ export interface Assignment {
   number: number;
   headSha: string | null;
   author: AuthorView;
-  preference: { rule: 'different-model-family'; authorModelFamily: string | null; met: boolean };
+  /** `evidence`: how well the met preference is established (agent families are declared). */
+  preference: { rule: 'different-model-family'; authorModelFamily: string | null; met: boolean; evidence: EvidenceLevel | null };
   assigned: ReviewerCandidate | null;
   candidates: ReviewerCandidate[];
 }
@@ -686,7 +715,9 @@ export function assignReviewer(cx: ChangeContext, rawNumber: string, input: unkn
         principal,
         agent: { id: a.id, name: a.name, owner: a.owner_login },
         modelFamily: a.model_family,
+        modelFamilyEvidence: modelFamilyEvidence(a.model_family, false),
         differentFamily: differentFamily(a.model_family, author.modelFamily),
+        differentFamilyEvidence: weaker(modelFamilyEvidence(a.model_family, false), author.modelFamilyEvidence),
         eligible: ineligible === null,
         ...(ineligible ? { ineligibleReason: ineligible } : {}),
       };
@@ -699,7 +730,12 @@ export function assignReviewer(cx: ChangeContext, rawNumber: string, input: unkn
         number: change.number,
         headSha: change.head_sha,
         author,
-        preference: { rule: 'different-model-family', authorModelFamily: author.modelFamily, met: assigned?.differentFamily ?? false },
+        preference: {
+          rule: 'different-model-family',
+          authorModelFamily: author.modelFamily,
+          met: assigned?.differentFamily ?? false,
+          evidence: assigned?.differentFamily ? assigned.differentFamilyEvidence : null,
+        },
         assigned,
         candidates,
       },

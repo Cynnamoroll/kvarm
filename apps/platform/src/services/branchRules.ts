@@ -40,6 +40,12 @@ export const INVALID_REF_REASON = 'invalid ref name';
 
 const RESERVED_BRANCH_NAMESPACES = ['refs/heads/kvarm-ci', 'refs/heads/agents'] as const;
 
+/**
+ * The attribution notes ref (architecture §11.5): services/attribution.ts is
+ * its only writer, through the receive-pack client, never the git gate.
+ */
+export const RESERVED_NOTES_REF = 'refs/notes/kvarm-attribution';
+
 export interface BranchRule {
   id: string;
   pattern: string;
@@ -186,10 +192,27 @@ export function directPushDenial(rules: readonly BranchRule[], ref: string): str
   return matchingRules(rules, ref).length > 0 ? PROTECTED_REF_REASON : null;
 }
 
-/** Human git credentials may never write the platform-owned branch namespaces. */
+/** Human git credentials may never write the platform-owned namespaces. */
 export function directHumanPushDenial(rules: readonly BranchRule[], ref: string): string | null {
   if (RESERVED_BRANCH_NAMESPACES.some((namespace) => ref === namespace || ref.startsWith(`${namespace}/`))) return RESERVED_REF_REASON;
+  if (ref === RESERVED_NOTES_REF) return RESERVED_REF_REASON;
   return directPushDenial(rules, ref);
+}
+
+/**
+ * Agent tokens may write their granted workspace refs (`refs/heads/agents/**`
+ * is judged by the workspace gate, which demands their own active workspace);
+ * every other platform-reserved ref stays out of their reach too: the CI
+ * staging namespace, its bare root, the bare workspace root and the
+ * attribution notes ref. A broad grant pattern such as `refs/heads/*` must
+ * not reach into them.
+ */
+export function agentReservedRefDenial(ref: string): string | null {
+  for (const namespace of RESERVED_BRANCH_NAMESPACES) {
+    if (ref === namespace || (namespace === 'refs/heads/kvarm-ci' && ref.startsWith(`${namespace}/`))) return RESERVED_REF_REASON;
+  }
+  if (ref === RESERVED_NOTES_REF) return RESERVED_REF_REASON;
+  return null;
 }
 
 // ---------------------------------------------------------------------------

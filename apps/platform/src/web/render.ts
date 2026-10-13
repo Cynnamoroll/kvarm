@@ -31,6 +31,9 @@ code{font-family:var(--mono);font-size:12px}
 .flash{border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;margin:12px 0}
 .flash.ok{border-color:#238636;color:#3fb950}
 .flash.err{border-color:var(--danger);color:var(--danger)}
+.signout{display:inline;margin:0}
+.linklike{background:none;border:0;padding:0;color:var(--link);font:inherit;cursor:pointer}
+.linklike:hover{text-decoration:underline}
 `);
 
 export interface PageOptions {
@@ -53,6 +56,11 @@ function publicOrigin(env: Env): string | null {
   } catch {
     return null;
   }
+}
+
+/** Hidden CSRF field for a session's state-changing forms; empty without a session. */
+export function csrfInput(token: string | null | undefined): string {
+  return token ? `<input type="hidden" name="_csrf" value="${escapeHtml(token)}" />` : '';
 }
 
 export function layout(env: Env, opts: PageOptions, body: string): string {
@@ -86,8 +94,8 @@ ${opts.script ? `<script type="module" defer>${opts.script}</script>` : ''}
       opts.userLogin
         ? `<a href="/${escapeHtml(opts.userLogin)}">${escapeHtml(opts.userLogin)}</a>
            <a href="/settings/tokens">Tokens</a>
-           <a href="/auth/sign-out">Sign out</a>`
-        : '<a href="/auth/sign-in">Sign in</a>'
+           <a href="/auth/logout">Sign out</a>`
+        : '<a href="/auth/login">Sign in</a>'
     }
   </div>
 </header>

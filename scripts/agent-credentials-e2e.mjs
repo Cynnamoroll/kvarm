@@ -16,7 +16,8 @@
  * printed; agent tokens are shown by prefix only.
  *   set -a; . ./.env.local; set +a
  *   node scripts/agent-credentials-e2e.mjs [--keep] [--skip-expiry]
- * Exit 0 only when every check holds.
+ * Exit 0 only when every check holds, 1 when a check failed, 2 on a fatal
+ * error; a fatal error still runs the cleanup.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -29,14 +30,16 @@ const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, 'skip-expiry': { type: 'boolean', default: false } },
 });
 
-const BASE = process.env.KVARM_BASE_URL ?? die('KVARM_BASE_URL is not set');
-const OWNER_PAT = process.env.KVARM_PAT_BOT ?? die('KVARM_PAT_BOT is not set');
+const BASE = process.env.KVARM_BASE_URL;
+const OWNER_PAT = process.env.KVARM_PAT_BOT;
 const ts = Math.floor(Date.now() / 1000);
 const results = [];
 
+class FatalError extends Error {}
+
+/** Throws: exiting here would skip the `finally` that deletes the scratch repos. */
 function die(msg) {
-  console.error(`agent-credentials-e2e: ${msg}`);
-  process.exit(2);
+  throw new FatalError(msg);
 }
 
 function check(name, ok, detail = '') {
@@ -157,11 +160,6 @@ async function rawPush(repo, token, commands, packRevs) {
 
 // ---------------------------------------------------------------------------
 
-const ownerLogin = (await api('GET', '/user', OWNER_PAT)).json?.user?.login ?? die('owner PAT rejected');
-const mainName = `agent-credentials-main-${ts}`;
-const otherName = `agent-credentials-other-${ts}`;
-const mainRepo = `${ownerLogin}/${mainName}`;
-const otherRepo = `${ownerLogin}/${otherName}`;
 const created = [];
 
 async function cleanup() {
@@ -176,7 +174,16 @@ async function cleanup() {
   rmSync(work, { recursive: true, force: true });
 }
 
+let exitCode = 0;
+
 try {
+  if (!BASE) die('KVARM_BASE_URL is not set');
+  if (!OWNER_PAT) die('KVARM_PAT_BOT is not set');
+  const ownerLogin = (await api('GET', '/user', OWNER_PAT)).json?.user?.login ?? die('owner PAT rejected');
+  const mainName = `agent-credentials-main-${ts}`;
+  const otherName = `agent-credentials-other-${ts}`;
+  const mainRepo = `${ownerLogin}/${mainName}`;
+  const otherRepo = `${ownerLogin}/${otherName}`;
   for (const name of [mainName, otherName]) {
     const r = await api('POST', '/repos', OWNER_PAT, { name, visibility: 'private' });
     if (r.status !== 201) die(`create ${name}: ${r.status} ${r.text}`);
@@ -358,10 +365,16 @@ try {
   check('agent revoked at end (record kept)', revokeAgent.status === 200 && revokeAgent.json?.agent?.status === 'revoked');
   const deadTok = await api('GET', `/repos/${mainRepo}`, agentTok);
   check('tokens of revoked agent denied', deadTok.status === 401);
+  const failed = results.filter((r) => !r.ok);
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+  exitCode = failed.length === 0 ? 0 : 1;
+} catch (err) {
+  // A driver failure, not a crash: report it and let the `finally` clean up.
+  if (!(err instanceof FatalError)) throw err;
+  console.error(`agent-credentials-e2e: ${err.message}`);
+  exitCode = 2;
 } finally {
   await cleanup();
 }
 
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
-process.exit(failed.length === 0 ? 0 : 1);
+process.exit(exitCode);

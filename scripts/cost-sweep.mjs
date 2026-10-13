@@ -13,13 +13,15 @@
  * their probe tag; non-live entries print their category and reason. The run
  * prints one verdict per row, the sweep row count against the document's
  * table row count, and exits 1 on any violation, missing sample, unmatched or
- * ambiguous row, or unused catalog entry (2 on a usage error).
+ * ambiguous row, unused catalog entry, failed cleanup phase or tail capture
+ * that never started (2 on a usage error).
  *
  * Isolation: scratch repos named m7-benchmarks-cost-sweep-<purpose>-<ts>
  * (deleted at the end unless --keep), one scratch org (orgs have no delete
- * API), agents revoked at the end. Bounded like every live driver: at most 5
- * HTTP requests and 3 git children in flight, 429/Retry-After honored, a
- * 10,000-request ceiling.
+ * API), agents revoked at the end. Every deletion is confirmed (2xx, then a
+ * 404 readback) and a cleanup that leaves a scratch resource behind fails the
+ * run. Bounded like every live driver: at most 5 HTTP requests and 3 git
+ * children in flight, 429/Retry-After honored, a 10,000-request ceiling.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -955,19 +957,35 @@ await phase('stored counters and push-event lines', async () => {
 });
 
 await phase('cleanup', async () => {
-  for (const id of agents) rec('agents.delete', await http(`/api/v1/agents/${id}`, { method: 'DELETE' }));
+  const failures = [];
+  for (const id of agents) {
+    const r = rec('agents.delete', await http(`/api/v1/agents/${id}`, { method: 'DELETE' }));
+    if (r.status !== 200) failures.push(`agent ${id}: DELETE ${r.status}${r.error ? ` (${r.error})` : ''}`);
+  }
   if (args.keep) {
     say(`  kept: ${created.map((c) => `${c.owner}/${c.name}`).join(', ')}`);
-    return;
+  } else {
+    for (const c of created) {
+      const gone = await live.remove(R(c.name, c.owner));
+      if (c.owner === OWNER) rec('repo.delete', gone.first);
+      say(`  ${c.name}: ${gone.detail}${gone.ok ? '' : ` after ${gone.attempts} attempts`}`);
+      if (!gone.ok) failures.push(`${c.owner}/${c.name}: ${gone.detail}`);
+    }
   }
-  for (const c of created) {
-    const r = await http(R(c.name, c.owner), { method: 'DELETE' });
-    if (c.owner === OWNER) rec('repo.delete', r);
-    say(`  DELETE ${c.name} -> ${r.status}`);
-  }
+  // A scratch repo or agent left behind is a failed run, not a warning.
+  expect(failures.length === 0, `cleanup left ${failures.length} scratch resource(s): ${failures.join('; ')}`);
 });
 
-const tailErr = await tail.stop(15_000);
+// The tail is the only source of the consumer/log counters, so a capture that
+// never started (no `wrangler` on PATH) fails the sweep rather than passing quietly.
+let tailErr = '';
+let tailFailure = null;
+try {
+  tailErr = await tail.stop(15_000);
+} catch (err) {
+  tailFailure = err instanceof Error ? err.message : String(err);
+  notes.push(`tail capture failed: ${tailFailure}`);
+}
 const lines = tailLogLines(tail.read());
 say(`\n== tail: ${lines.length} JSON log lines${tailErr && !lines.length ? ` (${tailErr.slice(0, 200)})` : ''}`);
 const ourEvent = (id) => eventsById.get(id);
@@ -1040,7 +1058,7 @@ for (const n of notes) say(`  note: ${n}`);
 say(`== requests: ${live.state.requests} of the ${live.state.ceiling} ceiling`);
 say(`== sweep rows ${summary.rows} vs cost.md table rows ${documentRows}${summary.rows === documentRows ? ' (equal)' : ' (MISMATCH)'}`);
 say(`== ${summary.pass} pass, ${summary.fail} fail, ${summary.missing} missing, ${summary.na} non-live with reason; unmatched ${summary.unmatched}, ambiguous ${summary.ambiguous}, unused ${summary.unused}`);
-const ok = summary.ok && summary.rows === documentRows && phases.every((p) => p.ok);
+const ok = summary.ok && summary.rows === documentRows && phases.every((p) => p.ok) && !tailFailure;
 say(`== cost sweep ${ok ? 'PASSED' : 'FAILED'}`);
 if (args.out) {
   writeFileSync(

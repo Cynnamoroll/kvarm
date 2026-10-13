@@ -7,8 +7,44 @@
 
 import http from 'node:http';
 import https from 'node:https';
+// CliError lives in checkout.js, which imports this module for its downloads.
+// The cycle is safe: neither module touches the other's bindings while it
+// evaluates, only from inside functions called after both have loaded.
+import { CliError } from './checkout.js';
 
 const IDLE_TIMEOUT_MS = 60_000;
+/**
+ * Reply bodies are read into memory only below this bound; the platform's
+ * own reply limits keep honest bodies far under it.
+ */
+export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Reads a response body as text, refusing one longer than `cap` bytes: a
+ * broken or hostile platform must not be able to make the CLI buffer an
+ * unbounded reply. Accepts a WHATWG Response, the HttpResponse this module
+ * returns, or any async-iterable body; a body that is absent reads as ''.
+ * @param {AsyncIterable<Uint8Array> | ReadableStream<Uint8Array> | { body?: AsyncIterable<Uint8Array> | ReadableStream<Uint8Array> | null }} res
+ * @param {number} [cap]
+ * @returns {Promise<string>}
+ */
+export async function text(res, cap = MAX_RESPONSE_BYTES) {
+  const body = res !== null && typeof res === 'object' && 'body' in res && res.body != null ? res.body : res;
+  if (body === null || typeof body !== 'object') return '';
+  // Node's web streams are async-iterable at runtime; the DOM lib types do not say so.
+  const source = /** @type {AsyncIterable<Uint8Array>} */ (body);
+  if (typeof source[Symbol.asyncIterator] !== 'function') return '';
+  /** @type {Uint8Array[]} */
+  const chunks = [];
+  let total = 0;
+  for await (const c of source) {
+    const chunk = c instanceof Uint8Array ? c : new Uint8Array(c);
+    total += chunk.byteLength;
+    if (total > cap) throw new CliError(`response body exceeds the ${cap}-byte read cap`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 /**
  * @typedef {object} HttpResponse
@@ -37,10 +73,7 @@ export function nodeFetch(url, init = {}) {
         },
         body: res,
         async json() {
-          /** @type {Buffer[]} */
-          const chunks = [];
-          for await (const c of res) chunks.push(c);
-          return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          return JSON.parse(await text(res));
         },
       });
     });

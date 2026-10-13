@@ -30,6 +30,8 @@ export default defineConfig({
                 LIVE_GITWRITE_TOKEN: process.env.LIVE_GITWRITE_TOKEN ?? '',
                 // Selects the live merge publication check (apps/platform/test/mergeLive.test.ts).
                 LIVE_MERGE: process.env.LIVE_MERGE ?? '',
+                // Test-only key for webhook secrets at rest (services/webhookSafety.ts).
+                WEBHOOK_SECRET_KEY: 'test-only-webhook-secret-key-not-for-deployments',
               },
             },
           })),

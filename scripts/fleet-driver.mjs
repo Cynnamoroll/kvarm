@@ -392,6 +392,9 @@ let local = '';
 let seed = '';
 const ledgerCommits = new Set();
 let abortedAt = null;
+// The burst poller polls the deployment in the background; the abort path stops
+// it before cleanup so its requests cannot starve the ledger the repo DELETE needs.
+let stopPoller = null;
 const burst = { samples: [], enqueue: new Map(), changes: new Map(), windowStart: null, windowEnd: null };
 const incomplete = [];
 const d1 = {};
@@ -609,10 +612,12 @@ async function main() {
   // -------------------------------------------------------------- burst
   let enqueueDone = false;
   let pausedUntil = 0;
+  let pollCancelled = false;
   const paceEnqueue = pacer(pace.enqueueIntervalMs);
   const poller = (async () => {
     const pollStart = Date.now();
     for (;;) {
+      if (pollCancelled) return;
       const snap = await pollState('polls');
       burst.samples.push({ t: Date.now(), backlog: snap.backlog, merged: snap.merged });
       const settled = enqueueDone && snap.backlog === 0 && [...burst.enqueue.keys()].every((k) => {
@@ -624,39 +629,53 @@ async function main() {
       await sleep(pace.pollIntervalMs);
     }
   })();
+  // Waiting for the poller here (rather than only flagging it) keeps an in-flight
+  // poll from overlapping the cleanup DELETE the ledger has to pay for.
+  stopPoller = async () => {
+    pollCancelled = true;
+    await poller.catch(() => {});
+  };
   let pollerFailed = null;
   poller.catch((err) => (pollerFailed = err));
-  for (const key of plan.enqueueOrder) {
-    const w = ws.get(key);
-    for (let attempt = 0; ; attempt++) {
-      if (pollerFailed) throw pollerFailed;
-      await paceEnqueue();
-      if (Date.now() < pausedUntil) await sleep(pausedUntil - Date.now());
-      const r = await api(`${API}/changes/${w.number}/enqueue`, { method: 'POST', json: { headSha: w.commit, mergePolicy: 'review' }, handle429: true });
-      if (r.status === 201) {
-        burst.enqueue.set(key, { at: Date.now(), enqueuedAt: Date.parse(r.json.entry.enqueuedAt), attempts: attempt + 1, cost: r.cost, entryId: r.json.entry.id });
-        break;
+  try {
+    for (const key of plan.enqueueOrder) {
+      const w = ws.get(key);
+      for (let attempt = 0; ; attempt++) {
+        if (pollerFailed) throw pollerFailed;
+        await paceEnqueue();
+        if (Date.now() < pausedUntil) await sleep(pausedUntil - Date.now());
+        const r = await api(`${API}/changes/${w.number}/enqueue`, { method: 'POST', json: { headSha: w.commit, mergePolicy: 'review' }, handle429: true });
+        if (r.status === 201) {
+          burst.enqueue.set(key, { at: Date.now(), enqueuedAt: Date.parse(r.json.entry.enqueuedAt), attempts: attempt + 1, cost: r.cost, entryId: r.json.entry.id });
+          break;
+        }
+        if (r.status === 429) {
+          spendRetry('queueFull');
+          const wait = retryAfterMs(r.retryAfter, 30_000, 65_000);
+          pausedUntil = Date.now() + wait;
+          log(`  429 ${r.json?.code ?? ''} at #${w.number} (${key}); Retry-After ${r.retryAfter}; pausing enqueues ${wait} ms`);
+          if (attempt >= 10) throw new CampaignAbort(`#${w.number} refused 429 more than 10 times`);
+          continue;
+        }
+        if (r.status === 409 && r.json?.code === 'MERGE_CONFLICT') {
+          burst.enqueue.set(key, { refused: 'MERGE_CONFLICT', at: Date.now() });
+          log(`  #${w.number} (${key}) already conflicted at enqueue: 409 MERGE_CONFLICT`);
+          break;
+        }
+        throw new CampaignAbort(`enqueue #${w.number} (${key}): ${r.status} ${r.json?.code ?? ''} ${r.json?.error ?? ''}`.slice(0, 300));
       }
-      if (r.status === 429) {
-        spendRetry('queueFull');
-        const wait = retryAfterMs(r.retryAfter, 30_000, 65_000);
-        pausedUntil = Date.now() + wait;
-        log(`  429 ${r.json?.code ?? ''} at #${w.number} (${key}); Retry-After ${r.retryAfter}; pausing enqueues ${wait} ms`);
-        if (attempt >= 10) throw new CampaignAbort(`#${w.number} refused 429 more than 10 times`);
-        continue;
-      }
-      if (r.status === 409 && r.json?.code === 'MERGE_CONFLICT') {
-        burst.enqueue.set(key, { refused: 'MERGE_CONFLICT', at: Date.now() });
-        log(`  #${w.number} (${key}) already conflicted at enqueue: 409 MERGE_CONFLICT`);
-        break;
-      }
-      throw new CampaignAbort(`enqueue #${w.number} (${key}): ${r.status} ${r.json?.code ?? ''} ${r.json?.error ?? ''}`.slice(0, 300));
+      if (burst.enqueue.size % 20 === 0) log(`  enqueued ${burst.enqueue.size}/${plan.burst.length}`);
     }
-    if (burst.enqueue.size % 20 === 0) log(`  enqueued ${burst.enqueue.size}/${plan.burst.length}`);
+  } catch (err) {
+    // Every early exit of this loop (including the abort above) leaves the poller
+    // running; stop it here so it does not keep spending the request ledger.
+    await stopPoller?.();
+    throw err;
   }
   enqueueDone = true;
   log(`  all ${plan.burst.length} enqueue requests answered; waiting for the train`);
   await poller;
+  stopPoller = null;
   const chainKeys = new Set([plan.chain.B, plan.chain.C]);
   const enqueueCosts = [...burst.enqueue.entries()].filter(([, e]) => e.cost).map(([k, e]) => ({ key: k, pinned: chainKeys.has(k), cost: e.cost }));
   for (const e of enqueueCosts.filter((x) => !withinBudget(parseCost(x.cost), BUDGETS.enqueue).ok)) {
@@ -1013,11 +1032,18 @@ async function cleanup() {
   }
   check('VAL-SCALE-004b', `revoked every agent this run created (${agents.length})`, out.agentsRevoked === agents.length, out.agentRevokeFailures.slice(0, 3).join('; '));
   if (repoCreated && !opts.keep) {
-    const del = await api(API, { method: 'DELETE' });
-    const after = await api(API);
-    out.repoDelete = del.status;
-    out.repoGetAfter = after.status;
-    check('VAL-SCALE-004b', `deleted only the repo this run created (${OWNER}/${REPO}): DELETE then owner GET 404`, del.status >= 200 && del.status < 300 && after.status === 404, `DELETE ${del.status}, GET ${after.status}`);
+    try {
+      const del = await api(API, { method: 'DELETE' });
+      const after = await api(API);
+      out.repoDelete = del.status;
+      out.repoGetAfter = after.status;
+      check('VAL-SCALE-004b', `deleted only the repo this run created (${OWNER}/${REPO}): DELETE then owner GET 404`, del.status >= 200 && del.status < 300 && after.status === 404, `DELETE ${del.status}, GET ${after.status}`);
+    } catch (err) {
+      // Like the agent revocations above: a failed delete is recorded, not thrown,
+      // so the report still carries the rest of the cleanup result.
+      out.repoDeleteError = String(err?.message ?? err).slice(0, 200);
+      check('VAL-SCALE-004b', `deleted only the repo this run created (${OWNER}/${REPO}): DELETE then owner GET 404`, false, out.repoDeleteError);
+    }
   } else if (repoCreated) log(`kept ${OWNER}/${REPO} (--keep)`);
   return out;
 }
@@ -1031,6 +1057,9 @@ try {
   exitCode = 1;
 } finally {
   try {
+    // Before the cleanup DELETE: a poller still running would spend the request
+    // ledger that delete needs, and the repo would be left behind.
+    await stopPoller?.();
     report.cleanup = await cleanup();
   } catch (err) {
     log(`cleanup error: ${String(err?.message ?? err)}`);

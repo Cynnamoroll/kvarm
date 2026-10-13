@@ -467,7 +467,8 @@ describe('kvarm runner trust enforcement', () => {
         once: false,
         apiFetch: async (input, init) => {
           const path = new URL(String(input)).pathname;
-          if (path.endsWith('/claim') && ++claims > 3) throw new Error('stop');
+          // A refused claim ends the loop; a retriable failure never would.
+          if (path.endsWith('/claim') && ++claims > 3) return Response.json({ error: 'stop' }, { status: 401 });
           if (path.endsWith('/report')) now += 61_000;
           return apiFetch(input, init);
         },
@@ -513,6 +514,9 @@ describe('kvarm runner flags', () => {
       expect(await main(['runner', '--repo', 'alice/demo', ...args], x)).toBe(2);
       expect(err.join('\n')).toMatch(/kvarm runner: /);
     }
+    const { err, io: x } = io();
+    expect(await main(['runner', '--repo', 'a%b/c'], x)).toBe(2);
+    expect(err.join('\n')).toMatch(/kvarm runner: invalid repository/);
   });
 
   it('documents the trust modes and the container executor in its help', async () => {

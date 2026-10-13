@@ -25,6 +25,7 @@ const ORIGINAL_AVAILABLE = [
   'list_tasks',
   'claim_task',
   'complete_task',
+  'get_audit',
 ];
 
 describe('operation registry', () => {
@@ -48,12 +49,11 @@ describe('operation registry', () => {
   it('contains the original tools whose services exist', () => {
     const names = new Set(OPERATIONS.map((o) => o.name));
     for (const n of ORIGINAL_AVAILABLE) expect(names, n).toContain(n);
-    expect(names).not.toContain('get_audit');
   });
 
   it('covers every implemented operation family', () => {
     const families = new Set(OPERATIONS.map((o) => o.family));
-    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'queue', 'tasks', 'reviews', 'dependencies']) {
+    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'provenance', 'queue', 'tasks', 'reviews', 'dependencies', 'webhooks']) {
       expect(families, f).toContain(f);
     }
     expect(families).toContain('issues');
@@ -73,6 +73,21 @@ describe('operation registry', () => {
     expect(findOperation('rank_arena')?.path).toBe('/repos/{repo}/arenas/{id}/candidates');
   });
 
+  it('registers the webhook operations', () => {
+    expect(findOperation('create_webhook')).toMatchObject({ command: ['webhook', 'create'], method: 'POST', path: '/repos/{repo}/webhooks', family: 'webhooks' });
+    expect(findOperation('create_webhook')?.params.map((p) => p.name)).toEqual(['repo', 'url', 'events']);
+    expect(findOperation('list_webhooks')).toMatchObject({ command: ['webhook', 'list'], readOnly: true });
+    expect(findOperation('delete_webhook')).toMatchObject({ method: 'DELETE', destructive: true });
+    expect(findCommand(['webhook', 'rotate-secret'])?.path).toBe('/repos/{repo}/webhooks/{id}/rotate-secret');
+    expect(findCommand(['webhook', 'deliveries'])?.params.map((p) => p.name)).toEqual(['repo', 'id', 'state', 'limit', 'cursor']);
+    expect(buildRequest(findOperation('update_webhook')!, { repo: 'o/r', id: 'h1', active: true })).toEqual({
+      method: 'PATCH',
+      path: '/api/v1/repos/o/r/webhooks/h1',
+      query: '',
+      body: { active: true },
+    });
+  });
+
   it('registers review, approval and escalation operations', () => {
     expect(findOperation('review_change')).toMatchObject({ command: ['review', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/reviews', family: 'reviews' });
     expect(findOperation('review_change')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'verdict', 'headSha', 'body']);
@@ -87,6 +102,19 @@ describe('operation registry', () => {
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
     const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40) });
     expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40) }]);
+  });
+
+  it('registers the audit export and provenance key operations', () => {
+    expect(findOperation('get_audit')).toMatchObject({ command: ['audit', 'export'], method: 'GET', path: '/repos/{repo}/audit', family: 'provenance', readOnly: true });
+    expect(findOperation('get_audit')?.params.map((p) => p.name)).toEqual(['repo', 'since', 'until', 'format', 'limit', 'cursor']);
+    expect(requestTarget(buildRequest(findOperation('get_audit')!, { repo: 'o/r', since: '2026-01-01T00:00:00Z', format: 'ndjson', limit: 10 }))).toBe(
+      '/api/v1/repos/o/r/audit?since=2026-01-01T00%3A00%3A00Z&format=ndjson&limit=10',
+    );
+    expect(() => buildRequest(findOperation('get_audit')!, { repo: 'o/r', format: 'csv' })).toThrow(OperationInputError);
+    expect(findOperation('list_provenance_keys')).toMatchObject({ command: ['provenance-key', 'list'], method: 'GET', path: '/repos/{repo}/provenance-keys' });
+    expect(findOperation('add_provenance_key')).toMatchObject({ command: ['provenance-key', 'add'], method: 'POST', path: '/repos/{repo}/provenance-keys' });
+    expect(findOperation('revoke_provenance_key')).toMatchObject({ method: 'DELETE', path: '/repos/{repo}/provenance-keys/{id}', destructive: true });
+    expect(findOperation('set_attribution')?.params.map((p) => p.name)).toContain('evidence');
   });
 
   it('registers the dependency, train status and recovery operations', () => {
@@ -167,8 +195,8 @@ describe('buildRequest', () => {
   });
 
   it('joins list query parameters with commas', () => {
-    const r = buildRequest(op('forecast'), { repo: 'o/r', paths: ['a.ts', 'src/'] });
-    expect(r.query).toBe('paths=a.ts%2Csrc%2F');
+    const r = buildRequest(op('list_candidates'), { repo: 'o/r', workspaces: ['ab12', 'cd34'] });
+    expect(r.query).toBe('workspaces=ab12%2Ccd34');
   });
 
   it('sends literal path lists as one repeated parameter per path, so commas stay part of a path', () => {
@@ -177,8 +205,11 @@ describe('buildRequest', () => {
     expect(new URLSearchParams(ctx.query).getAll('path')).toEqual(['src/a,b.ts', 'c.md']);
     const rec = buildRequest(op('record_decision'), { repo: 'o/r', paths: ['src/a,b.ts'], chosen: 'c', rejected: [], reason: 'r' });
     expect(rec.body).toMatchObject({ paths: ['src/a,b.ts'] });
+    const fc = buildRequest(op('forecast'), { repo: 'o/r', paths: ['src/a,b.ts', 'src/'] });
+    expect(fc.query).toBe('paths=src%2Fa%2Cb.ts&paths=src%2F');
     expect(op('get_context').params.find((p) => p.name === 'path')?.literal).toBe(true);
     expect(op('record_decision').params.find((p) => p.name === 'paths')?.literal).toBe(true);
+    expect(op('forecast').params.find((p) => p.name === 'paths')?.literal).toBe(true);
   });
 
   it('registers the existing repository lifecycle routes as thin entries', () => {

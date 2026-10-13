@@ -227,8 +227,9 @@ try {
 
   // ---- Unconfirmed pushes change nothing ----
   const before = await api('GET', `/repos/${OWNER}/${REPO}`);
+  // The API answers pushedAt as an ISO 8601 string; compare it as a timestamp.
   const pushedAtBefore = JSON.parse(before.text).repo?.pushedAt;
-  check('pushedAt set by confirmed pushes', pushedAtBefore, (v) => typeof v === 'number' && v > ts);
+  check('pushedAt set by confirmed pushes', pushedAtBefore, (v) => typeof v === 'string' && Date.parse(v) > ts);
 
   const parent = git(['rev-parse', 'HEAD~1']).out;
   writeFileSync(join(dir, 'UNCONFIRMED.txt'), `${ts}\n`);

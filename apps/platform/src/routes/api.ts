@@ -4,10 +4,15 @@
  * Repo lifecycle goes through src/repos/service.ts.
  */
 
-import { Hono, type Context } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { listReposForOwner, type RepoRow } from '../db/repos';
-import { findOrCreateUser } from '../db/users';
-import { getSessionInfo, type SessionInfo } from '../auth/workos';
+import {
+  getSessionInfo,
+  isSameOriginRequest,
+  isUnsafeMethod,
+  type SessionInfo,
+  type SessionLookup,
+} from '../auth/workos';
 import { mintPAT, revokePAT, scopesAllow, SCOPES, type Scope } from '../auth/pat';
 import * as svc from '../repos/service';
 import { patActor, type Actor, type RepoNeed } from '../services/authz';
@@ -20,7 +25,10 @@ import {
   type RepoAccess,
 } from '../services/access';
 
-export type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
+export type App = {
+  Bindings: Env;
+  Variables: { refreshCookies: string[]; sessionLookup: SessionLookup };
+};
 export const api = new Hono<App>();
 
 export type ApiActor = Actor;
@@ -30,17 +38,50 @@ export function clientIp(c: Context<App>): string | null {
 }
 
 /**
- * The presented credential, unverified: session cookie first (resolved to its
- * user), then Bearer PAT. PATs are verified by services/access.ts.
+ * The browser session for this request, resolved once: a WorkOS refresh
+ * rotates the refresh token, so a second lookup in the same request would
+ * redeem a spent one. Cookies it sets are persisted by persistSessionCookies.
+ */
+export async function requestSession(c: Context<App>): Promise<SessionInfo | null> {
+  let lookup = c.get('sessionLookup');
+  if (!lookup) {
+    lookup = await getSessionInfo(c.req.raw, c.env);
+    c.set('sessionLookup', lookup);
+    if (lookup.setCookies.length > 0) c.set('refreshCookies', lookup.setCookies);
+  }
+  return lookup.session;
+}
+
+/** Appends the session's Set-Cookie values to whatever response the route produced. */
+export const persistSessionCookies: MiddlewareHandler = async (c, next) => {
+  await next();
+  // Routes that still append the cookies themselves are not doubled.
+  const present = new Set(c.res.headers.getSetCookie());
+  const cookies = ((c.get('refreshCookies') as string[] | undefined) ?? []).filter((cookie) => !present.has(cookie));
+  if (cookies.length === 0) return;
+  try {
+    for (const cookie of cookies) c.res.headers.append('Set-Cookie', cookie);
+  } catch {
+    const res = new Response(c.res.body, c.res);
+    for (const cookie of cookies) res.headers.append('Set-Cookie', cookie);
+    // Hono's res setter merges the previous response's Set-Cookie headers
+    // over the new one; clearing first keeps the appended cookies.
+    c.res = undefined as unknown as Response;
+    c.res = res;
+  }
+};
+
+/**
+ * The presented credential, unverified: session cookie first (its user row is
+ * read fresh from D1), then Bearer PAT. A session never authorizes a
+ * state-changing request from another origin; such a request falls through
+ * to its Bearer token or acts anonymously. PATs are verified by
+ * services/access.ts.
  */
 export async function requestCredential(c: Context<App>): Promise<Credential> {
-  const session: SessionInfo | null = await getSessionInfo(c.req.raw, c.env);
-  if (session) {
-    const user = await findOrCreateUser(c.env, session.user);
-    if (session.refreshCookies.length > 0) {
-      c.set('refreshCookies', session.refreshCookies);
-    }
-    return { kind: 'session', actor: { user, via: 'session', scopes: null } };
+  const session = await requestSession(c);
+  if (session && (!isUnsafeMethod(c.req.method) || isSameOriginRequest(c.req.raw, c.env))) {
+    return { kind: 'session', actor: { user: session.user, via: 'session', scopes: null } };
   }
   const header = c.req.header('Authorization');
   if (header?.startsWith('Bearer ')) {
@@ -68,13 +109,9 @@ export async function apiActor(c: Context<App>): Promise<ActorResult> {
   return { ok: true, actor: scopesAllow(res.pat.scopes, 'api') ? patActor(res.pat) : null };
 }
 
-/** JSON response that persists refreshed session cookies when present. */
+/** JSON response; refreshed session cookies are added by persistSessionCookies. */
 export function actorJson(c: Context<App>, data: unknown, status = 200): Response {
-  const res = c.json(data, status as never);
-  for (const cookie of c.get('refreshCookies') ?? []) {
-    res.headers.append('Set-Cookie', cookie);
-  }
-  return res;
+  return c.json(data, status as never);
 }
 
 /** Resolves the caller and :owner/:repo, then applies the shared repository policy. */
@@ -100,15 +137,13 @@ export function denyJson(c: Context<App>, d: AccessDenied): Response {
   if (d.status === 429) {
     return c.json({ error: d.error, code: d.code }, 429, { 'Retry-After': '60' });
   }
-  // Rejected or missing credentials keep the existing `{error:"unauthorized"}` shape.
-  if (d.status === 401 && d.error === 'unauthorized') return c.json({ error: 'unauthorized' }, 401);
   return c.json({ error: d.error, code: d.code }, d.status);
 }
 
 export async function requireActor(c: Context<App>): Promise<ApiActor | Response> {
   const res = await apiActor(c);
   if (!res.ok) return denyJson(c, res);
-  if (!res.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!res.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   return res.actor;
 }
 
@@ -134,7 +169,7 @@ api.get('/user', async (c) => {
 api.get('/user/tokens', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session' }, 403);
+  if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session', code: 'SESSION_REQUIRED' }, 403);
   const { results } = await c.env.DB.prepare(
     'SELECT id, name, prefix, scopes, created_at, last_used_at FROM pat WHERE user_id = ? ORDER BY created_at DESC',
   )
@@ -153,8 +188,8 @@ api.get('/user/tokens', async (c) => {
       name: t.name,
       prefix: t.prefix,
       scopes: JSON.parse(t.scopes) as string[],
-      createdAt: t.created_at,
-      lastUsedAt: t.last_used_at,
+      createdAt: new Date(t.created_at).toISOString(),
+      lastUsedAt: t.last_used_at === null ? null : new Date(t.last_used_at).toISOString(),
     })),
   });
 });
@@ -162,13 +197,13 @@ api.get('/user/tokens', async (c) => {
 api.post('/user/tokens', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session' }, 403);
+  if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session', code: 'SESSION_REQUIRED' }, 403);
   const body = (await c.req.json().catch(() => ({}))) as { name?: string; scopes?: string[] };
   const name = (body.name ?? 'token').slice(0, 100);
   const scopes = (body.scopes ?? ['read', 'write', 'api']).filter((s): s is Scope =>
     SCOPES.includes(s as Scope),
   );
-  if (scopes.length === 0) return c.json({ error: 'no valid scopes' }, 400);
+  if (scopes.length === 0) return c.json({ error: 'no valid scopes', code: 'INVALID_SCOPES' }, 400);
   const minted = await mintPAT(c.env, actor.user.id, name, scopes);
   return c.json(
     {
@@ -185,6 +220,7 @@ api.post('/user/tokens', async (c) => {
 api.delete('/user/tokens/:id', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
+  if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session', code: 'SESSION_REQUIRED' }, 403);
   const ok = await revokePAT(c.env, c.req.param('id'), actor.user.id);
   return c.json({ revoked: ok });
 });
@@ -216,7 +252,7 @@ api.post('/repos', async (c) => {
     visibility: body.visibility === 'public' ? 'public' : 'private',
     defaultBranch: body.defaultBranch,
   });
-  if (!result.ok) return c.json({ error: result.error }, result.status as never);
+  if (!result.ok) return c.json({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status as never);
   return c.json({ repo: repoJson(c, result.value) }, 201);
 });
 
@@ -237,7 +273,7 @@ api.post('/import', async (c) => {
     branch: body.branch,
     visibility: body.visibility === 'public' ? 'public' : 'private',
   });
-  if (!result.ok) return c.json({ error: result.error }, result.status as never);
+  if (!result.ok) return c.json({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status as never);
   return c.json({ repo: repoJson(c, result.value), status: 'importing' }, 201);
 });
 
@@ -266,18 +302,18 @@ api.delete('/repos/:owner/:repo', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
   const result = await svc.deleteRepo(c.env, d.repo);
-  if (!result.ok) return c.json({ error: result.error }, result.status as never);
+  if (!result.ok) return c.json({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status as never);
   return c.json({ deleted: true });
 });
 
 api.post('/repos/:owner/:repo/forks', async (c) => {
   const d = await authorizeRoute(c, 'read', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const repo = d.repo;
   const body = (await c.req.json().catch(() => ({}))) as { name?: string };
   const result = await svc.forkRepo(c.env, repo, d.actor.user.login, body.name ?? `${repo.name}-fork`);
-  if (!result.ok) return c.json({ error: result.error }, result.status as never);
+  if (!result.ok) return c.json({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status as never);
   return c.json({ repo: repoJson(c, result.value) }, 201);
 });
 
@@ -294,8 +330,8 @@ export function repoJson(c: Context<App>, r: RepoRow) {
     defaultBranch: r.default_branch,
     description: r.description,
     stars: r.stars,
-    createdAt: r.created_at,
-    pushedAt: r.pushed_at,
+    createdAt: new Date(r.created_at).toISOString(),
+    pushedAt: r.pushed_at === null ? null : new Date(r.pushed_at).toISOString(),
     cloneUrl: `${new URL(c.req.url).origin}/${r.owner_login}/${r.name}.git`,
   };
 }

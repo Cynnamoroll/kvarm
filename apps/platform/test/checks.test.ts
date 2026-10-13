@@ -333,6 +333,69 @@ describe('the guard as the checks gate', () => {
     expect(first).toContainEqual({ name: 'kvarm/checks-window', state: 'pending' });
   });
 
+  it('answers a base-tree question from the run judged against that base, not only the newest run', async () => {
+    const repo = await seedRepo('guard-rejudge');
+    const { main, feature } = await fixture(repo, BASE, { 'secrets.txt': `aws_key=${AWS_KEY}\n` });
+    expect((await create('guard-rejudge')).status).toBe(201);
+    const rows =
+      (
+        await env.DB.prepare(
+          `SELECT c.id AS change_id, k.id AS run_id, k.summary, k.created_at
+             FROM change_sets c JOIN check_runs k ON k.change_set_id = c.id
+            WHERE c.repo_id = ? AND k.name = 'kvarm/guard'`,
+        )
+          .bind(repoIds['guard-rejudge'])
+          .all<{ change_id: string; run_id: string; summary: string; created_at: number }>()
+      ).results ?? [];
+    expect(rows).toHaveLength(1);
+    const run = rows[0]!;
+    const summary = JSON.parse(run.summary) as Record<string, unknown> & { baseTree: string; conclusion: string };
+    expect(summary.baseTree).toBe(main.tree);
+    expect(summary.conclusion).toBe('failure');
+
+    // A later re-judge of the same head against a different base tree, exactly
+    // as a landing stacked base produces. It is the newest run of the head.
+    const otherTree = 'e'.repeat(40);
+    await env.DB.prepare(
+      `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, tree_sha, name, status, conclusion, summary, attempt, required, quarantined, created_at)
+       VALUES (?, ?, ?, ?, ?, 'kvarm/guard', 'success', 'success', ?, 1, 1, 0, ?)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        repoIds['guard-rejudge'],
+        run.change_id,
+        feature.sha,
+        feature.tree,
+        JSON.stringify({ ...summary, baseTree: otherTree, conclusion: 'success', findings: [], title: 'passed' }),
+        run.created_at + 1,
+      )
+      .run();
+
+    const gate = checkRunsProducer(env);
+    const [oldBase, newBase, unknown] = await Promise.all([
+      gate.requiredChecksFor({ id: repoIds['guard-rejudge']! }, feature.tree, null, {
+        changeId: run.change_id,
+        headSha: feature.sha,
+        guardBaseTree: summary.baseTree,
+      }),
+      gate.requiredChecksFor({ id: repoIds['guard-rejudge']! }, feature.tree, null, {
+        changeId: run.change_id,
+        headSha: feature.sha,
+        guardBaseTree: otherTree,
+      }),
+      gate.requiredChecksFor({ id: repoIds['guard-rejudge']! }, feature.tree, null, {
+        changeId: run.change_id,
+        headSha: feature.sha,
+        guardBaseTree: 'f'.repeat(40),
+      }),
+    ]);
+    // The publication's plan names the base tree: its own run answers, even
+    // though a newer run judged the head against a different base exists.
+    expect(oldBase.find((c) => c.name === 'kvarm/guard')).toMatchObject({ state: 'failure', runId: run.run_id });
+    expect(newBase.find((c) => c.name === 'kvarm/guard')).toMatchObject({ state: 'success' });
+    expect(unknown.find((c) => c.name === 'kvarm/guard')).toMatchObject({ state: 'pending' });
+  });
+
   it('marks a full exact-tree result window pending without penalizing an under-full tree', async () => {
     const repo = await seedRepo('checks-window');
     const { feature } = await fixture(repo, BASE, { 'feature.txt': 'feature\n' });

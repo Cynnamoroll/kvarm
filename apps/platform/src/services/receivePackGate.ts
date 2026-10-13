@@ -66,7 +66,11 @@ export async function gateReceivePack(request: Request, check: RefCheck, limits?
 
   await prefix.drain(DENIED_DRAIN_LIMIT);
   const caps = parsed.capabilities;
-  if (!caps.includes('report-status') && !caps.includes('report-status-v2')) {
+  // The gate answers with a v1 report-status body. A client that negotiated
+  // only report-status-v2 would misparse it (v2 expects an option phase), so
+  // such a push is declined over plain HTTP instead, exactly like a client
+  // that asked for no report capability at all.
+  if (!caps.includes('report-status')) {
     const first = verdicts.find((v) => v.reason !== null);
     return { ok: false, response: plain(403, `push denied: ${first?.cmd.ref} ${first?.reason}`) };
   }

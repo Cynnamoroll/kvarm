@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { GIT_PATH_RE, handleGitRequest } from './routes/git';
 import { authRoutes } from './routes/auth';
-import { api } from './routes/api';
+import { api, persistSessionCookies } from './routes/api';
 import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
 import { branchRulesApi } from './routes/api/branchRules';
@@ -20,11 +20,15 @@ import { issuesApi } from './routes/api/issues';
 import { checksApi } from './routes/api/checks';
 import { ciApi } from './routes/api/ci';
 import { containerRunnerApi } from './routes/api/containerRunner';
+import { webhooksApi } from './routes/api/webhooks';
 import { handleEventBatch } from './services/events';
+import { runWebhookCron } from './services/webhooks';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { issuePages } from './routes/issuePages';
+import { coordinationPages } from './routes/coordinationPages';
+import { comparePages } from './routes/comparePages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -59,6 +63,10 @@ app.use('/assets/*', async (c, next) => {
   return next();
 });
 
+// Refreshed or cleared session cookies reach every response, whichever
+// route resolved the session (routes/api.ts requestSession).
+app.use('*', persistSessionCookies);
+
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/api/v1', tenancyApi);
@@ -80,13 +88,19 @@ app.route('/api/v1', issuesApi);
 app.route('/api/v1', checksApi);
 app.route('/api/v1', ciApi);
 app.route('/api/v1', containerRunnerApi);
+app.route('/api/v1', webhooksApi);
 // MCP tool calls are dispatched back through this router to their REST routes.
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
+// The issues, coordination and compare pages are further /:owner/:repo views;
+// their paths (/issues, /activity, /train, /arenas, /candidates, /compare)
+// collide with none of the pages above.
 app.route('/:owner/:repo', issuePages);
 app.route('/:owner/:repo', repoPages);
+app.route('/:owner/:repo', coordinationPages);
+app.route('/:owner/:repo', comparePages);
 
 // Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {
@@ -108,4 +122,7 @@ export default {
   // Artifacts push events, through the account-level event subscription
   // (services/events.ts).
   queue: (batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) => handleEventBatch(batch, env),
+  // Outbound webhooks: enqueue due deliveries and prune the delivery log
+  // (services/webhooks.ts).
+  scheduled: (_controller: ScheduledController, env: Env, ctx: ExecutionContext) => ctx.waitUntil(runWebhookCron(env)),
 } satisfies ExportedHandler<Env>;
