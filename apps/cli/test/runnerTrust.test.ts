@@ -467,7 +467,8 @@ describe('kvarm runner trust enforcement', () => {
         once: false,
         apiFetch: async (input, init) => {
           const path = new URL(String(input)).pathname;
-          if (path.endsWith('/claim') && ++claims > 3) throw new Error('stop');
+          // A refused claim ends the loop; a retriable failure never would.
+          if (path.endsWith('/claim') && ++claims > 3) return Response.json({ error: 'stop' }, { status: 401 });
           if (path.endsWith('/report')) now += 61_000;
           return apiFetch(input, init);
         },

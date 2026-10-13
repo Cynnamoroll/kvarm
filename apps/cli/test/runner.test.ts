@@ -358,7 +358,8 @@ describe('kvarm runner', () => {
           if (claims.length === 4) {
             return Response.json({ job: { id: 'j', name: 'build', command: 'true', sha: 'b'.repeat(40), generation: 1, timeoutSeconds: 30 } });
           }
-          if (claims.length >= 7) return Response.json({ error: 'runner stopped' }, { status: 500 });
+          // A refused claim (bad credentials) ends the loop; a retriable one never would.
+          if (claims.length >= 7) return Response.json({ error: 'runner stopped' }, { status: 401 });
           return new Response(null, { status: 204 });
         }
         if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
@@ -439,6 +440,187 @@ describe('kvarm runner', () => {
     expect(claims).toHaveLength(3);
     expect(claims[1]! - claims[0]!).toBeLessThan(2_000);
     expect(reports.map((r: any) => r.runnerId)).toHaveLength(2);
+  });
+
+  it('retries a claim on a 429, a network error and a 5xx, honoring Retry-After, and keeps serving', async () => {
+    vi.useFakeTimers();
+    try {
+      const claims: number[] = [];
+      const stderr: string[] = [];
+      let claim = 0;
+      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (path.endsWith('/claim')) {
+          claims.push(Date.now());
+          claim++;
+          if (claim === 1) return Response.json({ error: 'slow down' }, { status: 429, headers: { 'retry-after': '3' } });
+          if (claim === 2) throw new TypeError('fetch failed');
+          if (claim === 3) return Response.json({ error: 'storage unavailable' }, { status: 503 });
+          return Response.json({ job: { id: 'j-r', name: 'build', command: 'true', sha: 'b'.repeat(40), generation: 1, timeoutSeconds: 30 } });
+        }
+        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
+        return Response.json({});
+      };
+      const run = runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        once: true,
+        apiFetch,
+        checkoutFn: async (o: any) => {
+          mkdirSync(o.dir, { recursive: true });
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+        stdout: () => {},
+        stderr: (l) => stderr.push(l),
+        tempRoot: root,
+        workRoot: join(root, 'claim-retry-work'),
+      });
+      // Retry-After 3 s is honored exactly; the doubling ramp for the network
+      // error and the 503 stays within 4 s and 8 s even with jitter.
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = await run;
+      expect(result).toEqual({ claimed: 1, reported: 1 });
+      expect(claims).toHaveLength(4);
+      expect(claims[1]! - claims[0]!).toBe(3_000);
+      expect(claims[2]! - claims[1]!).toBeGreaterThanOrEqual(2_000);
+      expect(claims[2]! - claims[1]!).toBeLessThan(4_000);
+      expect(claims[3]! - claims[2]!).toBeGreaterThanOrEqual(4_000);
+      expect(claims[3]! - claims[2]!).toBeLessThan(8_000);
+      expect(stderr[0]).toBe('claim failed: ci/jobs/claim: slow down; retrying in 3.0 s');
+      expect(stderr[1]).toMatch(/^claim failed: fetch failed; retrying in ([23]\.\d|4\.0) s$/);
+      expect(stderr[2]).toMatch(/^claim failed: ci\/jobs\/claim: storage unavailable; retrying in ([4-7]\.\d|8\.0) s$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stays fatal on a refused claim: bad credentials are actionable, not retriable', async () => {
+    let claims = 0;
+    const apiFetch = async () => {
+      claims++;
+      return Response.json({ error: 'unauthorized', code: 'INVALID_TOKEN' }, { status: 401 });
+    };
+    await expect(
+      runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        once: true,
+        apiFetch,
+        checkoutFn: async () => {
+          throw new Error('never claimed');
+        },
+        execute: async () => {
+          throw new Error('never ran');
+        },
+        stdout: () => {},
+        stderr: () => {},
+        tempRoot: root,
+        workRoot: join(root, 'claim-fatal-work'),
+      }),
+    ).rejects.toThrow(/unauthorized \(INVALID_TOKEN\)/);
+    expect(claims).toBe(1);
+  });
+
+  it('treats a malformed claim as a failed claim and retries it, never a crash', async () => {
+    vi.useFakeTimers();
+    try {
+      const claims: string[] = [];
+      const stderr: string[] = [];
+      const replies = [
+        { job: { id: 'm1', name: 'build', command: 'true', sha: 'a'.repeat(40), timeoutSeconds: 30, generation: 0 } },
+        { job: { id: 'm2', name: 'build', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 } },
+        { job: { id: 'm3', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
+      ];
+      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (path.endsWith('/claim')) {
+          const next = replies.shift();
+          claims.push(next ? String(next.job.id) : 'gone');
+          return next ? Response.json(next) : new Response(null, { status: 204 });
+        }
+        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
+        return Response.json({});
+      };
+      const run = runRunner({
+        ...HOST_TRUSTED,
+        baseUrl: 'https://kvarm.test',
+        pat: 'p',
+        repo: 'alice/demo',
+        once: true,
+        apiFetch,
+        checkoutFn: async (o: any) => {
+          mkdirSync(o.dir, { recursive: true });
+          return { source: 'snapshot' as const, sha: o.ref };
+        },
+        execute: async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false, durationMs: 1 }),
+        stdout: () => {},
+        stderr: (l) => stderr.push(l),
+        tempRoot: root,
+        workRoot: join(root, 'claim-malformed-work'),
+      });
+      await vi.advanceTimersByTimeAsync(8_000);
+      const result = await run;
+      expect(result).toEqual({ claimed: 1, reported: 1 });
+      expect(claims).toEqual(['m1', 'm2', 'm3']);
+      expect(stderr.filter((l) => l.startsWith('claim failed:'))).toHaveLength(2);
+      expect(stderr[0]).toMatch(/^claim failed: claim returned an invalid job; retrying in (1\.\d|2\.0) s$/);
+      expect(stderr[1]).toMatch(/^claim failed: claim returned an invalid job; retrying in ([23]\.\d|4\.0) s$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runs a claimed job whose timeoutSeconds is out of range at the platform default', async () => {
+    const timeouts: number[] = [];
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (path.endsWith('/claim')) {
+        return Response.json({ job: { id: 'j-t', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 'fast' } });
+      }
+      if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
+      return Response.json({});
+    };
+    const result = await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha: o.ref };
+      },
+      execute: async (_command, _cwd, timeoutSeconds) => {
+        timeouts.push(timeoutSeconds);
+        return { code: 0, stdout: '', stderr: '', timedOut: false, durationMs: 1 };
+      },
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'claim-timeout-work'),
+    });
+    expect(result).toEqual({ claimed: 1, reported: 1 });
+    expect(timeouts).toEqual([900]);
+  });
+
+  it('derives the claim retry delay from Retry-After, else a doubling ramp to a 60 s cap', async () => {
+    const { claimRetryMs } = await import('../src/runner.js');
+    expect(claimRetryMs('7', 0)).toBe(7_000);
+    expect(claimRetryMs('120', 0)).toBe(60_000);
+    expect(claimRetryMs('soon', 0)).toBe(2_000);
+    expect(claimRetryMs(null, 0)).toBe(2_000);
+    expect(claimRetryMs(null, 1)).toBe(4_000);
+    expect(claimRetryMs(null, 2)).toBe(8_000);
+    expect(claimRetryMs(null, 12)).toBe(60_000);
   });
 
   it('materializes a warm job through the compare delta without a checkout and reports source delta', async () => {

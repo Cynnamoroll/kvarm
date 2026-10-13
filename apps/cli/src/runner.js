@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { checkout } from './checkout.js';
 import { CliError } from './checkout.js';
 import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution } from './executor.js';
+import { text } from './http.js';
 import { materialize, openWorkdir } from './workdir.js';
 
 export { executeShell } from './executor.js';
@@ -25,8 +26,14 @@ const SUMMARY_SAFETY_MARGIN = 1024;
 const SUMMARY_LIMIT = SUMMARY_SERVER_LIMIT - SUMMARY_SAFETY_MARGIN;
 const IDLE_MIN_MS = 2_000;
 const IDLE_MAX_MS = 10_000;
+/** A claim that failed this way is retried, doubling to this cap: the runner is a long-lived daemon and no claim failure is made better by dying. */
+const CLAIM_RETRY_MIN_MS = 2_000;
+const CLAIM_RETRY_MAX_MS = 60_000;
 /** Past this many changed paths a whole-tree checkout is cheaper than the delta. */
 const MAX_DELTA_CHANGES = 1_000;
+/** The platform's own CI bounds (services/ciConfig.ts) that a claimed job's fields are held to. */
+const JOB_TIMEOUT_MAX_SECONDS = 3_600;
+const JOB_TIMEOUT_DEFAULT_SECONDS = 900;
 const utf8 = new TextEncoder();
 
 /** @param {unknown} value */
@@ -75,6 +82,45 @@ function boundedSummary(summary) {
 /** A job the execution-trust policy will not run on this runner. */
 class JobRefused extends Error {}
 
+/**
+ * An API refusal with the status and Retry-After that produced it; plain
+ * CliError (which carries neither) says the reply was not an API answer at
+ * all. The claim loop reads both to decide what is worth retrying.
+ */
+class ApiError extends CliError {
+  /**
+   * @param {string} message
+   * @param {number} status
+   * @param {string | null} retryAfter
+   */
+  constructor(message, status, retryAfter) {
+    super(message);
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
+/**
+ * The job the claim returned, with every field the runner dereferences
+ * validated: id, sha and command must be strings, generation a positive
+ * integer, and an out-of-range timeoutSeconds falls back to the platform's
+ * own default. Anything else is the same malformed claim a bad id always
+ * was — retried, never a crash.
+ * @param {any} body
+ */
+function parseClaim(body) {
+  const job = body?.job;
+  if (!job || typeof job !== 'object' || typeof job.id !== 'string' || typeof job.sha !== 'string' || typeof job.command !== 'string') {
+    throw new CliError('claim returned an invalid job');
+  }
+  if (!Number.isInteger(job.generation) || job.generation < 1) throw new CliError('claim returned an invalid job');
+  const timeoutSeconds =
+    Number.isInteger(job.timeoutSeconds) && job.timeoutSeconds >= 1 && job.timeoutSeconds <= JOB_TIMEOUT_MAX_SECONDS
+      ? job.timeoutSeconds
+      : JOB_TIMEOUT_DEFAULT_SECONDS;
+  return { ...job, timeoutSeconds };
+}
+
 /** How long a failed container-runtime probe is remembered. */
 const RUNTIME_RETRY_MS = 60_000;
 
@@ -95,6 +141,23 @@ export function idleDelayMs(consecutive) {
 }
 
 /**
+ * Milliseconds to wait before the next claim after `fails` retryable
+ * failures: the response's Retry-After when the platform sent a usable one,
+ * otherwise a delay doubling from 2 s to a 60 s cap. An HTTP-date value or
+ * anything unparseable falls to the ramp like a missing header.
+ * @param {string | null} retryAfter
+ * @param {number} fails
+ */
+export function claimRetryMs(retryAfter, fails) {
+  const seconds = Number(retryAfter);
+  if (retryAfter !== null && retryAfter !== '' && Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, CLAIM_RETRY_MAX_MS);
+  return Math.min(CLAIM_RETRY_MIN_MS * 2 ** fails, CLAIM_RETRY_MAX_MS);
+}
+
+/** Half jitter, [50%, 100%) of the ramp delay, so a fleet of runners does not retry in lockstep. @param {number} ms @returns {number} */
+const jittered = (ms) => Math.floor(ms * (0.5 + Math.random() / 2));
+
+/**
  * @param {string} baseUrl
  * @param {string} repo
  * @param {string} pat
@@ -109,8 +172,13 @@ async function post(baseUrl, repo, pat, path, body, apiFetch) {
     body: JSON.stringify(body),
   });
   if (res.status === 204) return { status: 204, body: null };
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new CliError(`${path}: ${json.error ?? `HTTP ${res.status}`}${json.code ? ` (${json.code})` : ''}`);
+  let json;
+  try {
+    json = JSON.parse(await text(res));
+  } catch {
+    json = {};
+  }
+  if (!res.ok) throw new ApiError(`${path}: ${json.error ?? `HTTP ${res.status}`}${json.code ? ` (${json.code})` : ''}`, res.status, res.headers.get('retry-after'));
   return { status: res.status, body: json };
 }
 
@@ -126,12 +194,17 @@ async function getJson(baseUrl, repo, pat, path, apiFetch) {
   const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}/api/v1/repos/${repo}/${path}`, {
     headers: { Authorization: `Bearer ${pat}`, accept: 'application/json' },
   });
-  const json = await res.json().catch(() => null);
+  let json;
+  try {
+    json = JSON.parse(await text(res));
+  } catch {
+    json = null;
+  }
   if (!res.ok || json === null || typeof json !== 'object' || Array.isArray(json)) {
     const err = /** @type {{error?: unknown, code?: unknown}} */ (json);
     const detail = err !== null && typeof err === 'object' && typeof err.error === 'string' ? err.error : `HTTP ${res.status}`;
     const code = err !== null && typeof err === 'object' && typeof err.code === 'string' ? ` (${err.code})` : '';
-    throw new CliError(`${path.split('?')[0]}: ${detail}${code}`);
+    throw new ApiError(`${path.split('?')[0]}: ${detail}${code}`, res.status, res.headers.get('retry-after'));
   }
   return /** @type {Record<string, unknown>} */ (json);
 }
@@ -351,21 +424,45 @@ export async function runRunner(options) {
   let claimed = 0;
   let reported = 0;
   let idle = 0;
+  /** Consecutive claim failures, for the retry ramp; any successful claim resets it. */
+  let claimFails = 0;
+  /**
+   * Claims until one succeeds. A network failure, a 429/5xx or a malformed
+   * reply backs off and retries, while bad credentials and any other
+   * definite 4xx refusal are actionable and stay fatal like they always
+   * were: retrying a wrong token or a wrong --repo would only spam.
+   * @returns {Promise<any | null>} the claimed job, or null when none is queued
+   */
+  const nextClaim = async () => {
+    for (;;) {
+      try {
+        const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
+        const job = got.status === 204 ? null : parseClaim(got.body);
+        claimFails = 0;
+        return job;
+      } catch (err) {
+        if (err instanceof ApiError && err.status !== 429 && err.status < 500) throw err;
+        const retryAfter = err instanceof ApiError ? err.retryAfter : null;
+        const wait = claimRetryMs(retryAfter, claimFails++);
+        const sleepMs = retryAfter === null ? jittered(wait) : wait;
+        options.stderr(`claim failed: ${err instanceof Error ? err.message : String(err)}; retrying in ${(sleepMs / 1000).toFixed(1)} s`);
+        await sleep(sleepMs);
+      }
+    }
+  };
   try {
     if (executorMode === 'container' && !(await runtime())) {
       throw new CliError(`--executor container needs a running ${containerConfig.runtime ?? 'docker or podman'}, and none answered`, 2);
     }
     for (;;) {
-      const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
-      if (got.status === 204) {
+      const job = await nextClaim();
+      if (job === null) {
         if (options.once || options.drainUntilEmpty) return { claimed, reported };
         await sleep(idleDelayMs(idle++));
         continue;
       }
       idle = 0;
       const claimedAt = Date.now();
-      const job = got.body?.job;
-      if (!job || typeof job.id !== 'string' || typeof job.sha !== 'string') throw new CliError('claim returned an invalid job');
       claimed++;
       options.stdout(`claimed ${job.name} (${job.id}) at ${job.sha}`);
       let heartbeat;
