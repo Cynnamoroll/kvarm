@@ -320,7 +320,7 @@ Measured scale: one 100-workspace fleet run published 99 changes through the tra
 Configured limits (constants in the code, documented with their behavior in the API reference above):
 
 - Rate limits per token: 600 reads and 120 writes per minute (`READ_LIMITER`, `WRITE_LIMITER`); a push uses about two writes.
-- Merge queue: 8 prepared entries per pass, 4 in checking at once, 64 active entries per repository (then `429 QUEUE_FULL` with `Retry-After: 30`), 30 s publication lease.
+- Merge queue: 8 prepared entries per pass, 4 in checking at once, 64 active entries per repository (then `429 QUEUE_FULL` with `Retry-After: 30`), 30 s publication lease; a publication left unconfirmed by a crash or a lost reply is reconciled from the actual ref (at most 4 per pass, recorded as a `kvarm.queue.publication_reconciled` event).
 - Compare: at most 2,000 tree reads or 20,000 changed files (then `truncated: true`); per-file line counts up to 300 changed files; files over 4 MiB are `tooLarge`.
 - Dependencies: chains of at most 4 workspaces, at most 8 direct pins per workspace.
 - `kvarm/guard` reads at most 100 files, 64 KiB per side; anything beyond is reported as uninspected (`complete: false`), and blocks publication only into refs whose branch rule sets `guardCompleteness: "required"` (`409 GUARD_INCOMPLETE`).
@@ -335,7 +335,7 @@ Not built in this version, recorded for after the submission:
 - The collaborative UI pass (new pages and the visual direction); the existing pages are unchanged.
 - WorkOS sign-in (configured by the secrets above; personal access tokens are the supported path today).
 - Flaky-test retry and quarantine, revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
-- Contract capsules, semantic packets, hotspot suggestions, priority credits, resource lifecycle and crash reconciliation after a ref move.
+- Contract capsules, semantic packets, hotspot suggestions, priority credits and resource lifecycle.
 - Advisory low-signal test flags and an auto-updating repository wiki.
 - Adopting Effect TS across the codebase.
 
