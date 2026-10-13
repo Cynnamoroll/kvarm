@@ -27,16 +27,23 @@ async function refSha(env: Env, repo: RepoRow, baseRef: string): Promise<string 
   });
 }
 
-async function failedBuild(env: Env, buildId: string, error: string, outputTail = ''): Promise<void> {
+async function failedBuild(
+  env: Env,
+  buildId: string,
+  error: string,
+  outputTail = '',
+  phases?: Record<string, number>,
+): Promise<void> {
   await env.DB.prepare(
-    `UPDATE environment_builds SET status = 'failed', error = ?2, output_tail = ?3, finished_at = ?4
+    `UPDATE environment_builds SET status = 'failed', error = ?2, output_tail = ?3,
+      phases = COALESCE(?4, phases), finished_at = ?5
       WHERE id = ?1 AND status IN ('queued','building','validating')`,
   )
-    .bind(buildId, error.slice(0, 4096), outputTail.slice(-65_536), Date.now())
+    .bind(buildId, error.slice(0, 4096), outputTail.slice(-65_536), phases ? JSON.stringify(phases) : null, Date.now())
     .run();
 }
 
-async function promoteBuild(
+export async function promoteBuild(
   env: Env,
   build: EnvironmentBuildRow,
   snapshot: { id: string; size: number },
@@ -138,10 +145,25 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
           setupScript: source.environment.setup_script,
           validateScript: source.environment.validate_script,
           envVars: JSON.parse(source.environment.env_vars) as Record<string, string>,
+          allowedHosts: JSON.parse(source.environment.allowed_hosts) as string[],
         });
         if (!result.ok) {
-          outputTail = result.outputTail ?? '';
-          throw new Error(result.error);
+          if (
+            result.status === 502 ||
+            result.status === 503 ||
+            result.code === 'BUILD_IN_PROGRESS' ||
+            result.code === 'SNAPSHOT_MISSING'
+          ) {
+            throw new Error(result.error);
+          }
+          return {
+            ok: false,
+            status: result.status,
+            code: result.code,
+            error: result.error,
+            phases: result.phases ?? {},
+            outputTail: result.outputTail ?? '',
+          };
         }
         return {
           ok: true,
@@ -149,7 +171,21 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
           phases: result.phases,
           outputTail: result.outputTail,
         };
-      })) as Extract<EnvironmentBuilderResult, { ok: true }>;
+      })) as EnvironmentBuilderResult;
+      if (!built.ok) {
+        outputTail = built.outputTail ?? '';
+        await failedBuild(this.env, buildId, built.error, outputTail, built.phases);
+        const pending = await this.env.DB.prepare(
+          'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
+        )
+          .bind(environmentId)
+          .first<{ config_hash: string }>();
+        if (pending) {
+          const reason = pending.config_hash === source.build.config_hash ? 'manual' : 'config';
+          await requestEnvironmentBuild(this.env, environmentId, reason);
+        }
+        return { status: 'failed', buildId, error: built.error };
+      }
       outputTail = built.outputTail;
       const promoted = await step.do('promote-environment-build', RETRY, () =>
         promoteBuild(this.env, source.build, built.snapshot, built.phases, built.outputTail),

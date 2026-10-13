@@ -41,6 +41,8 @@ export interface SandboxRow {
   stopped_at: number | null;
   error: string | null;
   workspace_ref?: string | null;
+  repo_owner?: string;
+  repo_name?: string;
   environment_name?: string;
   owner_login?: string;
   agent_name?: string;
@@ -48,11 +50,15 @@ export interface SandboxRow {
 
 export interface SandboxView {
   id: string;
+  repo: string;
   repoId: string;
   environmentId: string;
+  environmentName: string;
   buildId: string;
   workspaceId: string;
   workspaceRef: string | null;
+  repoDirectory: string;
+  pushRef: string | null;
   ownerUserId: string;
   agentId: string;
   status: SandboxRow['status'];
@@ -87,6 +93,7 @@ export interface SandboxCommandView {
 
 export interface SandboxApprovalView {
   id: string;
+  repo: string;
   sandboxId: string;
   command: string;
   requestedBy: string;
@@ -114,13 +121,18 @@ function iso(value: number | null): string | null {
 }
 
 function sandboxView(row: SandboxRow, extra: Partial<SandboxView> = {}): SandboxView {
+  const workspaceRef = row.workspace_ref ?? null;
   return {
     id: row.id,
+    repo: `${row.repo_owner ?? ''}/${row.repo_name ?? ''}`,
     repoId: row.repo_id,
     environmentId: row.environment_id,
+    environmentName: row.environment_name ?? '',
     buildId: row.build_id,
     workspaceId: row.workspace_id,
-    workspaceRef: row.workspace_ref ?? null,
+    workspaceRef,
+    repoDirectory: repoDirectoryName(row.repo_name ?? ''),
+    pushRef: workspaceRef,
     ownerUserId: row.owner_user_id,
     agentId: row.agent_id,
     status: row.status,
@@ -170,14 +182,23 @@ async function sandboxAgentId(env: Env, actor: Actor, create: boolean): Promise<
 }
 
 function repoDirectory(repo: RepoRow): string {
-  return `/workspace/${repo.name.replace(/[^A-Za-z0-9._-]/g, '-')}`;
+  return repoDirectoryName(repo.name);
 }
+
+function repoDirectoryName(name: string): string {
+  return `/workspace/${name.replace(/[^A-Za-z0-9._-]/g, '-')}`;
+}
+
+const SANDBOX_SELECT = `SELECT s.*, w.ref AS workspace_ref, r.owner_login AS repo_owner,
+       r.name AS repo_name, e.name AS environment_name
+  FROM sandboxes s
+  LEFT JOIN workspaces w ON w.id = s.workspace_id
+  JOIN repos r ON r.id = s.repo_id
+  JOIN environments e ON e.id = s.environment_id`;
 
 async function sandboxRow(env: Env, repoId: string, id: string): Promise<SandboxRow | null> {
   return env.DB.prepare(
-    `SELECT s.*, w.ref AS workspace_ref FROM sandboxes s
-      LEFT JOIN workspaces w ON w.id = s.workspace_id
-      WHERE s.repo_id = ?1 AND s.id = ?2`,
+    `${SANDBOX_SELECT} WHERE s.repo_id = ?1 AND s.id = ?2`,
   )
     .bind(repoId, id)
     .first<SandboxRow>();
@@ -302,7 +323,7 @@ export async function startSandbox(
   if (!input.fresh) {
     if (input.workspace) {
       const candidate = await cx.env.DB.prepare(
-        `SELECT s.*, w.ref AS workspace_ref FROM sandboxes s LEFT JOIN workspaces w ON w.id = s.workspace_id
+        `${SANDBOX_SELECT}
           WHERE s.repo_id = ?1 AND s.workspace_id = ?2 AND s.environment_id = ?3
             AND s.owner_user_id = ?4 AND s.agent_id = ?5 AND s.status IN ('running','sleeping')
           ORDER BY s.last_active_at DESC LIMIT 1`,
@@ -318,7 +339,7 @@ export async function startSandbox(
       }
     } else {
       existing = await cx.env.DB.prepare(
-        `SELECT s.*, w.ref AS workspace_ref FROM sandboxes s LEFT JOIN workspaces w ON w.id = s.workspace_id
+        `${SANDBOX_SELECT}
           WHERE s.repo_id = ?1 AND s.environment_id = ?2 AND s.owner_user_id = ?3 AND s.agent_id = ?4
             AND s.status IN ('running','sleeping') ORDER BY s.last_active_at DESC LIMIT 1`,
       )
@@ -334,6 +355,19 @@ export async function startSandbox(
         startedFrom: 'resume',
         buildOutdated: existing.build_id !== environment.ready_build_id,
         localDiverged: false,
+      }),
+    };
+  }
+  if (existing?.status === 'sleeping') {
+    const woken = await wakeSandbox(cx, existing, ttlHours);
+    if (!woken.ok) return woken;
+    return {
+      ok: true,
+      value: sandboxView(woken.value.row, {
+        resumed: true,
+        startedFrom: 'resume',
+        buildOutdated: existing.build_id !== environment.ready_build_id,
+        localDiverged: woken.value.localDiverged,
       }),
     };
   }
@@ -389,6 +423,7 @@ export async function startSandbox(
     runExpiresAt,
     repoDirectory: repoDirectory(cx.repo),
     repositoryUrl: `${cx.origin}/${cx.repo.owner_login}/${cx.repo.name}.git`,
+    allowedHosts: JSON.parse(environment.allowed_hosts) as string[],
     workspaceRef: workspace.ref,
     baseRef: environment.base_ref,
     token: minted.token,
@@ -436,10 +471,114 @@ interface EnvironmentRow {
   ready_build_id: string | null;
 }
 
-async function ownsSandbox(env: Env, actor: Actor | null, row: SandboxRow): Promise<boolean> {
-  if (!actor || actor.user.id !== row.owner_user_id) return false;
-  const agentId = await sandboxAgentId(env, actor, false);
-  return agentId !== null && agentId === row.agent_id;
+function ownsSandbox(actor: Actor | null, row: SandboxRow): boolean {
+  return Boolean(
+    actor &&
+      actor.user.id === row.owner_user_id &&
+      (!actor.agent || actor.agent.agentId === row.agent_id),
+  );
+}
+
+async function wakeSandbox(
+  cx: SandboxContext,
+  row: SandboxRow,
+  ttlHours = 24,
+): Promise<ServiceResult<{ row: SandboxRow; localDiverged: boolean }>> {
+  if (!cx.actor || !ownsSandbox(cx.actor, row)) return fail(404, 'sandbox not found', 'SANDBOX_NOT_FOUND');
+  if (row.status !== 'sleeping' || !row.agent_id || !row.workspace_ref) {
+    return fail(409, 'sandbox is not ready to wake', 'SANDBOX_NOT_READY');
+  }
+  const [environment, build] = await Promise.all([
+    cx.env.DB.prepare('SELECT * FROM environments WHERE id = ?1 AND repo_id = ?2')
+      .bind(row.environment_id, row.repo_id)
+      .first<EnvironmentRow>(),
+    cx.env.DB.prepare(
+      `SELECT snapshot_id FROM environment_builds
+        WHERE id = ?1 AND environment_id = ?2 AND status IN ('ready','superseded')`,
+    )
+      .bind(row.build_id, row.environment_id)
+      .first<{ snapshot_id: string | null }>(),
+  ]);
+  if (!environment || !build?.snapshot_id) return fail(409, 'sandbox build snapshot is unavailable', 'ENVIRONMENT_NOT_READY');
+  const now = Date.now();
+  const runExpiresAt = now + ttlHours * 60 * 60 * 1000;
+  const expiresAt = now + RETENTION_MS;
+  const minted = await mintSandboxToken(
+    cx.env,
+    cx.actor,
+    cx.repo,
+    row.agent_id,
+    row.workspace_ref,
+    runExpiresAt,
+    row.id,
+  );
+  if (!minted) return fail(409, 'sandbox agent is revoked', 'AGENT_REVOKED');
+  const updated = await cx.env.DB.batch([
+    cx.env.DB.prepare(
+      `UPDATE sandboxes SET status = 'starting', token_id = ?2, expires_at = ?3,
+        run_expires_at = ?4, last_active_at = ?5, error = NULL
+        WHERE id = ?1 AND status = 'sleeping' AND token_id IS ?6`,
+    ).bind(row.id, minted.id, expiresAt, runExpiresAt, now, row.token_id),
+    cx.env.DB.prepare(
+      `UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2)
+        WHERE id = ?1 AND EXISTS (SELECT 1 FROM sandboxes WHERE id = ?3 AND token_id = ?4)`,
+    ).bind(row.token_id, now, row.id, minted.id),
+  ]);
+  if ((updated[0]?.meta?.changes ?? 0) !== 1) {
+    await cx.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
+      .bind(minted.id, Date.now())
+      .run();
+    return fail(409, 'sandbox is already being woken', 'SANDBOX_BUSY');
+  }
+  const provider = sandboxProvider(environment.os);
+  if (!provider) return fail(422, 'only Linux sandboxes are available on Cloudflare', 'OS_UNAVAILABLE');
+  let allowedHosts: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(environment.allowed_hosts);
+    if (Array.isArray(parsed)) allowedHosts = parsed.filter((host): host is string => typeof host === 'string');
+  } catch {
+    allowedHosts = [];
+  }
+  const result = await provider.agentSandbox(cx.env, row.id).start({
+    sandboxId: row.id,
+    environmentId: row.environment_id,
+    buildSnapshotId: build.snapshot_id,
+    sleepSnapshotId: row.sleep_snapshot_id,
+    instance: environment.instance,
+    idleMinutes: environment.idle_minutes,
+    expiresAt,
+    runExpiresAt,
+    repoDirectory: repoDirectory(cx.repo),
+    repositoryUrl: `${cx.origin}/${cx.repo.owner_login}/${cx.repo.name}.git`,
+    allowedHosts,
+    workspaceRef: row.workspace_ref,
+    baseRef: environment.base_ref,
+    token: minted.token,
+    tokenId: minted.id,
+  });
+  if (!rpcSuccess<{ started: true; localDiverged: boolean }>(result)) {
+    const failure = rpcFailure(result)
+      ? result
+      : { status: 503, code: 'CONTAINER_UNAVAILABLE', error: 'sandbox container could not start' };
+    await cx.env.DB.batch([
+      cx.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
+        .bind(minted.id, Date.now()),
+      cx.env.DB.prepare(
+        `UPDATE sandboxes SET status = 'sleeping', token_id = NULL, error = ?2
+          WHERE id = ?1 AND status = 'starting' AND token_id = ?3`,
+      ).bind(row.id, failure.error.slice(0, 1000), minted.id),
+    ]);
+    return fail(failure.status, failure.error, failure.code);
+  }
+  await cx.env.DB.prepare(
+    `UPDATE sandboxes SET status = 'running', sleep_snapshot_id = NULL, last_active_at = ?2
+      WHERE id = ?1 AND status IN ('starting','running')`,
+  )
+    .bind(row.id, Date.now())
+    .run();
+  const current = await sandboxRow(cx.env, cx.repo.id, row.id);
+  if (!current) return fail(500, 'sandbox could not be read after wake', 'SANDBOX_WAKE_FAILED');
+  return { ok: true, value: { row: current, localDiverged: result.value.localDiverged } };
 }
 
 export async function getSandbox(
@@ -473,7 +612,7 @@ export async function listSandboxes(
     cursorId = parts[1]!;
   }
   const rows = await env.DB.prepare(
-    `SELECT s.*, w.ref AS workspace_ref FROM sandboxes s LEFT JOIN workspaces w ON w.id = s.workspace_id
+    `${SANDBOX_SELECT}
       WHERE s.repo_id = ?1 AND (s.created_at < ?2 OR (s.created_at = ?2 AND s.id < ?3))
       ORDER BY s.created_at DESC, s.id DESC LIMIT ?4`,
   )
@@ -498,8 +637,6 @@ export async function listMySandboxes(
   page: { cursor?: string; limit?: number } = {},
 ): Promise<ServiceResult<{ sandboxes: SandboxView[]; nextCursor: string | null }>> {
   if (!actor) return fail(401, 'authentication required', 'UNAUTHENTICATED');
-  const agentId = await sandboxAgentId(env, actor, false);
-  if (!agentId) return { ok: true, value: { sandboxes: [], nextCursor: null } };
   const limit = Math.min(Math.max(Math.trunc(page.limit ?? 50), 1), 100);
   let createdAt = Number.MAX_SAFE_INTEGER;
   let cursorId = '\uffff';
@@ -509,14 +646,19 @@ export async function listMySandboxes(
     createdAt = Number(parts[0]);
     cursorId = parts[1]!;
   }
-  const repoClause = actor.agent ? ' AND s.repo_id = ?5' : '';
+  const agentClause = actor.agent ? ' AND s.agent_id = ?4 AND s.repo_id = ?5' : '';
   const rows = await env.DB.prepare(
-    `SELECT s.*, w.ref AS workspace_ref FROM sandboxes s LEFT JOIN workspaces w ON w.id = s.workspace_id
-      WHERE s.owner_user_id = ?1 AND s.agent_id = ?2
-        AND (s.created_at < ?3 OR (s.created_at = ?3 AND s.id < ?4))${repoClause}
-      ORDER BY s.created_at DESC, s.id DESC LIMIT ?${actor.agent ? 6 : 5}`,
+    `${SANDBOX_SELECT}
+      WHERE s.owner_user_id = ?1
+        AND (s.created_at < ?2 OR (s.created_at = ?2 AND s.id < ?3))${agentClause}
+      ORDER BY s.created_at DESC, s.id DESC LIMIT ?${actor.agent ? 6 : 4}`,
   )
-    .bind(actor.user.id, agentId, createdAt, cursorId, ...(actor.agent ? [actor.agent.repoId, limit + 1] : [limit + 1]))
+    .bind(
+      actor.user.id,
+      createdAt,
+      cursorId,
+      ...(actor.agent ? [actor.agent.agentId, actor.agent.repoId, limit + 1] : [limit + 1]),
+    )
     .all<SandboxRow>();
   const values = rows.results ?? [];
   const more = values.length > limit;
@@ -540,7 +682,7 @@ export async function stopSandbox(
   if (!access.ok) return access;
   const row = await sandboxRow(cx.env, cx.repo.id, id);
   if (!row) return fail(404, 'sandbox not found', 'SANDBOX_NOT_FOUND');
-  if (!(await ownsSandbox(cx.env, cx.actor, row))) return fail(404, 'sandbox not found', 'SANDBOX_NOT_FOUND');
+  if (!ownsSandbox(cx.actor, row)) return fail(404, 'sandbox not found', 'SANDBOX_NOT_FOUND');
   if (row.status === 'stopped') return { ok: true, value: sandboxView(row) };
   const provider = sandboxProvider('linux');
   if (!provider) return fail(422, 'only Linux sandboxes are available on Cloudflare', 'OS_UNAVAILABLE');
@@ -568,7 +710,8 @@ async function authorizeOwner(
   const access = await authorized(cx.env, cx.repo, cx.actor, 'write');
   if (!access.ok) return access;
   const row = await sandboxRow(cx.env, cx.repo.id, id);
-  if (!row || !(await ownsSandbox(cx.env, cx.actor, row))) return fail(404, 'sandbox not found', 'SANDBOX_NOT_FOUND');
+  if (!row) return fail(404, 'sandbox not found', 'SANDBOX_NOT_FOUND');
+  if (!ownsSandbox(cx.actor, row)) return fail(403, 'sandbox is owned by another principal', 'SANDBOX_NOT_OWNED');
   if (row.status === 'stopped' || row.status === 'failed') return fail(410, 'sandbox is stopped', 'SANDBOX_STOPPED');
   return { ok: true, value: row };
 }
@@ -687,7 +830,7 @@ export async function execSandbox(
     approvalId = approved.value.approvalId;
   }
   if (loaded.value.status === 'sleeping') {
-    const resumed = await startSandbox(cx, { environment: loaded.value.environment_id, workspace: loaded.value.workspace_id });
+    const resumed = await wakeSandbox(cx, loaded.value);
     if (!resumed.ok) return resumed;
   }
   const provider = sandboxProvider('linux');
@@ -737,7 +880,7 @@ export async function readSandboxFile(
   const loaded = await authorizeOwner(cx, id);
   if (!loaded.ok) return loaded;
   if (loaded.value.status === 'sleeping') {
-    const resumed = await startSandbox(cx, { environment: loaded.value.environment_id, workspace: loaded.value.workspace_id });
+    const resumed = await wakeSandbox(cx, loaded.value);
     if (!resumed.ok) return resumed;
   }
   const provider = sandboxProvider('linux');
@@ -758,7 +901,7 @@ export async function writeSandboxFile(
   if (!loaded.ok) return loaded;
   if (new TextEncoder().encode(input.content).byteLength > MAX_FILE_BYTES) return fail(413, 'sandbox files are limited to 1 MiB', 'FILE_TOO_LARGE');
   if (loaded.value.status === 'sleeping') {
-    const resumed = await startSandbox(cx, { environment: loaded.value.environment_id, workspace: loaded.value.workspace_id });
+    const resumed = await wakeSandbox(cx, loaded.value);
     if (!resumed.ok) return resumed;
   }
   const result = await sandboxProvider('linux')?.agentSandbox(cx.env, id).writeFile(input);
@@ -815,13 +958,51 @@ export async function listSandboxApprovals(
 ): Promise<ServiceResult<SandboxApprovalView[]>> {
   const access = await authorized(env, repo, actor, 'read');
   if (!access.ok) return access;
-  const rows = await env.DB.prepare('SELECT * FROM sandbox_approvals WHERE repo_id = ?1 ORDER BY created_at DESC LIMIT ?2')
+  const rows = await env.DB.prepare(
+    `SELECT a.*, r.owner_login AS repo_owner, r.name AS repo_name
+       FROM sandbox_approvals a JOIN repos r ON r.id = a.repo_id
+      WHERE a.repo_id = ?1 ORDER BY a.created_at DESC LIMIT ?2`,
+  )
     .bind(repo.id, Math.min(Math.max(Math.trunc(limit), 1), 200))
-    .all<SandboxApprovalView & { sandbox_id: string; requested_by: string; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
+    .all<SandboxApprovalView & { repo_owner: string; repo_name: string; sandbox_id: string; requested_by: string; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
   return {
     ok: true,
     value: (rows.results ?? []).map((row) => ({
       id: row.id,
+      repo: `${row.repo_owner}/${row.repo_name}`,
+      sandboxId: row.sandbox_id,
+      command: row.command,
+      requestedBy: row.requested_by,
+      status: row.status,
+      decidedBy: row.decided_by,
+      decidedAt: iso(row.decided_at),
+      createdAt: new Date(row.created_at).toISOString(),
+      expiresAt: new Date(row.expires_at).toISOString(),
+    })),
+  };
+}
+
+export async function listMyPendingApprovals(
+  env: Env,
+  actor: Actor | null,
+): Promise<ServiceResult<SandboxApprovalView[]>> {
+  if (!actor) return fail(401, 'authentication required', 'UNAUTHENTICATED');
+  if (actor.agent) return fail(403, 'agents cannot list human approvals', 'AGENT_FORBIDDEN');
+  const rows = await env.DB.prepare(
+    `SELECT a.*, r.owner_login AS repo_owner, r.name AS repo_name
+       FROM sandbox_approvals a
+       JOIN sandboxes s ON s.id = a.sandbox_id
+       JOIN repos r ON r.id = a.repo_id
+      WHERE s.owner_user_id = ?1 AND a.status = 'pending' AND a.expires_at > ?2
+      ORDER BY a.created_at DESC LIMIT 100`,
+  )
+    .bind(actor.user.id, Date.now())
+    .all<SandboxApprovalView & { repo_owner: string; repo_name: string; sandbox_id: string; requested_by: string; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
+  return {
+    ok: true,
+    value: (rows.results ?? []).map((row) => ({
+      id: row.id,
+      repo: `${row.repo_owner}/${row.repo_name}`,
       sandboxId: row.sandbox_id,
       command: row.command,
       requestedBy: row.requested_by,
@@ -842,22 +1023,40 @@ export async function decideSandboxApproval(
   if (cx.actor?.agent) return fail(403, 'agents cannot decide sandbox approvals', 'AGENT_FORBIDDEN');
   const access = await authorized(cx.env, cx.repo, cx.actor, 'write');
   if (!access.ok) return access;
+  const sandbox = await cx.env.DB.prepare(
+    `SELECT s.owner_user_id FROM sandbox_approvals a
+       JOIN sandboxes s ON s.id = a.sandbox_id
+      WHERE a.id = ?1 AND a.repo_id = ?2`,
+  )
+    .bind(approvalId, cx.repo.id)
+    .first<{ owner_user_id: string }>();
+  if (!sandbox) return fail(404, 'pending sandbox approval not found', 'APPROVAL_NOT_FOUND');
+  if (sandbox.owner_user_id !== cx.actor!.user.id) {
+    const admin = await resolveRepoAccessAs(cx.env, cx.actor!, cx.repo.owner_login, cx.repo.name, 'admin');
+    if (!admin.ok) return fail(403, 'only the sandbox owner or a repository admin can decide approvals', 'FORBIDDEN');
+  }
   const now = Date.now();
   const status = decision === 'approve' ? 'approved' : 'denied';
-  await cx.env.DB.prepare(
+  const changed = await cx.env.DB.prepare(
     `UPDATE sandbox_approvals SET status = ?3, decided_by = ?4, decided_at = ?5
-      WHERE id = ?1 AND repo_id = ?2 AND status = 'pending' AND expires_at > ?5`,
+      WHERE id = ?1 AND repo_id = ?2 AND status = 'pending' AND expires_at > ?5
+      RETURNING id`,
   )
     .bind(approvalId, cx.repo.id, status, cx.actor!.user.id, now)
-    .run();
-  const row = await cx.env.DB.prepare('SELECT * FROM sandbox_approvals WHERE id = ?1 AND repo_id = ?2')
+    .first<{ id: string }>();
+  if (!changed) return fail(404, 'pending sandbox approval not found', 'APPROVAL_NOT_FOUND');
+  const row = await cx.env.DB.prepare(
+    `SELECT a.*, r.owner_login AS repo_owner, r.name AS repo_name FROM sandbox_approvals a
+       JOIN repos r ON r.id = a.repo_id WHERE a.id = ?1 AND a.repo_id = ?2`,
+  )
     .bind(approvalId, cx.repo.id)
-    .first<SandboxApprovalView & { sandbox_id: string; requested_by: string; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
+    .first<SandboxApprovalView & { repo_owner: string; repo_name: string; sandbox_id: string; requested_by: string; decided_by: string | null; decided_at: number | null; created_at: number; expires_at: number }>();
   if (!row || row.status !== status) return fail(404, 'pending sandbox approval not found', 'APPROVAL_NOT_FOUND');
   return {
     ok: true,
     value: {
       id: row.id,
+      repo: `${row.repo_owner}/${row.repo_name}`,
       sandboxId: row.sandbox_id,
       command: row.command,
       requestedBy: row.requested_by,

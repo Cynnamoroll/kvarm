@@ -15,6 +15,7 @@ export interface EnvironmentBuildContainerRequest {
   setupScript: string;
   validateScript: string;
   envVars: Record<string, string>;
+  allowedHosts: string[];
 }
 
 export type EnvironmentBuilderResult =
@@ -49,7 +50,9 @@ export class EnvironmentBuilder extends DurableObject<Env> {
         entrypoint: ENTRYPOINT,
         enableInternet: false,
       });
-      const egress = this.ctx.exports.SandboxEgress({ props: { environmentId: request.environmentId, mode: 'build' } });
+      const egress = this.ctx.exports.SandboxEgress({
+        props: { environmentId: request.environmentId, allowedHosts: request.allowedHosts, mode: 'build' },
+      });
       await container.interceptOutboundHttp('*', egress);
       await container.interceptOutboundHttps('*', egress);
       const snapshot = await this.env.SNAPSHOTS.get(request.snapshotKey);

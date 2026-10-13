@@ -1269,7 +1269,7 @@ export const OPERATIONS = Object.freeze([
     name: 'start_sandbox',
     command: ['sandbox', 'start'],
     family: 'sandboxes',
-    description: 'Start or resume the caller principal’s sandbox; fresh=true forces a new sandbox.',
+    description: 'Resume the caller principal’s running or sleeping sandbox for this environment, or start one. Set fresh=true to force a separate sandbox.',
     method: 'POST',
     path: '/repos/{repo}/sandboxes',
     params: [
@@ -1294,7 +1294,7 @@ export const OPERATIONS = Object.freeze([
     name: 'list_my_sandboxes',
     command: ['sandbox', 'mine'],
     family: 'sandboxes',
-    description: 'List the authenticated caller principal’s sandboxes across repositories.',
+    description: 'List human-owned sandboxes across the owner’s agents; agent credentials see only their own repository and agent.',
     method: 'GET',
     path: '/sandboxes/mine',
     params: [LIMIT(100), CURSOR],

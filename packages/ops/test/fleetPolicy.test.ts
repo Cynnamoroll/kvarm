@@ -22,12 +22,17 @@ function fakeExec(exitCode = 0, stdout = '', stderr = '') {
 class FakeBuildContainer implements BuildContainerLike {
   calls: Array<{ cmd: string[]; env?: Record<string, string>; stdin?: ReadableStream }> = [];
   snapshotCalls = 0;
+  setupFails = false;
   validateFails = false;
+  output = '';
 
   async exec(cmd: string[], options?: { cwd?: string; env?: Record<string, string>; stdin?: ReadableStream }) {
     this.calls.push({ cmd, env: options?.env, stdin: options?.stdin });
-    const fail = this.validateFails && cmd.some((part) => part.includes('validate marker'));
-    return fakeExec(fail ? 1 : 0, '', fail ? 'validation failed' : '');
+    const text = cmd.join(' ');
+    const setupFailure = this.setupFails && text.includes('setup marker');
+    const validateFailure = this.validateFails && text.includes('validate marker');
+    const failed = setupFailure || validateFailure;
+    return fakeExec(failed ? 1 : 0, this.output, setupFailure ? 'setup failed' : validateFailure ? 'validation failed' : '');
   }
 
   async snapshotContainer() {
@@ -54,13 +59,12 @@ describe('fleet policy helpers', () => {
 
   it('runs extraction, git bootstrap, setup, validation, then snapshots without credentials', async () => {
     const container = new FakeBuildContainer();
-    const secret = 'kvarm_agt_secret-must-not-enter-container';
     const result = await runEnvironmentBuild(container, {
       snapshotTar: readable('snapshot tar'),
       repoDirectory: '/workspace/demo',
       setupScript: 'setup marker',
       validateScript: 'validate marker',
-      envVars: { MODE: 'test' },
+      envVars: { MODE: 'test', PUBLIC_SETTING: 'safe-value' },
     });
     expect(result.ok).toBe(true);
     expect(container.calls.map((call) => call.cmd.join(' '))).toEqual([
@@ -75,13 +79,17 @@ describe('fleet policy helpers', () => {
     ]);
     expect(container.snapshotCalls).toBe(1);
     for (const call of container.calls) {
-      expect(JSON.stringify(call.cmd)).not.toContain(secret);
-      expect(JSON.stringify(call.env ?? {})).not.toContain(secret);
+      const argumentsAndEnvironment = `${JSON.stringify(call.cmd)}${JSON.stringify(call.env ?? {})}`;
+      expect(argumentsAndEnvironment).not.toMatch(/kvarm_(?:agt|pat)_/);
       if (call.stdin) {
         const streamText = await new Response(call.stdin).text();
-        expect(streamText).not.toContain(secret);
+        expect(streamText).not.toMatch(/kvarm_(?:agt|pat)_/);
       }
     }
+    expect(container.calls.find((call) => call.cmd.includes('setup marker'))?.env).toEqual({
+      MODE: 'test',
+      PUBLIC_SETTING: 'safe-value',
+    });
   });
 
   it('fails validation without saving a snapshot', async () => {
@@ -97,6 +105,36 @@ describe('fleet policy helpers', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('validation failed');
     expect(container.snapshotCalls).toBe(0);
+  });
+
+  it('stops after a setup failure without running validation or snapshotting', async () => {
+    const container = new FakeBuildContainer();
+    container.setupFails = true;
+    const result = await runEnvironmentBuild(container, {
+      snapshotTar: readable('snapshot tar'),
+      repoDirectory: '/workspace/demo',
+      setupScript: 'setup marker',
+      validateScript: 'validate marker',
+      envVars: { MODE: 'test' },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('setup failed');
+    expect(container.calls.some((call) => call.cmd.includes('validate marker'))).toBe(false);
+    expect(container.snapshotCalls).toBe(0);
+  });
+
+  it('bounds the captured build output tail', async () => {
+    const container = new FakeBuildContainer();
+    container.output = 'x'.repeat(70 * 1024);
+    const result = await runEnvironmentBuild(container, {
+      snapshotTar: readable('snapshot tar'),
+      repoDirectory: '/workspace/demo',
+      setupScript: '',
+      validateScript: '',
+      envVars: { MODE: 'test' },
+    });
+    expect(result.ok).toBe(true);
+    expect(new TextEncoder().encode(result.outputTail).byteLength).toBeLessThanOrEqual(64 * 1024);
   });
 
   it('bounds output by UTF-8 bytes', () => {

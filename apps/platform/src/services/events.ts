@@ -372,7 +372,7 @@ const changeHooksEffect: PushEffect = {
   },
 };
 
-const environmentBuildEffect: PushEffect = {
+export const environmentBuildEffect: PushEffect = {
   name: 'environment-builds',
   async run(ctx) {
     if (!ctx.event.ref.startsWith(BRANCH_PREFIX)) return { state: 'skipped', detail: 'not a branch' };

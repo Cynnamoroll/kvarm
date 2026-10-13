@@ -66,7 +66,7 @@ fleetApi.post('/repos/:owner/:repo/environments', async (c) => {
   if ('denied' in route) return route.denied;
   const input = await body(c);
   if (input === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
-  const result = await environments.createEnvironment(route.envContext, input);
+  const result = await environments.createEnvironment(route.envContext, input as environments.CreateEnvironmentInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value, 201);
 });
@@ -84,7 +84,7 @@ fleetApi.patch('/repos/:owner/:repo/environments/:id', async (c) => {
   if ('denied' in route) return route.denied;
   const input = await body(c);
   if (input === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
-  const result = await environments.updateEnvironment(route.envContext, c.req.param('id'), input);
+  const result = await environments.updateEnvironment(route.envContext, c.req.param('id'), input as environments.UpdateEnvironmentInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value);
 });

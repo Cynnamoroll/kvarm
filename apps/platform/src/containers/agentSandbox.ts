@@ -17,6 +17,7 @@ export interface AgentSandboxStart {
   runExpiresAt: number;
   repoDirectory: string;
   repositoryUrl: string;
+  allowedHosts: string[];
   workspaceRef: string;
   baseRef: string;
   token: string;
@@ -34,6 +35,7 @@ interface SandboxState {
   runExpiresAt: number;
   repoDirectory: string;
   repositoryUrl: string;
+  allowedHosts: string[];
   workspaceRef: string;
   baseRef: string;
   tokenId: string;
@@ -74,6 +76,7 @@ export class AgentSandbox extends DurableObject<Env> {
         runExpiresAt: request.runExpiresAt,
         repoDirectory: request.repoDirectory,
         repositoryUrl: request.repositoryUrl,
+        allowedHosts: request.allowedHosts,
         workspaceRef: request.workspaceRef,
         baseRef: request.baseRef,
         tokenId: request.tokenId,
@@ -240,13 +243,7 @@ export class AgentSandbox extends DurableObject<Env> {
       this.ctx.storage.get<string>(TOKEN_KEY),
     ]);
     if (!state || !token || state.runExpiresAt <= Date.now()) return null;
-    const row = await this.env.DB.prepare(
-      `SELECT 1 AS active FROM agent_tokens t JOIN agents a ON a.id = t.agent_id
-        WHERE t.id = ?1 AND t.revoked_at IS NULL AND t.expires_at > ?2 AND a.revoked_at IS NULL`,
-    )
-      .bind(state.tokenId, Date.now())
-      .first<{ active: number }>();
-    return row ? token : null;
+    return token;
   }
 
   async alarm(): Promise<void> {
@@ -315,10 +312,17 @@ export class AgentSandbox extends DurableObject<Env> {
       entrypoint: ENTRYPOINT,
       enableInternet: false,
     });
-    const egress = this.ctx.exports.SandboxEgress({ props: { sandboxId: state.sandboxId, mode: 'sandbox' } });
+    const egress = this.ctx.exports.SandboxEgress({
+      props: {
+        sandboxId: state.sandboxId,
+        environmentId: state.environmentId,
+        allowedHosts: state.allowedHosts,
+        mode: 'sandbox',
+      },
+    });
     await container.interceptOutboundHttp('*', egress);
     await container.interceptOutboundHttps('*', egress);
-    await container.setInactivityTimeout(state.idleMinutes * 60_000);
+    await container.setInactivityTimeout(Math.min((state.idleMinutes + 15) * 60_000, 6 * 60 * 60_000));
     await container.exec([
       'cp',
       '/etc/cloudflare/certs/cloudflare-containers-ca.crt',
@@ -347,10 +351,18 @@ export class AgentSandbox extends DurableObject<Env> {
       if (error) return error;
     }
     const remoteRef = `refs/remotes/origin/${state.workspaceRef.replace(/^refs\/heads\//, '')}`;
+    const localBranch = state.workspaceRef.replace(/^refs\/heads\//, '');
     const fetch = await git(['git', 'fetch', '--depth=1', 'origin', `${state.workspaceRef}:${remoteRef}`]);
     if (fetch) return fetch;
-    const checkout = await git(['git', 'checkout', '--force', '-B', 'sandbox', remoteRef]);
-    return checkout ?? { ok: true, value: true };
+    for (const args of [
+      ['git', 'checkout', '--force', '-B', localBranch, remoteRef],
+      ['git', 'branch', '--set-upstream-to', `origin/${localBranch}`, localBranch],
+      ['git', 'config', 'push.default', 'upstream'],
+    ]) {
+      const error = await git(args);
+      if (error) return error;
+    }
+    return { ok: true, value: true };
   }
 
   private async syncWorkspace(container: Container, state: SandboxState): Promise<boolean> {
@@ -375,6 +387,9 @@ export class AgentSandbox extends DurableObject<Env> {
     const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
     if (!state || state.expiresAt <= Date.now()) {
       return { ok: false, status: 410, code: 'SANDBOX_STOPPED', error: 'sandbox is stopped or expired' };
+    }
+    if (!(await this.ctx.storage.get<string>(TOKEN_KEY))) {
+      return { ok: false, status: 409, code: 'SANDBOX_SLEEPING', error: 'sandbox must be woken before use' };
     }
     const container = this.ctx.container;
     if (!container) return { ok: false, status: 503, code: 'CONTAINER_UNAVAILABLE', error: 'no container runtime is bound to AgentSandbox in this deployment' };

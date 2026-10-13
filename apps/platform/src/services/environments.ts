@@ -129,6 +129,27 @@ export interface EnvironmentContext {
   actor: Actor | null;
 }
 
+export interface EnvironmentInput {
+  name?: string;
+  os?: string;
+  baseRef?: string;
+  instance?: string;
+  setupScript?: string;
+  validateScript?: string;
+  envVars?: Record<string, string>;
+  allowedHosts?: string[];
+  commandPolicy?: { deny?: string[]; approve?: string[] };
+  rebuildPaths?: string[];
+  maxBuildAgeHours?: number;
+  idleMinutes?: number;
+}
+
+export interface CreateEnvironmentInput extends EnvironmentInput {
+  name: string;
+}
+
+export type UpdateEnvironmentInput = EnvironmentInput;
+
 export interface EnvironmentBuildRequest {
   environmentId: string;
   buildId: string;
@@ -392,7 +413,7 @@ export async function getEnvironment(
 
 export async function createEnvironment(
   cx: EnvironmentContext,
-  input: unknown,
+  input: CreateEnvironmentInput,
 ): Promise<ServiceResult<{ environment: EnvironmentView; build: EnvironmentBuildView }>> {
   if (!cx.actor) return fail(401, 'authentication required', 'UNAUTHENTICATED');
   if (cx.actor.agent) return fail(403, 'agent credentials cannot manage environments', 'AGENT_FORBIDDEN');
@@ -459,7 +480,7 @@ export async function createEnvironment(
 export async function updateEnvironment(
   cx: EnvironmentContext,
   id: string,
-  input: unknown,
+  input: UpdateEnvironmentInput,
 ): Promise<ServiceResult<{ environment: EnvironmentView; build: EnvironmentBuildView | null }>> {
   if (!cx.actor) return fail(401, 'authentication required', 'UNAUTHENTICATED');
   if (cx.actor.agent) return fail(403, 'agent credentials cannot manage environments', 'AGENT_FORBIDDEN');
