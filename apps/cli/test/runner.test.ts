@@ -337,6 +337,91 @@ describe('kvarm runner', () => {
     expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
   });
 
+  it('trims a summary whose command alone exceeds the budget, before any output', async () => {
+    const sha = 'c'.repeat(40);
+    const command = `echo ${'x'.repeat(70_000)}`;
+    let report: any;
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/claim')) {
+        return Response.json({ job: { id: 'job-cmd', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 } });
+      }
+      if (path.endsWith('/report')) {
+        report = init?.body ? JSON.parse(String(init.body)) : {};
+        return Response.json({ run: { status: report.conclusion } });
+      }
+      return Response.json({});
+    };
+
+    const result = await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha };
+      },
+      execute: async () => ({ code: 0, stdout: 'out\n', stderr: '', timedOut: false, durationMs: 3 }),
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'command-trim-work'),
+    });
+
+    expect(result).toEqual({ claimed: 1, reported: 1 });
+    expect(report.summary.command).not.toBe(command);
+    expect(report.summary.command).toMatch(/…\[truncated\]$/);
+    // The command is display metadata: it is cut first, leaving the output whole.
+    expect(report.summary.stdout).toBe('out\n');
+    expect(report.summary.stderr).toBe('');
+    expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
+  });
+
+  it('still fits the report when neither an oversized command nor its output fits alone', async () => {
+    const sha = '4'.repeat(40);
+    const command = `echo ${'y'.repeat(70_000)}`;
+    let report: any;
+    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/claim')) {
+        return Response.json({ job: { id: 'job-both', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 } });
+      }
+      if (path.endsWith('/report')) {
+        report = init?.body ? JSON.parse(String(init.body)) : {};
+        return Response.json({ run: { status: report.conclusion } });
+      }
+      return Response.json({});
+    };
+
+    const result = await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo',
+      once: true,
+      apiFetch,
+      checkoutFn: async (o: any) => {
+        mkdirSync(o.dir, { recursive: true });
+        return { source: 'snapshot' as const, sha };
+      },
+      execute: async () => ({ code: 0, stdout: '😀'.repeat(16_500), stderr: '', timedOut: false, durationMs: 3 }),
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'command-both-work'),
+    });
+
+    expect(result).toEqual({ claimed: 1, reported: 1 });
+    expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
+    // The command is display metadata: it is the one cut to the bare marker
+    // so the oversized output keeps the largest share of the budget.
+    expect(report.summary.command).toBe('…[truncated]');
+    expect(report.summary.stdout).toMatch(/^(?:😀)*\n\[output truncated\]\n$/u);
+  });
+
   it('grows the idle claim delay from 2 s to a 10 s cap', async () => {
     const { idleDelayMs } = await import('../src/runner.js');
     expect([0, 1, 2, 3, 4, 5, 12].map((consecutive) => idleDelayMs(consecutive))).toEqual([
@@ -630,9 +715,8 @@ describe('kvarm runner', () => {
       const claims: string[] = [];
       let jobClaimed = false;
       const stderr: string[] = [];
-      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const apiFetch = async (input: string | URL | Request) => {
         const path = new URL(String(input)).pathname;
-        const body = init?.body ? JSON.parse(String(init.body)) : {};
         if (path.endsWith('/claim')) {
           if (!jobClaimed) {
             jobClaimed = true;

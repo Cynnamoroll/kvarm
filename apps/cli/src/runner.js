@@ -24,6 +24,8 @@ export { executeShell } from './executor.js';
 const SUMMARY_SERVER_LIMIT = 64 * 1024;
 const SUMMARY_SAFETY_MARGIN = 1024;
 const SUMMARY_LIMIT = SUMMARY_SERVER_LIMIT - SUMMARY_SAFETY_MARGIN;
+/** Marks a command cut to fit the summary budget; a command is display metadata, unlike the output fields. */
+const COMMAND_TRUNCATED = '…[truncated]';
 const IDLE_MIN_MS = 2_000;
 const IDLE_MAX_MS = 10_000;
 /** A claim that failed this way is retried, doubling to this cap: the runner is a long-lived daemon and no claim failure is made better by dying. */
@@ -42,23 +44,31 @@ function jsonBytes(value) {
 }
 
 /**
- * Trim one output field as far as necessary while retaining a marker.
- * Measuring the complete serialized summary accounts for JSON escaping too.
+ * Trim one field as far as necessary while retaining a marker. Measuring
+ * the complete serialized summary accounts for JSON escaping too. A field
+ * whose whole value cannot bring the summary under the limit is restored
+ * (unless `forced`): cutting it would only lose content, and a later field
+ * may be the one whose cut fits.
  * @param {Record<string, unknown>} summary
- * @param {'stdout'|'stderr'} field
+ * @param {'command'|'stdout'|'stderr'} field
+ * @param {string} marker
+ * @param {boolean} [forced]
  */
-function trimSummaryField(summary, field) {
+function trimSummaryField(summary, field, marker = TRUNCATED, forced = false) {
   const original = typeof summary[field] === 'string' ? summary[field] : '';
   if (!original) return;
   const points = [...original];
-  summary[field] = TRUNCATED;
-  if (jsonBytes(summary) > SUMMARY_LIMIT) return;
+  summary[field] = marker;
+  if (jsonBytes(summary) > SUMMARY_LIMIT) {
+    if (!forced) summary[field] = original;
+    return;
+  }
   let low = 0;
   let high = points.length;
   let best = '';
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = `${points.slice(0, middle).join('')}${TRUNCATED}`;
+    const candidate = `${points.slice(0, middle).join('')}${marker}`;
     summary[field] = candidate;
     if (jsonBytes(summary) <= SUMMARY_LIMIT) {
       best = candidate;
@@ -67,15 +77,32 @@ function trimSummaryField(summary, field) {
       high = middle - 1;
     }
   }
-  summary[field] = best || TRUNCATED;
+  summary[field] = best || marker;
 }
 
-/** @template {Record<string, unknown>} T @param {T} summary @returns {T} */
+/**
+ * Fits a summary under the report budget. The command is display metadata
+ * and is tried first, so an oversized claim can never make the report
+ * unshrinkable; the outputs follow. A second, forced pass guarantees a fit,
+ * because the markers alone sit far under the limit.
+ * @template {Record<string, unknown>} T
+ * @param {T} summary
+ * @returns {T}
+ */
 function boundedSummary(summary) {
   if (jsonBytes(summary) <= SUMMARY_LIMIT) return summary;
   const result = { ...summary };
-  trimSummaryField(result, 'stdout');
-  if (jsonBytes(result) > SUMMARY_LIMIT) trimSummaryField(result, 'stderr');
+  const order = /** @type {Array<['command'|'stdout'|'stderr', string]>} */ ([
+    ['command', COMMAND_TRUNCATED],
+    ['stdout', TRUNCATED],
+    ['stderr', TRUNCATED],
+  ]);
+  for (const forced of [false, true]) {
+    for (const [field, marker] of order) {
+      trimSummaryField(result, field, marker, forced);
+      if (jsonBytes(result) <= SUMMARY_LIMIT) return /** @type {T} */ (result);
+    }
+  }
   return /** @type {T} */ (result);
 }
 
