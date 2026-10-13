@@ -421,6 +421,8 @@ describe('kvarm runner', () => {
       pat: 'p',
       repo: 'alice/demo',
       apiFetch,
+      // The jobs carry no provenance; without host trust a runner with docker reachable would run them in containers.
+      ...HOST_TRUSTED,
       drainUntilEmpty: true,
       checkoutFn: async (o: any) => {
         mkdirSync(o.dir, { recursive: true });
