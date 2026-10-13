@@ -65,22 +65,17 @@ export async function findOrCreateUser(env: Env, session: SessionUser): Promise<
     const login = attempt === 0 ? base : `${base}-${attempt + 1}`;
     try {
       const id = crypto.randomUUID();
-      const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>();
-      const isAdmin = (count?.n ?? 0) === 0;
-      await env.DB.prepare(
-        'INSERT INTO users (id, workos_user_id, login, email, name, avatar_url, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?',
+      // The bootstrap admin is granted inside the INSERT itself: D1
+      // serializes writes, so of two concurrent first sign-ins only the one
+      // that inserts first sees an empty users table. A count-then-insert
+      // read could grant the instance two admins.
+      const inserted = await env.DB.prepare(
+        `INSERT INTO users (id, workos_user_id, login, email, name, avatar_url, is_admin, created_at)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, NOT EXISTS (SELECT 1 FROM users), ?7
+         RETURNING is_admin`,
       )
-        .bind(
-          id,
-          session.workosUserId,
-          login,
-          session.email,
-          session.name,
-          session.avatarUrl,
-          isAdmin ? 1 : 0,
-          now,
-        )
-        .run();
+        .bind(id, session.workosUserId, login, session.email, session.name, session.avatarUrl, now)
+        .first<{ is_admin: number }>();
       return {
         id,
         workos_user_id: session.workosUserId,
@@ -88,7 +83,7 @@ export async function findOrCreateUser(env: Env, session: SessionUser): Promise<
         email: session.email,
         name: session.name,
         avatar_url: session.avatarUrl,
-        is_admin: isAdmin,
+        is_admin: (inserted?.is_admin ?? 0) === 1,
         created_at: now,
       };
     } catch (err) {
