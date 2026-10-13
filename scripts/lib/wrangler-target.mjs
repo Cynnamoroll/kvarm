@@ -62,6 +62,52 @@ export function parseJsonc(text) {
   return JSON.parse(out);
 }
 
+/**
+ * Finds object keys that appear twice in the same object of a JSONC text.
+ * JSON.parse (and parseJsonc) keep the last one and report nothing, which
+ * silently dropped the per-minute cron when a second "triggers" key was added.
+ * Returns the paths of the repeated keys, e.g. ["triggers", "vars.A"].
+ * Skips comments and strings like parseJsonc does; trailing commas are harmless.
+ */
+export function findDuplicateKeys(text) {
+  /** @type {string[]} */
+  const dupes = [];
+  /** @type {{ array: boolean, keys: Set<string>, path: string, key: string | null }[]} */
+  const stack = [];
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    const frame = stack[stack.length - 1];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      let k = j + 1;
+      while (k < text.length && /\s/.test(text[k] ?? '')) k++;
+      if (frame && !frame.array && text[k] === ':') {
+        const key = JSON.parse(text.slice(i, j + 1));
+        if (frame.keys.has(key)) dupes.push(frame.path ? `${frame.path}.${key}` : key);
+        frame.keys.add(key);
+        frame.key = key;
+      }
+      i = j + 1;
+    } else if (ch === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+    } else if (ch === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 2;
+    } else if (ch === '{' || ch === '[') {
+      let path = '';
+      if (frame) path = frame.array ? `${frame.path}[]` : frame.path ? `${frame.path}.${frame.key}` : (frame.key ?? '');
+      stack.push({ array: ch === '[', keys: new Set(), path, key: null });
+      i++;
+    } else {
+      if (ch === '}' || ch === ']') stack.pop();
+      i++;
+    }
+  }
+  return dupes;
+}
+
 /** Reads KEY=VALUE lines (optional `export `, quotes, # comments). */
 export function parseEnvFile(text) {
   /** @type {Record<string, string>} */

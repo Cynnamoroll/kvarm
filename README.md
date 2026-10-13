@@ -181,7 +181,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    npx wrangler secret put WEBHOOK_SECRET_KEY        # a random value of 32+ characters, e.g. openssl rand -hex 32
    ```
 
-   The deploy also registers the Worker's once-a-minute cron trigger, which enqueues webhook deliveries recorded on request paths and prunes the delivery log.
+   The deploy also registers the Worker's two cron triggers (one `triggers` key in `wrangler.jsonc`; the Worker runs the job each expression is for). The once-a-minute trigger enqueues webhook deliveries recorded on request paths and prunes the delivery log; the 6-hour trigger (`0 */6 * * *`) runs the fleet sweeps (stale-environment rebuilds, failed-build retries, sandbox expiry).
 
 8. **Bootstrap admin and token.** `scripts/mint-pat.mjs` creates the user (non-admin) if the login is new, inserts a `kvarm_pat_` token row into remote D1 and writes the plaintext token only to a gitignored env file (it refuses any other file and prints only the token prefix). The second command makes that user the instance admin (needed for the `?nocache=1` compare bypass and the Container CI runner).
 
