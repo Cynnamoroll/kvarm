@@ -59,6 +59,20 @@ describe('classifyFile tags', () => {
     expect(tags(change('src/app.ts', { status: 'removed', newHash: null, newMode: null }))).not.toContain('test-deletion');
   });
 
+  it('tags a test renamed to a non-test path as test-deletion, matching kvarm/guard', () => {
+    expect(
+      tags(change('lib/app.js', { status: 'renamed', oldPath: 'tests/app.test.js', oldHash: H1, newHash: H2 })),
+    ).toContain('test-deletion');
+    // Renames that stay inside the test tree are not deletions.
+    expect(
+      tags(change('test/app.test.js', { status: 'renamed', oldPath: 'tests/app.test.js', oldHash: H1, newHash: H1 })),
+    ).not.toContain('test-deletion');
+    // A non-test path gaining an oldPath is not a deletion either.
+    expect(
+      tags(change('lib/app.js', { status: 'renamed', oldPath: 'src/app.js', oldHash: H1, newHash: H2 })),
+    ).not.toContain('test-deletion');
+  });
+
   it('tags removed or emptied test cases inside a modified test file', () => {
     const before = "describe('x', () => {\n  it('a', () => {});\n  it('b', () => {});\n  test('c', () => {});\n});\n";
     const fewer = "describe('x', () => {\n  it('a', () => {});\n});\n";

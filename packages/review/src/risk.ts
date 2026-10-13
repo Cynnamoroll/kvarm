@@ -126,6 +126,10 @@ export function needsContent(c: RiskChange): { old: boolean; new: boolean } {
 }
 
 function testDeletion(c: RiskChange, content: RiskContent): { before: number; after: number } | boolean {
+  // A test file moved to a non-test path is a deletion of the test, whatever
+  // edits the move carries: kvarm/guard judges the same change a failure
+  // (ci-gaming/test-deleted), and the rating must not understate it.
+  if (c.oldPath !== undefined && isTestPath(c.oldPath) && !isTestPath(c.path)) return true;
   if (!isTestPath(c.path)) return false;
   if (c.status === 'removed') return true;
   if (!contentChanged(c) || typeof content.oldText !== 'string' || typeof content.newText !== 'string') return false;
