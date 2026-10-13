@@ -1,8 +1,8 @@
 /**
  * Per-file risk classification and the change-level rating. Pure and
  * deterministic: the same inputs always produce byte-identical output,
- * independent of input order. Rules, weights and thresholds are documented
- * in library/api.md ("Risk rules"); keep the two in sync.
+ * independent of input order. packages/review/test/risk.test.ts pins the
+ * rules, weights and thresholds; change them together.
  */
 
 import { byteOrder, countTestCases, dependencyNames, hasGeneratedMarker, isWhitespaceOnlyChange } from './content';

@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import {
   PLACEHOLDER_D1_DATABASE_ID,
   parseEnvFile,
+  localD1Args,
   parseJsonc,
   remoteD1Args,
   resolveSettings,
@@ -105,6 +106,15 @@ describe('remoteD1Args', () => {
     const args = remoteD1Args('SELECT 1');
     expect(args[0]).toBe(`${ROOT}scripts/wrangler-target.mjs`);
     expect(args.slice(1)).toEqual(['d1', 'execute', 'DB', '--remote', '--json', '--command', 'SELECT 1']);
+  });
+});
+
+describe('localD1Args', () => {
+  it('runs a D1 statement against the local dev database of wrangler.dev.jsonc, never a remote one', () => {
+    const args = localD1Args('SELECT 1');
+    expect(args[0]).toMatch(/node_modules\/wrangler\/bin\/wrangler\.js$/);
+    expect(args.slice(1)).toEqual(['d1', 'execute', 'DB', '--local', '-c', 'wrangler.dev.jsonc', '--json', '--command', 'SELECT 1']);
+    expect(args).not.toContain('--remote');
   });
 });
 

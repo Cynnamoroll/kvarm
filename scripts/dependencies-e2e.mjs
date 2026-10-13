@@ -27,7 +27,7 @@
  *             VAL-CLI-001/002/003/005)
  *
  *   set -a; . ./.env.local; set +a
- *   node scripts/dependencies-e2e.mjs [--keep] [--only pins,stale,...] [--api-doc <library/api.md>]
+ *   node scripts/dependencies-e2e.mjs [--keep] [--only pins,stale,...] [--api-doc <registry table .md>]
  * Tokens are read by NAME and never printed. Git runs with
  * `-c credential.helper=`, GIT_TERMINAL_PROMPT=0 and a secret-free
  * GIT_ASKPASS helper; CLI runs get stdin closed. Exit 0 only when every
@@ -657,9 +657,9 @@ await scenario('cli', async (env) => {
     const missing = OPERATIONS.filter((op) => documented.get(op.name) !== op.command.join(' ')).map((op) => op.name);
     const extra = rows.filter(([n]) => !OPERATIONS.some((op) => op.name === n)).map(([n]) => n);
     console.log(`registry of record ${doc}: ${rows.length} rows; missing/mismatched ${missing.join(',') || 'none'}; undocumented extras ${extra.join(',') || 'none'}`);
-    check('VAL-CLI-001', 'library/api.md documents every command with its MCP tool, and nothing else', missing.length === 0 && extra.length === 0 && rows.length === OPERATIONS.length);
+    check('VAL-CLI-001', 'the --api-doc registry table documents every command with its MCP tool, and nothing else', missing.length === 0 && extra.length === 0 && rows.length === OPERATIONS.length);
   } else {
-    console.log('(--api-doc not given: skipping the library/api.md comparison)');
+    console.log('(--api-doc not given: skipping the registry table comparison)');
   }
 });
 

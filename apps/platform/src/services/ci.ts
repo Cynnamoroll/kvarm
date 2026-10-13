@@ -8,30 +8,10 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { withLazyRepo } from '../artifacts/repo';
 import { CHECK_RUN_COLUMNS, checkRunView, type CheckRunRow, type CheckRunView } from './checks';
+import { CI_CONFIG_PATH, CI_LIMITS, parseCiConfig, type CiConfig } from './ciConfig';
 
-export const CI_CONFIG_PATH = '.kvarm/ci.json';
 export const CI_LEASE_SECONDS = 120;
-export const CI_LIMITS = {
-  jobs: 16,
-  name: 100,
-  command: 8 * 1024,
-  configBytes: 64 * 1024,
-  summaryBytes: 64 * 1024,
-  minTimeoutSeconds: 1,
-  maxTimeoutSeconds: 3_600,
-  defaultTimeoutSeconds: 900,
-} as const;
-
-interface CiJobConfig {
-  name: string;
-  run: string;
-  required: boolean;
-  timeoutSeconds: number;
-}
-
-export interface CiConfig {
-  jobs: CiJobConfig[];
-}
+export { CI_CONFIG_PATH, CI_LIMITS, type CiConfig } from './ciConfig';
 
 /**
  * Parsed configs keyed by (Artifacts repo, commit). A commit's config never
@@ -43,54 +23,12 @@ export type CiConfigMemo = Map<string, Promise<ServiceResult<CiConfig | null>>>;
 type Fail = Extract<ServiceResult<never>, { ok: false }>;
 const fail = (status: number, error: string, code: string): Fail => ({ ok: false, status, error, code });
 
-function parseConfig(text: string): ServiceResult<CiConfig> {
-  if (new TextEncoder().encode(text).length > CI_LIMITS.configBytes) return fail(422, `${CI_CONFIG_PATH} is too large`, 'CI_CONFIG_TOO_LARGE');
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return fail(422, `${CI_CONFIG_PATH} must be valid JSON`, 'INVALID_CI_CONFIG');
-  }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !Array.isArray((raw as { jobs?: unknown }).jobs)) {
-    return fail(422, `${CI_CONFIG_PATH} must contain a jobs array`, 'INVALID_CI_CONFIG');
-  }
-  const list = (raw as { jobs: unknown[] }).jobs;
-  if (list.length > CI_LIMITS.jobs) return fail(422, `${CI_CONFIG_PATH} may contain at most ${CI_LIMITS.jobs} jobs`, 'TOO_MANY_CI_JOBS');
-  const names = new Set<string>();
-  const jobs: CiJobConfig[] = [];
-  for (const item of list) {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) return fail(422, 'each CI job must be an object', 'INVALID_CI_JOB');
-    const j = item as Record<string, unknown>;
-    if (typeof j.name !== 'string' || j.name.trim().length === 0 || j.name.trim().length > CI_LIMITS.name || j.name.toLowerCase().startsWith('kvarm/')) {
-      return fail(422, `CI job names must be 1-${CI_LIMITS.name} characters and may not start with kvarm/`, 'INVALID_CI_JOB_NAME');
-    }
-    const name = j.name.trim();
-    if (names.has(name)) return fail(422, `duplicate CI job name: ${name}`, 'DUPLICATE_CI_JOB');
-    names.add(name);
-    if (typeof j.run !== 'string' || j.run.trim().length === 0 || j.run.length > CI_LIMITS.command) {
-      return fail(422, `CI job ${name} must have a run command of at most ${CI_LIMITS.command} characters`, 'INVALID_CI_COMMAND');
-    }
-    if (j.required !== undefined && typeof j.required !== 'boolean') return fail(422, `CI job ${name} required must be a boolean`, 'INVALID_CI_REQUIRED');
-    const timeout = j.timeoutSeconds ?? CI_LIMITS.defaultTimeoutSeconds;
-    if (
-      typeof timeout !== 'number' ||
-      !Number.isInteger(timeout) ||
-      timeout < CI_LIMITS.minTimeoutSeconds ||
-      timeout > CI_LIMITS.maxTimeoutSeconds
-    ) {
-      return fail(422, `CI job ${name} timeoutSeconds is invalid`, 'INVALID_CI_TIMEOUT');
-    }
-    jobs.push({ name, run: j.run, required: j.required !== false, timeoutSeconds: timeout });
-  }
-  return { ok: true, value: { jobs } };
-}
-
 async function readConfigAt(env: Env, artifactsName: string, headSha: string): Promise<ServiceResult<CiConfig | null>> {
   return withLazyRepo(env, artifactsName, async (repo) => {
     const blob = await (await repo.get()).readFile({ ref: headSha, path: CI_CONFIG_PATH });
     if (!blob) return { ok: true, value: null };
     if (blob.size > CI_LIMITS.configBytes) return fail(422, `${CI_CONFIG_PATH} is too large`, 'CI_CONFIG_TOO_LARGE');
-    return parseConfig(await blob.text());
+    return parseCiConfig(await blob.text());
   });
 }
 

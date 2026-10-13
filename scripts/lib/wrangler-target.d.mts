@@ -4,6 +4,10 @@ export const SETTINGS: string[];
 
 export const WRANGLER_TARGET: string;
 
+export const WRANGLER_BIN: string;
+
+export function localD1Args(sql: string): string[];
+
 export function remoteD1Args(sql: string): string[];
 
 export function parseJsonc(text: string): unknown;

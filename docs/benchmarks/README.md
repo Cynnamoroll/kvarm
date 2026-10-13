@@ -41,7 +41,7 @@ Share of repeated requests answered from the Cache API (`cache=hit` in `x-kvarm-
 
 ## Per-endpoint cost medians
 
-Median of each counter over n requests of the same endpoint in the same state, compared with its `library/cost.md` budget row (`scripts/cost-sweep.mjs` checks every row).
+Median of each counter over n requests of the same endpoint in the same state, compared with its budget (the `budget` column; `scripts/lib/cost-catalog.mjs` holds every budget spec and `scripts/cost-sweep.mjs` checks them).
 
 | endpoint | n | d1 | art | do | r2b | sub | cache | budget | verdict |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |

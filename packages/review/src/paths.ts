@@ -1,6 +1,6 @@
 /**
- * Path-only classifiers behind the risk tags. Every rule here is documented
- * in library/api.md ("Risk rules"); keep the two in sync.
+ * Path-only classifiers behind the risk tags. packages/review/test/risk.test.ts
+ * pins every rule here; change them together.
  */
 
 function basename(path: string): string {

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * Ops script: mint a platform PAT directly in your deployment's remote D1
- * database (the target configured for scripts/wrangler-target.mjs).
+ * database (the target configured for scripts/wrangler-target.mjs), or with
+ * --local in the local dev database that `wrangler dev -c wrangler.dev.jsonc`
+ * serves (no Cloudflare account involved).
  *
  * Creates the user (non-admin) when the login does not exist yet, inserts a
  * PAT row with the given scopes, and writes the plaintext token to KEY=<token>
@@ -13,11 +15,13 @@
  *
  * Usage:
  *   node scripts/mint-pat.mjs --login <login> --scopes read,write,api,ci \
- *     --name my-token --env-file .env.local \
- *     --key KVARM_PAT [--email you@example.invalid] [--rotate]
+ *     --name my-token --token-file .env.local \
+ *     --key KVARM_PAT [--email you@example.invalid] [--rotate] [--local]
  *
- * Requires `wrangler` (logged in) resolvable through npx, and
+ * Remote mode requires `wrangler` (logged in) resolvable through npx, and
  * KVARM_D1_DATABASE_ID in the environment or apps/platform/.env.deploy.
+ * --local needs only the local migrations applied
+ * (`npm run db:migrate:local --workspace apps/platform`).
  */
 
 import { spawnSync } from 'node:child_process';
@@ -26,7 +30,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { remoteD1Args } from './lib/wrangler-target.mjs';
+import { localD1Args, remoteD1Args } from './lib/wrangler-target.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const platformDir = resolve(repoRoot, 'apps/platform');
@@ -47,9 +51,10 @@ const { values: args } = parseArgs({
     email: { type: 'string' },
     scopes: { type: 'string' },
     name: { type: 'string' },
-    'env-file': { type: 'string' },
+    'token-file': { type: 'string' },
     key: { type: 'string' },
     rotate: { type: 'boolean', default: false },
+    local: { type: 'boolean', default: false },
   },
 });
 
@@ -64,7 +69,7 @@ if (!/^[\w .:-]{1,64}$/.test(name)) fail('--name must be 1-64 word characters, s
 const key = args.key ?? fail('--key is required');
 if (!/^[A-Z][A-Z0-9_]*$/.test(key)) fail('--key must be an UPPER_SNAKE env var name');
 const email = args.email ?? `${login}@kvarm.invalid`;
-const envFile = resolve(args['env-file'] ?? fail('--env-file is required'));
+const envFile = resolve(args['token-file'] ?? fail('--token-file is required'));
 
 const ignored = spawnSync('git', ['-C', repoRoot, 'check-ignore', '-q', envFile]);
 if (ignored.status !== 0) fail(`${envFile} is not gitignored; refusing to write a plaintext token there`);
@@ -95,7 +100,7 @@ const sql = [
      FROM pat p JOIN users u ON u.id = p.user_id WHERE p.id = ${sqlString(patId)}`,
 ].join(';\n');
 
-const wrangler = spawnSync(process.execPath, remoteD1Args(sql), { cwd: platformDir, encoding: 'utf8' });
+const wrangler = spawnSync(process.execPath, args.local ? localD1Args(sql) : remoteD1Args(sql), { cwd: platformDir, encoding: 'utf8' });
 if (wrangler.status !== 0) {
   fail(`wrangler d1 execute failed (exit ${wrangler.status})\n${wrangler.stderr}\n${wrangler.stdout}`);
 }

@@ -4,11 +4,25 @@
  * APP_ORIGIN); a deployer's own target comes from KVARM_* settings.
  */
 
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const PLACEHOLDER_D1_DATABASE_ID = '00000000-0000-0000-0000-000000000000';
 
 export const WRANGLER_TARGET = fileURLToPath(new URL('../wrangler-target.mjs', import.meta.url));
+
+/** The wrangler CLI that apps/platform depends on, run as `node <WRANGLER_BIN> ...`. */
+export const WRANGLER_BIN = join(
+  dirname(createRequire(fileURLToPath(new URL('../../apps/platform/package.json', import.meta.url))).resolve('wrangler/package.json')),
+  'bin',
+  'wrangler.js',
+);
+
+/** Arguments for `spawnSync(process.execPath, ...)` running one D1 statement on the local dev database (cwd apps/platform). */
+export function localD1Args(sql) {
+  return [WRANGLER_BIN, 'd1', 'execute', 'DB', '--local', '-c', 'wrangler.dev.jsonc', '--json', '--command', sql];
+}
 
 /** Arguments for `spawnSync(process.execPath, ...)` running one remote D1 statement on the configured target. */
 export function remoteD1Args(sql) {

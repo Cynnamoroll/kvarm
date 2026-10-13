@@ -525,7 +525,7 @@ await scenario('cost', async (repo) => {
     a.status === 200 && b.status === 200 && a.c.d1 === b.c.d1 && a.c.d1 <= 3 && a.c.art === 0 && b.c.art === 0 && b.json?.checks?.length === 6,
     `d1 ${a.c.d1} vs ${b.c.d1}`,
   );
-  // Reference figure for library/cost.md: an explicit merge now also asks the gate once.
+  // Reference figure for the merge budget row: an explicit merge now also asks the gate once.
   const merged = await http(`${env.api}/changes/${na}/merge`, { method: 'POST', label: 'POST changes/:n/merge (success)' });
   console.log(`POST changes/${na}/merge -> ${merged.status} ${merged.json?.state} x-kvarm-cost ${merged.cost}`);
   check('VAL-COST-011', 'a guard-passing change merges; the merge asks the gate once (d1 <= 6)', merged.status === 200 && merged.json?.state === 'merged' && merged.c.d1 <= 6, merged.cost);

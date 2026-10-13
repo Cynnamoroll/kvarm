@@ -1,6 +1,6 @@
 /**
  * Pure pieces of the final cost sweep (scripts/cost-sweep.mjs): reading the
- * budget tables of library/cost.md, matching every row to a catalog entry,
+ * tables of a markdown budget document, matching every row to a catalog entry,
  * checking measured x-kvarm-cost samples against a budget spec, and the
  * per-row verdicts that decide the exit code.
  */

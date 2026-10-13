@@ -1,5 +1,5 @@
 /**
- * One entry per library/cost.md table row for scripts/cost-sweep.mjs.
+ * One entry per row of the per-endpoint budget table for scripts/cost-sweep.mjs.
  *
  * A live entry names the probe tag the sweep records samples under and the
  * row's budget as a spec (`d1<=2;art=0;cache=hit`; a function when the row's

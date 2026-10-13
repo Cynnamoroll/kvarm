@@ -9,7 +9,8 @@
  * Node directly; the Worker bundles it like any other module.
  *
  * Later features add their operations here (attribution, queue, tasks,
- * reviews, dependencies); `library/api.md` documents the registry of record.
+ * reviews, dependencies). This file is the registry of record; `kvarm help
+ * <group> <verb>` prints one entry.
  */
 
 /**

@@ -348,7 +348,7 @@ await scenario('cand', async (repo) => {
     JSON.stringify(rankOf),
   );
   check('VAL-CAND-004', 'two identical calls return byte-identical ranking arrays (and bodies)', eq(r1.json?.ranking, r2.json?.ranking) && r1.text === r2.text);
-  // d1 = 3 since kvarm/guard made the checks gate read D1 (library/cost.md, warm candidates row).
+  // d1 = 3 since kvarm/guard made the checks gate read D1 (warm candidates budget row).
   check('VAL-COST-015', 'second identical candidates call: art=0, do=0, d1 <= 3', r2.c.art === 0 && r2.c.do === 0 && r2.c.d1 <= 3, `#1 ${r1.cost} | #2 ${r2.cost}`);
   const o1 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
   const o2 = await http(`${api}/workspaces/overlap?base=main`, { label: 'GET workspaces/overlap' });
