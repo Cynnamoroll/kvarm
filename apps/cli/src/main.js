@@ -23,8 +23,8 @@ const USAGE = `usage: kvarm <command> [args]
 
 commands:
   checkout <owner/repo> <ref> <dir>   materialize <ref> into <dir> from a snapshot, or git clone
-  runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>] [--trust humans|all|none]
-         [--executor auto|host|container] [container options]
+  runner --repo <owner/repo> [--once] [--drain] [--fresh] [--workdir <dir>]
+         [--trust humans|all|none] [--executor auto|host|container] [container options]
                                       claim and run CI jobs on this machine
   status <owner/repo> [--json]        read-only status: active workspaces with their pins, the train, open tasks
   help [command]                      show help (for API commands: help <group> <verb>)
@@ -65,7 +65,7 @@ first, for example:
 "git status" is clean right after the reset because the snapshot tree equals
 the commit tree.`;
 
-const RUNNER_HELP = `usage: kvarm runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]
+const RUNNER_HELP = `usage: kvarm runner --repo <owner/repo> [--once] [--drain] [--fresh] [--workdir <dir>]
                     [--trust humans|all|none] [--executor auto|host|container]
                     [--container-runtime docker|podman] [--image <image>] [--network <name>]
                     [--cpus <n>] [--memory <size>] [--pids-limit <n>] [--container-user <uid:gid>|image]
@@ -74,7 +74,9 @@ Claims CI jobs for the repository, materializes each job's exact immutable
 commit through snapshot checkout (with clone fallback), runs the configured
 command, heartbeats the 120-second lease, and reports a bounded summary.
 The command runs only because the user explicitly started this runner.
---once exits after one job, or immediately when none is queued.
+--once exits after one job, or immediately when none is queued; --drain keeps
+claiming until the queue is empty and then exits, for batch runners that
+should stop on their own.
 
 Execution trust: repository commands are code from whoever pushed the
 commit, often an agent. Before running a job the runner decides from the
@@ -204,6 +206,7 @@ async function runCiRunner(args, io) {
       options: {
         repo: { type: 'string' },
         once: { type: 'boolean', default: false },
+        drain: { type: 'boolean', default: false },
         fresh: { type: 'boolean', default: false },
         workdir: { type: 'string' },
         trust: { type: 'string', default: 'humans' },
@@ -254,6 +257,7 @@ async function runCiRunner(args, io) {
     pat,
     repo,
     once: parsed.values.once,
+    drainUntilEmpty: parsed.values.drain,
     fresh: parsed.values.fresh,
     trust,
     executor,

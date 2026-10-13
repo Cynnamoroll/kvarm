@@ -11,7 +11,7 @@ Kvarm is a git platform for teams of people and coding agents, built as one Clou
 | `apps/platform/src/routes` | thin HTTP adapters: the git gate (`git.ts`), the REST API (`api.ts`, `api/`), pages and auth |
 | `apps/platform/src/mcp` | the MCP server (`server.ts`); tools come from the operation registry |
 | `apps/platform/src/services` | all platform behavior: access, changes, merge, queue, checks, CI, workspaces, Nexus intents, candidates, reviews, tasks |
-| `apps/platform/src/do`, `workflows`, `containers` | Durable Objects, Workflows and the Container CI runner showcase |
+| `apps/platform/src/do`, `workflows`, `containers` | Durable Objects, Workflows and the Container CI runner (opt-in hosted drain and the single-run showcase) |
 | `apps/platform/migrations` | D1 schema as numbered SQL migrations |
 | `apps/platform/test` | workerd tests (real D1, in-memory Artifacts fakes) |
 | `apps/cli` | the `kvarm` CLI: snapshot checkout, user-owned CI runner, every registry operation |

@@ -300,6 +300,7 @@ async function fetchDelta(o) {
  * @property {string} [tempRoot]
  * @property {string} [workRoot] root of the persistent workdirs (defaults below tempRoot)
  * @property {boolean} [fresh] fully rematerialize every job instead of syncing warm
+ * @property {boolean} [drainUntilEmpty] exit as soon as a claim finds no job, instead of polling for more
  * @property {(previous: import('./workdir.js').RecordedState, sha: string) => Promise<import('./workdir.js').DeltaManifest>} [deltaFn] fetches a warm delta (defaults to the compare-based fetcher)
  * @property {(info: { job: { id: string, name: string, sha: string }, work: string, workdir: 'warm' | 'fresh', source: string }) => Promise<void>} [prepared]
  *   awaited after the job's workspace is materialized and before its command runs, while the lease heartbeat keeps running;
@@ -357,7 +358,7 @@ export async function runRunner(options) {
     for (;;) {
       const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
       if (got.status === 204) {
-        if (options.once) return { claimed, reported };
+        if (options.once || options.drainUntilEmpty) return { claimed, reported };
         await sleep(idleDelayMs(idle++));
         continue;
       }

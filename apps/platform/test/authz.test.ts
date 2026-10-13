@@ -119,6 +119,7 @@ function repoRow(visibility: 'public' | 'private'): RepoRow {
     stars: 0,
     created_at: 0,
     pushed_at: null,
+    hosted_ci: 0,
   };
 }
 

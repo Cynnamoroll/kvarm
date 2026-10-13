@@ -749,13 +749,29 @@ describe('composition', () => {
     });
     const claim = await call('POST', `${R('compose-ci')}/ci/jobs/claim`, tok.owner, { runnerId: 'compose-runner' });
     expect(claim.json.job).toMatchObject({ name: 'semantic', sha: composed.json.commitSha, treeSha: composed.json.treeSha });
-    const report = await call('POST', `${R('compose-ci')}/ci/jobs/${claim.json.job.id}/report`, tok.owner, {
+    // A required failure on the composed tree first requeues its one automatic
+    // retry of the same exact tree (issue #13); the composition stays pending.
+    const retried = await call('POST', `${R('compose-ci')}/ci/jobs/${claim.json.job.id}/report`, tok.owner, {
       runnerId: 'compose-runner',
       generation: claim.json.job.generation,
       conclusion: 'failure',
       summary: { exitCode: 1 },
     });
+    expect(retried.status).toBe(200);
+    expect(retried.json.retried).toBe(true);
+    const stillPending = await call('GET', `${R('compose-ci')}/compositions/${composed.json.id}`, tok.owner);
+    expect(stillPending.json.checks.state).toBe('pending');
+    expect(stillPending.json.conflict).toBeNull();
+    const retry = await call('POST', `${R('compose-ci')}/ci/jobs/claim`, tok.owner, { runnerId: 'compose-runner' });
+    expect(retry.json.job).toMatchObject({ name: 'semantic', sha: composed.json.commitSha, treeSha: composed.json.treeSha });
+    const report = await call('POST', `${R('compose-ci')}/ci/jobs/${retry.json.job.id}/report`, tok.owner, {
+      runnerId: 'compose-runner',
+      generation: retry.json.job.generation,
+      conclusion: 'failure',
+      summary: { exitCode: 1 },
+    });
     expect(report.status).toBe(200);
+    expect(report.json.retried).toBe(false);
 
     const read = await call('GET', `${R('compose-ci')}/compositions/${composed.json.id}`, tok.owner);
     expect(read.json.conflict).toEqual({ kind: 'semantic', checks: ['semantic'], treeSha: composed.json.treeSha });

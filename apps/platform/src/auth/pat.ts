@@ -69,15 +69,16 @@ export async function mintPAT(
   userId: string,
   name: string,
   scopes: Scope[],
+  expiresAt: number | null = null,
 ): Promise<{ id: string; token: string; prefix: string }> {
   const token = `kvarm_pat_${randomHex(32)}`;
   const hash = await sha256Hex(token);
   const id = crypto.randomUUID();
   const prefix = token.slice(0, 18);
   await env.DB.prepare(
-    'INSERT INTO pat (id, user_id, name, prefix, hash, scopes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO pat (id, user_id, name, prefix, hash, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   )
-    .bind(id, userId, name, prefix, hash, JSON.stringify(scopes), Date.now())
+    .bind(id, userId, name, prefix, hash, JSON.stringify(scopes), Date.now(), expiresAt)
     .run();
   return { id, token, prefix };
 }
