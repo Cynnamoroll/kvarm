@@ -23,6 +23,8 @@ import { handleEventBatch } from './services/events';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
+import { coordinationPages } from './routes/coordinationPages';
+import { comparePages } from './routes/comparePages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -82,7 +84,12 @@ app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req,
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
+// The coordination and compare pages are further /:owner/:repo views; their
+// paths (/activity, /train, /arenas, /candidates, /compare) collide with none
+// of the pages above.
 app.route('/:owner/:repo', repoPages);
+app.route('/:owner/:repo', coordinationPages);
+app.route('/:owner/:repo', comparePages);
 
 // Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {
