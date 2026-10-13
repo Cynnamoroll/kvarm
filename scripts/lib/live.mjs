@@ -188,19 +188,29 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
     return { ok: false, detail, attempts, first };
   }
 
-  /** Read-only remote D1 query through wrangler (needs `. "$HOME/.config/vite-plus/env"`). */
+  /** Read-only remote D1 query: runs the repository's own wrangler through node, so it needs no PATH entry. */
   function d1(sql) {
     const r = spawnSync(process.execPath, remoteD1Args(sql), { cwd: PLATFORM, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     if (r.status !== 0) throw new Error(`wrangler d1 execute failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
     return JSON.parse(r.stdout).map((x) => x.results ?? []);
   }
 
+  /**
+   * Captures `wrangler tail` into a file. The binary comes from PATH (`. "$HOME/.config/vite-plus/env"`);
+   * unlike d1(), which runs the repository's wrangler through node, this spawn needs it there.
+   */
   function startTail(file = join(work, 'tail.jsonl')) {
     const stream = createWriteStream(file);
     const child = spawn('wrangler', ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(stream);
     let err = '';
+    let spawnError = null;
     child.stderr.on('data', (d) => (err += d));
+    // Without this listener a host with no `wrangler` on PATH dies on an unhandled
+    // ENOENT; stop() reports the recorded error instead.
+    child.on('error', (e) => {
+      spawnError = e;
+    });
     let stopped = false;
     return {
       file,
@@ -209,9 +219,13 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
         if (stopped) return err;
         stopped = true;
         await sleep(graceMs);
-        child.kill('SIGINT');
-        await new Promise((r) => (child.exitCode !== null ? r() : child.once('close', r)));
+        // A spawn that never started has no process to signal or to wait for.
+        if (!spawnError) {
+          child.kill('SIGINT');
+          await new Promise((r) => (child.exitCode !== null ? r() : child.once('close', r)));
+        }
         stream.end();
+        if (spawnError) throw new Error(`wrangler tail did not start: ${spawnError.message}`);
         return err;
       },
     };

@@ -13,8 +13,8 @@
  * their probe tag; non-live entries print their category and reason. The run
  * prints one verdict per row, the sweep row count against the document's
  * table row count, and exits 1 on any violation, missing sample, unmatched or
- * ambiguous row, unused catalog entry or failed cleanup phase (2 on a usage
- * error).
+ * ambiguous row, unused catalog entry, failed cleanup phase or tail capture
+ * that never started (2 on a usage error).
  *
  * Isolation: scratch repos named m7-benchmarks-cost-sweep-<purpose>-<ts>
  * (deleted at the end unless --keep), one scratch org (orgs have no delete
@@ -976,7 +976,16 @@ await phase('cleanup', async () => {
   expect(failures.length === 0, `cleanup left ${failures.length} scratch resource(s): ${failures.join('; ')}`);
 });
 
-const tailErr = await tail.stop(15_000);
+// The tail is the only source of the consumer/log counters, so a capture that
+// never started (no `wrangler` on PATH) fails the sweep rather than passing quietly.
+let tailErr = '';
+let tailFailure = null;
+try {
+  tailErr = await tail.stop(15_000);
+} catch (err) {
+  tailFailure = err instanceof Error ? err.message : String(err);
+  notes.push(`tail capture failed: ${tailFailure}`);
+}
 const lines = tailLogLines(tail.read());
 say(`\n== tail: ${lines.length} JSON log lines${tailErr && !lines.length ? ` (${tailErr.slice(0, 200)})` : ''}`);
 const ourEvent = (id) => eventsById.get(id);
@@ -1049,7 +1058,7 @@ for (const n of notes) say(`  note: ${n}`);
 say(`== requests: ${live.state.requests} of the ${live.state.ceiling} ceiling`);
 say(`== sweep rows ${summary.rows} vs cost.md table rows ${documentRows}${summary.rows === documentRows ? ' (equal)' : ' (MISMATCH)'}`);
 say(`== ${summary.pass} pass, ${summary.fail} fail, ${summary.missing} missing, ${summary.na} non-live with reason; unmatched ${summary.unmatched}, ambiguous ${summary.ambiguous}, unused ${summary.unused}`);
-const ok = summary.ok && summary.rows === documentRows && phases.every((p) => p.ok);
+const ok = summary.ok && summary.rows === documentRows && phases.every((p) => p.ok) && !tailFailure;
 say(`== cost sweep ${ok ? 'PASSED' : 'FAILED'}`);
 if (args.out) {
   writeFileSync(
