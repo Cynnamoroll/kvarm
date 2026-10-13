@@ -401,6 +401,15 @@ describe('prepareMerge + publishMerge', () => {
     const main = await store.commit([b1, b2], { 'a.txt': 'a\n', 'f.txt': 'B1\n', 'g.txt': 'g\n' });
     const head = await store.commit([b2, b1], { 'a.txt': 'a\n', 'f.txt': 'B1\n', 'g.txt': 'g\n', 'h.txt': 'h\n' });
     expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' })).toMatchObject({ ok: true });
+    // Five distinct commits: the inner walk between the bases is not charged again for what the outer walk read.
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxCommitReads: 5 } })).toMatchObject({
+      ok: true,
+      value: { work: { commitReads: 5 } },
+    });
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxCommitReads: 4 } })).toMatchObject({
+      ok: false,
+      code: 'MERGE_TOO_LARGE',
+    });
 
     expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxMergeBases: 1 } })).toMatchObject({
       ok: false,

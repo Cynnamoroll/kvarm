@@ -274,11 +274,15 @@ interface MergePlan {
 const READ_FAILURES = new Set(['missingCommit', 'missingObject', 'readError']);
 
 /** Memoizes and counts commit reads so the merge-base walk and tree lookups share them. */
-class CommitCache implements CommitReader {
+export class CommitCache implements CommitReader {
   reads = 0;
   private readonly seen = new Map<string, Promise<CommitInfo | null>>();
 
   constructor(private readonly source: CommitReader) {}
+
+  has(sha: string): boolean {
+    return this.seen.has(sha);
+  }
 
   readCommit(sha: string): Promise<CommitInfo | null> {
     let p = this.seen.get(sha);
@@ -289,6 +293,40 @@ class CommitCache implements CommitReader {
     }
     return p;
   }
+}
+
+export type VirtualBaseOutcome =
+  | { ok: true; treeHash: string; sources: MergeSources; objects: GitObject[]; work: { treeReads: number; blobReads: number; bytes: number } }
+  | { ok: false; reason: string; work: { treeReads: number; blobReads: number; bytes: number } };
+
+/**
+ * The virtual merge base of a criss-cross (architecture §3.1) within budget
+ * `b`. Commits go through `commits`, so the inner walks pay only for commits
+ * the outer walk has not read. The returned sources serve the virtual
+ * objects and memoize trees, so the outer merge re-reads nothing the inner
+ * merges fetched; `work.treeReads` counts actual fetches, and the caller
+ * gives the outer merge what is left of each budget.
+ */
+export async function crissCrossBase(sources: MergeSources, commits: CommitCache, bases: readonly string[], b: typeof MERGE_BUDGETS): Promise<VirtualBaseOutcome> {
+  const trees = new Map<string, Promise<TreeEntry[] | null>>();
+  let fetched = 0;
+  const memo: MergeSources = {
+    readCommit: (sha) => commits.readCommit(sha),
+    readTree(hash) {
+      let p = trees.get(hash);
+      if (!p) {
+        fetched++;
+        p = sources.readTree(hash);
+        trees.set(hash, p);
+      }
+      return p;
+    },
+    readBlob: (hash) => sources.readBlob(hash),
+  };
+  const v = await virtualMergeBase(memo, bases, { ...b, mayReadCommit: (sha) => commits.has(sha) || commits.reads < b.maxCommitReads });
+  const work = { treeReads: fetched, blobReads: v.blobReads, bytes: v.objects.reduce((n, o) => n + o.raw.length + o.store.length, 0) };
+  if (v.truncated || v.treeHash === null) return { ok: false, reason: v.truncatedReason ?? 'readError', work };
+  return { ok: true, treeHash: v.treeHash, sources: overlaySources(memo, new Map(v.objects.map((o) => [o.hash, o]))), objects: v.objects, work };
 }
 
 async function plan(sources: MergeSources, targetSha: string, headSha: string, budgets: MergeBudgets = {}): Promise<MergePlan> {
@@ -335,25 +373,13 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
   let mergeSources = sources;
   let virtualWork = { treeReads: 0, blobReads: 0, bytes: 0 };
   if (bases.length > 1) {
-    const v = await virtualMergeBase({ readCommit: (sha) => commits.readCommit(sha), readTree: (h) => sources.readTree(h), readBlob: (h) => sources.readBlob(h) }, bases, {
-      maxCommitReads: Math.max(0, b.maxCommitReads - commits.reads),
-      maxMergeBases: b.maxMergeBases,
-      maxVirtualDepth: b.maxVirtualDepth,
-      maxTreeReads: b.maxTreeReads,
-      maxChanges: b.maxChanges,
-      maxBlobReads: b.maxBlobReads,
-      maxBlobBytes: b.maxBlobBytes,
-      nodeBudget: b.nodeBudget,
-      concurrency: b.concurrency,
-      maxMergedBytes: b.maxMergedBytes,
-      contentConcurrency: b.contentConcurrency,
-    });
-    virtualWork = { treeReads: v.treeReads, blobReads: v.blobReads, bytes: v.objects.reduce((n, o) => n + o.raw.length + o.store.length, 0) };
-    if (v.truncated || v.treeHash === null) {
-      return { ...unknown(v.truncatedReason ?? 'readError', { mergeBase: base, ...several }), work: { commitReads: commits.reads, treeReads: v.treeReads, blobReads: v.blobReads } };
+    const v = await crissCrossBase(sources, commits, bases, b);
+    virtualWork = v.work;
+    if (!v.ok) {
+      return { ...unknown(v.reason, { mergeBase: base, ...several }), work: { commitReads: commits.reads, treeReads: v.work.treeReads, blobReads: v.work.blobReads } };
     }
     baseTree = v.treeHash;
-    mergeSources = overlaySources(sources, new Map(v.objects.map((o) => [o.hash, o])));
+    mergeSources = v.sources;
   }
 
   const m = await merge3(mergeSources, baseTree, targetCommit.treeHash, headCommit.treeHash, {
