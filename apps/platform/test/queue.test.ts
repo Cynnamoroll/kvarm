@@ -19,6 +19,7 @@ import {
   TRAIN_LIMITS,
   defaultTrainDeps,
   mergeLockLease,
+  onQueuedHeadMoved,
   runTrain,
   type TrainDeps,
   type TrainEvent,
@@ -715,6 +716,76 @@ describe('integration train', () => {
     expect(repo.refs.get(MAIN)).toBe(repo.refs.get('refs/heads/b2'));
     expect(commitOf(repo, repo.refs.get(MAIN)!).parents).toEqual([repo.refs.get('refs/heads/b2') && commitOf(repo, repo.refs.get('refs/heads/b2')!).parents[0]]);
     expect(firstParents(repo, main)).toHaveLength(2);
+  });
+
+  it('a late head-move hook cannot stale or regress an entry approved for a newer head', async () => {
+    const { repo, numbers } = await setup('late-hook', 2);
+    const [review, auto] = numbers as [number, number];
+    await enqueue('late-hook', review);
+    await enqueue('late-hook', auto);
+    await env.DB.prepare(`UPDATE change_sets SET merge_policy = 'auto' WHERE repo_id = ? AND number = ?`).bind(repoIds['late-hook'], auto).run();
+    await env.DB.prepare(`UPDATE merge_queue SET merge_policy = 'auto' WHERE repo_id = ? AND change_number = ?`).bind(repoIds['late-hook'], auto).run();
+    const ids = new Map<number, string>();
+    for (const n of numbers) {
+      ids.set(n, (await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = ?').bind(repoIds['late-hook'], n).first<{ id: string }>())!.id);
+    }
+    const b1 = 'refs/heads/b1';
+    const b2 = 'refs/heads/b2';
+    const before1 = repo.refs.get(b1)!;
+    const before2 = repo.refs.get(b2)!;
+    const entryHead = async (n: number): Promise<string> =>
+      (
+        await env.DB
+          .prepare('SELECT head_sha FROM merge_queue WHERE repo_id = ? AND change_number = ? AND active = 1')
+          .bind(repoIds['late-hook'], n)
+          .first<{ head_sha: string }>()
+      )!.head_sha;
+
+    // Review: the push stales the entry; the reviewer approves the new head.
+    const next1 = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1 v2\n' }, [before1]);
+    repo.refs.set(b1, next1.sha);
+    await deliver(pushBody('late-hook', b1, before1, next1.sha, Date.now()));
+    expect((await entries('late-hook')).map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [review, 'stale', 'HEAD_MOVED'],
+      [auto, 'queued', null],
+    ]);
+    expect((await enqueue('late-hook', review, { headSha: next1.sha })).status).toBe(201);
+    expect((await entries('late-hook')).map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [review, 'stale', 'HEAD_MOVED'],
+      [auto, 'queued', null],
+      [review, 'queued', null],
+    ]);
+
+    // A late redelivery of the first push's hook carries the approved head it
+    // observed at its own ingest (before1) while the active entry already
+    // records the newer approval (next1): it must not stale the fresh entry.
+    await onQueuedHeadMoved({
+      env,
+      repoId: repoIds['late-hook']!,
+      change: { id: ids.get(review)!, number: review, policy: 'review', headSha: next1.sha, queuedHead: before1 },
+      headSha: next1.sha,
+    });
+    expect((await entries('late-hook')).map((r) => [r.change_number, r.state, r.reason_code])).toEqual([
+      [review, 'stale', 'HEAD_MOVED'],
+      [auto, 'queued', null],
+      [review, 'queued', null],
+    ]);
+
+    // Auto: the entry follows each delivered push. A late hook for the first
+    // of two pushes must not regress the head the entry already follows.
+    const next2a = await commit(repo, { 'README.md': 'readme\n', 'f2.txt': 'file 2 v2\n' }, [before2]);
+    const next2b = await commit(repo, { 'README.md': 'readme\n', 'f2.txt': 'file 2 v3\n' }, [next2a.sha]);
+    repo.refs.set(b2, next2b.sha);
+    await deliver(pushBody('late-hook', b2, before2, next2a.sha, Date.now()));
+    await deliver(pushBody('late-hook', b2, next2a.sha, next2b.sha, Date.now()));
+    expect(await entryHead(auto)).toBe(next2b.sha);
+    await onQueuedHeadMoved({
+      env,
+      repoId: repoIds['late-hook']!,
+      change: { id: ids.get(auto)!, number: auto, policy: 'auto', headSha: next2a.sha, queuedHead: before2 },
+      headSha: next2a.sha,
+    });
+    expect(await entryHead(auto)).toBe(next2b.sha);
   });
 
   it('a head push whose event is not yet delivered never lets the train publish the previous head', async () => {

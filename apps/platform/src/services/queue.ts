@@ -2346,7 +2346,11 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
   if (!queued || queued === e.headSha) return;
   const db = e.env.DB;
   const now = Date.now();
-  const active = `SELECT q.id FROM merge_queue q WHERE q.change_set_id = ?1 AND q.active = 1 AND q.state != 'publishing'`;
+  // Fenced to the entry that still records the head this event displaced
+  // (the head its own ingest observed as queued). A late redelivery whose
+  // hook runs after a newer push already moved or re-approved the entry
+  // must not stale the fresh approval or regress an auto entry's head.
+  const active = `SELECT q.id FROM merge_queue q WHERE q.change_set_id = ?1 AND q.active = 1 AND q.state != 'publishing' AND q.head_sha = ?5`;
   let ref: string | null;
   if (e.change.policy === 'auto') {
     const row = await db
@@ -2355,7 +2359,7 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
                 checks_state = NULL, updated_at = ?3
           WHERE repo_id = ?4 AND id = (${active}) RETURNING target_ref`,
       )
-      .bind(e.change.id, e.headSha, now, e.repoId)
+      .bind(e.change.id, e.headSha, now, e.repoId, queued)
       .first<{ target_ref: string }>();
     ref = row?.target_ref ?? null;
   } else {
@@ -2365,7 +2369,7 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
                 reason = ?3, updated_at = ?2
           WHERE repo_id = ?4 AND id = (${active}) RETURNING target_ref`,
       )
-      .bind(e.change.id, now, `the head moved from the approved ${queued} to ${e.headSha}; enqueue again to approve the new head`, e.repoId)
+      .bind(e.change.id, now, `the head moved from the approved ${queued} to ${e.headSha}; enqueue again to approve the new head`, e.repoId, queued)
       .first<{ target_ref: string }>();
     ref = row?.target_ref ?? null;
   }
