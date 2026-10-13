@@ -121,15 +121,77 @@ the commit tree. `scripts/cli-checkout-e2e.mjs` checks this recipe live,
 including the final push. When an agent needs history from the start, a clone
 is the better choice.
 
-## `kvarm runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]`
+## `kvarm runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>] [--trust …] [--executor …]`
 
 Starts a user-owned CI runner. It claims a queued `.kvarm/ci.json` job with a
-120-second generation-fenced lease, materializes the job's exact immutable
-commit through snapshot checkout (clone fallback), runs the configured command
-in a shell with its timeout, heartbeats while it runs, and reports a bounded
-summary. `--once` exits after one job, or immediately when the queue is empty.
-The PAT must have `ci` scope. Repository commands run only because the user
-explicitly starts this process.
+120-second generation-fenced lease, decides whether and where the job may run
+(execution trust, below), materializes the job's exact immutable commit
+through snapshot checkout (clone fallback), runs the configured command with
+its timeout on the host or in a container, heartbeats while it runs, and
+reports a bounded summary. `--once` exits after one job, or immediately when
+the queue is empty. The PAT must have `ci` scope. Repository commands run only
+because the user explicitly starts this process.
+
+### Execution trust
+
+A `.kvarm/ci.json` command is code from whoever pushed the commit, and on
+Kvarm that is often an agent. The runner decides before materializing or
+running anything, from the `provenance` the claim returns (the change number,
+its head ref, whether the job's commit is the change head or a
+platform-prepared merge commit, and whether a human or an agent token opened
+the change):
+
+| `--trust` | runs on the host |
+| --- | --- |
+| `humans` (default) | the exact head of a change a human opened outside the agent workspace namespace (`refs/heads/agents/**`) |
+| `none` | nothing |
+| `all` | everything; every host job prints `warning: running <job> on the host with --trust all; …` |
+
+Untrusted jobs go to the container executor (`--executor auto`, the default)
+or are refused when no container runtime answers. `--executor host` refuses
+every untrusted job; `--executor container` runs every job in a container and
+exits 2 before claiming if neither docker nor podman answers. A refused job is
+reported as a `failure` whose summary carries `refused: true`, the reason and
+the runner's `trust`/`executor`; it is never skipped silently or left claimed.
+A claim without provenance (an older platform) is untrusted.
+
+`humans` judges the change, not the push: the platform does not record which
+principal pushed a head, so a commit an agent token pushed to a human's
+branch (agent tokens may be granted ordinary refs) still counts as the human
+change's head. Run untrusted repositories with `--trust none` or
+`--executor container`.
+
+### Container executor
+
+`--executor container`, or `auto` for an untrusted job, runs the command with
+docker, else podman (`--container-runtime docker|podman` picks one; a runtime
+counts only when `<runtime> info` succeeds). Each job gets a fresh container:
+
+- `--rm`, named `kvarm-job-<job>-<random>`; on timeout the runner runs
+  `<runtime> kill <name>` and then kills the client, so the container never
+  outlives the job
+- the job's working directory bind-mounted at `/workspace` as the only
+  writable host mount and the working directory; a read-only root filesystem
+  with a private `/tmp` (also `HOME`); all capabilities dropped and
+  `no-new-privileges`; `--init`
+- this user's `uid:gid` so files in the working directory stay yours
+  (`--container-user <uid:gid>` overrides, `--container-user image` keeps the
+  image's user; rootless podman also gets `--userns keep-id`)
+- `--cpus 2`, `--memory 4g`, `--pids-limit 1024` unless set with `--cpus`,
+  `--memory`, `--pids-limit`
+- the runtime's default network, because installs need one; `--network none`
+  cuts the job off (installs then only work from a warm working directory)
+- only `LANG`, `LC_*`, `TZ`, `GIT_TERMINAL_PROMPT=0` and `HOME=/tmp` in its
+  environment: the host filter without host paths
+- `--image` (default `node:24-bookworm`, the official Node.js LTS image, whose
+  full variant carries the `git` the snapshot jobs use; pin a patch tag or a
+  digest such as `node:24.x.y-bookworm@sha256:…` for reproducible jobs)
+
+Output limits and the report are the same as on the host. Container jobs use
+their own working directories under `<workdir>-container`, so code that ran
+isolated can never leave files (a `node_modules/.bin` script, a hook) for a
+later host job. The summary names `executor: host|container` (and the
+`image`).
 
 Jobs run in a persistent working directory per repository
 (`<workdir>/<owner>/<repo>/slot-<n>/work`; default root

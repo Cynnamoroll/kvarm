@@ -34,6 +34,17 @@ Out of scope: findings that need a compromised Cloudflare account or a malicious
 
 Test against a deployment you run yourself (the README's [Deploy from zero](README.md#deploy-from-zero) creates one). Do not test against deployments other people operate, do not access other people's data, and do not degrade a service for others.
 
+## CI runner threat model
+
+`kvarm runner` executes `.kvarm/ci.json` commands, which are code from whoever pushed the commit. On Kvarm that is routinely an agent, so treat every job as potentially hostile unless the runner's trust policy says otherwise.
+
+- **Environment filtering is not a sandbox.** On the host, a job sees only `PATH`, `HOME`, `LANG`, `LC_*`, `TZ` and `TMPDIR` (plus `GIT_TERMINAL_PROMPT=0`), so the runner's `KVARM_PAT`, version-control credentials and cloud keys in its environment do not pass. The job still runs as your user: it can read `~/.ssh`, `~/.config`, other repositories and any token stored on disk (including a `.env.local` holding the runner's own PAT), and it can send what it reads anywhere over the network.
+- **The trust policy decides before anything runs.** The default, `--trust humans`, runs on the host only the exact head of a change a human opened outside the agent workspace namespace; agent-authored changes, agent workspace refs, platform-prepared merge commits (which can include other queued changes) and jobs without provenance run in a container or are refused and reported as failures. `--trust all` runs everything on the host and warns on every job; use it only for repositories whose every pusher you trust.
+- **The container executor is the isolation boundary.** A job container (docker or podman) gets the job's working directory as its only writable host mount, a read-only root, no capabilities, no privilege escalation, CPU, memory and process limits, the filtered environment without host paths, and is killed on timeout. It keeps network access unless you pass `--network none`, and it is only as strong as your container runtime. Container jobs never share a working directory with host jobs.
+- **Known gap.** The platform records who opened a change, not who pushed its head. An agent token granted an ordinary branch can push to a human's change, and `humans` will trust that head. Where that matters, run with `--trust none` or `--executor container`.
+
+A runner escape (a job reaching files outside its working directory, the runner's credentials, or another job's working directory under the container executor) is in scope for the reports above.
+
 ## Supported versions
 
 Kvarm is developed on `main`, and fixes land there. There are no separately maintained release branches.
