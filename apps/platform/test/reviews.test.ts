@@ -587,11 +587,34 @@ describe('pending reviews and budgets', () => {
     const pend = await call('GET', api('budget', '/reviews/pending'), tok.owner);
     const assign = await call('POST', api('budget', '/changes/1/reviewers/assign'), tok.owner, {});
     expect(a.cost).toMatchObject({ do: 0 });
-    expect(a.cost.art).toBeLessThanOrEqual(8);
-    expect(a.cost.d1).toBeLessThanOrEqual(25);
+    expect(a.cost).toMatchObject({ art: 0 });
+    expect(a.cost.d1).toBeLessThanOrEqual(3);
     for (const r of [p, pend, assign]) {
       expect(r.cost).toMatchObject({ art: 0, do: 0, rw: 0 });
       expect(r.cost.d1).toBeLessThanOrEqual(2);
     }
+  });
+
+  it('records review coverage only when a guide map is already cached', async () => {
+    await setup('review-map-present');
+    const reviewer = await agent('review-map-present', 'map-present', 'claude');
+    await createChange('review-map-present', 'b1');
+    const guidePath = api('review-map-present', '/changes/1/review-guide');
+    const guide = await call('GET', guidePath, tok.owner);
+    expect(guide.status).toBe(200);
+    const reviewed = await approve('review-map-present', 1, reviewer.token);
+    expect(reviewed.status).toBe(201);
+    expect(reviewed.json.review.coverage.units).toBeGreaterThan(0);
+    expect(reviewed.cost).toMatchObject({ art: 0 });
+    expect(reviewed.cost.d1).toBeLessThanOrEqual(3);
+
+    await setup('review-map-absent');
+    const reviewerWithoutGuide = await agent('review-map-absent', 'map-absent', 'claude');
+    await createChange('review-map-absent', 'b1');
+    const unprimed = await approve('review-map-absent', 1, reviewerWithoutGuide.token);
+    expect(unprimed.status).toBe(201);
+    expect(unprimed.json.review.coverage).toBeNull();
+    expect(unprimed.cost).toMatchObject({ art: 0 });
+    expect(unprimed.cost.d1).toBeLessThanOrEqual(3);
   });
 });

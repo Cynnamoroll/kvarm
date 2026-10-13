@@ -43,6 +43,8 @@ export const compareKeys = {
     key(`numstat/v2/${oldBlob ?? NONE}/${newBlob ?? NONE}`),
   reviewmap: (baseTree: string, headTree: string, configSha: string) =>
     key(`reviewmap/v1/${baseTree}/${headTree}`, { config: configSha }),
+  reviewmapHead: (changeId: string, baseSha: string, headSha: string) =>
+    key(`reviewmap-head/v1/${changeId}/${baseSha}/${headSha}`),
   commit: (repoId: string, sha: string) => key('commit/v1', { repo: repoId, sha }),
   ref: (repoId: string, gen: string, name: string) => key('ref/v1', { repo: repoId, gen, name }),
   refgen: (repoId: string) => key('refgen/v1', { repo: repoId }),

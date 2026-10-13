@@ -113,8 +113,11 @@ describe('guided review endpoints', () => {
     const { repo, head } = await setup('guide-flow');
     expect((await openChange('guide-flow')).status).toBe(201);
     const path = api('guide-flow', '/changes/1/review-guide');
+    await call('GET', path, tokens.owner);
     const fallback = await call('GET', path, tokens.owner);
     costs['GET review guide'] = fallback.cost;
+    expect(fallback.cost).toMatchObject({ art: 0 });
+    expect(fallback.cost.d1).toBeLessThanOrEqual(3);
     expect(fallback.json.source).toBe('fallback');
     const units = fallback.json.units as Array<{ key: string; path: string; floor: string }>;
     expect(units.length).toBeGreaterThan(1);
@@ -126,11 +129,15 @@ describe('guided review endpoints', () => {
     expect([unknown.status, unknown.json.code]).toEqual([422, 'INVALID_GUIDE']);
     const submitted = await call('POST', path, tokens.owner, { headSha: head, guide });
     costs['POST submit guide'] = submitted.cost;
+    expect(submitted.cost).toMatchObject({ art: 0 });
+    expect(submitted.cost.d1).toBeLessThanOrEqual(4);
     expect(submitted.status).toBe(201);
     expect(submitted.json.guide.coverage.gaps).toBeGreaterThan(0);
     expect(submitted.json.guide.guide.chapters.some((chapter: { id: string }) => chapter.id === 'unguided')).toBe(true);
     const ack = await call('POST', api('guide-flow', '/changes/1/review-acks'), tokens.reviewer, { headSha: head, keys: [first.key] });
     costs['POST review ack'] = ack.cost;
+    expect(ack.cost).toMatchObject({ art: 0 });
+    expect(ack.cost.d1).toBeLessThanOrEqual(3);
     expect(ack.status).toBe(200);
     const unacked = await call('GET', `${path}?unacked=true`, tokens.reviewer);
     expect((unacked.json.units as Array<{ path: string }>).some((unit) => unit.path === 'src/a.ts')).toBe(false);
@@ -171,10 +178,15 @@ describe('guided review endpoints', () => {
   it('deduplicates and suppresses findings, enforces author permissions, and gates merge/train until resolution', async () => {
     const { head } = await setup('finding-flow');
     await openChange('finding-flow');
+    const guidePath = api('finding-flow', '/changes/1/review-guide');
+    await call('GET', guidePath, tokens.owner);
+    await call('GET', guidePath, tokens.owner);
     const findingsPath = api('finding-flow', '/changes/1/findings');
     const low = { path: 'src/a.ts', startLine: 1, category: 'bug', severity: 'low', confidence: 'investigate', title: 'small issue' };
     const first = await call('POST', findingsPath, tokens.owner, { headSha: head, findings: [low] });
     costs['POST submit findings'] = first.cost;
+    expect(first.cost).toMatchObject({ art: 0 });
+    expect(first.cost.d1).toBeLessThanOrEqual(3);
     const id = first.json.created[0].id as string;
     const duplicate = await call('POST', findingsPath, tokens.reviewer, { headSha: head, findings: [{ ...low, title: ' Small   Issue ' }] });
     expect(duplicate.json.duplicates).toContain(id);

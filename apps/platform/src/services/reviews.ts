@@ -36,7 +36,7 @@ import {
   type ReviewBlocker,
   type ReviewFactsRow,
 } from './reviewGate';
-import { getGuide } from './reviewGuide';
+import { reviewMapAckKeys } from './reviewGuide';
 
 export { HUMAN_MODEL_FAMILY };
 export const REVIEW_VERDICTS = ['approve', 'request-changes'] as const;
@@ -168,7 +168,7 @@ export interface ReviewView {
   body: string | null;
   createdAt: string;
   updatedAt: string;
-  coverage: { units: number; acked: number; scrutinizeUnacked: number };
+  coverage: { units: number; acked: number; scrutinizeUnacked: number } | null;
 }
 
 export interface EscalationView {
@@ -246,13 +246,14 @@ function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorVie
     coverage: (() => {
       try {
         const parsed = JSON.parse(r.coverage ?? 'null') as { units?: unknown; acked?: unknown; scrutinizeUnacked?: unknown } | null;
+        if (parsed === null) return null;
         return {
           units: typeof parsed?.units === 'number' ? parsed.units : 0,
           acked: typeof parsed?.acked === 'number' ? parsed.acked : 0,
           scrutinizeUnacked: typeof parsed?.scrutinizeUnacked === 'number' ? parsed.scrutinizeUnacked : 0,
         };
       } catch {
-        return { units: 0, acked: 0, scrutinizeUnacked: 0 };
+        return null;
       }
     })(),
   };
@@ -499,6 +500,7 @@ interface ReviewTargetRow {
   id: string;
   number: number;
   state: string;
+  base_sha: string | null;
   head_sha: string | null;
   author_id: string | null;
   agent_meta: string | null;
@@ -530,7 +532,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     const db = cx.env.DB;
     const target = await db
       .prepare(
-        `SELECT c.id, c.number, c.state, c.head_sha, c.author_id, c.agent_meta, c.merge_policy,
+        `SELECT c.id, c.number, c.state, c.base_sha, c.head_sha, c.author_id, c.agent_meta, c.merge_policy,
                 (SELECT a.model_family FROM agents a WHERE a.id = ?3) AS reviewer_family
            FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2`,
       )
@@ -547,14 +549,8 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     if (authorPrincipal === me.id) {
       return fail(409, 'self-review: the author of a change cannot review it; another principal must review', 'SELF_REVIEW');
     }
-    const guide = await getGuide(cx, rawNumber);
-    if (!guide.ok) return guide;
-    const coverage = {
-      units: guide.value.coverage.units,
-      acked: guide.value.units.filter((unit) => unit.acked).length,
-      scrutinizeUnacked: guide.value.units.filter((unit) => unit.tier === 'scrutinize' && !unit.acked).length,
-    };
     const headSha = target.head_sha;
+    const coverageKeys = await reviewMapAckKeys(target.id, target.base_sha, headSha);
     const family = me.kind === 'agent' ? target.reviewer_family : HUMAN_MODEL_FAMILY;
     // A human other than the author answers for every open escalation by approving the current head.
     const humanResolves = p.verdict === 'approve' && me.kind === 'user' && me.userId !== target.author_id;
@@ -585,20 +581,48 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     } else {
       effects.push(escalation(`'reviewer-disagreement'`, otherVerdict('request-changes')));
     }
+    const packetQueries = packetStatements(db, cx.repo.id, number);
     const results = await db.batch([
       db
         .prepare(
           `INSERT INTO change_reviews (id, repo_id, change_set_id, head_sha, principal, user_id, user_login, agent_id, agent_name, token_id,
                                        model_family, verdict, body, coverage, created_at, updated_at)
-           SELECT ?1, c.repo_id, c.id, c.head_sha, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14
+           SELECT ?1, c.repo_id, c.id, c.head_sha, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                  CASE WHEN ?13 = 1 THEN json_object(
+                    'units', ?14,
+                    'acked', (SELECT COUNT(DISTINCT a.unit_key) FROM review_acks a
+                      WHERE a.change_set_id = c.id AND a.principal = ?4
+                        AND a.unit_key IN (SELECT value FROM json_each(?15))),
+                    'scrutinizeUnacked', (SELECT COUNT(*) FROM json_each(?16) units
+                      WHERE NOT EXISTS (SELECT 1 FROM review_acks a
+                        WHERE a.change_set_id = c.id AND a.principal = ?4 AND a.unit_key = units.value))
+                  ) ELSE NULL END, ?17, ?17
              FROM change_sets c WHERE c.id = ?2 AND c.head_sha = ?3 AND c.state IN ('open', 'conflicted')
            ON CONFLICT (change_set_id, head_sha, principal) DO UPDATE SET
              verdict = excluded.verdict, body = excluded.body, model_family = excluded.model_family, token_id = excluded.token_id,
              user_login = excluded.user_login, agent_name = excluded.agent_name, coverage = excluded.coverage, updated_at = excluded.updated_at`,
         )
-        .bind(crypto.randomUUID(), target.id, headSha, me.id, me.userId, me.login, me.agentId, me.agentName, me.tokenId, family, p.verdict, p.body, JSON.stringify(coverage), now),
+        .bind(
+          crypto.randomUUID(),
+          target.id,
+          headSha,
+          me.id,
+          me.userId,
+          me.login,
+          me.agentId,
+          me.agentName,
+          me.tokenId,
+          family,
+          p.verdict,
+          p.body,
+          coverageKeys ? 1 : 0,
+          coverageKeys?.units.length ?? 0,
+          JSON.stringify(coverageKeys?.units ?? []),
+          JSON.stringify(coverageKeys?.scrutinize ?? []),
+          now,
+        ),
       ...effects,
-      ...packetStatements(db, cx.repo.id, number),
+      ...packetQueries,
     ]);
     const read = packetRead(results, 1 + effects.length);
     const mine = read?.reviews.find((r) => r.principal === me.id && r.head_sha === headSha && r.updated_at === now);

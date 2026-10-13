@@ -49,10 +49,23 @@ interface CoverageBuild {
   baseTree: string;
   headTree: string;
   map: CoverageMap;
-  compare: CompareBody;
+  compare?: CompareBody;
   configError?: string;
   configSha: string;
   truncated: boolean;
+  pointer: ReviewMapPointer;
+}
+
+interface ReviewMapPointer {
+  baseSha: string;
+  headSha: string;
+  baseTree: string;
+  headTree: string;
+  configSha: string;
+  map: CoverageMap;
+  truncated: boolean;
+  configError?: string;
+  tiers?: Record<string, ReviewTier>;
 }
 
 function actorPrincipal(actor: Actor): { id: string; userId: string; agentId: string | null; tokenId: string | null } {
@@ -162,13 +175,34 @@ async function computeMap(
   };
 }
 
-async function coverageBuild(cx: ChangeContext, change: GuideChange): Promise<ServiceResult<CoverageBuild>> {
+async function coverageBuild(cx: ChangeContext, change: GuideChange, since = false): Promise<ServiceResult<CoverageBuild>> {
   if (!change.head_sha || !change.base_sha) return fail(409, 'change has no base or head commit', 'NO_HEAD');
+  const baseSha = change.base_sha;
+  const headSha = change.head_sha;
   return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
     const ctx = resolveCtx(cx, artifacts);
-    const [base, head] = await Promise.all([readCommitInfo(ctx, change.base_sha!), readCommitInfo(ctx, change.head_sha!)]);
+    const pointerKey = compareKeys.reviewmapHead(change.id, baseSha, headSha);
+    const pointer = await readJson<ReviewMapPointer>(pointerKey);
+    if (pointer?.baseSha === baseSha && pointer.headSha === headSha && Array.isArray(pointer.map?.units)) {
+      await writeJson(pointerKey, JSON.stringify(pointer));
+      return {
+        ok: true,
+        value: {
+          change,
+          baseTree: pointer.baseTree,
+          headTree: pointer.headTree,
+          map: pointer.map,
+          ...(pointer.configError ? { configError: pointer.configError } : {}),
+          configSha: pointer.configSha,
+          truncated: pointer.truncated,
+          pointer,
+        },
+      };
+    }
+    const [base, head] = await Promise.all([readCommitInfo(ctx, baseSha), readCommitInfo(ctx, headSha)]);
+    if (!head && since) return fail(404, 'since commit not found', 'SINCE_NOT_FOUND');
     if (!base || !head) return fail(503, 'change commits could not be read, retry shortly', 'STORAGE_UNAVAILABLE');
-    const config = await reviewConfigAt(artifacts, change.base_sha!, base.tree);
+    const config = await reviewConfigAt(artifacts, baseSha, base.tree);
     const cacheKey = compareKeys.reviewmap(base.tree, head.tree, config.configSha);
     const cached = await readJson<{ map: CoverageMap; truncated: boolean }>(cacheKey);
     let result: { map: CoverageMap; truncated: boolean };
@@ -183,6 +217,18 @@ async function coverageBuild(cx: ChangeContext, change: GuideChange): Promise<Se
       result = await computeMap(cx, ctx, change, compare, config.config);
       cx.waitUntil(writeJson(cacheKey, JSON.stringify(result)));
     }
+    const nextPointer: ReviewMapPointer = {
+      baseSha,
+      headSha,
+      baseTree: base.tree,
+      headTree: head.tree,
+      configSha: config.configSha,
+      map: result.map,
+      truncated: result.truncated,
+      ...(config.configError ? { configError: config.configError } : {}),
+      ...(pointer?.tiers ? { tiers: pointer.tiers } : {}),
+    };
+    await writeJson(pointerKey, JSON.stringify(nextPointer));
     return {
       ok: true,
       value: {
@@ -194,6 +240,7 @@ async function coverageBuild(cx: ChangeContext, change: GuideChange): Promise<Se
         ...(config.configError ? { configError: config.configError } : {}),
         configSha: config.configSha,
         truncated: result.truncated,
+        pointer: nextPointer,
       },
     };
   });
@@ -213,8 +260,24 @@ async function findChange(cx: ChangeContext, rawNumber: string): Promise<Service
   return row ? { ok: true, value: row } : fail(404, 'change not found', 'CHANGE_NOT_FOUND');
 }
 
-export async function coverageFor(cx: ChangeContext, change: GuideChange): Promise<ServiceResult<CoverageBuild>> {
-  return coverageBuild(cx, change);
+export async function coverageFor(cx: ChangeContext, change: GuideChange, headSha?: string): Promise<ServiceResult<CoverageBuild>> {
+  const selected = headSha === undefined ? change : { ...change, head_sha: headSha };
+  return coverageBuild(cx, selected, headSha !== undefined);
+}
+
+export async function reviewMapAckKeys(
+  changeId: string,
+  baseSha: string | null,
+  headSha: string | null,
+): Promise<{ units: string[]; scrutinize: string[] } | null> {
+  if (!baseSha || !headSha) return null;
+  const pointer = await readJson<ReviewMapPointer>(compareKeys.reviewmapHead(changeId, baseSha, headSha));
+  if (!pointer || pointer.baseSha !== baseSha || pointer.headSha !== headSha || !Array.isArray(pointer.map?.units)) return null;
+  const units = pointer.map.units;
+  return {
+    units: units.map((unit) => unit.key),
+    scrutinize: units.filter((unit) => (pointer.tiers?.[unit.key] ?? unit.defaultTier) === 'scrutinize').map((unit) => unit.key),
+  };
 }
 
 interface GuideRow {
@@ -268,17 +331,12 @@ function fallbackFromCoverage(map: CoverageMap): ResolvedGuide {
   return fallbackGuide(map);
 }
 
-async function resolveGuide(
-  cx: ChangeContext,
+function resolveGuide(
   coverage: CoverageBuild,
-): Promise<{ guide: ResolvedGuide; source: ResolvedGuide['source']; fromHead?: string; guideRow: GuideRow | null; gaps: string[]; raised: unknown[]; undeclared: string[] }> {
-  const db = cx.env.DB;
+  guideRows: GuideRow[],
+): { guide: ResolvedGuide; source: ResolvedGuide['source']; fromHead?: string; guideRow: GuideRow | null; gaps: string[]; raised: unknown[]; undeclared: string[] } {
   const change = coverage.change;
-  const current = await db.prepare(
-    `SELECT id, head_sha, source, user_id, agent_id, token_id, body, gaps, undeclared, created_at
-       FROM review_guides WHERE change_set_id = ?1 AND head_sha = ?2 ORDER BY source`,
-  ).bind(change.id, change.head_sha).all<GuideRow>();
-  const rows = current.results ?? [];
+  const rows = guideRows.filter((row) => row.head_sha === change.head_sha);
   const author = rows.find((row) => row.source === 'author');
   const reviewer = rows.find((row) => row.source === 'reviewer');
   const preferred = author ?? reviewer;
@@ -296,12 +354,7 @@ async function resolveGuide(
       };
     }
   }
-  const older = await db.prepare(
-    `SELECT id, head_sha, source, user_id, agent_id, token_id, body, gaps, undeclared, created_at
-       FROM review_guides WHERE change_set_id = ?1 AND head_sha != ?2
-       ORDER BY (source = 'author') DESC, created_at DESC LIMIT 50`,
-  ).bind(change.id, change.head_sha).all<GuideRow>();
-  const prior = (older.results ?? [])
+  const prior = guideRows.filter((row) => row.head_sha !== change.head_sha)
     .map((row) => ({ row, guide: guideRowGuide(row, coverage.map) }))
     .find((value) => value.guide !== null);
   if (prior?.guide) {
@@ -389,69 +442,138 @@ function currentAttentionFacts(change: GuideChange, blocking: number, guideRequi
   };
 }
 
+interface ReviewSummaryRow extends Partial<ReviewFactsRow> {
+  rv_checks_pending?: number | null;
+  rv_checks_failing?: number | null;
+  rv_request_changes?: number | null;
+  rv_blocking_policy?: string | null;
+}
+
+interface GuideSnapshot {
+  change: GuideChange;
+  guideRows: GuideRow[];
+  ackRows: Array<{ unit_key: string; ack_count: number; mine: number }>;
+  findings: FindingRow[];
+  openFindings: number;
+  reviewRow: ReviewSummaryRow | null;
+}
+
+async function loadGuideSnapshot(cx: ChangeContext, rawNumber: string, mine: string | null): Promise<ServiceResult<GuideSnapshot>> {
+  const number = parseNumber(rawNumber);
+  if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+  const db = cx.env.DB;
+  const results = await db.batch([
+    selectChange(db, cx.repo.id, number),
+    db.prepare(
+      `SELECT g.id, g.head_sha, g.source, g.user_id, g.agent_id, g.token_id, g.body, g.gaps, g.undeclared, g.created_at
+         FROM review_guides g JOIN change_sets c ON c.id = g.change_set_id
+        WHERE c.repo_id = ?1 AND c.number = ?2
+        ORDER BY (g.head_sha = c.head_sha) DESC, (g.source = 'author') DESC, g.created_at DESC LIMIT 50`,
+    ).bind(cx.repo.id, number),
+    db.prepare(
+      `SELECT a.unit_key, COUNT(*) AS ack_count, MAX(CASE WHEN a.principal = ?3 THEN 1 ELSE 0 END) AS mine
+         FROM review_acks a JOIN change_sets c ON c.id = a.change_set_id
+        WHERE c.repo_id = ?1 AND c.number = ?2 GROUP BY a.unit_key`,
+    ).bind(cx.repo.id, number, mine),
+    db.prepare(
+      `SELECT f.id, f.opened_head, f.last_seen_head, f.path, f.side, f.start_line, f.end_line, f.unit_key, f.category, f.severity,
+              f.confidence, f.title, f.scenario, f.verify, f.body, f.status, f.principal, f.created_at, f.updated_at
+         FROM review_findings f JOIN change_sets c ON c.id = f.change_set_id
+        WHERE c.repo_id = ?1 AND c.number = ?2 AND (f.status = 'open' OR f.opened_head = c.head_sha OR f.last_seen_head = c.head_sha)
+        ORDER BY f.created_at DESC LIMIT 100`,
+    ).bind(cx.repo.id, number),
+    db.prepare(
+      `SELECT COUNT(*) AS n FROM review_findings f JOIN change_sets c ON c.id = f.change_set_id
+        WHERE c.repo_id = ?1 AND c.number = ?2 AND f.status = 'open'`,
+    ).bind(cx.repo.id, number),
+    db.prepare(
+      `SELECT ${reviewFactsColumns('c')},
+              EXISTS (SELECT 1 FROM check_runs k WHERE k.change_set_id = c.id AND k.head_sha = c.head_sha AND k.status IN ('queued', 'running')) AS rv_checks_pending,
+              EXISTS (SELECT 1 FROM check_runs k WHERE k.change_set_id = c.id AND k.head_sha = c.head_sha AND k.conclusion = 'failure') AS rv_checks_failing,
+              EXISTS (SELECT 1 FROM change_reviews r WHERE r.change_set_id = c.id AND r.head_sha = c.head_sha AND r.verdict = 'request-changes') AS rv_request_changes,
+              (SELECT p.blocking_findings FROM review_policies p WHERE p.repo_id = c.repo_id) AS rv_blocking_policy
+         FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2`,
+    ).bind(cx.repo.id, number),
+  ]);
+  const change = (results[0]?.results?.[0] as GuideChange | undefined) ?? null;
+  if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+  return {
+    ok: true,
+    value: {
+      change,
+      guideRows: (results[1]?.results ?? []) as GuideRow[],
+      ackRows: (results[2]?.results ?? []) as Array<{ unit_key: string; ack_count: number; mine: number }>,
+      findings: (results[3]?.results ?? []) as FindingRow[],
+      openFindings: Number((results[4]?.results?.[0] as { n?: number } | undefined)?.n ?? 0),
+      reviewRow: (results[5]?.results?.[0] as ReviewSummaryRow | undefined) ?? null,
+    },
+  };
+}
+
+function reviewSummary(
+  cx: ChangeContext,
+  change: GuideChange,
+  row: ReviewSummaryRow | null,
+): { facts: Partial<AttentionFacts>; satisfied: boolean; blockers: unknown[]; approvals: { count: number; required: number } } {
+  const facts = parseReviewFacts(row);
+  const branchPolicy = effectivePolicy(cx.branchRules ?? [], branchRef(change.base_ref));
+  const gate = reviewGate(facts, branchPolicy);
+  const required = facts.required;
+  const approvals = facts.approvals;
+  return {
+    facts: {
+      escalations: facts.open,
+      checksPending: Boolean(row?.rv_checks_pending),
+      checksFailing: Boolean(row?.rv_checks_failing),
+      requestChanges: Boolean(row?.rv_request_changes),
+      blockingFindings: facts.blockingFindings,
+      guideRequired: facts.guideRequired,
+      guidePresent: facts.guidePresent,
+      undeclared: facts.undeclared,
+      approvals,
+      required,
+      humans: facts.humans,
+      humansRequired: branchPolicy.requiredApprovals,
+      mergePolicy: change.merge_policy,
+    },
+    satisfied: gate.block === null,
+    blockers: gate.blockers,
+    approvals: { count: approvals, required },
+  };
+}
+
 export async function getGuide(
   cx: ChangeContext,
   rawNumber: string,
   query: GuideQuery = {},
+  preload?: { snapshot: GuideSnapshot; built: CoverageBuild },
 ): Promise<ServiceResult<ReviewGuideView>> {
   if (query.since !== undefined && !SHA_RE.test(query.since)) return fail(400, 'since must be a full 40-character commit SHA', 'INVALID_SINCE');
   if (query.include !== undefined && query.include !== 'hunks') return fail(400, 'include must be "hunks"', 'INVALID_INCLUDE');
   if (query.unacked !== undefined && query.unacked !== 'true' && query.unacked !== 'false') {
     return fail(400, 'unacked must be true or false', 'INVALID_UNACKED');
   }
-  const changeResult = await findChange(cx, rawNumber);
-  if (!changeResult.ok) return changeResult;
-  const coverage = await coverageFor(cx, changeResult.value);
+  const mine = cx.actor ? actorPrincipal(cx.actor).id : null;
+  const snapshotResult = preload ? { ok: true as const, value: preload.snapshot } : await loadGuideSnapshot(cx, rawNumber, mine);
+  if (!snapshotResult.ok) return snapshotResult;
+  const snapshot = snapshotResult.value;
+  const coverage = preload ? { ok: true as const, value: preload.built } : await coverageFor(cx, snapshot.change);
   if (!coverage.ok) return coverage;
   const built = coverage.value;
   if (!built.change.head_sha || !built.change.base_sha) return fail(409, 'change has no base or head commit', 'NO_HEAD');
-  const selected = await resolveGuide(cx, built);
-  const mine = cx.actor ? actorPrincipal(cx.actor).id : null;
-  const ackRows = await cx.env.DB.prepare(
-    `SELECT unit_key, COUNT(*) AS ack_count, MAX(CASE WHEN principal = ?2 THEN 1 ELSE 0 END) AS mine
-       FROM review_acks WHERE change_set_id = ?1 GROUP BY unit_key`,
-  ).bind(built.change.id, mine).all<{ unit_key: string; ack_count: number; mine: number }>();
-  const ackMap = new Map((ackRows.results ?? []).map((row) => [row.unit_key, row]));
+  let compare = built.compare;
+  if (query.include === 'hunks' && !compare) {
+    compare = (await withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) =>
+      treePairBody(resolveCtx(cx, artifacts), built.baseTree, built.headTree),
+    )).body;
+  }
+  const selected = resolveGuide(built, snapshot.guideRows);
+  const ackMap = new Map(snapshot.ackRows.map((row) => [row.unit_key, row]));
   let sinceKeys: Set<string> | null = null;
   if (query.since !== undefined) {
-    const previous = await withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
-      const ctx = resolveCtx(cx, artifacts);
-      const [priorCommit, baseCommit] = await Promise.all([
-        readCommitInfo(ctx, query.since!),
-        readCommitInfo(ctx, built.change.base_sha!),
-      ]);
-      if (!priorCommit) return { error: 'SINCE_NOT_FOUND' as const };
-      if (!baseCommit) return { error: 'STORAGE_UNAVAILABLE' as const };
-      const earlier = (await treePairBody(ctx, baseCommit.tree, priorCommit.tree)).body;
-      const config = await reviewConfigAt(artifacts, built.change.base_sha!, baseCommit.tree);
-      const previousFiles: CoverageFileInput[] = [];
-      let hunkFiles = 0;
-      for (const file of earlier.files) {
-        const input: CoverageFileInput = {
-          path: file.path,
-          ...(file.oldPath ? { oldPath: file.oldPath } : {}),
-          status: file.status,
-          oldHash: file.oldHash,
-          newHash: file.newHash,
-          additions: file.additions,
-          deletions: file.deletions,
-          tags: file.risk.tags as CoverageFileInput['tags'],
-          hunks: null,
-        };
-        if (receiptEligible(file) || file.binary || file.tooLarge || hunkFiles >= REVIEW_BUDGETS.maxHunkFiles) {
-          previousFiles.push(input);
-          continue;
-        }
-        hunkFiles++;
-        const diff = await cachedFileDiff(ctx, file);
-        previousFiles.push({ ...input, hunks: diff.hunks, ...(diff.truncated ? { truncated: true } : {}) });
-      }
-      return { map: await buildCoverage(previousFiles, config.config) };
-    });
-    if ('error' in previous) return previous.error === 'SINCE_NOT_FOUND'
-      ? fail(404, 'since commit not found', 'SINCE_NOT_FOUND')
-      : fail(503, 'base commit could not be read', 'STORAGE_UNAVAILABLE');
-    sinceKeys = new Set(previous.map.units.map((unit) => unit.key));
+    const previous = await coverageFor(cx, built.change, query.since);
+    if (!previous.ok) return previous;
+    sinceKeys = new Set(previous.value.map.units.map((unit) => unit.key));
   }
   const visible = built.map.units.filter((unit) => {
     if (sinceKeys && sinceKeys.has(unit.key)) return false;
@@ -467,7 +589,7 @@ export async function getGuide(
       const ctx = resolveCtx(cx, artifacts);
       for (const unit of visible) {
         if (unit.kind !== 'hunk') continue;
-        const file = built.compare.files.find((item) => item.path === unit.path);
+        const file = compare?.files.find((item) => item.path === unit.path);
         if (!file) continue;
         let list = inlineByFile.get(file.path);
         if (!list) {
@@ -514,39 +636,33 @@ export async function getGuide(
   });
   const declared = selected.guide.contracts ?? [];
   const undeclared = built.map.contracts.filter((path) => !declared.some((item) => item.surface === path || item.surface.startsWith(`${path}#`)));
-  const policy = await cx.env.DB.prepare('SELECT guide_required, blocking_findings FROM review_policies WHERE repo_id = ?1').bind(cx.repo.id)
-    .first<{ guide_required: number; blocking_findings: string }>();
+  const blockingPolicy = snapshot.reviewRow?.rv_blocking_policy ?? 'high-confirmed';
   const validKeys = JSON.stringify(built.map.units.map((unit) => unit.key));
-  if (built.map.units.length) {
-    await cx.env.DB.prepare(
+  if (built.map.units.length && !preload) {
+    await cx.env.DB.batch([cx.env.DB.prepare(
       `UPDATE review_findings SET last_seen_head = ?3
         WHERE change_set_id = ?1 AND unit_key IN (SELECT value FROM json_each(?2)) AND last_seen_head != ?3`,
-    ).bind(built.change.id, validKeys, built.change.head_sha).run();
+    ).bind(built.change.id, validKeys, built.change.head_sha)]);
+    const knownKeys = new Set(built.map.units.map((unit) => unit.key));
+    for (const finding of snapshot.findings) {
+      if (finding.unit_key !== null && knownKeys.has(finding.unit_key)) finding.last_seen_head = built.change.head_sha;
+    }
   }
-  const findings = await cx.env.DB.prepare(
-    `SELECT id, opened_head, last_seen_head, path, side, start_line, end_line, unit_key, category, severity, confidence, title, scenario, verify, body, status, principal, created_at, updated_at
-       FROM review_findings WHERE change_set_id = ?1 AND (status = 'open' OR opened_head = ?2 OR last_seen_head = ?2)
-       ORDER BY created_at DESC LIMIT 100`,
-  ).bind(built.change.id, built.change.head_sha).all<FindingRow>();
-  const items = (findings.results ?? []).map((row) => ({
+  const items = snapshot.findings.map((row) => ({
     ...findingView(row),
     outdated: row.unit_key !== null && !built.map.units.some((unit) => unit.key === row.unit_key),
-    blocking: isBlocking(row, policy?.blocking_findings ?? 'high-confirmed'),
+    blocking: isBlocking(row, blockingPolicy),
   }));
-  const blockingCount = await cx.env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM review_findings WHERE change_set_id = ?1 AND status = 'open'
-       AND (?2 = 'high-confirmed' AND ((severity = 'high' AND confidence = 'confirmed') OR category = 'security'))`,
-  ).bind(built.change.id, policy?.blocking_findings ?? 'high-confirmed').first<{ n: number }>();
-  const blocking = Number(blockingCount?.n ?? 0);
-  const openCount = await cx.env.DB.prepare(`SELECT COUNT(*) AS n FROM review_findings WHERE change_set_id = ?1 AND status = 'open'`)
-    .bind(built.change.id).first<{ n: number }>();
-  const guideRequired = Boolean(policy?.guide_required);
-  const review = await readReviewSummary(cx, built.change);
+  const review = reviewSummary(cx, built.change, snapshot.reviewRow);
+  const blocking = Number(review.facts.blockingFindings ?? 0);
+  const guideRequired = Boolean(review.facts.guideRequired);
   const attention = attentionFor({
     ...currentAttentionFacts(built.change, blocking, guideRequired, selected.guideRow?.head_sha === built.change.head_sha, undeclared.length),
     ...review.facts,
   });
   const reviews = { satisfied: review.satisfied, blockers: review.blockers, approvals: review.approvals };
+  built.pointer.tiers = Object.fromEntries(built.map.units.map((unit) => [unit.key, selected.guide.tiers[unit.key] ?? unit.defaultTier]));
+  await writeJson(compareKeys.reviewmapHead(built.change.id, built.change.base_sha, built.change.head_sha), JSON.stringify(built.pointer));
   const out: ReviewGuideView = {
     number: built.change.number,
     headSha: built.change.head_sha,
@@ -562,7 +678,7 @@ export async function getGuide(
     },
     units,
     contracts: { changed: built.map.contracts, declared: declaredContracts(selected.guide, built.map.contracts).map((path) => declared.find((item) => item.surface === path)!), undeclared },
-    findings: { open: Number(openCount?.n ?? 0), resolved: (findings.results ?? []).filter((row) => row.status === 'resolved').length, items },
+    findings: { open: snapshot.openFindings, resolved: snapshot.findings.filter((row) => row.status === 'resolved').length, items },
     attention,
     review: reviews,
     ...(built.configError ? { configError: built.configError } : {}),
@@ -570,41 +686,6 @@ export async function getGuide(
     ...(hunksTruncated ? { hunksTruncated: true } : {}),
   };
   return { ok: true, value: out };
-}
-
-async function readReviewSummary(cx: ChangeContext, change: GuideChange): Promise<{ facts: Partial<AttentionFacts>; satisfied: boolean; blockers: unknown[]; approvals: { count: number; required: number } }> {
-  const row = await cx.env.DB.prepare(
-    `SELECT ${reviewFactsColumns('c')},
-            EXISTS (SELECT 1 FROM check_runs k WHERE k.change_set_id = c.id AND k.head_sha = c.head_sha AND k.status IN ('queued', 'running')) AS rv_checks_pending,
-            EXISTS (SELECT 1 FROM check_runs k WHERE k.change_set_id = c.id AND k.head_sha = c.head_sha AND k.conclusion = 'failure') AS rv_checks_failing,
-            EXISTS (SELECT 1 FROM change_reviews r WHERE r.change_set_id = c.id AND r.head_sha = c.head_sha AND r.verdict = 'request-changes') AS rv_request_changes
-       FROM change_sets c WHERE c.id = ?1`,
-  ).bind(change.id).first<ReviewFactsRow & { rv_checks_pending: number; rv_checks_failing: number; rv_request_changes: number }>();
-  const facts = parseReviewFacts(row);
-  const branchPolicy = effectivePolicy(cx.branchRules ?? [], branchRef(change.base_ref));
-  const gate = reviewGate(facts, branchPolicy);
-  const required = facts.required;
-  const approvals = facts.approvals;
-  return {
-    facts: {
-      escalations: facts.open,
-      checksPending: Boolean(row?.rv_checks_pending),
-      checksFailing: Boolean(row?.rv_checks_failing),
-      requestChanges: Boolean(row?.rv_request_changes),
-      blockingFindings: facts.blockingFindings,
-      guideRequired: facts.guideRequired,
-      guidePresent: facts.guidePresent,
-      undeclared: facts.undeclared,
-      approvals,
-      required,
-      humans: facts.humans,
-      humansRequired: branchPolicy.requiredApprovals,
-      mergePolicy: change.merge_policy,
-    },
-    satisfied: gate.block === null,
-    blockers: gate.blockers,
-    approvals: { count: approvals, required },
-  };
 }
 
 export async function submitGuide(
@@ -616,27 +697,42 @@ export async function submitGuide(
   if (!input || typeof input !== 'object' || Array.isArray(input)) return fail(400, 'body must be an object {headSha, guide}', 'INVALID_BODY');
   const body = input as Record<string, unknown>;
   if (typeof body.headSha !== 'string' || !SHA_RE.test(body.headSha)) return fail(422, 'headSha must be a full 40-character commit SHA', 'INVALID_HEAD_SHA');
-  const change = await findChange(cx, rawNumber);
-  if (!change.ok) return change;
-  if (body.headSha !== change.value.head_sha) return fail(409, 'the change head moved; submit a guide for the current head', 'HEAD_MOVED');
-  const built = await coverageFor(cx, change.value);
+  const principal = actorPrincipal(cx.actor);
+  const snapshotResult = await loadGuideSnapshot(cx, rawNumber, principal.id);
+  if (!snapshotResult.ok) return snapshotResult;
+  const snapshot = snapshotResult.value;
+  const change = snapshot.change;
+  if (body.headSha !== change.head_sha) return fail(409, 'the change head moved; submit a guide for the current head', 'HEAD_MOVED');
+  const built = await coverageFor(cx, change);
   if (!built.ok) return built;
   const validated = validateGuide(body.guide, built.value.map);
   if (!validated.ok) return fail(422, validated.error, validated.code);
-  const source = authorPrincipal(change.value) === actorPrincipal(cx.actor).id ? 'author' : 'reviewer';
-  const principal = actorPrincipal(cx.actor);
+  const source = authorPrincipal(change) === principal.id ? 'author' : 'reviewer';
   const now = Date.now();
-  const existing = await cx.env.DB.prepare('SELECT id FROM review_guides WHERE change_set_id = ?1 AND head_sha = ?2 AND source = ?3')
-    .bind(change.value.id, body.headSha, source).first<{ id: string }>();
+  const existing = snapshot.guideRows.find((row) => row.head_sha === body.headSha && row.source === source);
   const id = existing?.id ?? crypto.randomUUID();
   const json = JSON.stringify(body.guide);
-  await cx.env.DB.prepare(
+  await cx.env.DB.batch([cx.env.DB.prepare(
     `INSERT INTO review_guides (id, change_set_id, head_sha, source, user_id, agent_id, token_id, body, gaps, undeclared, created_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
      ON CONFLICT(change_set_id, head_sha, source) DO UPDATE SET user_id = excluded.user_id, agent_id = excluded.agent_id,
        token_id = excluded.token_id, body = excluded.body, gaps = excluded.gaps, undeclared = excluded.undeclared, created_at = excluded.created_at`,
-  ).bind(id, change.value.id, body.headSha, source, principal.userId, principal.agentId, principal.tokenId, json, validated.gaps.length, validated.undeclared.length, now).run();
-  const result = await getGuide(cx, rawNumber);
+  ).bind(id, change.id, body.headSha, source, principal.userId, principal.agentId, principal.tokenId, json, validated.gaps.length, validated.undeclared.length, now)]);
+  const guideRow: GuideRow = {
+    id,
+    head_sha: body.headSha,
+    source,
+    user_id: principal.userId,
+    agent_id: principal.agentId,
+    token_id: principal.tokenId,
+    body: json,
+    gaps: validated.gaps.length,
+    undeclared: validated.undeclared.length,
+    created_at: now,
+  };
+  snapshot.guideRows = [guideRow, ...snapshot.guideRows.filter((row) => !(row.head_sha === body.headSha && row.source === source))];
+  snapshot.reviewRow = { ...snapshot.reviewRow, rv_guide_json: JSON.stringify([validated.undeclared.length]) };
+  const result = await getGuide(cx, rawNumber, {}, { snapshot, built: built.value });
   return result.ok ? { ok: true, value: { created: !existing, guide: result.value } } : result;
 }
 
@@ -655,11 +751,15 @@ export async function ackUnits(
     return fail(422, 'keys must be an array of at most 500 unit keys', 'INVALID_KEYS');
   }
   if (keys !== undefined && body.chapter !== undefined) return fail(422, 'provide explicit keys or a chapter, not both', 'INVALID_KEYS');
-  const current = await getGuide(cx, rawNumber);
+  const principal = actorPrincipal(cx.actor);
+  const snapshotResult = await loadGuideSnapshot(cx, rawNumber, principal.id);
+  if (!snapshotResult.ok) return snapshotResult;
+  const snapshot = snapshotResult.value;
+  const built = await coverageFor(cx, snapshot.change);
+  if (!built.ok) return built;
+  const current = await getGuide(cx, rawNumber, {}, { snapshot, built: built.value });
   if (!current.ok) return current;
   if (body.headSha !== current.value.headSha) return fail(409, 'the change head moved; acknowledge the current head', 'HEAD_MOVED');
-  const change = await findChange(cx, rawNumber);
-  if (!change.ok) return change;
   const requested = new Set(keys as string[] | undefined);
   if (typeof body.chapter === 'string') {
     const chapter = current.value.guide.chapters.find((item) => item.id === body.chapter);
@@ -672,11 +772,10 @@ export async function ackUnits(
   const known = new Set(current.value.units.map((unit) => unit.key));
   const unknown = [...requested].filter((key) => !known.has(key));
   if (unknown.length) return fail(422, `unknown unit key${unknown.length === 1 ? '' : 's'}: ${unknown.slice(0, 10).join(', ')}`, 'UNKNOWN_UNIT');
-  const principal = actorPrincipal(cx.actor);
   const unack = body.unack === true;
   const now = Date.now();
   const stmts = [...requested].map((key) => unack
-    ? cx.env.DB.prepare('DELETE FROM review_acks WHERE change_set_id = ?1 AND principal = ?2 AND unit_key = ?3').bind(change.value.id, principal.id, key)
+    ? cx.env.DB.prepare('DELETE FROM review_acks WHERE change_set_id = ?1 AND principal = ?2 AND unit_key = ?3').bind(snapshot.change.id, principal.id, key)
     : cx.env.DB.prepare(
       `INSERT INTO review_acks (change_set_id, unit_key, principal, user_id, agent_id, head_sha, created_at)
        SELECT c.id, ?3, ?4, ?5, ?6, ?7, ?8 FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2
@@ -737,15 +836,12 @@ export async function submitFindings(
   const body = input as Record<string, unknown>;
   if (typeof body.headSha !== 'string' || !SHA_RE.test(body.headSha)) return fail(422, 'headSha must be a full 40-character commit SHA', 'INVALID_HEAD_SHA');
   if (!Array.isArray(body.findings) || body.findings.length > 50) return fail(422, 'findings must be an array of at most 50 items', 'INVALID_FINDINGS');
-  const change = await findChange(cx, rawNumber);
-  if (!change.ok) return change;
-  if (body.headSha !== change.value.head_sha) return fail(409, 'the change head moved; submit findings for the current head', 'HEAD_MOVED');
-  const built = await coverageFor(cx, change.value);
-  if (!built.ok) return built;
-  const principal = actorPrincipal(cx.actor);
-  const created: Array<Record<string, unknown>> = [];
-  const duplicates: string[] = [];
-  const suppressed: string[] = [];
+  const parsed: Array<{
+    value: Record<string, unknown>;
+    side: 'head' | 'base';
+    lineNumber: number;
+    fingerprint: string;
+  }> = [];
   for (const [index, item] of body.findings.entries()) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return fail(422, `findings[${index}] must be an object`, 'INVALID_FINDING');
     const value = item as Record<string, unknown>;
@@ -761,15 +857,40 @@ export async function submitFindings(
     for (const [field, max] of [['scenario', 2000], ['verify', 1000], ['body', 4000]] as const) {
       if (value[field] !== undefined && (typeof value[field] !== 'string' || value[field].length > max)) return fail(422, `findings[${index}].${field} must be at most ${max} characters`, 'INVALID_FINDING');
     }
-    const lineNumber = Number(value.startLine);
-    const unit = built.value.map.units.find((candidate) => candidate.path === value.path && (candidate.kind === 'file' ||
-      (side === 'head' ? lineNumber >= candidate.newStart && lineNumber <= candidate.newStart + candidate.newLines : lineNumber >= candidate.oldStart && lineNumber <= candidate.oldStart + candidate.oldLines)));
-    const fingerprint = await findingFingerprint(value.category, value.path, value.title);
-    const prior = await cx.env.DB.prepare(`SELECT id, status FROM review_findings WHERE change_set_id = ?1 AND fingerprint = ?2 AND status IN ('open', 'irrelevant')
-      ORDER BY (status = 'open') DESC, created_at DESC LIMIT 1`)
-      .bind(change.value.id, fingerprint).first<{ id: string; status: FindingStatus }>();
+    parsed.push({
+      value,
+      side,
+      lineNumber: Number(value.startLine),
+      fingerprint: await findingFingerprint(value.category, value.path, value.title),
+    });
+  }
+  const number = parseNumber(rawNumber);
+  if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+  const db = cx.env.DB;
+  const results = await db.batch([
+    selectChange(db, cx.repo.id, number),
+    ...parsed.map(({ fingerprint }) => db.prepare(
+      `SELECT id, status FROM review_findings WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2)
+         AND fingerprint = ?3 AND status IN ('open', 'irrelevant')
+        ORDER BY (status = 'open') DESC, created_at DESC LIMIT 1`,
+    ).bind(cx.repo.id, number, fingerprint)),
+  ]);
+  const change = (results[0]?.results?.[0] as GuideChange | undefined) ?? null;
+  if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+  if (body.headSha !== change.head_sha) return fail(409, 'the change head moved; submit findings for the current head', 'HEAD_MOVED');
+  const built = await coverageFor(cx, change);
+  if (!built.ok) return built;
+  const principal = actorPrincipal(cx.actor);
+  const created: Array<Record<string, unknown>> = [];
+  const duplicates: string[] = [];
+  const suppressed: string[] = [];
+  const writes: D1PreparedStatement[] = [];
+  const now = Date.now();
+  for (const [index, item] of parsed.entries()) {
+    const { value, side, lineNumber, fingerprint } = item;
+    const prior = (results[index + 1]?.results?.[0] as { id: string; status: FindingStatus } | undefined) ?? null;
     if (prior?.status === 'open') {
-      await cx.env.DB.prepare('UPDATE review_findings SET last_seen_head = ?2 WHERE id = ?1').bind(prior.id, body.headSha).run();
+      writes.push(db.prepare('UPDATE review_findings SET last_seen_head = ?2 WHERE id = ?1').bind(prior.id, body.headSha));
       duplicates.push(prior.id);
       continue;
     }
@@ -777,16 +898,18 @@ export async function submitFindings(
       suppressed.push(prior.id);
       continue;
     }
+    const unit = built.value.map.units.find((candidate) => candidate.path === value.path && (candidate.kind === 'file' ||
+      (side === 'head' ? lineNumber >= candidate.newStart && lineNumber <= candidate.newStart + candidate.newLines : lineNumber >= candidate.oldStart && lineNumber <= candidate.oldStart + candidate.oldLines)));
     if (!unit) return fail(422, `findings[${index}] does not match a current coverage unit`, 'UNKNOWN_UNIT');
     const id = crypto.randomUUID();
-    const now = Date.now();
-    await cx.env.DB.prepare(
+    writes.push(db.prepare(
       `INSERT INTO review_findings (id, change_set_id, opened_head, last_seen_head, path, side, start_line, end_line, unit_key, category, severity, confidence, title, scenario, verify, body, fingerprint, status, principal, user_id, agent_id, created_at, updated_at)
        VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'open', ?17, ?18, ?19, ?20, ?20)`,
-    ).bind(id, change.value.id, body.headSha, value.path, side, lineNumber, value.endLine ?? null, unit.key, value.category, value.severity,
-      value.confidence, value.title, value.scenario ?? null, value.verify ?? null, value.body ?? null, fingerprint, principal.id, principal.userId, principal.agentId, now).run();
+    ).bind(id, change.id, body.headSha, value.path, side, lineNumber, value.endLine ?? null, unit.key, value.category, value.severity,
+      value.confidence, value.title, value.scenario ?? null, value.verify ?? null, value.body ?? null, fingerprint, principal.id, principal.userId, principal.agentId, now));
     created.push({ id, path: value.path, unitKey: unit.key, category: value.category, severity: value.severity, confidence: value.confidence, title: value.title });
   }
+  if (writes.length) await db.batch(writes);
   return { ok: true, value: { created, duplicates, suppressed } };
 }
 
