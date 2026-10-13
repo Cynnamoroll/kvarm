@@ -33,7 +33,7 @@ import type { RepoRow } from '../db/repos';
 import type { GitRef } from '@kvarm/gitops';
 import { finish, notFound, resolveRepo, type Resolved } from './repoPages';
 
-type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
+import type { App } from './api';
 export const comparePages = new Hono<App>();
 
 const HTML = { 'content-type': 'text/html; charset=utf-8' };

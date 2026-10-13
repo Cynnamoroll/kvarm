@@ -146,7 +146,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    curl -s https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # ok
    ```
 
-7. **Secrets.** None are required. WorkOS sign-in is deferred: without its secrets `/auth/*` answers 503 and personal access tokens are the way in. To enable it later:
+7. **Secrets.** None are required. Without the WorkOS secrets every `/auth/*` route answers `503`, session cookies are ignored and personal access tokens are the way in. To let people sign in to the web UI through WorkOS AuthKit:
 
    ```sh
    cd apps/platform
@@ -155,7 +155,22 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    npx wrangler secret put WORKOS_COOKIE_PASSWORD   # a random value of 32+ characters, e.g. openssl rand -hex 32
    ```
 
-   and set `vars.WORKOS_REDIRECT_URI` to `<APP_ORIGIN>/auth/callback`.
+   set `vars.WORKOS_REDIRECT_URI` to `<APP_ORIGIN>/auth/callback` (when empty, the callback is the origin that served `/auth/login`), and register that exact URI as a redirect URI (and the site origin as the sign-out return URL) for the AuthKit application in the WorkOS dashboard. A cookie password shorter than 32 characters counts as unset.
+
+   **How sign-in behaves.** `GET /auth/login` sends the browser to AuthKit with a random `state` and a PKCE (S256) challenge, both held in a sealed, 10-minute `kvarm-auth-state-…` cookie (one per pending sign-in, so two tabs do not collide). `GET /auth/callback` checks the state against that cookie, exchanges the code (with the verifier and the API key) and sets the `wos-session` cookie: AES-GCM sealed with a key derived from `WORKOS_COOKIE_PASSWORD`, `HttpOnly; Secure; SameSite=Lax`, valid for 7 days at most. The session names the Kvarm user; every request re-reads that user from D1 and authorizes exactly like a personal access token of the same user, so removing a grant, flipping visibility or deleting the user applies to the next request. Every 10 minutes the session redeems its WorkOS refresh token; if WorkOS refuses (session revoked or user removed there), the session ends. Parallel requests that race on that single-use token adopt the winner's rotated session instead of signing out; if WorkOS cannot be reached at all, the session continues on its D1-checked authority and retries a minute later. `GET /auth/logout` shows a sign-out form; `POST /auth/logout` (same-origin, with the session's CSRF token) clears the cookie, records the session as signed out (`session_revocations`, migration `0032`, so a copied cookie stops working too) and ends the WorkOS session. Rotating `WORKOS_COOKIE_PASSWORD` signs everyone out.
+
+   **Accounts.** A first sign-in creates a user whose login is the email's local-part, lowercased, with other characters turned into dashes and cut to 39 characters; a login taken by any user or organization, or a reserved word, gets a numeric suffix (`jane-doe-2`). Sign-in never makes anyone an instance admin. Existing PAT-only users (created by `mint-pat.mjs`, including the bootstrap admin) are **not** linked automatically, because a matching email alone does not prove it is the same person. Two explicit ways link one:
+
+   - An instance admin signed in through WorkOS opens `/settings/tokens` and links a login to a WorkOS user id (`user_…`, shown in the WorkOS dashboard). Only users without a WorkOS identity can be linked, and only to a WorkOS user that has no Kvarm account yet. The bootstrap admin has no session to do this from, so link it once from the command line before that person first signs in (create the user in the WorkOS dashboard to get the id):
+
+     ```sh
+     node scripts/wrangler-target.mjs d1 execute DB --remote \
+       --command "UPDATE users SET workos_user_id = '<user_…>' WHERE login = '<admin-login>' AND workos_user_id LIKE 'kvarm-ops:%'"
+     ```
+
+   - Or opt in to linking by verified email with `vars.WORKOS_LINK_VERIFIED_EMAIL = "true"`: a first sign-in then links to the one PAT-only user with the same email, if WorkOS reports the email as verified and exactly one such user exists.
+
+   The settings form and the email opt-in record a `user.identity.linked` event. Organizations are not mapped to WorkOS organizations.
 
 8. **Bootstrap admin and token.** `scripts/mint-pat.mjs` creates the user (non-admin) if the login is new, inserts a `kvarm_pat_` token row into remote D1 and writes the plaintext token only to a gitignored env file (it refuses any other file and prints only the token prefix). The second command makes that user the instance admin (needed for the `?nocache=1` compare bypass and the Container CI runner).
 
@@ -167,7 +182,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    printf 'KVARM_BASE_URL=%s\nKVARM_USER=%s\n' https://kvarm-platform.<your-subdomain>.workers.dev <admin-login> >> .env.local
    ```
 
-   `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
+   `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or, once WorkOS sign-in is enabled, the `/settings/tokens` page or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
 
 9. **Smoke test.** Create a repository, push to it and read its events:
 
@@ -261,7 +276,7 @@ claude mcp add --transport http kvarm "$KVARM_BASE_URL/mcp" --header "Authorizat
 
 ## API reference
 
-All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 UTC timestamps, and fail with `{"error": "...", "code": "..."}`. Authenticate with `Authorization: Bearer kvarm_pat_...` (the PAT needs the `api` scope) or an agent token. Git uses the token as the basic-auth password. Every response carries `x-kvarm-cost` (`d1`, `rr`, `rw`, `art`, `do`, `r2a`, `r2b`, `q`, `sub`, `cache`); compare responses also carry `x-kvarm-cache: hit|miss|bypass`.
+All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 UTC timestamps, and fail with `{"error": "...", "code": "..."}`. Authenticate with `Authorization: Bearer kvarm_pat_...` (the PAT needs the `api` scope) or an agent token; a browser signed in through WorkOS authenticates with its session cookie, and state-changing calls carrying that cookie count only when they come from the same origin. Git uses the token as the basic-auth password. Every response carries `x-kvarm-cost` (`d1`, `rr`, `rw`, `art`, `do`, `r2a`, `r2b`, `q`, `sub`, `cache`); compare responses also carry `x-kvarm-cache: hit|miss|bypass`.
 
 | area | endpoints (repository routes are under `/api/v1/repos/:owner/:repo`) |
 | --- | --- |
@@ -335,7 +350,6 @@ Configured limits (constants in the code, documented with their behavior in the 
 Not built in this version, recorded for after the submission:
 
 - The collaborative UI pass (new pages and the visual direction); the existing pages are unchanged.
-- WorkOS sign-in (configured by the secrets above; personal access tokens are the supported path today).
 - Revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
 - Contract capsules, semantic packets, hotspot suggestions, priority credits and resource lifecycle.
 - Advisory low-signal test flags and an auto-updating repository wiki.

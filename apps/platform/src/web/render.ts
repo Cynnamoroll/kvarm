@@ -58,6 +58,11 @@ function publicOrigin(env: Env): string | null {
   }
 }
 
+/** Hidden CSRF field for a session's state-changing forms; empty without a session. */
+export function csrfInput(token: string | null | undefined): string {
+  return token ? `<input type="hidden" name="_csrf" value="${escapeHtml(token)}" />` : '';
+}
+
 export function layout(env: Env, opts: PageOptions, body: string): string {
   const name = siteName(env);
   const origin = publicOrigin(env);
@@ -89,8 +94,8 @@ ${opts.script ? `<script type="module" defer>${opts.script}</script>` : ''}
       opts.userLogin
         ? `<a href="/${escapeHtml(opts.userLogin)}">${escapeHtml(opts.userLogin)}</a>
            <a href="/settings/tokens">Tokens</a>
-           <form method="post" action="/auth/sign-out" class="signout"><button class="linklike" type="submit">Sign out</button></form>`
-        : '<a href="/auth/sign-in">Sign in</a>'
+           <a href="/auth/logout">Sign out</a>`
+        : '<a href="/auth/login">Sign in</a>'
     }
   </div>
 </header>

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { GIT_PATH_RE, handleGitRequest } from './routes/git';
 import { authRoutes } from './routes/auth';
-import { api } from './routes/api';
+import { api, persistSessionCookies } from './routes/api';
 import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
 import { branchRulesApi } from './routes/api/branchRules';
@@ -58,6 +58,10 @@ app.use('/assets/*', async (c, next) => {
   if (res.status !== 404) return res;
   return next();
 });
+
+// Refreshed or cleared session cookies reach every response, whichever
+// route resolved the session (routes/api.ts requestSession).
+app.use('*', persistSessionCookies);
 
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
