@@ -45,6 +45,8 @@ export const compareKeys = {
     key(`reviewmap/v2/${baseTree}/${headTree}`, { config: configSha }),
   reviewmapHead: (changeId: string, baseSha: string, headSha: string) =>
     key(`reviewmap-head/v2/${changeId}/${baseSha}/${headSha}`),
+  reviewStack: (changeId: string, headSha: string, parentsSha: string) =>
+    key(`review-stack/v1/${changeId}/${headSha}/${parentsSha}`),
   reviewFiles: (headTree: string) => key(`review-files/v1/${headTree}`),
   imports: (blobSha: string) => key(`imports/v1/${blobSha}`),
   reviewImpact: (baseTree: string, headTree: string, configSha: string) =>

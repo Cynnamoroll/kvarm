@@ -3,6 +3,7 @@
  */
 
 import { detectMoves, type Hunk } from '@kvarm/diffcore';
+import { sha256Hex } from '@kvarm/gitops';
 import {
   buildCoverage,
   carryGuide,
@@ -32,6 +33,7 @@ import { effectivePolicy } from './branchRules';
 import { readCommitInfo, type ResolveContext } from './refs';
 import { attentionFor, type AttentionFacts } from './attention';
 import { parseReviewFacts, reviewFactsColumns, reviewGate, type ReviewFactsRow } from './reviewGate';
+import { edgeState, sourceHeadSql, type DependencyState } from './dependencyGate';
 
 export const REVIEW_BUDGETS = { maxHunkFiles: 300, maxUnits: 5000, maxInlineHunkLines: 4000 } as const;
 const MAX_EXPORT_FILES = 50;
@@ -77,6 +79,54 @@ interface ReviewMapPointer {
   configError?: string;
   tiers?: Record<string, ReviewTier>;
   changedPaths?: string[];
+}
+
+interface StackLayerRow extends GuideChange, Partial<ReviewFactsRow> {
+  direction: 'parent' | 'child';
+  on_workspace: string;
+  revision: string;
+  satisfied_commit: string | null;
+  broken_code: string | null;
+  broken_reason: string | null;
+  s_status: string | null;
+  s_head: string | null;
+  rv_checks_pending: number;
+  rv_checks_failing: number;
+  rv_request_changes: number;
+  queue_state: string | null;
+}
+
+interface StackParentUnits {
+  id: string;
+  number: number;
+  revision: string;
+  keys: string[];
+}
+
+interface StackLayer {
+  number: number;
+  title: string;
+  state: string;
+  headSha: string | null;
+  revision?: string;
+  edgeState: DependencyState;
+  waitingOn: ReturnType<typeof attentionFor>['waitingOn'];
+  approvals: { have: number; need: number };
+}
+
+function liveParentEdgeSql(d = 'd', s = 's', f = 'f'): string {
+  return `(${d}.satisfied_commit IS NOT NULL OR (${d}.broken_code IS NULL AND ${s}.status = 'active'
+    AND ${sourceHeadSql(s, f, d)} = ${d}.revision))`;
+}
+
+export function reviewParentChangeIdsSql(changeIdSql: string): string {
+  return `SELECT DISTINCT source.change_set_id
+    FROM workspaces dependent INDEXED BY idx_ws_change
+     JOIN workspace_dependencies d INDEXED BY idx_dep_edge ON d.repo_id = dependent.repo_id AND d.workspace_id = dependent.id
+    JOIN workspaces source ON source.repo_id = d.repo_id AND source.id = d.on_workspace
+    LEFT JOIN repo_refs f ON f.repo_id = source.repo_id AND f.ref = source.ref
+   WHERE dependent.change_set_id = ${changeIdSql} AND source.change_set_id IS NOT NULL
+     AND ${liveParentEdgeSql('d', 'source', 'f')}`;
 }
 
 function actorPrincipal(actor: Actor): { id: string; userId: string; agentId: string | null; tokenId: string | null } {
@@ -502,6 +552,7 @@ export interface ReviewGuideView {
     contract: boolean;
     moved?: { from: string };
     receipt?: string;
+    inherited?: { change: number };
     acked: boolean;
     ackCount: number;
     hunks?: Hunk[];
@@ -511,6 +562,12 @@ export interface ReviewGuideView {
     declared: Array<{ surface: string; impact: string; note?: string }>;
     undeclared: string[];
     breaks: Array<ExportBreak & { declared: boolean }>;
+  };
+  stack: {
+    parents: StackLayer[];
+    children: StackLayer[];
+    inherited: number;
+    truncated?: true;
   };
   impact: { cached: boolean };
   findings: { open: number; resolved: number; items: Array<Record<string, unknown>> };
@@ -551,10 +608,62 @@ interface GuideSnapshot {
   change: GuideChange;
   guideRows: GuideRow[];
   ackRows: Array<{ unit_key: string; ack_count: number; mine: number }>;
+  stackRows: StackLayerRow[];
   checks: Array<{ name: string; status: string; conclusion: string | null }>;
   findings: FindingRow[];
   openFindings: number;
   reviewRow: ReviewSummaryRow | null;
+}
+
+function stackLayersStatement(db: D1Database, repoId: string, number: number): D1PreparedStatement {
+  return db.prepare(
+    `WITH target AS (
+       SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2
+     ),
+     current_ws AS (
+       SELECT id FROM workspaces WHERE change_set_id = (SELECT id FROM target) LIMIT 1
+     ),
+     parent_edges AS (
+       SELECT d.created_at AS edge_created_at, d.id AS edge_id, d.revision, d.satisfied_commit, d.broken_code, d.broken_reason,
+              s.id AS on_workspace,
+              s.status AS s_status, ${sourceHeadSql('s', 'f', 'd')} AS s_head, s.change_set_id
+         FROM current_ws w
+         JOIN workspace_dependencies d INDEXED BY idx_dep_edge ON d.repo_id = ?1 AND d.workspace_id = w.id
+         JOIN workspaces s ON s.repo_id = d.repo_id AND s.id = d.on_workspace
+         LEFT JOIN repo_refs f ON f.repo_id = s.repo_id AND f.ref = s.ref
+        WHERE s.change_set_id IS NOT NULL AND ${liveParentEdgeSql()}
+     ),
+     child_edges AS (
+       SELECT d.created_at AS edge_created_at, d.id AS edge_id, d.revision, d.satisfied_commit, d.broken_code, d.broken_reason,
+              s.id AS on_workspace,
+              s.status AS s_status, ${sourceHeadSql('s', 'f', 'd')} AS s_head, child.change_set_id
+         FROM current_ws w
+         JOIN workspaces s ON s.id = w.id
+         JOIN workspace_dependencies d INDEXED BY idx_dep_source ON d.repo_id = ?1 AND d.on_workspace = s.id
+         JOIN workspaces child ON child.repo_id = d.repo_id AND child.id = d.workspace_id
+         LEFT JOIN repo_refs f ON f.repo_id = s.repo_id AND f.ref = s.ref
+        WHERE child.change_set_id IS NOT NULL
+     ),
+     parent_candidates AS (
+       SELECT 'parent' AS direction, * FROM parent_edges ORDER BY edge_created_at, edge_id LIMIT 8
+     ),
+     child_candidates AS (
+       SELECT 'child' AS direction, * FROM child_edges ORDER BY edge_created_at, edge_id LIMIT 21
+     ),
+     candidates AS (
+       SELECT * FROM parent_candidates UNION ALL SELECT * FROM child_candidates
+     )
+     SELECT candidates.direction, candidates.revision, candidates.satisfied_commit, candidates.broken_code, candidates.broken_reason, candidates.on_workspace,
+            candidates.s_status, candidates.s_head,
+            c.id, c.number, c.title, c.base_ref, c.head_ref, c.head_sha, c.base_sha, c.state, c.author_id, c.agent_meta,
+            c.merge_policy, c.risk_level, c.updated_at,
+            ${reviewFactsColumns('c')},
+            EXISTS (SELECT 1 FROM check_runs k WHERE k.change_set_id = c.id AND k.head_sha = c.head_sha AND k.status IN ('queued', 'running')) AS rv_checks_pending,
+            EXISTS (SELECT 1 FROM check_runs k WHERE k.change_set_id = c.id AND k.head_sha = c.head_sha AND k.conclusion = 'failure') AS rv_checks_failing,
+            EXISTS (SELECT 1 FROM change_reviews r WHERE r.change_set_id = c.id AND r.head_sha = c.head_sha AND r.verdict = 'request-changes') AS rv_request_changes,
+            (SELECT q.state FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1 LIMIT 1) AS queue_state
+       FROM candidates JOIN change_sets c ON c.id = candidates.change_set_id`,
+  ).bind(repoId, number);
 }
 
 async function loadGuideSnapshot(cx: ChangeContext, rawNumber: string, mine: string | null): Promise<ServiceResult<GuideSnapshot>> {
@@ -570,9 +679,12 @@ async function loadGuideSnapshot(cx: ChangeContext, rawNumber: string, mine: str
         ORDER BY (g.head_sha = c.head_sha) DESC, (g.source = 'author') DESC, g.created_at DESC LIMIT 50`,
     ).bind(cx.repo.id, number),
     db.prepare(
-      `SELECT a.unit_key, COUNT(*) AS ack_count, MAX(CASE WHEN a.principal = ?3 THEN 1 ELSE 0 END) AS mine
-         FROM review_acks a JOIN change_sets c ON c.id = a.change_set_id
-        WHERE c.repo_id = ?1 AND c.number = ?2 GROUP BY a.unit_key`,
+      `WITH target AS (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2)
+       SELECT a.unit_key, COUNT(DISTINCT a.principal) AS ack_count, MAX(CASE WHEN a.principal = ?3 THEN 1 ELSE 0 END) AS mine
+         FROM review_acks a
+        WHERE a.change_set_id = (SELECT id FROM target)
+           OR a.change_set_id IN (${reviewParentChangeIdsSql('(SELECT id FROM target)')})
+        GROUP BY a.unit_key`,
     ).bind(cx.repo.id, number, mine),
     db.prepare(
       `SELECT f.id, f.opened_head, f.last_seen_head, f.path, f.side, f.start_line, f.end_line, f.unit_key, f.category, f.severity,
@@ -600,6 +712,7 @@ async function loadGuideSnapshot(cx: ChangeContext, rawNumber: string, mine: str
           AND head_sha = (SELECT head_sha FROM change_sets WHERE repo_id = ?1 AND number = ?2)
         ORDER BY created_at DESC, id DESC LIMIT 200`,
     ).bind(cx.repo.id, number),
+    stackLayersStatement(db, cx.repo.id, number),
   ]);
   const change = (results[0]?.results?.[0] as GuideChange | undefined) ?? null;
   if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
@@ -609,6 +722,7 @@ async function loadGuideSnapshot(cx: ChangeContext, rawNumber: string, mine: str
       change,
       guideRows: (results[1]?.results ?? []) as GuideRow[],
       ackRows: (results[2]?.results ?? []) as Array<{ unit_key: string; ack_count: number; mine: number }>,
+      stackRows: (results[7]?.results ?? []) as StackLayerRow[],
       checks: (results[6]?.results ?? []) as Array<{ name: string; status: string; conclusion: string | null }>,
       findings: (results[3]?.results ?? []) as FindingRow[],
       openFindings: Number((results[4]?.results?.[0] as { n?: number } | undefined)?.n ?? 0),
@@ -649,13 +763,103 @@ function reviewSummary(
   };
 }
 
+interface ReviewStackBuild {
+  parents: StackLayer[];
+  children: StackLayer[];
+  inheritedByKey: Map<string, number>;
+  inherited: number;
+  truncated: boolean;
+}
+
+async function buildReviewStack(
+  cx: ChangeContext,
+  change: GuideChange,
+  units: CoverageUnit[],
+  rows: StackLayerRow[],
+): Promise<ServiceResult<ReviewStackBuild>> {
+  const parentRows = rows.filter((row) => row.direction === 'parent').sort((a, b) => a.number - b.number || a.id.localeCompare(b.id));
+  const childRows = rows.filter((row) => row.direction === 'child').sort((a, b) => a.number - b.number || a.id.localeCompare(b.id));
+  const parentPins = parentRows.map((row) => `${row.id}:${row.revision}`).sort();
+  const stackKey = compareKeys.reviewStack(change.id, change.head_sha ?? '', await sha256Hex(parentPins.join('\n')));
+  const cached = await readJson<{ parents: StackParentUnits[] }>(stackKey);
+  let parentUnits = cached?.parents;
+  if (!parentUnits || parentUnits.length !== parentRows.length ||
+      parentUnits.some((parent, index) => parent.id !== parentRows[index]?.id || parent.revision !== parentRows[index]?.revision)) {
+    parentUnits = [];
+    for (const row of parentRows) {
+      const coverage = await coverageFor(cx, row, row.revision);
+      if (!coverage.ok) return coverage;
+      parentUnits.push({
+        id: row.id,
+        number: row.number,
+        revision: row.revision,
+        keys: coverage.value.map.units.map((unit) => unit.key),
+      });
+    }
+    await writeJson(stackKey, JSON.stringify({ parents: parentUnits }));
+  }
+  const inheritedByKey = new Map<string, number>();
+  for (const parent of parentUnits) {
+    for (const key of parent.keys) if (!inheritedByKey.has(key)) inheritedByKey.set(key, parent.number);
+  }
+  const toLayer = (row: StackLayerRow): StackLayer => {
+    const facts = parseReviewFacts(row);
+    const policy = effectivePolicy(cx.branchRules ?? [], branchRef(row.base_ref));
+    const attention = attentionFor({
+      state: row.state,
+      escalations: facts.open,
+      checksPending: Boolean(row.rv_checks_pending),
+      checksFailing: Boolean(row.rv_checks_failing),
+      blockingFindings: facts.blockingFindings ?? 0,
+      requestChanges: Boolean(row.rv_request_changes),
+      guideRequired: Boolean(facts.guideRequired),
+      guidePresent: Boolean(facts.guidePresent),
+      undeclared: facts.undeclared ?? 0,
+      approvals: facts.approvals,
+      required: facts.required,
+      humans: facts.humans,
+      humansRequired: policy.requiredApprovals,
+      mergePolicy: row.merge_policy,
+      queueState: row.queue_state,
+    });
+    return {
+      number: row.number,
+      title: row.title,
+      state: row.state,
+      headSha: row.head_sha,
+      revision: row.revision,
+      edgeState: edgeState({
+        revision: row.revision,
+        on_workspace: row.on_workspace,
+        satisfied_commit: row.satisfied_commit,
+        broken_code: row.broken_code,
+        broken_reason: row.broken_reason,
+        s_status: row.s_status,
+        s_head: row.s_head,
+      }).state,
+      waitingOn: attention.waitingOn,
+      approvals: { have: facts.approvals, need: facts.required },
+    };
+  };
+  return {
+    ok: true,
+    value: {
+      parents: parentRows.map(toLayer),
+      children: childRows.slice(0, 20).map(toLayer),
+      inheritedByKey,
+      inherited: units.reduce((count, unit) => count + Number(inheritedByKey.has(unit.key)), 0),
+      truncated: childRows.length > 20,
+    },
+  };
+}
+
 export async function getGuide(
   cx: ChangeContext,
   rawNumber: string,
   query: GuideQuery = {},
   preload?: { snapshot: GuideSnapshot; built: CoverageBuild },
 ): Promise<ServiceResult<ReviewGuideView>> {
-  if (query.since !== undefined && !SHA_RE.test(query.since)) return fail(400, 'since must be a full 40-character commit SHA', 'INVALID_SINCE');
+  if (query.since !== undefined && query.since !== 'parent' && !SHA_RE.test(query.since)) return fail(400, 'since must be a full 40-character commit SHA or "parent"', 'INVALID_SINCE');
   if (query.include !== undefined && query.include !== 'hunks') return fail(400, 'include must be "hunks"', 'INVALID_INCLUDE');
   if (query.unacked !== undefined && query.unacked !== 'true' && query.unacked !== 'false') {
     return fail(400, 'unacked must be true or false', 'INVALID_UNACKED');
@@ -668,6 +872,9 @@ export async function getGuide(
   if (!coverage.ok) return coverage;
   const built = coverage.value;
   if (!built.change.head_sha || !built.change.base_sha) return fail(409, 'change has no base or head commit', 'NO_HEAD');
+  const stackResult = await buildReviewStack(cx, built.change, built.map.units, snapshot.stackRows);
+  if (!stackResult.ok) return stackResult;
+  const stack = stackResult.value;
   let compare = built.compare;
   if (query.include === 'hunks' && !compare) {
     compare = (await withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) =>
@@ -700,12 +907,13 @@ export async function getGuide(
     : selected.guide;
   const ackMap = new Map(snapshot.ackRows.map((row) => [row.unit_key, row]));
   let sinceKeys: Set<string> | null = null;
-  if (query.since !== undefined) {
+  if (query.since !== undefined && query.since !== 'parent') {
     const previous = await coverageFor(cx, built.change, query.since);
     if (!previous.ok) return previous;
     sinceKeys = new Set(previous.value.map.units.map((unit) => unit.key));
   }
   const visible = built.map.units.filter((unit) => {
+    if (query.since === 'parent' && stack.inheritedByKey.has(unit.key)) return false;
     if (sinceKeys && sinceKeys.has(unit.key)) return false;
     if (query.unacked === 'true' && ackMap.get(unit.key)?.mine) return false;
     return true;
@@ -758,6 +966,7 @@ export async function getGuide(
       ...(unit.receipt ? { receipt: unit.receipt } : {}),
       acked: Boolean(ack?.mine),
       ackCount: Number(ack?.ack_count ?? 0),
+      ...(stack.inheritedByKey.has(unit.key) ? { inherited: { change: stack.inheritedByKey.get(unit.key)! } } : {}),
     };
     if (query.include === 'hunks' && unit.kind === 'hunk' && includedInlineKeys.has(unit.key)) {
       const hunk = inlineByFile.get(unit.path)?.[unit.index];
@@ -807,6 +1016,12 @@ export async function getGuide(
       truncated: built.truncated,
     },
     units,
+    stack: {
+      parents: stack.parents,
+      children: stack.children,
+      inherited: stack.inherited,
+      ...(stack.truncated ? { truncated: true } : {}),
+    },
     contracts: {
       changed: built.map.contracts,
       declared: activeContracts.filter((item) => built.map.contracts.some((path) => contractSurfaceMatches(item.surface, path))),

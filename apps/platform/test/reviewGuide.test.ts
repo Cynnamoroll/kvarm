@@ -531,11 +531,114 @@ describe('guided review endpoints', () => {
     expect(attentionFor({ ...base, state: 'merged', blockingFindings: 1 })).toEqual({ waitingOn: 'none', reasons: [] });
   });
 
+  it('inherits focused coverage and acknowledgements from an active parent workspace', async () => {
+    const { repo, base } = await setup('review-stack-flow');
+    const createWorkspace = async (task: string) => {
+      const result = await call('POST', api('review-stack-flow', '/workspaces'), tokens.owner, { task, agent: 'stack-agent' });
+      expect(result.status).toBe(201);
+      return result.json as { id: string; ref: string; baseSha: string };
+    };
+    const pushWorkspace = async (ws: { ref: string; baseSha: string }, before: string, files: Record<string, string>, parents: string[]) => {
+      const next = await commit(repo, files, parents);
+      repo.refs.set(ws.ref, next.sha);
+      await deliver({
+        type: 'cf.artifacts.repo.pushed',
+        source: { type: 'artifacts', namespace: 'default', repoName: `${OWNER}--review-stack-flow` },
+        payload: { ref: ws.ref, before, after: next.sha, commits: [], totalCommitsCount: 0, commitsTruncated: false },
+        metadata: { accountId: 'acct', eventSubscriptionId: 'sub', eventSchemaVersion: 1, eventTimestamp: new Date().toISOString() },
+      });
+      return next.sha;
+    };
+    const baseFiles = {
+      'README.md': 'base\n',
+      'src/a.ts': 'export const a = 1;\n',
+      'src/b.ts': 'export const b = 1;\n',
+      '.kvarm/review.json': JSON.stringify({ contracts: [] }),
+    };
+    const aWs = await createWorkspace('stack parent');
+    const aHead = await pushWorkspace(aWs, aWs.baseSha, { ...baseFiles, 'src/a.ts': 'export const a = 2;\n' }, [base]);
+    const aChange = await call('POST', api('review-stack-flow', `/workspaces/${aWs.id}/change-set`), tokens.owner, {
+      title: 'Stack parent',
+      mergePolicy: 'review',
+    });
+    expect(aChange.status).toBe(201);
+    const bWs = await createWorkspace('stack child');
+    const bHead = await pushWorkspace(
+      bWs,
+      bWs.baseSha,
+      { ...baseFiles, 'src/a.ts': 'export const a = 2;\n', 'src/b.ts': 'export const b = 2;\n' },
+      [aHead],
+    );
+    const pinned = await call('POST', api('review-stack-flow', `/workspaces/${bWs.id}/dependencies`), tokens.owner, {
+      onWorkspace: aWs.id,
+      revision: aHead,
+    });
+    expect(pinned.status).toBe(201);
+    const bChange = await call('POST', api('review-stack-flow', `/workspaces/${bWs.id}/change-set`), tokens.owner, {
+      title: 'Stack child',
+      mergePolicy: 'review',
+    });
+    expect(bChange.status).toBe(201);
+
+    const guidePath = api('review-stack-flow', '/changes/1/review-guide');
+    const parentGuide = await call('GET', guidePath, tokens.owner);
+    const parentUnit = (parentGuide.json.units as Array<{ key: string; path: string }>).find((unit) => unit.path === 'src/a.ts')!;
+    const childPath = api('review-stack-flow', '/changes/2/review-guide');
+    const cold = await call('GET', childPath, tokens.owner);
+    costs['GET review guide with stack cold'] = cold.cost;
+    expect(cold.status).toBe(200);
+    expect(cold.json.stack.parents).toEqual([expect.objectContaining({ number: 1, edgeState: 'active', waitingOn: expect.any(String) })]);
+    const childUnits = cold.json.units as Array<{ key: string; path: string; inherited?: { change: number }; acked: boolean }>;
+    const inherited = childUnits.find((unit) => unit.path === 'src/a.ts')!;
+    expect(inherited.key).toBe(parentUnit.key);
+    expect(inherited.inherited).toEqual({ change: 1 });
+    expect(childUnits.find((unit) => unit.path === 'src/b.ts')?.inherited).toBeUndefined();
+    const focused = await call('GET', `${childPath}?since=parent`, tokens.owner);
+    expect((focused.json.units as Array<{ path: string }>).map((unit) => unit.path)).toContain('src/b.ts');
+    expect((focused.json.units as Array<{ path: string }>).map((unit) => unit.path)).not.toContain('src/a.ts');
+    const warm = await call('GET', childPath, tokens.owner);
+    costs['GET review guide with stack warm'] = warm.cost;
+    expect(warm.cost).toMatchObject({ art: 0 });
+    expect(warm.cost.d1).toBeLessThanOrEqual(3);
+
+    await call('PUT', api('review-stack-flow', '/review-policy'), tokens.owner, { dangerAckRequired: true });
+    const keys = childUnits.map((unit) => unit.key);
+    await call('POST', childPath, tokens.owner, {
+      headSha: bHead,
+      guide: { intent: 'review every stack unit', chapters: [{ id: 'all', title: 'All', tier: 'scrutinize', hunks: keys }] },
+    });
+    expect((await call('POST', api('review-stack-flow', '/changes/1/review-acks'), tokens.reviewer, {
+      headSha: aHead,
+      keys: [parentUnit.key],
+    })).status).toBe(200);
+    const ownKeys = childUnits.filter((unit) => !unit.inherited).map((unit) => unit.key);
+    expect((await call('POST', api('review-stack-flow', '/changes/2/review-acks'), tokens.reviewer, {
+      headSha: bHead,
+      keys: ownKeys,
+    })).status).toBe(200);
+    const carried = await call('GET', childPath, tokens.reviewer);
+    expect((carried.json.units as Array<{ path: string; acked: boolean }>).find((unit) => unit.path === 'src/a.ts')?.acked).toBe(true);
+    expect((await call('POST', api('review-stack-flow', '/changes/2/approve'), tokens.reviewer, { headSha: bHead })).status).toBe(201);
+    const parentWithChild = await call('GET', guidePath, tokens.owner);
+    expect(parentWithChild.json.stack.children).toEqual([expect.objectContaining({ number: 2, waitingOn: expect.any(String) })]);
+
+    const moved = await pushWorkspace(aWs, aHead, { ...baseFiles, 'src/a.ts': 'export const a = 3;\n' }, [aHead]);
+    expect(moved).not.toBe(aHead);
+    const stale = await call('GET', childPath, tokens.reviewer);
+    expect(stale.json.stack.parents).toEqual([]);
+    expect(stale.json.stack.inherited).toBe(0);
+    expect((stale.json.units as Array<{ path: string; inherited?: unknown; acked: boolean }>).find((unit) => unit.path === 'src/a.ts'))
+      .toMatchObject({ acked: false });
+    expect((await call('GET', `${childPath}?since=parent`, tokens.owner)).json.units).toHaveLength(childUnits.length);
+  });
+
   it('prints measured x-kvarm-cost counters for each new endpoint', () => {
     expect(costs).toEqual(expect.objectContaining({
       'GET review impact cold': expect.any(Object),
       'GET review impact warm': expect.any(Object),
       'GET review guide': expect.any(Object),
+      'GET review guide with stack cold': expect.any(Object),
+      'GET review guide with stack warm': expect.any(Object),
       'POST submit guide': expect.any(Object),
       'POST review ack': expect.any(Object),
       'POST submit findings': expect.any(Object),

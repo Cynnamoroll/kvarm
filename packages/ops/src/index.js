@@ -683,7 +683,7 @@ export const OPERATIONS = Object.freeze([
     description: 'Get deterministic change coverage, the guide and acknowledgements; include hunks only when requested.',
     method: 'GET',
     path: '/repos/{repo}/changes/{number}/review-guide',
-    params: [REPO, CHANGE, query('since', 'string', 'Only include units added since this commit SHA'), query('unacked', 'boolean', 'Only return units not acknowledged by you'), query('include', 'string', 'Include inline hunk details', { enum: ['hunks'] })],
+    params: [REPO, CHANGE, query('since', 'string', 'Only include units added since this commit SHA, or use parent for the focused diff'), query('unacked', 'boolean', 'Only return units not acknowledged by you'), query('include', 'string', 'Include inline hunk details', { enum: ['hunks'] })],
   }),
   define({
     name: 'get_review_impact',

@@ -36,7 +36,7 @@ import {
   type ReviewBlocker,
   type ReviewFactsRow,
 } from './reviewGate';
-import { reviewMapAckKeys } from './reviewGuide';
+import { reviewMapAckKeys, reviewParentChangeIdsSql } from './reviewGuide';
 
 export { HUMAN_MODEL_FAMILY };
 export const REVIEW_VERDICTS = ['approve', 'request-changes'] as const;
@@ -592,7 +592,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
       db.prepare('SELECT danger_ack_required FROM review_policies WHERE repo_id = ?1').bind(cx.repo.id),
       db.prepare(
         `SELECT unit_key FROM review_acks
-          WHERE change_set_id = ?1 AND principal = ?2
+          WHERE (change_set_id = ?1 OR change_set_id IN (${reviewParentChangeIdsSql('?1')})) AND principal = ?2
             AND unit_key IN (SELECT value FROM json_each(?3))`,
       ).bind(target.id, me.id, JSON.stringify(coverageKeys?.scrutinize ?? [])),
     ];
@@ -605,11 +605,12 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
                   CASE WHEN ?13 = 1 THEN json_object(
                     'units', ?14,
                     'acked', (SELECT COUNT(DISTINCT a.unit_key) FROM review_acks a
-                      WHERE a.change_set_id = c.id AND a.principal = ?4
+                      WHERE (a.change_set_id = c.id OR a.change_set_id IN (${reviewParentChangeIdsSql('c.id')})) AND a.principal = ?4
                         AND a.unit_key IN (SELECT value FROM json_each(?15))),
                     'scrutinizeUnacked', (SELECT COUNT(*) FROM json_each(?16) units
                       WHERE NOT EXISTS (SELECT 1 FROM review_acks a
-                        WHERE a.change_set_id = c.id AND a.principal = ?4 AND a.unit_key = units.value))
+                        WHERE (a.change_set_id = c.id OR a.change_set_id IN (${reviewParentChangeIdsSql('c.id')}))
+                          AND a.principal = ?4 AND a.unit_key = units.value))
                   ) ELSE NULL END, ?17, ?17
              FROM change_sets c WHERE c.id = ?2 AND c.head_sha = ?3 AND c.state IN ('open', 'conflicted')
                AND NOT EXISTS (
@@ -619,7 +620,8 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
                       SELECT 1 FROM json_each(?16) units
                        WHERE NOT EXISTS (
                          SELECT 1 FROM review_acks a
-                          WHERE a.change_set_id = c.id AND a.principal = ?4 AND a.unit_key = units.value
+                          WHERE (a.change_set_id = c.id OR a.change_set_id IN (${reviewParentChangeIdsSql('c.id')}))
+                            AND a.principal = ?4 AND a.unit_key = units.value
                        )
                     ))
                )
