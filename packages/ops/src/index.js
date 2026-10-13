@@ -679,6 +679,15 @@ export const OPERATIONS = Object.freeze([
     ],
   }),
   define({
+    name: 'get_review_analytics',
+    command: ['review', 'analytics'],
+    family: 'reviews',
+    description: 'Finding outcomes grouped by filer model family and its evidence level, plus review timing and guide-coverage medians for recent changes.',
+    method: 'GET',
+    path: '/repos/{repo}/review/analytics',
+    params: [REPO, query('days', 'integer', 'Window of change updates to include (1-180 days; default 30)')],
+  }),
+  define({
     name: 'get_review_guide',
     command: ['review', 'guide'],
     family: 'reviews',

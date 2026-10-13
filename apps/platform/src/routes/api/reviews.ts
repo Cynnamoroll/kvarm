@@ -23,6 +23,7 @@ import type { ChangeContext } from '../../services/changes';
 import * as reviews from '../../services/reviews';
 import * as guide from '../../services/reviewGuide';
 import * as impact from '../../services/reviewImpact';
+import * as analytics from '../../services/reviewAnalytics';
 
 export const reviewsApi = new Hono<App>();
 
@@ -64,6 +65,14 @@ reviewsApi.put('/repos/:owner/:repo/review-policy', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
   const r = await reviews.setReviewPolicy(c.env, d.repo, d.actor!, await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/review/analytics', async (c) => {
+  const d = await authorizeRoute(c, 'read');
+  if (!d.ok) return denyJson(c, d);
+  const r = await analytics.getReviewAnalytics(c.env, d.repo, c.req.query('days'));
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

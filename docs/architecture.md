@@ -40,6 +40,7 @@ This inversion is why the merge engine and the integration train do not depend o
 ### 0.4.1 Guided review
 
 `services/reviewGuide.ts` builds deterministic coverage from the base/head trees, reuses cached per-file diffs, and validates author or reviewer guides against that map. Direct active or satisfied workspace dependencies inherit matching coverage units without lowering their tier or floor; `since=parent` returns the focused diff, and parent acknowledgements carry across the stack. It records moved-code provenance, export-signature breaks and evidence status; `services/reviewImpact.ts` separately caches import consumers and test spillover so reviewers can fetch impact before approving contract changes. Acknowledgements follow stable content keys across pushes; findings, declared contract surfaces and the review policy feed the shared publication gate and `services/attention.ts`. The `dangerAckRequired` policy rejects human and agent approvals until the current guide's scrutinize units are acknowledged, but does not block request-changes. Delayed review nudges are idempotently recorded per head; a reviewer suggestion uses the assignment candidate selection, and agent model families are `declared`. The REST routes are thin adapters and `packages/ops/src/index.js` exposes the same operations to CLI and MCP.
+Review analytics groups findings by filer kind and model family, returning `modelFamilyEvidence`; agent families are `declared`.
 
 ### 0.5 Execution posture
 

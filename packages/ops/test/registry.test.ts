@@ -94,6 +94,12 @@ describe('operation registry', () => {
     expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')?.params.find((p) => p.name === 'requiredReviews')?.required).toBeFalsy();
     expect(findOperation('set_review_policy')?.params.find((p) => p.name === 'dangerAckRequired')).toBeDefined();
+    expect(findOperation('set_review_policy')?.params.find((p) => p.name === 'nudgeAfterMinutes')).toBeDefined();
+    expect(findOperation('set_review_policy')?.params.find((p) => p.name === 'nudgeAfterMinutes')?.nullable).toBe(true);
+    expect(findOperation('get_review_analytics')).toMatchObject({
+      command: ['review', 'analytics'], method: 'GET', path: '/repos/{repo}/review/analytics', family: 'reviews', readOnly: true,
+    });
+    expect(findOperation('get_review_analytics')?.description).toContain('model family and its evidence level');
     expect(findOperation('get_review_guide')).toMatchObject({ command: ['review', 'guide'], method: 'GET', path: '/repos/{repo}/changes/{number}/review-guide', readOnly: true });
     expect(findOperation('get_review_guide')?.params.find((p) => p.name === 'since')?.description).toContain('parent');
     expect(findOperation('get_review_impact')).toMatchObject({ command: ['review', 'impact'], method: 'GET', path: '/repos/{repo}/changes/{number}/review/impact', family: 'reviews', readOnly: true });
