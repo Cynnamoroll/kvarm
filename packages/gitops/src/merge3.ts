@@ -48,6 +48,15 @@ export class BlobTooLargeError extends Error {
   override readonly name = 'BlobTooLargeError';
 }
 
+/**
+ * A reader's refusal to fetch another tree under a budget it enforces itself
+ * (one budget shared by several merges over a memoizing reader); the merge
+ * truncates with `maxTreeReads`.
+ */
+export class TreeReadBudgetError extends Error {
+  override readonly name = 'TreeReadBudgetError';
+}
+
 export interface MergeReader extends TreeReader, BlobReader {}
 
 export type MergeConflictKind = 'content' | 'add-add' | 'modify-delete' | 'rename' | 'typechange' | 'binary' | 'file-directory';
@@ -345,6 +354,7 @@ class Merge {
         try {
           entries = await this.reader.readTree(hash);
         } catch (err) {
+          if (err instanceof TreeReadBudgetError) throw new Stop('maxTreeReads');
           throw new Stop('readError', err instanceof Error ? err.message : String(err));
         }
         if (!entries) throw new Stop('missingObject', hash);
@@ -630,8 +640,10 @@ class Merge {
           this.conflict({ path: place, kind: 'binary', base: b, ours: o, theirs: th });
           return void set(o);
         }
-        // git's binary driver answers a virtual ancestor with the base bytes and no content conflict; the mode rule still applies.
-        hash = b && typeOf(b.mode) !== 'gitlink' ? b.hash : await this.blob(bb, place);
+        // git's binary driver answers a virtual ancestor with the base bytes (empty for two adds) and no content
+        // conflict; the mode rule still applies. A submodule base has no bytes to keep.
+        if (b && typeOf(b.mode) === 'gitlink') this.refuseVirtual(place);
+        hash = b ? b.hash : await this.blob(bb, place);
       } else {
         const resolver = this.opts.resolver;
         const merged = mergeText(bb, ob, tb, {

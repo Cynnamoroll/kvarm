@@ -480,7 +480,8 @@ export async function mergePlanFor(ctx: ResolveContext, targetSha: string, headS
 
 /**
  * The guard over the change's own edits: its merge base's tree against the
- * head tree (the base tip's when there is no single merge base). `body` is
+ * head tree (the base tip's when there is none; for a criss-cross, the first
+ * of its merge bases, architecture §3.1). `body` is
  * the base tip -> head compare body when the caller already holds it.
  */
 async function guardFor(

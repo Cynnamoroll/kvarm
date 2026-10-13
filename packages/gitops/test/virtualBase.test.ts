@@ -217,6 +217,8 @@ describe('virtualMergeBase', () => {
     paid.add((await store.readCommit(B1))!.parents[0]!);
     expect(await virtualMergeBase(store, [B1, B2], { maxCommitReads: 1, mayReadCommit: (sha) => paid.has(sha) })).toMatchObject({ truncated: false });
     expect(await virtualMergeBase(store, [B1, B2], { maxTreeReads: 1 })).toMatchObject({ truncated: true, truncatedReason: 'maxTreeReads' });
+    // Three root trees (O, B1, B2): the budget counts distinct fetches, not the merge's repeated reads.
+    expect(await virtualMergeBase(store, [B1, B2], { maxTreeReads: 3 })).toMatchObject({ truncated: false, treeReads: 3 });
     expect(await virtualMergeBase(store, [B1, B2], { maxBlobReads: 1 })).toMatchObject({ truncated: true, truncatedReason: 'maxBlobReads' });
     expect(await virtualMergeBase(store, [B1, 'f'.repeat(40)])).toMatchObject({ truncated: true, truncatedReason: 'missingCommit', truncatedDetail: 'f'.repeat(40) });
     const failing: CommitReader & MergeReader = {

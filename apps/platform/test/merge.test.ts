@@ -410,6 +410,16 @@ describe('prepareMerge + publishMerge', () => {
       ok: false,
       code: 'MERGE_TOO_LARGE',
     });
+    // Trees too: the outer merge reuses what the virtual base fetched, and the budget counts distinct fetches.
+    const full = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    if (!full.ok) throw new Error('expected a merge');
+    const treeReads = full.value.work.treeReads;
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxTreeReads: treeReads } })).toMatchObject({ ok: true });
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxTreeReads: treeReads - 1 } })).toMatchObject({
+      ok: false,
+      code: 'MERGE_TOO_LARGE',
+      error: 'merge exceeds the maxTreeReads budget',
+    });
 
     expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'm', budgets: { maxMergeBases: 1 } })).toMatchObject({
       ok: false,

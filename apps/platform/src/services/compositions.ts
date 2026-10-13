@@ -26,7 +26,7 @@ import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './check
 import { reconcileObserved } from './intents/forecast';
 import { observedSeedFailedStatement } from './intents/store';
 import { normalizePath } from './intents/paths';
-import { CommitCache, KVARM_COMMITTER, MERGE_BUDGETS, artifactsMergeSources, crissCrossBase, isCrissCrossRefusal, overlaySources } from './merge';
+import { CommitCache, KVARM_COMMITTER, MERGE_BUDGETS, artifactsMergeSources, crissCrossBase, isCrissCrossRefusal, overlaySources, sharedTrees, type SharedTrees } from './merge';
 import { RefStoreUnavailable, lsRefs, readCommitInfo, type ResolveContext } from './refs';
 import {
   WORKSPACE_ID_RE,
@@ -81,7 +81,10 @@ export const defaultComposeDeps: ComposeDeps = { ...defaultWorkspaceDeps, gate: 
 export interface CompositionSource {
   workspace: string;
   headSha: string;
+  /** The merge base with the base head; for a criss-cross, the first of `mergeBases`. */
   mergeBase: string;
+  /** Every merge base, sorted, when there are several (the piece was diffed against their virtual merge). */
+  mergeBases?: string[];
   /** Selected paths (a trailing `/` is a prefix); null: the whole workspace. */
   paths: string[] | null;
 }
@@ -304,8 +307,10 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
       const pieces: ComposePiece[] = [];
       const recorded: CompositionSource[] = [];
       const virtualObjects = new Map<string, GitObject>();
-      // Virtual merge bases of criss-cross pieces spend the composition's own read and created-bytes budgets.
-      const spent = { treeReads: 0, blobReads: 0, bytes: 0 };
+      // Virtual merge bases of criss-cross pieces spend the composition's own read and created-bytes budgets;
+      // their trees are memoized for the fold below.
+      const spent = { blobReads: 0, bytes: 0 };
+      let trees: SharedTrees | null = null;
       for (const piece of p.pieces) {
         const headSha = heads.get(found.get(piece.workspace)!.ref!) ?? null;
         if (!headSha) return fail(409, `the ref of workspace ${piece.workspace} is gone`, 'WORKSPACE_REF_MISSING', { workspace: piece.workspace });
@@ -318,22 +323,18 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
         }
         if (mb.bases.length === 0) return fail(409, `workspace ${piece.workspace} shares no history with ${p.base}`, 'UNRELATED_HISTORIES', { workspace: piece.workspace });
         const bases = [...mb.bases].sort();
-        const headCommit = await readCommitInfo(ctx, headSha);
-        if (!headCommit) return fail(503, `could not read the commits of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
-        let baseTree: string;
-        if (bases.length === 1) {
-          const mbCommit = await readCommitInfo(ctx, bases[0]!);
-          if (!mbCommit) return fail(503, `could not read the commits of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
-          baseTree = mbCommit.tree;
-        } else {
+        // Both were read by the merge-base walk; the cache answers without another read.
+        const [headCommit, mbCommit] = await Promise.all([commits.readCommit(headSha), commits.readCommit(bases[0]!)]);
+        if (!headCommit || !mbCommit) return fail(503, `could not read the commits of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
+        let baseTree = mbCommit.treeHash;
+        if (bases.length > 1) {
           // A criss-cross piece diffs against the virtual merge of its bases (architecture §3.1).
-          const v = await crissCrossBase(sources, commits, bases, {
+          trees ??= sharedTrees(sources, MERGE_BUDGETS.maxTreeReads);
+          const v = await crissCrossBase(trees, commits, bases, {
             ...MERGE_BUDGETS,
-            maxTreeReads: MERGE_BUDGETS.maxTreeReads - spent.treeReads,
             maxBlobReads: MERGE_BUDGETS.maxBlobReads - spent.blobReads,
             maxMergedBytes: MERGE_BUDGETS.maxMergedBytes - spent.bytes,
           });
-          spent.treeReads += v.work.treeReads;
           spent.blobReads += v.work.blobReads;
           spent.bytes += v.work.bytes;
           if (!v.ok) {
@@ -351,19 +352,20 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
           baseTree = v.treeHash;
           for (const o of v.objects) virtualObjects.set(o.hash, o);
         }
-        pieces.push({ name: piece.workspace, baseTree, headTree: headCommit.tree, ...(piece.paths ? { paths: piece.paths } : {}) });
-        recorded.push({ workspace: piece.workspace, headSha, mergeBase: bases[0]!, paths: piece.paths });
+        pieces.push({ name: piece.workspace, baseTree, headTree: headCommit.treeHash, ...(piece.paths ? { paths: piece.paths } : {}) });
+        recorded.push({ workspace: piece.workspace, headSha, mergeBase: bases[0]!, ...(bases.length > 1 ? { mergeBases: bases } : {}), paths: piece.paths });
       }
 
       const n = pieces.length;
-      const result = await composeTrees(virtualObjects.size > 0 ? overlaySources(sources, virtualObjects) : sources, baseCommit.tree, pieces, {
-        maxTreeReads: Math.max(1, MERGE_BUDGETS.maxTreeReads - spent.treeReads),
+      // composeTrees counts the memoized re-reads too, so its share stays within what the virtual bases left.
+      const result = await composeTrees(trees ? overlaySources(trees, virtualObjects) : sources, baseCommit.tree, pieces, {
+        maxTreeReads: Math.max(1, MERGE_BUDGETS.maxTreeReads - (trees?.fetched() ?? 0)),
         maxChanges: MERGE_BUDGETS.maxChanges,
         maxBlobReads: Math.max(1, Math.floor((MERGE_BUDGETS.maxBlobReads - spent.blobReads) / n)),
         maxBlobBytes: MERGE_BUDGETS.maxBlobBytes,
         nodeBudget: MERGE_BUDGETS.nodeBudget,
         concurrency: MERGE_BUDGETS.concurrency,
-        maxMergedBytes: Math.floor((MERGE_BUDGETS.maxMergedBytes - spent.bytes) / n),
+        maxMergedBytes: Math.max(1, Math.floor((MERGE_BUDGETS.maxMergedBytes - spent.bytes) / n)),
         contentConcurrency: MERGE_BUDGETS.contentConcurrency,
       });
       if (result.unmatched.length > 0) {

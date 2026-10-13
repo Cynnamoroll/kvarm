@@ -25,7 +25,7 @@
  */
 
 import { parseTree, type GitObject, type TreeEntry } from './index';
-import { merge3, type Merge3Options, type Merge3Truncation, type MergeReader } from './merge3';
+import { merge3, TreeReadBudgetError, type Merge3Options, type Merge3Truncation, type MergeReader } from './merge3';
 import { mergeBase, type CommitInfo, type CommitReader, type MergeBaseTruncation } from './mergebase';
 
 export interface VirtualBaseOptions extends Omit<Merge3Options, 'resolver' | 'virtualDepth'> {
@@ -98,6 +98,7 @@ class VirtualMerge implements CommitReader, MergeReader {
   private createdBytes = 0;
   private readonly commits = new Map<string, Promise<CommitInfo | null>>();
   private readonly virtualCommits = new Map<string, CommitInfo>();
+  private readonly trees = new Map<string, Promise<TreeEntry[] | null>>();
   readonly objects = new Map<string, GitObject>();
 
   constructor(
@@ -124,11 +125,22 @@ class VirtualMerge implements CommitReader, MergeReader {
     return p;
   }
 
+  /**
+   * Trees are memoized across the inner merges, which mostly read the same
+   * base subtrees, and `maxTreeReads` bounds distinct fetches.
+   */
   async readTree(hash: string): Promise<TreeEntry[] | null> {
     const o = this.objects.get(hash);
     if (o?.type === 'tree') return parseTree(body(o));
     if (hash === EMPTY_TREE) return [];
-    return this.inner.readTree(hash);
+    let p = this.trees.get(hash);
+    if (!p) {
+      if (this.treeReads >= this.opts.maxTreeReads) throw new TreeReadBudgetError(hash);
+      this.treeReads++;
+      p = this.inner.readTree(hash);
+      this.trees.set(hash, p);
+    }
+    return p;
   }
 
   async readBlob(hash: string): Promise<Uint8Array | null> {
@@ -180,12 +192,12 @@ class VirtualMerge implements CommitReader, MergeReader {
     const { maxCommitReads: _c, maxMergeBases: _b, maxVirtualDepth: _d, mayReadCommit: _m, ...mergeOpts } = this.opts;
     const m = await merge3(this, base, ours, theirs, {
       ...mergeOpts,
-      maxTreeReads: this.opts.maxTreeReads - this.treeReads,
+      // readTree enforces the tree budget on distinct fetches across all inner merges.
+      maxTreeReads: Number.MAX_SAFE_INTEGER,
       maxBlobReads: this.opts.maxBlobReads - this.blobReads,
       maxMergedBytes: this.opts.maxMergedBytes - this.createdBytes,
       virtualDepth: depth,
     });
-    this.treeReads += m.treeReads;
     this.blobReads += m.blobReads;
     this.merges++;
     if (m.truncated || m.treeHash === null) throw new Stop(m.truncatedReason ?? 'readError', m.truncatedDetail);

@@ -679,7 +679,7 @@ describe('composition', () => {
     expect(r.cost.sub).toBeLessThanOrEqual(3);
     expect(r.json.treeSha).toBe(await writeTree(repo, { ...merged, 'src/a.ts': 'a\n', 'docs/b.md': 'b\n' }));
     expect(r.json.sources).toMatchObject([
-      { workspace: a.id, mergeBase: [x1.sha, x2.sha].sort()[0] },
+      { workspace: a.id, mergeBase: [x1.sha, x2.sha].sort()[0], mergeBases: [x1.sha, x2.sha].sort() },
       { workspace: b.id, mergeBase: mainM.sha },
     ]);
   });

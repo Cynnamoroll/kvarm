@@ -35,6 +35,7 @@ import {
   merge3,
   mergeBase,
   parseTree,
+  TreeReadBudgetError,
   virtualMergeBase,
   type ClassifiedConflict,
   type CommitInfo,
@@ -295,38 +296,53 @@ export class CommitCache implements CommitReader {
   }
 }
 
-export type VirtualBaseOutcome =
-  | { ok: true; treeHash: string; sources: MergeSources; objects: GitObject[]; work: { treeReads: number; blobReads: number; bytes: number } }
-  | { ok: false; reason: string; work: { treeReads: number; blobReads: number; bytes: number } };
+export interface SharedTrees extends MergeSources {
+  /** Distinct trees fetched so far. */
+  fetched(): number;
+}
 
 /**
- * The virtual merge base of a criss-cross (architecture §3.1) within budget
- * `b`. Commits go through `commits`, so the inner walks pay only for commits
- * the outer walk has not read. The returned sources serve the virtual
- * objects and memoize trees, so the outer merge re-reads nothing the inner
- * merges fetched; `work.treeReads` counts actual fetches, and the caller
- * gives the outer merge what is left of each budget.
+ * Tree reads memoized across the merges of one criss-cross (the virtual
+ * base's inner merges and the outer merge mostly read the same subtrees),
+ * with one budget on distinct fetches: past it a read throws
+ * `TreeReadBudgetError`, which a merge reports as `maxTreeReads`.
  */
-export async function crissCrossBase(sources: MergeSources, commits: CommitCache, bases: readonly string[], b: typeof MERGE_BUDGETS): Promise<VirtualBaseOutcome> {
+export function sharedTrees(sources: MergeSources, maxTreeReads: number): SharedTrees {
   const trees = new Map<string, Promise<TreeEntry[] | null>>();
-  let fetched = 0;
-  const memo: MergeSources = {
-    readCommit: (sha) => commits.readCommit(sha),
+  return {
+    readCommit: (sha) => sources.readCommit(sha),
     readTree(hash) {
       let p = trees.get(hash);
       if (!p) {
-        fetched++;
+        if (trees.size >= maxTreeReads) return Promise.reject(new TreeReadBudgetError(hash));
         p = sources.readTree(hash);
         trees.set(hash, p);
       }
       return p;
     },
     readBlob: (hash) => sources.readBlob(hash),
+    fetched: () => trees.size,
   };
-  const v = await virtualMergeBase(memo, bases, { ...b, mayReadCommit: (sha) => commits.has(sha) || commits.reads < b.maxCommitReads });
-  const work = { treeReads: fetched, blobReads: v.blobReads, bytes: v.objects.reduce((n, o) => n + o.raw.length + o.store.length, 0) };
+}
+
+export type VirtualBaseOutcome =
+  | { ok: true; treeHash: string; sources: MergeSources; objects: GitObject[]; work: { blobReads: number; bytes: number } }
+  | { ok: false; reason: string; work: { blobReads: number; bytes: number } };
+
+/**
+ * The virtual merge base of a criss-cross (architecture §3.1) within budget
+ * `b`. Commits go through `commits`, so the inner walks pay only for commits
+ * the outer walk has not read; trees go through `trees`, whose fetches the
+ * caller counts. The returned sources also serve the virtual objects, for
+ * the merge that uses the virtual base; the caller gives that merge what is
+ * left of the blob and created-bytes budgets.
+ */
+export async function crissCrossBase(trees: SharedTrees, commits: CommitCache, bases: readonly string[], b: typeof MERGE_BUDGETS): Promise<VirtualBaseOutcome> {
+  const reader: MergeSources = { readCommit: (sha) => commits.readCommit(sha), readTree: (h) => trees.readTree(h), readBlob: (h) => trees.readBlob(h) };
+  const v = await virtualMergeBase(reader, bases, { ...b, mayReadCommit: (sha) => commits.has(sha) || commits.reads < b.maxCommitReads });
+  const work = { blobReads: v.blobReads, bytes: v.objects.reduce((n, o) => n + o.raw.length + o.store.length, 0) };
   if (v.truncated || v.treeHash === null) return { ok: false, reason: v.truncatedReason ?? 'readError', work };
-  return { ok: true, treeHash: v.treeHash, sources: overlaySources(memo, new Map(v.objects.map((o) => [o.hash, o]))), objects: v.objects, work };
+  return { ok: true, treeHash: v.treeHash, sources: overlaySources(reader, new Map(v.objects.map((o) => [o.hash, o]))), objects: v.objects, work };
 }
 
 async function plan(sources: MergeSources, targetSha: string, headSha: string, budgets: MergeBudgets = {}): Promise<MergePlan> {
@@ -371,19 +387,22 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
   // inner merges spend the same read and created-bytes budgets as the outer merge.
   let baseTree = baseCommit.treeHash;
   let mergeSources = sources;
-  let virtualWork = { treeReads: 0, blobReads: 0, bytes: 0 };
+  let virtualWork = { blobReads: 0, bytes: 0 };
+  let shared: SharedTrees | null = null;
   if (bases.length > 1) {
-    const v = await crissCrossBase(sources, commits, bases, b);
+    shared = sharedTrees(sources, b.maxTreeReads);
+    const v = await crissCrossBase(shared, commits, bases, b);
     virtualWork = v.work;
     if (!v.ok) {
-      return { ...unknown(v.reason, { mergeBase: base, ...several }), work: { commitReads: commits.reads, treeReads: v.work.treeReads, blobReads: v.work.blobReads } };
+      return { ...unknown(v.reason, { mergeBase: base, ...several }), work: { commitReads: commits.reads, treeReads: shared.fetched(), blobReads: v.work.blobReads } };
     }
     baseTree = v.treeHash;
     mergeSources = v.sources;
   }
 
   const m = await merge3(mergeSources, baseTree, targetCommit.treeHash, headCommit.treeHash, {
-    maxTreeReads: b.maxTreeReads - virtualWork.treeReads,
+    // Over shared trees the reader enforces maxTreeReads on distinct fetches, the virtual base's included.
+    maxTreeReads: shared ? Number.MAX_SAFE_INTEGER : b.maxTreeReads,
     maxChanges: b.maxChanges,
     maxBlobReads: b.maxBlobReads - virtualWork.blobReads,
     maxBlobBytes: b.maxBlobBytes,
@@ -393,7 +412,7 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
     contentConcurrency: b.contentConcurrency,
     resolver,
   });
-  const mergeWork = { commitReads: commits.reads, treeReads: virtualWork.treeReads + m.treeReads, blobReads: virtualWork.blobReads + m.blobReads };
+  const mergeWork = { commitReads: commits.reads, treeReads: shared ? shared.fetched() : m.treeReads, blobReads: virtualWork.blobReads + m.blobReads };
   if (m.truncated) return { ...unknown(m.truncatedReason ?? 'readError', { mergeBase: base, ...several }), work: mergeWork };
   if (!m.clean) {
     return {
