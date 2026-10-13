@@ -7,6 +7,7 @@ import { matchCommandPolicy, sandboxPath, tailText } from '../containers/fleetJo
 import { createWorkspace, type WorkspaceContext, type WorkspaceRow } from './workspaces';
 import { sandboxProvider } from './sandboxes/provider';
 import type { ServiceResult } from '../repos/service';
+import { requestEnvironmentBuild } from './environments';
 
 const RETENTION_MS = 25 * 24 * 60 * 60 * 1000;
 const MAX_TTL_HOURS = 24 * 7;
@@ -302,6 +303,31 @@ function rpcSuccess<T>(value: unknown): value is { ok: true; value: T } {
   return typeof value === 'object' && value !== null && (value as { ok?: unknown }).ok === true;
 }
 
+function scheduleStaleBuild(cx: SandboxContext, environment: EnvironmentRow): void {
+  if (
+    environment.ready_build_created_at === null ||
+    environment.ready_build_created_at + environment.max_build_age_hours * 3_600_000 > Date.now()
+  ) {
+    return;
+  }
+  cx.waitUntil(
+    requestEnvironmentBuild(cx.env, environment.id, 'age')
+      .then((result) => {
+        if (!result.ok && result.code !== 'BUILD_NOT_QUEUED') {
+          console.warn(JSON.stringify({ staleEnvironmentBuild: environment.id, error: result.error }));
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn(
+          JSON.stringify({
+            staleEnvironmentBuild: environment.id,
+            error: String(error instanceof Error ? error.message : error),
+          }),
+        );
+      }),
+  );
+}
+
 export async function startSandbox(
   cx: SandboxContext,
   input: StartSandboxInput,
@@ -310,7 +336,9 @@ export async function startSandbox(
   if (!access.ok) return access;
   if (typeof input.environment !== 'string') return fail(422, 'environment is required', 'INVALID_ENVIRONMENT');
   const environment = await cx.env.DB.prepare(
-    'SELECT * FROM environments WHERE repo_id = ?1 AND id = ?2 AND archived_at IS NULL',
+    `SELECT e.*, b.created_at AS ready_build_created_at FROM environments e
+      LEFT JOIN environment_builds b ON b.id = e.ready_build_id AND b.status = 'ready'
+      WHERE e.repo_id = ?1 AND e.id = ?2 AND e.archived_at IS NULL`,
   )
     .bind(cx.repo.id, input.environment)
     .first<EnvironmentRow>();
@@ -322,6 +350,7 @@ export async function startSandbox(
   if (!Number.isInteger(ttlHours) || ttlHours < 1 || ttlHours > MAX_TTL_HOURS) {
     return fail(422, `ttlHours must be from 1 to ${MAX_TTL_HOURS}`, 'INVALID_TTL');
   }
+  scheduleStaleBuild(cx, environment);
   const runExpiresAt = now + ttlHours * 60 * 60 * 1000;
   let workspace: { id: string; ref: string } | null = null;
   let existing: SandboxRow | null = null;
@@ -474,6 +503,8 @@ interface EnvironmentRow {
   allowed_hosts: string;
   command_policy: string;
   ready_build_id: string | null;
+  max_build_age_hours: number;
+  ready_build_created_at: number | null;
 }
 
 function ownsSandbox(actor: Actor | null, row: SandboxRow): boolean {

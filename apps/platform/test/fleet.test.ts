@@ -1,14 +1,19 @@
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext } from 'cloudflare:test';
-import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { createExecutionContext, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import type { RepoRow } from '../src/db/repos';
 import type { Actor } from '../src/services/authz';
 import {
   createEnvironment,
+  archiveEnvironment,
+  getEnvironment,
   listEnvironments,
+  nextScheduledBuild,
   requestEnvironmentBuild,
+  updateEnvironment,
   type EnvironmentContext,
+  type EnvironmentRow,
 } from '../src/services/environments';
 import {
   decideSandboxApproval,
@@ -20,7 +25,6 @@ import {
   type SandboxContext,
 } from '../src/services/sandboxes';
 import { SANDBOX_PROVIDERS, type SandboxProvider } from '../src/services/sandboxes/provider';
-import { runFleetSweeps } from '../src/services/sandboxes/sweeps';
 import { promoteBuild } from '../src/workflows/environmentBuild';
 import { getRepoById } from '../src/db/repos';
 import worker from '../src/index';
@@ -148,8 +152,21 @@ async function seedSandbox(options: {
   return id;
 }
 
-function sandboxContext(actor: Actor): SandboxContext {
-  return { env, repo, actor, origin: 'https://kvarm.test', waitUntil: () => undefined };
+function sandboxContext(actor: Actor, waitUntil: SandboxContext['waitUntil'] = () => undefined): SandboxContext {
+  return { env, repo, actor, origin: 'https://kvarm.test', waitUntil };
+}
+
+function environmentBuilder(environmentId: string) {
+  const stub = env.ENV_BUILDER.getByName(environmentId);
+  return {
+    stub,
+    builder: stub as unknown as { schedule(id: string): Promise<void> },
+  };
+}
+
+async function builderAlarm(environmentId: string): Promise<number | null> {
+  const { stub } = environmentBuilder(environmentId);
+  return runInDurableObject(stub, async (_instance, state) => state.storage.getAlarm());
 }
 
 beforeAll(async () => {
@@ -173,6 +190,11 @@ beforeAll(async () => {
   oldLinux = SANDBOX_PROVIDERS.linux!;
   SANDBOX_PROVIDERS.linux = {
     ...oldLinux,
+    startEnvironmentBuild: async (boundEnv, buildId) => {
+      if (boundEnv === env) {
+        await (boundEnv.ENVIRONMENT_BUILD as unknown as FakeWorkflow).create({ id: buildId });
+      }
+    },
     agentSandbox: (boundEnv, sandboxId) => ({
       start: async (request) => {
         starts.push({ sandboxId, tokenId: request.tokenId, refs: JSON.parse(
@@ -209,11 +231,100 @@ afterAll(() => {
   SANDBOX_PROVIDERS.linux = oldLinux;
 });
 
+describe('nextScheduledBuild', () => {
+  const environment = { archived_at: null, max_build_age_hours: 12 } as EnvironmentRow;
+  const finish = 1_000_000;
+
+  it.each([
+    {
+      name: 'ignores an in-flight build',
+      environment,
+      ready: { created_at: finish },
+      latest: { status: 'validating', attempt: 1, finished_at: null },
+      expected: null,
+    },
+    {
+      name: 'retries attempt one after two hours',
+      environment,
+      ready: null,
+      latest: { status: 'failed', attempt: 1, finished_at: finish },
+      expected: { at: finish + 2 * 3_600_000, reason: 'retry' },
+    },
+    {
+      name: 'retries attempt five after twenty-four hours',
+      environment,
+      ready: null,
+      latest: { status: 'failed', attempt: 5, finished_at: finish },
+      expected: { at: finish + 24 * 3_600_000, reason: 'retry' },
+    },
+    {
+      name: 'ages a ready build after the configured maximum',
+      environment,
+      ready: { created_at: finish },
+      latest: null,
+      expected: { at: finish + 12 * 3_600_000, reason: 'age' },
+    },
+    {
+      name: 'chooses the earlier failed-build retry',
+      environment,
+      ready: { created_at: finish },
+      latest: { status: 'failed', attempt: 1, finished_at: finish },
+      expected: { at: finish + 2 * 3_600_000, reason: 'retry' },
+    },
+    {
+      name: 'does not schedule archived environments',
+      environment: { ...environment, archived_at: finish } as EnvironmentRow,
+      ready: { created_at: finish },
+      latest: null,
+      expected: null,
+    },
+  ])('$name', async ({ environment: row, ready, latest, expected }) => {
+    expect(nextScheduledBuild(row, ready, latest as Parameters<typeof nextScheduledBuild>[2])).toEqual(expected);
+  });
+});
+
+describe('Durable Object alarm backoff', () => {
+  it('re-arms the first failure after sixty seconds and clears failures after success', async () => {
+    const { withAlarmBackoff } = await import('../src/containers/alarmBackoff');
+    const now = 1_000_000;
+    const values = new Map<string, unknown>();
+    let alarmAt: number | null = null;
+    const storage = {
+      get: async (key: string) => values.get(key),
+      put: async (key: string, value: unknown) => {
+        values.set(key, value);
+      },
+      delete: async (key: string) => values.delete(key),
+      setAlarm: async (at: number) => {
+        alarmAt = at;
+      },
+    };
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await withAlarmBackoff(storage as never, 'test', async () => {
+        throw new Error('failed');
+      });
+      expect(alarmAt).toBe(now + 60_000);
+      expect([...values.values()]).toContain(1);
+      expect(JSON.parse(warning.mock.calls[0]?.[0] ?? '{}')).toMatchObject({ error: expect.any(String) });
+      await withAlarmBackoff(storage as never, 'test', async () => undefined);
+      expect(values.size).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
 describe('fleet services', () => {
   it('authorizes environment CRUD, rejects non-Linux, and keeps read costs bounded', async () => {
     const cx: EnvironmentContext = { env, repo, actor: owner };
     const created = await createEnvironment(cx, { name: `env-${crypto.randomUUID().slice(0, 8)}` });
     expect(created.ok).toBe(true);
+    if (created.ok) {
+      const detail = await getEnvironment(env, repo, owner, created.value.environment.id);
+      expect(detail).toMatchObject({ ok: true, value: { nextBuildAt: null, nextBuildReason: null } });
+    }
     expect((await createEnvironment({ ...cx, actor: writer }, { name: 'writer-env' })).ok).toBe(false);
     const agentId = await seedAgent(owner, `agent-${crypto.randomUUID()}`);
     const agent: Actor = { ...owner, agent: { agentId, agentName: 'fleet-agent', ownerLogin: OWNER, ownerKind: 'user', tokenId: 'fixture', repoId: repo.id, role: 'write', refs: ['refs/heads/agents/**'], expiresAt: Date.now() + 60_000 } };
@@ -249,6 +360,108 @@ describe('fleet services', () => {
     expect(await promoteBuild(env, build, { id: 'snapshot-new', size: 9 }, {}, '')).toBe(true);
     expect(await env.DB.prepare('SELECT status FROM environment_builds WHERE id = ?').bind(oldId).first()).toMatchObject({ status: 'superseded' });
     expect(await env.DB.prepare('SELECT ready_build_id FROM environments WHERE id = ?').bind(environmentId).first()).toMatchObject({ ready_build_id: buildId });
+    const { builder } = environmentBuilder(environmentId);
+    await builder.schedule(environmentId);
+    const age = await env.DB.prepare(
+      `SELECT b.created_at + e.max_build_age_hours * 3600000 AS at
+         FROM environment_builds b JOIN environments e ON e.ready_build_id = b.id WHERE b.id = ?`,
+    )
+      .bind(buildId)
+      .first<{ at: number }>();
+    expect(await builderAlarm(environmentId)).toBe(age?.at);
+  });
+
+  it('schedules failed-build retries and removes alarms after archive', async () => {
+    const retry = await seedEnvironment({ ready: true });
+    const finishedAt = Date.now() - 60_000;
+    await env.DB.prepare(
+      `INSERT INTO environment_builds
+        (id, environment_id, repo_id, seq, status, reason, config_hash, attempt, phases, output_tail, created_at, finished_at)
+       VALUES (?, ?, ?, 2, 'failed', 'age', 'config', 1, '{}', '', ?, ?)`,
+    )
+      .bind(crypto.randomUUID(), retry.id, repo.id, finishedAt, finishedAt)
+      .run();
+    const { builder } = environmentBuilder(retry.id);
+    await builder.schedule(retry.id);
+    expect(await builderAlarm(retry.id)).toBe(finishedAt + 2 * 3_600_000);
+
+    const archived = await seedEnvironment({ ready: true });
+    const archiveBuilder = environmentBuilder(archived.id);
+    await archiveBuilder.builder.schedule(archived.id);
+    expect(await builderAlarm(archived.id)).not.toBeNull();
+    expect(await archiveEnvironment({ env, repo, actor: owner }, archived.id)).toMatchObject({ ok: true });
+    expect(await builderAlarm(archived.id)).toBeNull();
+  });
+
+  it('reschedules the age alarm when max build age changes', async () => {
+    const environment = await seedEnvironment({ ready: true });
+    const createdAt = Date.now();
+    await env.DB.prepare('UPDATE environment_builds SET created_at = ? WHERE id = ?').bind(createdAt, environment.buildId).run();
+    const updated = await updateEnvironment({ env, repo, actor: owner }, environment.id, { maxBuildAgeHours: 1 });
+    expect(updated.ok).toBe(true);
+    expect(await builderAlarm(environment.id)).toBe(createdAt + 3_600_000);
+  });
+
+  it('fires a due age alarm to queue a build and re-arms an early alarm', async () => {
+    const due = await seedEnvironment({ ready: true });
+    const oldCreatedAt = Date.now() - 3_600_000 + 60_000;
+    await env.DB.batch([
+      env.DB.prepare('UPDATE environments SET max_build_age_hours = 1 WHERE id = ?').bind(due.id),
+      env.DB.prepare('UPDATE environment_builds SET created_at = ? WHERE id = ?').bind(oldCreatedAt, due.buildId),
+    ]);
+    expect(
+      await env.DB.prepare('SELECT created_at FROM environment_builds WHERE id = ?').bind(due.buildId).first(),
+    ).toEqual({ created_at: oldCreatedAt });
+    const dueBuilder = environmentBuilder(due.id);
+    await dueBuilder.builder.schedule(due.id);
+    const dueAt = oldCreatedAt + 3_600_000;
+    expect(await builderAlarm(due.id)).toBe(dueAt);
+    vi.spyOn(Date, 'now').mockReturnValue(dueAt + 1);
+    try {
+      expect(await runDurableObjectAlarm(dueBuilder.stub)).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(
+      await env.DB.prepare("SELECT status, reason, attempt FROM environment_builds WHERE environment_id = ? ORDER BY seq DESC LIMIT 1")
+        .bind(due.id)
+        .first(),
+    ).toMatchObject({ status: 'queued', reason: 'age', attempt: 0 });
+
+    const early = await seedEnvironment({ ready: true });
+    const earlyBuilder = environmentBuilder(early.id);
+    await earlyBuilder.builder.schedule(early.id);
+    const future = await builderAlarm(early.id);
+    expect(future).toBeGreaterThan(Date.now());
+    expect(await runDurableObjectAlarm(earlyBuilder.stub)).toBe(true);
+    expect(await builderAlarm(early.id)).toBe(future);
+  });
+
+  it('fires a due retry alarm with an incremented attempt', async () => {
+    const environment = await seedEnvironment();
+    const finishedAt = Date.now() - 2 * 3_600_000 + 60_000;
+    await env.DB.prepare(
+      `INSERT INTO environment_builds
+        (id, environment_id, repo_id, seq, status, reason, config_hash, attempt, phases, output_tail, created_at, finished_at)
+       VALUES (?, ?, ?, 1, 'failed', 'age', 'config', 1, '{}', '', ?, ?)`,
+    )
+      .bind(crypto.randomUUID(), environment.id, repo.id, finishedAt, finishedAt)
+      .run();
+    const builder = environmentBuilder(environment.id);
+    await builder.builder.schedule(environment.id);
+    const retryAt = finishedAt + 2 * 3_600_000;
+    expect(await builderAlarm(environment.id)).toBe(retryAt);
+    vi.spyOn(Date, 'now').mockReturnValue(retryAt + 1);
+    try {
+      expect(await runDurableObjectAlarm(builder.stub)).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(
+      await env.DB.prepare("SELECT status, reason, attempt FROM environment_builds WHERE environment_id = ? ORDER BY seq DESC LIMIT 1")
+        .bind(environment.id)
+        .first(),
+    ).toMatchObject({ status: 'queued', reason: 'retry', attempt: 2 });
   });
 
   it('requests push builds only when rebuild paths are touched', async () => {
@@ -296,6 +509,30 @@ describe('fleet services', () => {
     expect(await env.DB.prepare('SELECT revoked_at FROM agent_tokens WHERE id = ?').bind(starts[0]?.tokenId).first<{ revoked_at: number }>()).toMatchObject({ revoked_at: expect.any(Number) });
   });
 
+  it('queues an age build for a stale ready environment and still starts the sandbox', async () => {
+    const agentId = await seedAgent(owner, `stale-${crypto.randomUUID()}`);
+    const actor: Actor = { ...owner, agent: { agentId, agentName: 'stale', ownerLogin: OWNER, ownerKind: 'user', tokenId: 'fixture', repoId: repo.id, role: 'write', refs: ['refs/heads/agents/**'], expiresAt: Date.now() + 60_000 } };
+    const ready = await seedEnvironment({ ready: true });
+    const workspace = await seedWorkspace(agentId);
+    await env.DB.batch([
+      env.DB.prepare('UPDATE environments SET max_build_age_hours = 1 WHERE id = ?').bind(ready.id),
+      env.DB.prepare('UPDATE environment_builds SET created_at = ? WHERE id = ?').bind(Date.now() - 2 * 3_600_000, ready.buildId),
+    ]);
+    startResponse = { ok: true, value: { started: true, localDiverged: false } };
+    const pending: Promise<unknown>[] = [];
+    const result = await startSandbox(sandboxContext(actor, (promise) => pending.push(promise)), {
+      environment: ready.id,
+      workspace: workspace.id,
+    });
+    await Promise.all(pending);
+    expect(result).toMatchObject({ ok: true });
+    expect(
+      await env.DB.prepare("SELECT status, reason FROM environment_builds WHERE environment_id = ? ORDER BY seq DESC LIMIT 1")
+        .bind(ready.id)
+        .first(),
+    ).toMatchObject({ status: 'queued', reason: 'age' });
+  });
+
   it('resumes the same sleeping sandbox, rotates tokens, supports fresh and agent-scoped ownership', async () => {
     const agentId = await seedAgent(owner, `resume-${crypto.randomUUID()}`);
     const actor: Actor = { ...owner, agent: { agentId, agentName: 'resume', ownerLogin: OWNER, ownerKind: 'user', tokenId: 'fixture', repoId: repo.id, role: 'write', refs: ['refs/heads/agents/**'], expiresAt: Date.now() + 60_000 } };
@@ -320,7 +557,7 @@ describe('fleet services', () => {
     expect(await startSandbox(sandboxContext(other), { environment: environment.id, workspace: workspace.id })).toMatchObject({ ok: false, status: 403 });
   });
 
-  it('sleeps by default, discards on request, filters ownership, and expires sleeping rows in cron', async () => {
+  it('sleeps by default, discards on request, and filters ownership', async () => {
     const agentId = await seedAgent(owner, `stop-${crypto.randomUUID()}`);
     const environment = await seedEnvironment({ ready: true });
     const workspace = await seedWorkspace(agentId);
@@ -339,9 +576,6 @@ describe('fleet services', () => {
     expect(await listMyPendingApprovals(env, owner)).toMatchObject({ ok: true, value: [{ repo: `${OWNER}/fleet`, sandboxId: id }] });
     expect(await decideSandboxApproval(sandboxContext(actor), pendingId, 'approve')).toMatchObject({ ok: false, status: 403, code: 'AGENT_FORBIDDEN' });
     expect(await decideSandboxApproval(sandboxContext(owner), pendingId, 'approve')).toMatchObject({ ok: true, value: { status: 'approved', repo: `${OWNER}/fleet`, sandboxId: id } });
-    const expired = await seedSandbox({ agentId, environmentId: environment.id, buildId: environment.buildId!, workspaceId: workspace.id, status: 'sleeping', expiresAt: Date.now() - 1 });
-    await runFleetSweeps(env,);
-    expect(await env.DB.prepare('SELECT status FROM sandboxes WHERE id = ?').bind(expired).first()).toMatchObject({ status: 'stopped' });
     const otherAgentId = await seedAgent(owner, `human-list-${crypto.randomUUID()}`);
     const otherWorkspace = await seedWorkspace(otherAgentId);
     const otherSandbox = await seedSandbox({ agentId: otherAgentId, environmentId: environment.id, buildId: environment.buildId!, workspaceId: otherWorkspace.id });

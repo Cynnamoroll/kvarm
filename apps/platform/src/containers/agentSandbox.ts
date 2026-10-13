@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { withAlarmBackoff } from './alarmBackoff';
 import { runSandboxCommand, sandboxPath, tailText } from './fleetJob';
 
 const ENTRYPOINT = ['sleep', 'infinity'];
@@ -247,58 +248,60 @@ export class AgentSandbox extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
-    if (!state) return;
-    if (state.expiresAt <= Date.now()) {
-      await this.discard();
-      await this.env.DB.prepare(
-        "UPDATE sandboxes SET status = 'stopped', stopped_at = COALESCE(stopped_at, ?2) WHERE id = ?1 AND status IN ('starting','running','sleeping')",
-      )
-        .bind(state.sandboxId, Date.now())
-        .run();
-      return;
-    }
-    const idleAt = state.lastActiveAt + state.idleMinutes * 60_000;
-    if (state.runExpiresAt > Date.now() && idleAt > Date.now()) {
-      await this.ctx.storage.setAlarm(Math.min(idleAt, state.runExpiresAt, state.expiresAt));
-      return;
-    }
-    const container = this.ctx.container;
-    if (!container?.running) {
-      state.sleepSnapshotId ??= state.buildSnapshotId;
-      await this.ctx.storage.put(STATE_KEY, state);
-      await this.ctx.storage.delete(TOKEN_KEY);
-      await this.env.DB.batch([
-        this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
-          .bind(state.tokenId, Date.now()),
-        this.env.DB.prepare(
+    await withAlarmBackoff(this.ctx.storage, 'agent-sandbox', async () => {
+      const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
+      if (!state) return;
+      if (state.expiresAt <= Date.now()) {
+        await this.discard();
+        await this.env.DB.prepare(
+          "UPDATE sandboxes SET status = 'stopped', stopped_at = COALESCE(stopped_at, ?2) WHERE id = ?1 AND status IN ('starting','running','sleeping')",
+        )
+          .bind(state.sandboxId, Date.now())
+          .run();
+        return;
+      }
+      const idleAt = state.lastActiveAt + state.idleMinutes * 60_000;
+      if (state.runExpiresAt > Date.now() && idleAt > Date.now()) {
+        await this.ctx.storage.setAlarm(Math.min(idleAt, state.runExpiresAt, state.expiresAt));
+        return;
+      }
+      const container = this.ctx.container;
+      if (!container?.running) {
+        state.sleepSnapshotId ??= state.buildSnapshotId;
+        await this.ctx.storage.put(STATE_KEY, state);
+        await this.ctx.storage.delete(TOKEN_KEY);
+        await this.env.DB.batch([
+          this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
+            .bind(state.tokenId, Date.now()),
+          this.env.DB.prepare(
+            "UPDATE sandboxes SET status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL WHERE id = ?1 AND status = 'running'",
+          ).bind(state.sandboxId, state.sleepSnapshotId),
+        ]);
+        await this.ctx.storage.setAlarm(state.expiresAt);
+        return;
+      }
+      try {
+        const snapshot = await container.snapshotContainer();
+        state.sleepSnapshotId = snapshot.id;
+        await this.ctx.storage.put(STATE_KEY, state);
+        await container.destroy();
+        await this.ctx.storage.delete(TOKEN_KEY);
+        await this.env.DB.prepare(
           "UPDATE sandboxes SET status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL WHERE id = ?1 AND status = 'running'",
-        ).bind(state.sandboxId, state.sleepSnapshotId),
-      ]);
-      await this.ctx.storage.setAlarm(state.expiresAt);
-      return;
-    }
-    try {
-      const snapshot = await container.snapshotContainer();
-      state.sleepSnapshotId = snapshot.id;
-      await this.ctx.storage.put(STATE_KEY, state);
-      await container.destroy();
-      await this.ctx.storage.delete(TOKEN_KEY);
-      await this.env.DB.prepare(
-        "UPDATE sandboxes SET status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL WHERE id = ?1 AND status = 'running'",
-      )
-        .bind(state.sandboxId, snapshot.id)
-        .run();
-      await this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
-        .bind(state.tokenId, Date.now())
-        .run();
-      await this.ctx.storage.setAlarm(state.expiresAt);
-    } catch (error) {
-      await this.env.DB.prepare('UPDATE sandboxes SET error = ?2 WHERE id = ?1 AND status = \'running\'')
-        .bind(state.sandboxId, String(error instanceof Error ? error.message : error).slice(0, 1000))
-        .run();
-      await this.ctx.storage.setAlarm(Math.min(state.expiresAt, Date.now() + 60_000));
-    }
+        )
+          .bind(state.sandboxId, snapshot.id)
+          .run();
+        await this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
+          .bind(state.tokenId, Date.now())
+          .run();
+        await this.ctx.storage.setAlarm(state.expiresAt);
+      } catch (error) {
+        await this.env.DB.prepare('UPDATE sandboxes SET error = ?2 WHERE id = ?1 AND status = \'running\'')
+          .bind(state.sandboxId, String(error instanceof Error ? error.message : error).slice(0, 1000))
+          .run();
+        await this.ctx.storage.setAlarm(Math.min(state.expiresAt, Date.now() + 60_000));
+      }
+    });
   }
 
   private async startContainer(

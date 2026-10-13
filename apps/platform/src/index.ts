@@ -23,7 +23,6 @@ import { containerRunnerApi } from './routes/api/containerRunner';
 import { fleetApi } from './routes/api/fleet';
 import { webhooksApi } from './routes/api/webhooks';
 import { handleEventBatch } from './services/events';
-import { handleFleetScheduled } from './services/sandboxes/sweeps';
 import { runWebhookCron } from './services/webhooks';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
@@ -137,7 +136,6 @@ export default {
   // (services/events.ts).
   queue: (batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) => handleEventBatch(batch, env),
   scheduled: (_controller: ScheduledController, env: Env, ctx: ExecutionContext) => {
-    void handleFleetScheduled(env, ctx);
     ctx.waitUntil(runWebhookCron(env));
   },
 } satisfies ExportedHandler<Env>;

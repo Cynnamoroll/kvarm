@@ -13,6 +13,7 @@ import {
   type EnvironmentBuildRow,
   type EnvironmentRow,
 } from '../services/environments';
+import { sandboxProvider } from '../services/sandboxes/provider';
 import type { EnvironmentBuilderResult } from '../containers/environmentBuilder';
 
 const RETRY = { retries: { limit: 2, delay: '10 seconds', backoff: 'exponential' }, timeout: '30 minutes' } as const;
@@ -29,6 +30,7 @@ async function refSha(env: Env, repo: RepoRow, baseRef: string): Promise<string 
 
 async function failedBuild(
   env: Env,
+  environmentId: string,
   buildId: string,
   error: string,
   outputTail = '',
@@ -41,6 +43,7 @@ async function failedBuild(
   )
     .bind(buildId, error.slice(0, 4096), outputTail.slice(-65_536), phases ? JSON.stringify(phases) : null, Date.now())
     .run();
+  await sandboxProvider('linux')?.environmentBuilder(env, environmentId).schedule(environmentId);
 }
 
 export async function promoteBuild(
@@ -174,7 +177,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
       })) as EnvironmentBuilderResult;
       if (!built.ok) {
         outputTail = built.outputTail ?? '';
-        await failedBuild(this.env, buildId, built.error, outputTail, built.phases);
+        await failedBuild(this.env, environmentId, buildId, built.error, outputTail, built.phases);
         const pending = await this.env.DB.prepare(
           'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
         )
@@ -190,6 +193,10 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
       const promoted = await step.do('promote-environment-build', RETRY, () =>
         promoteBuild(this.env, source.build, built.snapshot, built.phases, built.outputTail),
       );
+      await step.do('schedule-next-build', RETRY, async () => {
+        await sandboxProvider('linux')?.environmentBuilder(this.env, environmentId).schedule(environmentId);
+        return true;
+      });
       const pending = await this.env.DB.prepare(
         'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
       )
@@ -202,7 +209,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
       return { status: promoted ? 'ready' : 'superseded', buildId, snapshotId: built.snapshot.id };
     } catch (error) {
       const message = String(error instanceof Error ? error.message : error).slice(0, 4096);
-      await failedBuild(this.env, buildId, message, outputTail);
+      await failedBuild(this.env, environmentId, buildId, message, outputTail);
       const pending = await this.env.DB.prepare(
         'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
       )

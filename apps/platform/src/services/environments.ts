@@ -37,6 +37,32 @@ const MAX_LIST = 100;
 export type EnvironmentBuildReason = 'create' | 'config' | 'push' | 'age' | 'manual' | 'retry';
 export type EnvironmentBuildState = 'queued' | 'building' | 'validating' | 'ready' | 'failed' | 'superseded';
 
+export function nextScheduledBuild(
+  environment: EnvironmentRow,
+  ready: { created_at: number } | null,
+  latest: {
+    status: EnvironmentBuildState;
+    attempt: number;
+    finished_at: number | null;
+  } | null,
+): { at: number; reason: 'age' | 'retry' } | null {
+  if (environment.archived_at !== null || (latest && LIVE_BUILD_STATES.includes(latest.status as (typeof LIVE_BUILD_STATES)[number]))) {
+    return null;
+  }
+  const candidates: Array<{ at: number; reason: 'age' | 'retry' }> = [];
+  if (latest?.status === 'failed' && latest.finished_at !== null) {
+    const hours = latest.attempt >= 5 ? 24 : 2 ** Math.min(latest.attempt, 4);
+    candidates.push({ at: latest.finished_at + hours * 3_600_000, reason: 'retry' });
+  }
+  if (ready) {
+    candidates.push({ at: ready.created_at + environment.max_build_age_hours * 3_600_000, reason: 'age' });
+  }
+  return candidates.reduce<(typeof candidates)[number] | null>(
+    (earliest, candidate) => (!earliest || candidate.at < earliest.at ? candidate : earliest),
+    null,
+  );
+}
+
 export interface EnvironmentRow {
   id: string;
   repo_id: string;
@@ -102,6 +128,8 @@ export interface EnvironmentView {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  nextBuildAt?: string | null;
+  nextBuildReason?: 'age' | 'retry' | null;
 }
 
 export interface EnvironmentBuildView {
@@ -406,9 +434,31 @@ export async function getEnvironment(
 ): Promise<ServiceResult<EnvironmentView>> {
   const access = await authorize(env, repo, actor, 'read');
   if (!access.ok) return access;
-  const row = await byId(env, repo.id, id);
+  const [environmentResult, readyResult, latestResult] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM environments WHERE repo_id = ?1 AND id = ?2').bind(repo.id, id),
+    env.DB.prepare(
+      `SELECT created_at FROM environment_builds
+        WHERE id = (SELECT ready_build_id FROM environments WHERE id = ?1) AND status = 'ready'`,
+    ).bind(id),
+    env.DB.prepare(
+      'SELECT status, attempt, finished_at FROM environment_builds WHERE environment_id = ?1 ORDER BY seq DESC LIMIT 1',
+    ).bind(id),
+  ]);
+  const row = environmentResult?.results?.[0] as EnvironmentRow | undefined;
   if (!row) return fail(404, 'environment not found', 'ENVIRONMENT_NOT_FOUND');
-  return { ok: true, value: environmentView(row) };
+  const ready = readyResult?.results?.[0] as { created_at: number } | undefined;
+  const latest = latestResult?.results?.[0] as
+    | { status: EnvironmentBuildState; attempt: number; finished_at: number | null }
+    | undefined;
+  const next = nextScheduledBuild(row, ready ?? null, latest ?? null);
+  return {
+    ok: true,
+    value: {
+      ...environmentView(row),
+      nextBuildAt: next ? new Date(next.at).toISOString() : null,
+      nextBuildReason: next?.reason ?? null,
+    },
+  };
 }
 
 export async function createEnvironment(
@@ -525,6 +575,7 @@ export async function updateEnvironment(
       now,
     )
     .run();
+  await sandboxProvider(current.os)?.environmentBuilder(cx.env, id).schedule(id);
   let build: EnvironmentBuildView | null = null;
   if (hash !== current.config_hash) {
     const requested = await requestEnvironmentBuild(cx.env, id, 'config');
@@ -550,6 +601,7 @@ export async function archiveEnvironment(
     .bind(cx.repo.id, id, Date.now())
     .run();
   if ((result.meta?.changes ?? 0) === 0) return fail(404, 'environment not found', 'ENVIRONMENT_NOT_FOUND');
+  await sandboxProvider('linux')?.environmentBuilder(cx.env, id).schedule(id);
   return { ok: true, value: { archived: true } };
 }
 
@@ -599,6 +651,7 @@ export async function requestEnvironmentBuild(
       )
         .bind(id, `build workflow could not start: ${message}`, Date.now())
         .run();
+      await provider.environmentBuilder(env, environmentId).schedule(environmentId);
       return fail(503, 'environment build could not be started', 'BUILD_START_FAILED');
     }
   } else {

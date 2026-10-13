@@ -7,6 +7,7 @@ export interface SandboxProvider {
   startEnvironmentBuild(env: Env, buildId: string, params: EnvironmentBuildRequest): Promise<void>;
   environmentBuilder(env: Env, environmentId: string): {
     build(request: EnvironmentBuildContainerRequest): Promise<unknown>;
+    schedule(environmentId: string): Promise<void>;
   };
   agentSandbox(env: Env, sandboxId: string): {
     start(request: AgentSandboxStart): Promise<unknown>;

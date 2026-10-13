@@ -1,9 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
+import { nextScheduledBuild, requestEnvironmentBuild, type EnvironmentBuildState, type EnvironmentRow } from '../services/environments';
+import { withAlarmBackoff } from './alarmBackoff';
 import { runEnvironmentBuild, type EnvironmentBuildResult } from './fleetJob';
 
 const IMAGE = 'cloudflare/debian-trixie';
 const ENTRYPOINT = ['sleep', 'infinity'];
 const CA_PATH = '/etc/cloudflare/certs/cloudflare-containers-ca.crt';
+const ENVIRONMENT_ID_KEY = 'environment-id';
 
 export interface EnvironmentBuildContainerRequest {
   environmentId: string;
@@ -28,6 +31,59 @@ function containerInstance(instance: string): 'standard-1' | 'standard-2' | 'sta
 
 export class EnvironmentBuilder extends DurableObject<Env> {
   private busy = false;
+
+  async schedule(environmentId: string): Promise<void> {
+    await this.ctx.storage.put(ENVIRONMENT_ID_KEY, environmentId);
+    const { next } = await this.loadSchedule(environmentId);
+    if (next) await this.ctx.storage.setAlarm(next.at);
+    else await this.ctx.storage.deleteAlarm();
+  }
+
+  async alarm(): Promise<void> {
+    await withAlarmBackoff(this.ctx.storage, 'environment-builder', async () => {
+      const environmentId = await this.ctx.storage.get<string>(ENVIRONMENT_ID_KEY);
+      if (!environmentId) {
+        await this.ctx.storage.deleteAlarm();
+        return;
+      }
+      const { next } = await this.loadSchedule(environmentId);
+      if (!next) {
+        await this.ctx.storage.deleteAlarm();
+        return;
+      }
+      if (next.at > Date.now()) {
+        await this.ctx.storage.setAlarm(next.at);
+        return;
+      }
+      const requested = await requestEnvironmentBuild(this.env, environmentId, next.reason);
+      if (!requested.ok && requested.code !== 'BUILD_NOT_QUEUED') throw new Error(requested.error);
+    });
+  }
+
+  private async loadSchedule(environmentId: string): Promise<{
+    environment: EnvironmentRow | null;
+    next: { at: number; reason: 'age' | 'retry' } | null;
+  }> {
+    const [environmentResult, readyResult, latestResult] = await this.env.DB.batch([
+      this.env.DB.prepare('SELECT * FROM environments WHERE id = ?1').bind(environmentId),
+      this.env.DB.prepare(
+        `SELECT created_at FROM environment_builds
+          WHERE id = (SELECT ready_build_id FROM environments WHERE id = ?1) AND status = 'ready'`,
+      ).bind(environmentId),
+      this.env.DB.prepare(
+        'SELECT status, attempt, finished_at FROM environment_builds WHERE environment_id = ?1 ORDER BY seq DESC LIMIT 1',
+      ).bind(environmentId),
+    ]);
+    const environment = environmentResult?.results?.[0] as EnvironmentRow | undefined;
+    const ready = readyResult?.results?.[0] as { created_at: number } | undefined;
+    const latest = latestResult?.results?.[0] as
+      | { status: EnvironmentBuildState; attempt: number; finished_at: number | null }
+      | undefined;
+    return {
+      environment: environment ?? null,
+      next: environment ? nextScheduledBuild(environment, ready ?? null, latest ?? null) : null,
+    };
+  }
 
   async build(request: EnvironmentBuildContainerRequest): Promise<EnvironmentBuilderResult> {
     const container = this.ctx.container;
