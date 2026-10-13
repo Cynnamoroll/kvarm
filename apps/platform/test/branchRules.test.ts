@@ -206,10 +206,17 @@ describe('branch rule evaluation', () => {
   });
 
   it('reserves platform branch namespaces from human pushes without branch rules', () => {
-    for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+    for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/agents', 'refs/heads/agents/x', 'refs/heads/kvarm-revert', 'refs/heads/kvarm-revert/x']) {
       expect(directHumanPushDenial([], ref)).toBe(RESERVED_REF_REASON);
     }
     expect(directHumanPushDenial([], 'refs/heads/feature/x')).toBeNull();
+  });
+
+  it('reserves revert heads from every git credential, agent tokens included', () => {
+    for (const ref of ['refs/heads/kvarm-revert', 'refs/heads/kvarm-revert/abc-1']) expect(directPushDenial([], ref)).toBe(RESERVED_REF_REASON);
+    // The other reserved namespaces keep their agent rules (workspace grants, CI staging) unchanged.
+    expect(directPushDenial([], 'refs/heads/agents/x')).toBeNull();
+    expect(directPushDenial([], 'refs/heads/kvarm-revertx')).toBeNull();
   });
 });
 
@@ -387,7 +394,7 @@ describe('protected direct pushes', () => {
       `${A} ${ZERO_OID}`,
     ];
     for (const who of ['owner', 'writer', 'admin'] as const) {
-      for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/agents', 'refs/heads/agents/x']) {
+      for (const ref of ['refs/heads/kvarm-ci', 'refs/heads/kvarm-ci/x', 'refs/heads/agents', 'refs/heads/agents/x', 'refs/heads/kvarm-revert', 'refs/heads/kvarm-revert/x']) {
         for (const command of commands) {
           const res = await push(pat[who], PLAIN, pushBody([`${command} ${ref}`]));
           expect(res.status, `${who} ${command} ${ref}`).toBe(200);
@@ -430,6 +437,14 @@ describe('protected refs and agent tokens', () => {
     const allowed = await push(token, REPO, pushBody([`${A} ${B} refs/heads/scratch`]));
     expect(allowed.status).toBe(503);
     await allowed.body?.cancel();
+    // Even a grant naming the revert namespace cannot move a platform-built revert head.
+    const revertTokRes = await call(
+      `/api/v1/agents/${agentId}/tokens`,
+      as('owner', { method: 'POST', json: { repo: REPO, role: 'write', refs: ['refs/heads/kvarm-revert/*'], expiresIn: 600 } }),
+    );
+    const revertTok = (await json<{ token: string }>(revertTokRes)).token;
+    const revertPush = await push(revertTok, REPO, pushBody([`${A} ${B} refs/heads/kvarm-revert/x`]));
+    expect(await reportStatus(revertPush)).toEqual(['unpack ok', `ng refs/heads/kvarm-revert/x ${RESERVED_REF_REASON}`]);
     // Agents cannot manage rules.
     const manage = await call(`/api/v1/repos/${REPO}/branch-rules`, {
       method: 'POST',

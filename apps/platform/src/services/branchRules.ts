@@ -38,7 +38,11 @@ export const PROTECTED_REF_REASON = 'protected branch: direct pushes are not all
 export const RESERVED_REF_REASON = 'platform-reserved branch: direct pushes are not allowed';
 export const INVALID_REF_REASON = 'invalid ref name';
 
-const RESERVED_BRANCH_NAMESPACES = ['refs/heads/kvarm-ci', 'refs/heads/agents'] as const;
+/** Revert change set heads (services/reverts.ts): written only by the platform's direct writer, never by a git credential. */
+export const REVERT_BRANCH_NAMESPACE = 'refs/heads/kvarm-revert';
+const RESERVED_BRANCH_NAMESPACES = ['refs/heads/kvarm-ci', 'refs/heads/agents', REVERT_BRANCH_NAMESPACE] as const;
+
+const inNamespace = (ref: string, namespace: string) => ref === namespace || ref.startsWith(`${namespace}/`);
 
 /**
  * The attribution notes ref (architecture §11.5): services/attribution.ts is
@@ -187,6 +191,8 @@ export function effectivePolicy(rules: readonly BranchRule[], ref: string): Bran
  * are refused too, so an unusual spelling cannot slip past pattern matching.
  */
 export function directPushDenial(rules: readonly BranchRule[], ref: string): string | null {
+  // Agent tokens reach only this check: a broad ref grant must not move a revert head the guard already judged.
+  if (inNamespace(ref, REVERT_BRANCH_NAMESPACE)) return RESERVED_REF_REASON;
   if (rules.length === 0) return null;
   if (!isSafeRefName(ref)) return INVALID_REF_REASON;
   return matchingRules(rules, ref).length > 0 ? PROTECTED_REF_REASON : null;
@@ -194,7 +200,7 @@ export function directPushDenial(rules: readonly BranchRule[], ref: string): str
 
 /** Human git credentials may never write the platform-owned namespaces. */
 export function directHumanPushDenial(rules: readonly BranchRule[], ref: string): string | null {
-  if (RESERVED_BRANCH_NAMESPACES.some((namespace) => ref === namespace || ref.startsWith(`${namespace}/`))) return RESERVED_REF_REASON;
+  if (RESERVED_BRANCH_NAMESPACES.some((namespace) => inNamespace(ref, namespace))) return RESERVED_REF_REASON;
   if (ref === RESERVED_NOTES_REF) return RESERVED_REF_REASON;
   return directPushDenial(rules, ref);
 }
