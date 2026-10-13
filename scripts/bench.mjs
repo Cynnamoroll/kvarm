@@ -27,9 +27,11 @@
  *
  * Isolation: scratch repos m7-benchmarks-cost-sweep-bench-<ts> and
  * m7-benchmarks-cost-sweep-loopci-<ts> plus two scratch agents, removed at the
- * end unless --keep. Bounded: <= 5 HTTP requests and <= 3 git children in
- * flight (child benchmarks run one at a time), 429/Retry-After honored, a
- * 10,000-request ceiling. Tokens are never printed.
+ * end unless --keep; every removal is confirmed (2xx, then a 404 readback) and
+ * a cleanup that leaves a scratch resource behind fails the run. Bounded: <= 5
+ * HTTP requests and <= 3 git children in flight (child benchmarks run one at a
+ * time), 429/Retry-After honored, a 10,000-request ceiling. Tokens are never
+ * printed.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -538,12 +540,22 @@ await phase('clone vs snapshot', async () => {
 
 // ---------------------------------------------------------------------------
 await phase('cleanup', async () => {
-  for (const id of agents) await http(`/api/v1/agents/${id}`, { method: 'DELETE' });
+  const failures = [];
+  for (const id of agents) {
+    const r = await http(`/api/v1/agents/${id}`, { method: 'DELETE' });
+    if (r.status !== 200) failures.push(`agent ${id}: DELETE ${r.status}${r.error ? ` (${r.error})` : ''}`);
+  }
   if (args.keep) {
     say(`   kept ${created.join(', ')}`);
-    return;
+  } else {
+    for (const name of created) {
+      const gone = await live.remove(R(name));
+      say(`   ${name}: ${gone.detail}${gone.ok ? '' : ` after ${gone.attempts} attempts`}`);
+      if (!gone.ok) failures.push(`${name}: ${gone.detail}`);
+    }
   }
-  for (const name of created) say(`   DELETE ${name} -> ${(await http(R(name), { method: 'DELETE' })).status}`);
+  // A scratch repo or agent left behind is a failed run, not a warning.
+  expect(failures.length === 0, `cleanup left ${failures.length} scratch resource(s): ${failures.join('; ')}`);
 });
 
 // ---------------------------------------------------------------------------

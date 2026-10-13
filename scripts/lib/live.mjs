@@ -163,6 +163,31 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
     }
   }
 
+  /**
+   * Deletes one scratch resource and confirms it is really gone: a 2xx DELETE,
+   * then a readback that must answer 404 (a lost reply can still have deleted
+   * it). Retries within a small bound, so a DELETE that is still settling does
+   * not report a leak. `first` is the first DELETE response, for cost samples.
+   */
+  async function remove(path, { attempts = 3, waitMs = 1500 } = {}) {
+    let detail = 'no attempt';
+    let first = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const del = await http(path, { method: 'DELETE' });
+      first ??= del;
+      const suffix = del.error ? ` (${del.error})` : '';
+      if (del.status === 404 || (del.status >= 200 && del.status < 300)) {
+        const after = await http(path);
+        detail = `DELETE ${del.status}${suffix}, GET ${after.status}`;
+        if (after.status === 404) return { ok: true, detail, attempts: attempt, first };
+      } else {
+        detail = `DELETE ${del.status}${suffix}`;
+      }
+      if (attempt < attempts) await sleep(waitMs * attempt);
+    }
+    return { ok: false, detail, attempts, first };
+  }
+
   /** Read-only remote D1 query through wrangler (needs `. "$HOME/.config/vite-plus/env"`). */
   function d1(sql) {
     const r = spawnSync(process.execPath, remoteD1Args(sql), { cwd: PLATFORM, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -192,5 +217,5 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
     };
   }
 
-  return { work, askpass, state, http, git, d1, startTail };
+  return { work, askpass, state, http, git, remove, d1, startTail };
 }
