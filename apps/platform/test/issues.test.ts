@@ -224,6 +224,62 @@ describe('filing', () => {
   });
 });
 
+describe('comments', () => {
+  const comment = (repo: string, n: number, body: unknown, token = tok.owner) => call('POST', api(repo, `/issues/${n}/comments`), token, { body });
+
+  it('comments on an issue, oldest first, also after it closed', async () => {
+    await seedRepo('thread');
+    await fileIssue('thread', { title: 'Crash' });
+    const first = await comment('thread', 1, 'I see this too `here`.');
+    expect(first.status).toBe(201);
+    expect(first.json).toMatchObject({ body: 'I see this too `here`.', author: OWNER, agent: null, id: expect.any(String) });
+    await comment('thread', 1, 'Second, with <script>alert(1)</script>');
+    const got = await getIssue('thread', 1);
+    expect(got.json.comments.map((c: any) => c.body)).toEqual(['I see this too `here`.', 'Second, with <script>alert(1)</script>']);
+    expect(got.json.commentsTruncated).toBe(false);
+    expect((await call('PATCH', api('thread', '/issues/1'), tok.owner, { state: 'closed' })).status).toBe(200);
+    expect((await comment('thread', 1, 'post-mortem')).status).toBe(201);
+  });
+
+  it('validates input and needs write access to comment', async () => {
+    await seedRepo('thread-validate');
+    await fileIssue('thread-validate', { title: 'Bug' });
+    expect((await comment('thread-validate', 1, '')).status).toBe(422);
+    expect((await comment('thread-validate', 1, '   ')).status).toBe(422);
+    expect((await comment('thread-validate', 1, 'a'.repeat(65_537))).status).toBe(422);
+    expect((await comment('thread-validate', 99, 'hi')).status).toBe(404);
+    expect((await comment('thread-validate', 1, 'hi', tok.reader)).status).toBe(403);
+    expect((await comment('thread-validate', 1, 'hi', '')).status).toBe(401);
+  });
+
+  it('records agent comments with the agent, and the detail keeps the newest 50', async () => {
+    await seedRepo('agentthread');
+    const agent = await call('POST', '/api/v1/agents', tok.owner, { name: 'commenter' });
+    const minted = await call('POST', `/api/v1/agents/${agent.json.agent.id}/tokens`, tok.owner, {
+      repo: `${OWNER}/agentthread`,
+      role: 'write',
+      refs: ['refs/heads/agents/*'],
+    });
+    await fileIssue('agentthread', { title: 'Off-by-one' });
+    const posted = await comment('agentthread', 1, 'Reproduced in my workspace.', minted.json.token);
+    expect(posted.status).toBe(201);
+    expect(posted.json).toMatchObject({ body: 'Reproduced in my workspace.', agent: { id: agent.json.agent.id, name: 'commenter' } });
+
+    // 60 more: the detail returns the newest 50, oldest first, and says it is capped.
+    const issueId = (await env.DB.prepare('SELECT id FROM issues WHERE repo_id = ? AND number = 1').bind(repoIds['agentthread']).first()) as { id: string };
+    const at = Date.now() + 1;
+    for (let i = 0; i < 60; i++) {
+      await env.DB.prepare('INSERT INTO issue_comments (id, issue_id, user_id, body, agent_meta, created_at) VALUES (?, ?, NULL, ?, NULL, ?)')
+        .bind(`cap-${i}`, issueId.id, `comment ${i}`, at + i)
+        .run();
+    }
+    const got = await getIssue('agentthread', 1);
+    expect(got.json.comments).toHaveLength(50);
+    expect(got.json.commentsTruncated).toBe(true);
+    expect(got.json.comments.map((c: any) => c.body)).toEqual(Array.from({ length: 50 }, (_, i) => `comment ${i + 10}`));
+  });
+});
+
 describe('changes close their issues', () => {
   it('closes the issues a change names with closing keywords when it merges into the default branch', async () => {
     const r = await seedRepo('keywords');

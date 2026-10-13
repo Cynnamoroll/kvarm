@@ -65,3 +65,6 @@ CREATE TABLE issue_paths (
   PRIMARY KEY (repo_id, path, issue_id)
 ) WITHOUT ROWID;
 CREATE INDEX idx_issue_paths_issue ON issue_paths(issue_id, path);
+
+-- Comments carry the same agent attribution as the issues they are on.
+ALTER TABLE issue_comments ADD COLUMN agent_meta TEXT;

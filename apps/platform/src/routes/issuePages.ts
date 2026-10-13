@@ -1,7 +1,8 @@
 /**
  * Issue pages under /:owner/:repo: the list (with a new-issue form), one
- * issue with its links and agent tasks, edit, close and reopen, confirming
- * or rejecting a proposed link, and handing the issue to an agent. SSR HTML over services/issues.ts, the same service the
+ * issue with its links, comments and agent tasks, edit, close and reopen,
+ * commenting, confirming or rejecting a proposed link, and handing the
+ * issue to an agent. SSR HTML over services/issues.ts, the same service the
  * REST, MCP and CLI surfaces use; no client JS.
  *
  * Issues change without a push, so these pages are never edge-cached.
@@ -318,6 +319,30 @@ issuePages.get('/issues/:number', async (c) => {
     taskRows || dispatch
       ? html`<div class="card"><div class="card-title">Agent tasks</div>${raw(taskRows)}${raw(dispatch)}</div>`
       : '';
+  const commentRows = i.comments
+    .map(
+      (cm) => html`
+    <div class="comment">
+      <div class="md">${raw(renderMarkdown(cm.body))}</div>
+      <div class="muted">by <strong>${cm.agent ? `agent ${cm.agent.name}` : cm.author ?? 'unknown'}</strong> · ${timeAgo(Date.parse(cm.createdAt))}</div>
+    </div>`,
+    )
+    .join('');
+  const commentForm = writable
+    ? html`
+    <form method="post" action="${raw(`${at}/comments`)}">
+      <label for="comment">Comment (Markdown)</label>
+      <textarea id="comment" name="body" rows="4" required></textarea>
+      <p><button class="btn" type="submit">Comment</button></p>
+    </form>`
+    : '';
+  const commentsCard = html`
+    <div class="card">
+      <div class="card-title">Comments</div>
+      ${i.commentsTruncated ? raw('<p class="muted">Showing the newest 50; older comments are not listed.</p>') : ''}
+      ${raw(commentRows || '<p class="muted">No comments yet.</p>')}
+      ${raw(commentForm)}
+    </div>`;
   const body = html`
     ${raw(flash(c))}
     <div class="issue-head">
@@ -326,6 +351,7 @@ issuePages.get('/issues/:number', async (c) => {
     </div>
     <div class="card md">${raw(i.body ? renderMarkdown(i.body) : '<p class="muted">No description.</p>')}</div>
     <div class="card issue-facts">${raw(facts.join(''))}</div>
+    ${raw(commentsCard)}
     <div class="card">
       <div class="card-title">Linked changes and workspaces</div>
       ${raw(links || '<p class="muted">Nothing links this issue yet. A change closes it with <code>fixes #' + i.number + '</code> in its title, body or a commit message, a branch named like <code>fix/' + i.number + '-…</code>, or a workspace created for it.</p>')}
@@ -369,6 +395,21 @@ issuePages.post('/issues/:number/links', async (c) => {
   });
   if (!linked.ok) return redirect(c, at, { error: linked.error });
   return redirect(c, at, { notice: form.state === 'rejected' ? `Change #${change} will not close this issue.` : `Change #${change} will close this issue when it merges.` });
+});
+
+issuePages.post('/issues/:number/comments', async (c) => {
+  const r = await resolveRepo(c, 'write');
+  if (!r || !canWrite(r)) return notFound();
+  if (crossSite(c)) return new Response('cross-site form posts are refused', { status: 403 });
+  const number = c.req.param('number');
+  const at = `${base(r.repo)}/issues/${number}`;
+  const form = await c.req.parseBody();
+  const posted = await svc.createComment({ env: c.env, repo: r.repo, actor: r.viewer }, number, { body: form.body });
+  if (!posted.ok) {
+    if (posted.status === 404) return notFound();
+    return redirect(c, at, { error: posted.error });
+  }
+  return redirect(c, at);
 });
 
 issuePages.post('/issues/:number/dispatch', async (c) => {

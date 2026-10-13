@@ -8,6 +8,7 @@
  *   GET   issues?state=&source=&limit=&cursor=
  *   GET   issues/:number          the issue and its links
  *   PATCH issues/:number          {title?, body?, paths?, state?, closedReason?}
+ *   POST  issues/:number/comments {body} → 201 the comment
  *   POST  issues/:number/dispatch a fix-issue agent task → 201 created | 200 the live one
  *   GET   changes/:number/issues  issues linked to the change (or its workspace) and whether each will close
  *   POST  changes/:number/issues  {issue, kind?, state?} confirm or reject a link
@@ -70,6 +71,16 @@ issuesApi.patch('/repos/:owner/:repo/issues/:number', async (c) => {
   const r = await svc.updateIssue({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
+});
+
+issuesApi.post('/repos/:owner/:repo/issues/:number/comments', async (c) => {
+  const d = await authorizeRoute(c, 'write');
+  if (!d.ok) return denyJson(c, d);
+  const body = await jsonBody(c);
+  if (body === undefined) return invalidBody(c);
+  const r = await svc.createComment({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value, 201);
 });
 
 issuesApi.get('/repos/:owner/:repo/changes/:number/issues', async (c) => {

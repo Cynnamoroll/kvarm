@@ -198,6 +198,37 @@ describe('issue pages', () => {
     expect((await request('POST', pages('dispatch', '/1/dispatch'), { token: tok.owner, form: {}, headers: { origin: 'https://evil.test' } })).status).toBe(403);
   });
 
+  it('shows comments, posts them from the form and escapes them', async () => {
+    await seedRepo('thread');
+    const filed = await request('POST', api('thread', '/issues'), { token: tok.owner, json: { title: 'Crash' } });
+    expect(filed.status).toBe(201);
+    const at = pages('thread', '/1');
+    // A reader sees the comments but no form to write one.
+    const empty = await request('GET', at, { token: tok.reader });
+    expect(empty.text).toContain('No comments yet.');
+    expect(empty.text).not.toContain('name="body"');
+    expect(empty.text).not.toContain('name="comment"');
+
+    const posted = await request('POST', `${at}/comments`, { token: tok.owner, form: { body: 'I can reproduce this `quickly`.' } });
+    expect(posted.status).toBe(303);
+    expect(posted.location).toBe(at);
+    await request('POST', `${at}/comments`, { token: tok.owner, form: { body: '<script>alert(1)</script> **and bold**' } });
+    const shown = await request('GET', at, { token: tok.owner });
+    expect(shown.text).toContain('<code>quickly</code>');
+    expect(shown.text).toContain('<strong>and bold</strong>');
+    expect(shown.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(shown.text).not.toContain('<script>alert');
+    expect((await request('GET', at, { token: tok.reader })).text).toContain('I can reproduce this');
+
+    // An empty comment redirects back with the error; an unknown issue is a 404.
+    const blank = await request('POST', `${at}/comments`, { token: tok.owner, form: { body: '   ' } });
+    expect(blank.status).toBe(303);
+    expect(blank.location).toContain('error=');
+    expect((await request('POST', pages('thread', '/99/comments'), { token: tok.owner, form: { body: 'hi' } })).status).toBe(404);
+    expect((await request('POST', `${at}/comments`, { token: tok.reader, form: { body: 'hi' } })).status).toBe(404);
+    expect((await request('POST', `${at}/comments`, { token: tok.owner, form: { body: 'hi' }, headers: { origin: 'https://evil.test' } })).status).toBe(403);
+  });
+
   it('refuses cross-site posts, readers and anonymous writers, and conceals private repositories', async () => {
     await seedRepo('guarded');
     const evil = await request('POST', pages('guarded'), { token: tok.owner, form: { title: 'x' }, headers: { origin: 'https://evil.test' } });

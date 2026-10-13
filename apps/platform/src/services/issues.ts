@@ -28,6 +28,9 @@
  * (guardFingerprint) or counts one more occurrence while one is open, and
  * the push that clears one on a path it changes closes it as verified.
  *
+ * Comments (createComment) are plain discussion on an issue, agent-attributed
+ * like filings; they carry no links, and get_issue returns the newest ones.
+ *
  * Callers authorize first through the shared authority lookup; nothing here
  * checks access.
  */
@@ -63,6 +66,8 @@ export const ISSUE_LIMITS = {
   pageMax: 100,
   /** Links returned with one issue or one change. */
   linksMax: 50,
+  /** Comments returned with one issue; the newest are kept when beyond. */
+  commentsMax: 50,
 } as const;
 
 export const ISSUE_SOURCES = ['human', 'agent', 'ci', 'flake', 'guard'] as const;
@@ -212,6 +217,33 @@ function linkView(r: LinkRow): IssueLinkView {
     actor: r.actor,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
+  };
+}
+
+export interface CommentView {
+  id: string;
+  body: string;
+  author: string | null;
+  agent: { id: string; name: string } | null;
+  createdAt: string;
+}
+
+interface CommentRow {
+  id: string;
+  body: string;
+  author_login: string | null;
+  agent_meta: string | null;
+  created_at: number;
+}
+
+function commentView(r: CommentRow): CommentView {
+  const agent = parseJson<{ agentId?: string; agentName?: string } | null>(r.agent_meta, null);
+  return {
+    id: r.id,
+    body: r.body,
+    author: r.author_login,
+    agent: agent?.agentId && agent.agentName ? { id: agent.agentId, name: agent.agentName } : null,
+    createdAt: iso(r.created_at),
   };
 }
 
@@ -556,6 +588,9 @@ export interface IssueDetail extends IssueView {
   links: IssueLinkView[];
   /** The issue's fix-issue agent tasks, newest first. */
   tasks: IssueTaskView[];
+  /** The newest comments, oldest first; `commentsTruncated` says older ones exist. */
+  comments: CommentView[];
+  commentsTruncated: boolean;
 }
 
 interface IssueTaskRow {
@@ -569,12 +604,12 @@ interface IssueTaskRow {
 
 const ISSUE_TASKS_MAX = 5;
 
-/** GET issues/:number — the issue and its links to changes and workspaces, in one batch. */
+/** GET issues/:number — the issue, its links, tasks and newest comments, in one batch. */
 export async function getIssue(cx: IssueContext, rawNumber: string): Promise<ServiceResult<IssueDetail>> {
   const number = parseNumber(rawNumber);
   if (number === null) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
   const db = cx.env.DB;
-  const [issue, links, tasks] = await db.batch([
+  const [issue, links, tasks, comments] = await db.batch([
     db.prepare(`${ISSUE_SELECT} WHERE i.repo_id = ?1 AND i.number = ?2`).bind(cx.repo.id, number),
     db
       .prepare(
@@ -590,6 +625,14 @@ export async function getIssue(cx: IssueContext, rawNumber: string): Promise<Ser
           ORDER BY created_at DESC, id DESC LIMIT ${ISSUE_TASKS_MAX}`,
       )
       .bind(cx.repo.id, number),
+    db
+      .prepare(
+        `SELECT c.id, c.body, u.login AS author_login, c.agent_meta, c.created_at
+           FROM issue_comments c LEFT JOIN users u ON u.id = c.user_id
+          WHERE c.issue_id = (SELECT id FROM issues WHERE repo_id = ?1 AND number = ?2)
+          ORDER BY c.created_at DESC, c.rowid DESC LIMIT ${ISSUE_LIMITS.commentsMax + 1}`,
+      )
+      .bind(cx.repo.id, number),
   ]);
   const row = (issue?.results as IssueRow[] | undefined)?.[0];
   if (!row) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
@@ -601,7 +644,17 @@ export async function getIssue(cx: IssueContext, rawNumber: string): Promise<Ser
     workspace: t.claim_workspace_id,
     createdAt: iso(t.created_at),
   }));
-  return { ok: true, value: { ...issueView(row), links: ((links?.results as LinkRow[] | undefined) ?? []).map(linkView), tasks: taskViews } };
+  const commentRows = (comments?.results as CommentRow[] | undefined) ?? [];
+  return {
+    ok: true,
+    value: {
+      ...issueView(row),
+      links: ((links?.results as LinkRow[] | undefined) ?? []).map(linkView),
+      tasks: taskViews,
+      comments: commentRows.slice(0, ISSUE_LIMITS.commentsMax).reverse().map(commentView),
+      commentsTruncated: commentRows.length > ISSUE_LIMITS.commentsMax,
+    },
+  };
 }
 
 /**
@@ -667,6 +720,45 @@ export function updateIssue(cx: IssueContext, rawNumber: string, input: unknown)
     const row = (read?.results as IssueRow[] | undefined)?.[0];
     if (!row) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
     return { ok: true, value: issueView(row) };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+/**
+ * POST issues/:number/comments. A comment is plain discussion: it carries no
+ * links (an issue link belongs to a change or a workspace) and is allowed on
+ * a closed issue. One batch: the insert and the read-back.
+ */
+export function createComment(cx: IssueContext, rawNumber: string, input: unknown): Promise<ServiceResult<CommentView>> {
+  return guarded(async () => {
+    const number = parseNumber(rawNumber);
+    if (number === null) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object {body}', 'INVALID_BODY');
+    const body = (input as Record<string, unknown>).body;
+    if (!textOf(body, ISSUE_LIMITS.bodyMax)) return fail(422, `body is required (1-${ISSUE_LIMITS.bodyMax} characters)`, 'INVALID_BODY');
+    const agent = cx.actor?.agent;
+    const id = crypto.randomUUID();
+    const db = cx.env.DB;
+    const [, read] = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO issue_comments (id, issue_id, user_id, body, agent_meta, created_at)
+           SELECT ?1, i.id, ?2, ?3, ?4, ?5 FROM issues i WHERE i.repo_id = ?6 AND i.number = ?7`,
+        )
+        .bind(id, cx.actor?.user.id ?? null, body, agent ? JSON.stringify({ agentId: agent.agentId, agentName: agent.agentName }) : null, Date.now(), cx.repo.id, number),
+      db
+        .prepare(
+          `SELECT c.id, c.body, u.login AS author_login, c.agent_meta, c.created_at
+             FROM issue_comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = ?1`,
+        )
+        .bind(id),
+    ]);
+    const row = (read?.results as CommentRow[] | undefined)?.[0];
+    if (!row) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
+    return { ok: true, value: commentView(row) };
   });
 }
 
