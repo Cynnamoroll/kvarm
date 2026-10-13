@@ -26,6 +26,7 @@ export * from './virtualBase';
 export * from './compose';
 export * from './notes';
 export * from './resolve';
+export * from './revert';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
