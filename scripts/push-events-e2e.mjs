@@ -120,9 +120,11 @@ async function push(dir, refspec, force = false) {
   return { ...git(dir, ['push', '-q', ...(force ? ['-f'] : []), 'origin', refspec]), doneAt: Date.now() };
 }
 
+/** The repo's `pushedAt` as epoch ms (the API answers ISO 8601; null stays null). */
 async function pushedAt() {
   const r = await api('GET', `/repos/${OWNER}/${REPO}`);
-  return r.status === 200 ? JSON.parse(r.text).repo?.pushedAt ?? null : null;
+  const v = r.status === 200 ? JSON.parse(r.text).repo?.pushedAt ?? null : null;
+  return typeof v === 'string' ? Date.parse(v) : null;
 }
 
 async function events() {
@@ -215,7 +217,7 @@ try {
 
   // ---- VAL-EVENT-001 / 003 ----
   const before = await pushedAt();
-  check('pushedAt recorded before the push', before, (v) => typeof v === 'number');
+  check('pushedAt recorded before the push', before, (v) => Number.isFinite(v));
   const a = commit(dir, 'A');
   const pa = await push(dir, 'main');
   check(`push A ${a.slice(0, 7)}`, pa.code, 0);
@@ -230,7 +232,7 @@ try {
     }
     if (pushedAtAt === Infinity) {
       after = await pushedAt();
-      if (typeof after === 'number' && after > before) pushedAtAt = Date.now() - t0;
+      if (Number.isFinite(after) && after > before) pushedAtAt = Date.now() - t0;
     }
   }
   console.log(`#   pushedAt before=${new Date(before).toISOString()} after=${new Date(after).toISOString()}`);
@@ -264,7 +266,7 @@ try {
   const lsRemote = git(dir, ['ls-remote', 'origin', 'refs/heads/main']).out.split(/\s+/)[0];
   check('ls-remote after the cycle shows B', lsRemote, b);
   const pa4 = await pushedAt();
-  check('pushedAt is a plausible timestamp', pa4, (v) => typeof v === 'number' && v >= ts && v <= Date.now() + 60000);
+  check('pushedAt is a plausible timestamp', pa4, (v) => Number.isFinite(v) && v >= ts && v <= Date.now() + 60000);
 
   // ---- VAL-EVENT-005: orphan Artifacts repo ----
   const oc = wrangler(['artifacts', 'repos', 'create', ORPHAN, '--namespace', 'default', '--json']);
@@ -291,7 +293,7 @@ try {
   const cSha = commit(dir, 'C');
   const pc = await pushAndWait('after-orphan B→C', dir, `${cSha}:refs/heads/main`, b, cSha, seen);
   const afterC = await pushedAt();
-  check('pushedAt moved for the push after the orphan event', afterC, (v) => typeof v === 'number' && v > beforeC);
+  check('pushedAt moved for the push after the orphan event', afterC, (v) => Number.isFinite(v) && v > beforeC);
   check('after-orphan snapshot effect created', snapshotDetail(pc.event), (s) => s.startsWith('done:created') && s.endsWith(cSha));
   await snapshotReady('after-orphan (C)', cSha, pc.doneAt);
 
