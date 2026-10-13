@@ -11,6 +11,9 @@ import { runRunner } from '../src/runner.js';
 import { slotPaths } from '../src/workdir.js';
 import { git, tarFromCommit, tempDir } from './helpers';
 
+/** These tests exercise host execution mechanics; the trust policy has its own tests. */
+const HOST_TRUSTED = { trust: 'all', hostWarning: false } as const;
+
 const root = tempDir('kvarm-cli-warm-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -254,6 +257,7 @@ async function runOnce(
   const stdout: string[] = [];
   const stderr: string[] = [];
   const result = await runRunner({
+      ...HOST_TRUSTED,
     baseUrl: BASE,
     pat: 'p',
     repo: 'alice/demo',
@@ -591,6 +595,7 @@ describe('kvarm runner warm workdir', () => {
     const stdout: string[] = [];
     const coldDownloads = snapshotDownloads.count;
     const run = runRunner({
+      ...HOST_TRUSTED,
       baseUrl: BASE,
       pat: 'p',
       repo: 'alice/demo',

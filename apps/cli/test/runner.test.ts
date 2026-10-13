@@ -5,6 +5,9 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { executeShell, runRunner } from '../src/runner.js';
 import { tempDir } from './helpers';
 
+/** These tests exercise host execution mechanics; the trust policy has its own tests. */
+const HOST_TRUSTED = { trust: 'all', hostWarning: false } as const;
+
 const root = tempDir('kvarm-cli-runner-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -103,6 +106,7 @@ describe('kvarm runner', () => {
     });
 
     const result = await runRunner({
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'kvarm_pat_test',
       repo: 'alice/demo',
@@ -150,6 +154,7 @@ describe('kvarm runner', () => {
       return { source: 'clone' as const, sha: 'c'.repeat(40) };
     };
     const first = await runRunner({
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'alice/demo',
@@ -165,6 +170,7 @@ describe('kvarm runner', () => {
     expect(first).toEqual({ claimed: 1, reported: 1 });
     expect(reports[0]).toMatchObject({ conclusion: 'failure', summary: { timedOut: true, stderr: 'timed out' } });
     const empty = await runRunner({
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'alice/demo',
@@ -202,6 +208,7 @@ describe('kvarm runner', () => {
       return Response.json({});
     };
     const result = await runRunner({
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'alice/demo',
@@ -242,6 +249,7 @@ describe('kvarm runner', () => {
     };
 
     const result = await runRunner({
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'alice/demo',
@@ -296,6 +304,7 @@ describe('kvarm runner', () => {
     };
 
     const result = await runRunner({
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'alice/demo',
@@ -323,6 +332,7 @@ describe('kvarm runner', () => {
       stderr,
       source: 'snapshot',
       sha,
+      executor: 'host',
     });
     expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
   });
@@ -355,6 +365,7 @@ describe('kvarm runner', () => {
         return Response.json({});
       };
       const run = runRunner({
+      ...HOST_TRUSTED,
         baseUrl: 'https://kvarm.test',
         pat: 'p',
         repo: 'alice/demo',
@@ -426,6 +437,7 @@ describe('kvarm runner', () => {
       return Response.json({ error: 'not found' }, { status: 404 });
     };
     const options = {
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'alice/demo',
@@ -495,6 +507,7 @@ describe('kvarm runner', () => {
       return Response.json({ error: 'not found' }, { status: 404 });
     };
     const options = {
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'p',
       repo: 'alice/demo',
@@ -551,6 +564,7 @@ describe('kvarm runner', () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     try {
       const result = await runRunner({
+      ...HOST_TRUSTED,
         baseUrl: 'https://kvarm.test',
         pat: 'kvarm_pat_test',
         repo: 'alice/demo',
@@ -594,6 +608,7 @@ describe('kvarm runner', () => {
     const platform = preparedPlatform(sha);
     let executed = false;
     const result = await runRunner({
+      ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
       pat: 'kvarm_pat_test',
       repo: 'alice/demo',

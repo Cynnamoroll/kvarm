@@ -7,12 +7,24 @@ import { CliError, checkout } from './checkout.js';
 import { commandHelp, commandUsage, groupCommands, operationsOverview, runOperation } from './ops.js';
 import { STATUS_HELP, runStatus } from './status.js';
 import { runRunner } from './runner.js';
+import {
+  CONTAINER_RUNTIMES,
+  CONTAINER_WORKDIR,
+  DEFAULT_CPUS,
+  DEFAULT_IMAGE,
+  DEFAULT_MEMORY,
+  DEFAULT_PIDS_LIMIT,
+  EXECUTOR_MODES,
+  TRUST_MODES,
+  containerConfigError,
+} from './executor.js';
 
 const USAGE = `usage: kvarm <command> [args]
 
 commands:
   checkout <owner/repo> <ref> <dir>   materialize <ref> into <dir> from a snapshot, or git clone
-  runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]
+  runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>] [--trust humans|all|none]
+         [--executor auto|host|container] [container options]
                                       claim and run CI jobs on this machine
   status <owner/repo> [--json]        read-only status: active workspaces with their pins, the train, open tasks
   help [command]                      show help (for API commands: help <group> <verb>)
@@ -54,12 +66,43 @@ first, for example:
 the commit tree.`;
 
 const RUNNER_HELP = `usage: kvarm runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>]
+                    [--trust humans|all|none] [--executor auto|host|container]
+                    [--container-runtime docker|podman] [--image <image>] [--network <name>]
+                    [--cpus <n>] [--memory <size>] [--pids-limit <n>] [--container-user <uid:gid>|image]
 
 Claims CI jobs for the repository, materializes each job's exact immutable
 commit through snapshot checkout (with clone fallback), runs the configured
-command in a shell, heartbeats the 120-second lease, and reports a bounded
-summary. The command runs only because the user explicitly started this
-runner. --once exits after one job, or immediately when none is queued.
+command, heartbeats the 120-second lease, and reports a bounded summary.
+The command runs only because the user explicitly started this runner.
+--once exits after one job, or immediately when none is queued.
+
+Execution trust: repository commands are code from whoever pushed the
+commit, often an agent. Before running a job the runner decides from the
+claim's provenance whether it may run on this host:
+  --trust humans   (default) the exact head of a change a human opened runs
+                   on the host; agent-authored changes, agent workspace refs,
+                   platform-prepared merge commits and anything unknown are
+                   untrusted
+  --trust none     no job is trusted
+  --trust all      every job runs on the host, with a warning per job
+Untrusted jobs run in a container (--executor auto, the default) or are
+refused when no container runtime answers; --executor host refuses them,
+--executor container isolates every job. A refused job is reported as a
+failure whose summary says why; it is never skipped or left claimed. On the
+host the command sees only PATH, HOME, LANG, LC_*, TZ and TMPDIR, but keeps
+this user's files and network: environment filtering is not a sandbox.
+
+Container executor (docker, else podman, or --container-runtime): a fresh
+container per job (--rm) from --image (default ${DEFAULT_IMAGE}; pin a patch
+tag or digest for reproducible jobs), the job's working directory bind-
+mounted at ${CONTAINER_WORKDIR} as the only writable host mount, a read-only
+root with a private /tmp, all capabilities dropped, no privilege escalation,
+this user's uid:gid (--container-user image keeps the image's user),
+--cpus ${DEFAULT_CPUS}, --memory ${DEFAULT_MEMORY} and --pids-limit ${DEFAULT_PIDS_LIMIT} by default, and the
+runtime's default network unless --network is set (--network none cuts it
+off; installs then need a warm workdir). A timeout kills the container.
+Container jobs use their own working directories (<workdir>-container), so
+they never share files with host jobs.
 
 Jobs run in a persistent working directory per repository, locked to this
 runner process (a concurrent runner uses another one), under --workdir
@@ -162,6 +205,15 @@ async function runCiRunner(args, io) {
         once: { type: 'boolean', default: false },
         fresh: { type: 'boolean', default: false },
         workdir: { type: 'string' },
+        trust: { type: 'string', default: 'humans' },
+        executor: { type: 'string', default: 'auto' },
+        'container-runtime': { type: 'string' },
+        image: { type: 'string' },
+        network: { type: 'string' },
+        cpus: { type: 'string' },
+        memory: { type: 'string' },
+        'pids-limit': { type: 'string' },
+        'container-user': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -178,12 +230,33 @@ async function runCiRunner(args, io) {
   const pat = io.env.KVARM_PAT;
   if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set', 2);
   if (!pat) throw new CliError('KVARM_PAT is not set (the runner requires ci scope)', 2);
+  const v = parsed.values;
+  const trust = /** @type {import('./executor.js').TrustMode} */ (v.trust);
+  const executor = /** @type {import('./executor.js').ExecutorMode} */ (v.executor);
+  if (!TRUST_MODES.includes(trust)) throw new CliError(`--trust must be one of ${TRUST_MODES.join(', ')}`, 2);
+  if (!EXECUTOR_MODES.includes(executor)) throw new CliError(`--executor must be one of ${EXECUTOR_MODES.join(', ')}`, 2);
+  const runtime = /** @type {import('./executor.js').ContainerRuntime | undefined} */ (v['container-runtime']);
+  if (runtime !== undefined && !CONTAINER_RUNTIMES.includes(runtime)) throw new CliError(`--container-runtime must be one of ${CONTAINER_RUNTIMES.join(', ')}`, 2);
+  /** @type {Partial<import('./executor.js').ContainerConfig>} */
+  const container = {};
+  if (runtime !== undefined) container.runtime = runtime;
+  if (v.image !== undefined) container.image = v.image;
+  if (v.network !== undefined) container.network = v.network;
+  if (v.cpus !== undefined) container.cpus = v.cpus;
+  if (v.memory !== undefined) container.memory = v.memory;
+  if (v['pids-limit'] !== undefined) container.pidsLimit = /^\d+$/.test(v['pids-limit']) ? Number(v['pids-limit']) : NaN;
+  if (v['container-user'] !== undefined) container.user = v['container-user'] === 'image' ? null : v['container-user'];
+  const problem = containerConfigError(container);
+  if (problem) throw new CliError(problem, 2);
   await runRunner({
     baseUrl,
     pat,
     repo,
     once: parsed.values.once,
     fresh: parsed.values.fresh,
+    trust,
+    executor,
+    container,
     workRoot: parsed.values.workdir
       ? resolve(parsed.values.workdir)
       : join(io.env.XDG_CACHE_HOME && isAbsolute(io.env.XDG_CACHE_HOME) ? io.env.XDG_CACHE_HOME : join(io.env.HOME || homedir(), '.cache'), 'kvarm', 'runner'),

@@ -45,6 +45,12 @@ const result = await runRunner({
   runnerId: env.KVARM_RUNNER_ID,
   workRoot: env.KVARM_WORK_ROOT,
   once: true,
+  // The container is the isolation boundary: it holds no host files and
+  // its credentials live only in this exec's environment, which the
+  // repository command never sees.
+  trust: 'all',
+  executor: 'host',
+  hostWarning: false,
   stdout: (line) => process.stdout.write(line + '\\n'),
   stderr: (line) => process.stderr.write(line + '\\n'),
   prepared: go
