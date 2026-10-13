@@ -265,9 +265,9 @@ describe('nextScheduledBuild', () => {
       expected: { at: finish + 12 * 3_600_000, reason: 'age' },
     },
     {
-      name: 'chooses the earlier failed-build retry',
+      name: 'uses failed-build retry backoff instead of the stale ready build age',
       environment,
-      ready: { created_at: finish },
+      ready: { created_at: finish - 20 * 3_600_000 },
       latest: { status: 'failed', attempt: 1, finished_at: finish },
       expected: { at: finish + 2 * 3_600_000, reason: 'retry' },
     },
@@ -324,6 +324,11 @@ describe('fleet services', () => {
     if (created.ok) {
       const detail = await getEnvironment(env, repo, owner, created.value.environment.id);
       expect(detail).toMatchObject({ ok: true, value: { nextBuildAt: null, nextBuildReason: null } });
+      expect(await getEnvironment(env, { ...repo, id: crypto.randomUUID() }, owner, created.value.environment.id)).toMatchObject({
+        ok: false,
+        status: 404,
+        code: 'ENVIRONMENT_NOT_FOUND',
+      });
     }
     expect((await createEnvironment({ ...cx, actor: writer }, { name: 'writer-env' })).ok).toBe(false);
     const agentId = await seedAgent(owner, `agent-${crypto.randomUUID()}`);
@@ -342,6 +347,47 @@ describe('fleet services', () => {
       createExecutionContext(),
     );
     expect(response.headers.get('x-kvarm-cost')).toBeTruthy();
+  });
+
+  it('keeps environment mutations successful when schedule arming fails', async () => {
+    const provider = SANDBOX_PROVIDERS.linux!;
+    let failWorkflow = false;
+    SANDBOX_PROVIDERS.linux = {
+      ...provider,
+      startEnvironmentBuild: async (environment, buildId, params) => {
+        if (failWorkflow) throw new Error('workflow unavailable');
+        await provider.startEnvironmentBuild(environment, buildId, params);
+      },
+      environmentBuilder: () => ({
+        build: async () => null,
+        schedule: async () => {
+          throw new Error('schedule unavailable');
+        },
+      }),
+    };
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const environment = await seedEnvironment({ ready: true });
+      expect(
+        await updateEnvironment({ env, repo, actor: owner }, environment.id, { maxBuildAgeHours: 3 }),
+      ).toMatchObject({ ok: true });
+      expect(await archiveEnvironment({ env, repo, actor: owner }, environment.id)).toMatchObject({ ok: true });
+
+      const startFailure = await seedEnvironment();
+      failWorkflow = true;
+      expect(await requestEnvironmentBuild(env, startFailure.id, 'manual')).toMatchObject({
+        ok: false,
+        code: 'BUILD_START_FAILED',
+      });
+      expect(warning).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(warning.mock.calls[0]?.[0] ?? '{}')).toMatchObject({
+        environmentSchedule: environment.id,
+        error: 'schedule unavailable',
+      });
+    } finally {
+      SANDBOX_PROVIDERS.linux = provider;
+      warning.mockRestore();
+    }
   });
 
   it('coalesces builds and supersedes the previous ready build on promotion', async () => {
@@ -464,6 +510,37 @@ describe('fleet services', () => {
     ).toMatchObject({ status: 'queued', reason: 'retry', attempt: 2 });
   });
 
+  it('does not rebuild a stale ready environment before the failed-build retry time', async () => {
+    const environment = await seedEnvironment({ ready: true });
+    const readyCreatedAt = Date.now() - 2 * 3_600_000;
+    const finishedAt = Date.now() - 10 * 60_000;
+    await env.DB.batch([
+      env.DB.prepare('UPDATE environments SET max_build_age_hours = 1 WHERE id = ?').bind(environment.id),
+      env.DB.prepare('UPDATE environment_builds SET created_at = ? WHERE id = ?').bind(readyCreatedAt, environment.buildId),
+      env.DB.prepare(
+        `INSERT INTO environment_builds
+          (id, environment_id, repo_id, seq, status, reason, config_hash, attempt, phases, output_tail, created_at, finished_at)
+         VALUES (?, ?, ?, 2, 'failed', 'age', 'config', 1, '{}', '', ?, ?)`,
+      ).bind(crypto.randomUUID(), environment.id, repo.id, finishedAt, finishedAt),
+    ]);
+    const builder = environmentBuilder(environment.id);
+    await builder.builder.schedule(environment.id);
+    const retryAt = finishedAt + 2 * 3_600_000;
+    expect(await builderAlarm(environment.id)).toBe(retryAt);
+    expect(await runDurableObjectAlarm(builder.stub)).toBe(true);
+    expect(
+      await env.DB.prepare('SELECT status FROM environment_builds WHERE environment_id = ? ORDER BY seq DESC LIMIT 1')
+        .bind(environment.id)
+        .first(),
+    ).toMatchObject({ status: 'failed' });
+    expect(
+      await env.DB.prepare('SELECT COUNT(*) AS count FROM environment_builds WHERE environment_id = ?')
+        .bind(environment.id)
+        .first(),
+    ).toMatchObject({ count: 2 });
+    expect(await builderAlarm(environment.id)).toBe(retryAt);
+  });
+
   it('requests push builds only when rebuild paths are touched', async () => {
     const workflow = env.ENVIRONMENT_BUILD as unknown as FakeWorkflow;
     const previousRepo = repo;
@@ -531,6 +608,35 @@ describe('fleet services', () => {
         .bind(ready.id)
         .first(),
     ).toMatchObject({ status: 'queued', reason: 'age' });
+  });
+
+  it('does not queue an age build for a stale ready environment still in retry backoff', async () => {
+    const agentId = await seedAgent(owner, `retry-${crypto.randomUUID()}`);
+    const actor: Actor = { ...owner, agent: { agentId, agentName: 'retry', ownerLogin: OWNER, ownerKind: 'user', tokenId: 'fixture', repoId: repo.id, role: 'write', refs: ['refs/heads/agents/**'], expiresAt: Date.now() + 60_000 } };
+    const environment = await seedEnvironment({ ready: true });
+    const workspace = await seedWorkspace(agentId);
+    const readyCreatedAt = Date.now() - 2 * 3_600_000;
+    const finishedAt = Date.now() - 10 * 60_000;
+    await env.DB.batch([
+      env.DB.prepare('UPDATE environments SET max_build_age_hours = 1 WHERE id = ?').bind(environment.id),
+      env.DB.prepare('UPDATE environment_builds SET created_at = ? WHERE id = ?').bind(readyCreatedAt, environment.buildId),
+      env.DB.prepare(
+        `INSERT INTO environment_builds
+          (id, environment_id, repo_id, seq, status, reason, config_hash, attempt, phases, output_tail, created_at, finished_at)
+         VALUES (?, ?, ?, 2, 'failed', 'age', 'config', 1, '{}', '', ?, ?)`,
+      ).bind(crypto.randomUUID(), environment.id, repo.id, finishedAt, finishedAt),
+    ]);
+    startResponse = { ok: true, value: { started: true, localDiverged: false } };
+    const result = await startSandbox(sandboxContext(actor), {
+      environment: environment.id,
+      workspace: workspace.id,
+    });
+    expect(result).toMatchObject({ ok: true });
+    expect(
+      await env.DB.prepare('SELECT COUNT(*) AS count FROM environment_builds WHERE environment_id = ?')
+        .bind(environment.id)
+        .first(),
+    ).toMatchObject({ count: 2 });
   });
 
   it('resumes the same sleeping sandbox, rotates tokens, supports fresh and agent-scoped ownership', async () => {

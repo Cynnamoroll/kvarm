@@ -8,6 +8,7 @@ import {
 } from '../services/snapshots';
 import { lsRefs, type ResolveContext } from '../services/refs';
 import {
+  armEnvironmentSchedule,
   requestEnvironmentBuild,
   type EnvironmentBuildRequest,
   type EnvironmentBuildRow,
@@ -31,6 +32,7 @@ async function refSha(env: Env, repo: RepoRow, baseRef: string): Promise<string 
 async function failedBuild(
   env: Env,
   environmentId: string,
+  os: string | undefined,
   buildId: string,
   error: string,
   outputTail = '',
@@ -43,7 +45,7 @@ async function failedBuild(
   )
     .bind(buildId, error.slice(0, 4096), outputTail.slice(-65_536), phases ? JSON.stringify(phases) : null, Date.now())
     .run();
-  await sandboxProvider('linux')?.environmentBuilder(env, environmentId).schedule(environmentId);
+  if (os) await armEnvironmentSchedule(env, os, environmentId);
 }
 
 export async function promoteBuild(
@@ -89,6 +91,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
   async run(event: WorkflowEvent<EnvironmentBuildRequest>, step: WorkflowStep) {
     const { environmentId, buildId } = event.payload;
     let outputTail = '';
+    let environmentOs: string | undefined;
     try {
       const source = await step.do('resolve-environment', RETRY, async () => {
         const [environment, build] = await Promise.all([
@@ -100,6 +103,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
             .first<EnvironmentBuildRow>(),
         ]);
         if (!environment || !build) throw new Error('environment build no longer exists');
+        environmentOs = environment.os;
         const repo = await this.env.DB.prepare('SELECT * FROM repos WHERE id = ?1')
           .bind(environment.repo_id)
           .first<RepoRow>();
@@ -113,6 +117,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
           .run();
         return { environment, build, repo, sha };
       });
+      environmentOs = source.environment.os;
 
       const requested = await step.do('request-source-snapshot', RETRY, async () => {
         const row = await readSnapshot(this.env, source.repo.id, source.sha);
@@ -177,7 +182,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
       })) as EnvironmentBuilderResult;
       if (!built.ok) {
         outputTail = built.outputTail ?? '';
-        await failedBuild(this.env, environmentId, buildId, built.error, outputTail, built.phases);
+        await failedBuild(this.env, environmentId, source.environment.os, buildId, built.error, outputTail, built.phases);
         const pending = await this.env.DB.prepare(
           'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
         )
@@ -194,7 +199,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
         promoteBuild(this.env, source.build, built.snapshot, built.phases, built.outputTail),
       );
       await step.do('schedule-next-build', RETRY, async () => {
-        await sandboxProvider('linux')?.environmentBuilder(this.env, environmentId).schedule(environmentId);
+        await sandboxProvider(source.environment.os)?.environmentBuilder(this.env, environmentId).schedule(environmentId);
         return true;
       });
       const pending = await this.env.DB.prepare(
@@ -209,7 +214,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
       return { status: promoted ? 'ready' : 'superseded', buildId, snapshotId: built.snapshot.id };
     } catch (error) {
       const message = String(error instanceof Error ? error.message : error).slice(0, 4096);
-      await failedBuild(this.env, environmentId, buildId, message, outputTail);
+      await failedBuild(this.env, environmentId, environmentOs, buildId, message, outputTail);
       const pending = await this.env.DB.prepare(
         'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
       )

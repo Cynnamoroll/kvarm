@@ -7,7 +7,12 @@ import { matchCommandPolicy, sandboxPath, tailText } from '../containers/fleetJo
 import { createWorkspace, type WorkspaceContext, type WorkspaceRow } from './workspaces';
 import { sandboxProvider } from './sandboxes/provider';
 import type { ServiceResult } from '../repos/service';
-import { requestEnvironmentBuild } from './environments';
+import {
+  nextScheduledBuild,
+  requestEnvironmentBuild,
+  type EnvironmentBuildState,
+  type EnvironmentRow as EnvironmentScheduleRow,
+} from './environments';
 
 const RETENTION_MS = 25 * 24 * 60 * 60 * 1000;
 const MAX_TTL_HOURS = 24 * 7;
@@ -303,15 +308,21 @@ function rpcSuccess<T>(value: unknown): value is { ok: true; value: T } {
   return typeof value === 'object' && value !== null && (value as { ok?: unknown }).ok === true;
 }
 
-function scheduleStaleBuild(cx: SandboxContext, environment: EnvironmentRow): void {
-  if (
-    environment.ready_build_created_at === null ||
-    environment.ready_build_created_at + environment.max_build_age_hours * 3_600_000 > Date.now()
-  ) {
-    return;
-  }
+function scheduleStaleBuild(cx: SandboxContext, environment: StartEnvironmentRow): void {
+  const next = nextScheduledBuild(
+    environment,
+    environment.ready_build_created_at === null ? null : { created_at: environment.ready_build_created_at },
+    environment.latest_build_status === null
+      ? null
+      : {
+          status: environment.latest_build_status,
+          attempt: environment.latest_build_attempt ?? 0,
+          finished_at: environment.latest_build_finished_at,
+        },
+  );
+  if (!next || next.at > Date.now()) return;
   cx.waitUntil(
-    requestEnvironmentBuild(cx.env, environment.id, 'age')
+    requestEnvironmentBuild(cx.env, environment.id, next.reason)
       .then((result) => {
         if (!result.ok && result.code !== 'BUILD_NOT_QUEUED') {
           console.warn(JSON.stringify({ staleEnvironmentBuild: environment.id, error: result.error }));
@@ -336,12 +347,16 @@ export async function startSandbox(
   if (!access.ok) return access;
   if (typeof input.environment !== 'string') return fail(422, 'environment is required', 'INVALID_ENVIRONMENT');
   const environment = await cx.env.DB.prepare(
-    `SELECT e.*, b.created_at AS ready_build_created_at FROM environments e
+    `SELECT e.*, b.created_at AS ready_build_created_at,
+        (SELECT status FROM environment_builds WHERE environment_id = e.id ORDER BY seq DESC LIMIT 1) AS latest_build_status,
+        (SELECT attempt FROM environment_builds WHERE environment_id = e.id ORDER BY seq DESC LIMIT 1) AS latest_build_attempt,
+        (SELECT finished_at FROM environment_builds WHERE environment_id = e.id ORDER BY seq DESC LIMIT 1) AS latest_build_finished_at
+       FROM environments e
       LEFT JOIN environment_builds b ON b.id = e.ready_build_id AND b.status = 'ready'
       WHERE e.repo_id = ?1 AND e.id = ?2 AND e.archived_at IS NULL`,
   )
     .bind(cx.repo.id, input.environment)
-    .first<EnvironmentRow>();
+    .first<StartEnvironmentRow>();
   if (!environment) return fail(404, 'environment not found', 'ENVIRONMENT_NOT_FOUND');
   const agentId = await sandboxAgentId(cx.env, cx.actor!, true);
   if (!agentId) return fail(409, 'sandbox agent could not be created', 'AGENT_CREATE_FAILED');
@@ -492,7 +507,7 @@ export async function startSandbox(
   };
 }
 
-interface EnvironmentRow {
+interface EnvironmentRow extends EnvironmentScheduleRow {
   id: string;
   repo_id: string;
   name: string;
@@ -505,6 +520,12 @@ interface EnvironmentRow {
   ready_build_id: string | null;
   max_build_age_hours: number;
   ready_build_created_at: number | null;
+}
+
+interface StartEnvironmentRow extends EnvironmentRow {
+  latest_build_status: EnvironmentBuildState | null;
+  latest_build_attempt: number | null;
+  latest_build_finished_at: number | null;
 }
 
 function ownsSandbox(actor: Actor | null, row: SandboxRow): boolean {
