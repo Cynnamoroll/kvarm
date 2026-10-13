@@ -12,6 +12,8 @@ export function remoteD1Args(sql: string): string[];
 
 export function parseJsonc(text: string): unknown;
 
+export function findDuplicateKeys(text: string): string[];
+
 export function parseEnvFile(text: string): Record<string, string>;
 
 export function resolveSettings(

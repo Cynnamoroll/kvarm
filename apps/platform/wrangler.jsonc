@@ -56,10 +56,13 @@
       }
     ]
   },
-  // Outbound webhooks: every minute, enqueue due deliveries whose message was
+  // The only "triggers" key: a duplicate key silently replaces this one
+  // (scripts/test/wranglerCrons.test.ts). `scheduled` dispatches on the expression
+  // (src/cron.ts). Every minute: enqueue due webhook deliveries whose message was
   // never sent or was lost, and prune the delivery log (services/webhooks.ts).
+  // Every six hours: the fleet sweeps (services/sandboxes/sweeps.ts).
   "triggers": {
-    "crons": ["* * * * *"]
+    "crons": ["* * * * *", "0 */6 * * *"]
   },
   // Workers Rate Limiting (per-colo counters). The RateLimiter Durable Object
   // stays exported for its migration but is no longer on any request path.
@@ -119,9 +122,6 @@
     { "name": "repo-import", "binding": "REPO_IMPORT", "class_name": "RepoImport" },
     { "name": "environment-build", "binding": "ENVIRONMENT_BUILD", "class_name": "EnvironmentBuild" }
   ],
-  "triggers": {
-    "crons": ["0 */6 * * *"]
-  },
   "vars": {
     "SITE_NAME": "Kvarm",
     "APP_ORIGIN": "http://localhost:8787",
