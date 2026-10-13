@@ -36,10 +36,10 @@ export interface CreateRepoParams {
 export async function createRepo(env: Env, p: CreateRepoParams): Promise<ServiceResult<RepoRow>> {
   const name = p.name.trim();
   if (!isValidRepoName(name)) {
-    return { ok: false, status: 400, error: 'invalid name (letters, digits, dot, dash, underscore; max 100)' };
+    return { ok: false, status: 400, error: 'invalid name (letters, digits, dot, dash, underscore; max 100)', code: 'INVALID_REPO_NAME' };
   }
   if (await getRepo(env.DB, p.ownerLogin, name)) {
-    return { ok: false, status: 409, error: 'you already have a repo with that name' };
+    return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
   }
   const visibility = p.visibility === 'public' ? 'public' : 'private';
   const defaultBranch = (p.defaultBranch ?? 'main').replace(/[^a-zA-Z0-9._/-]+/g, '-') || 'main';
@@ -53,7 +53,7 @@ export async function createRepo(env: Env, p: CreateRepoParams): Promise<Service
       setDefaultBranch: defaultBranch,
     });
   } catch (err) {
-    return { ok: false, status: 502, error: `Artifacts create failed: ${String(err)}` };
+    return { ok: false, status: 502, error: `Artifacts create failed: ${String(err)}`, code: 'ARTIFACTS_UNAVAILABLE' };
   }
 
   const row = await createRepoRow(env, {
@@ -78,14 +78,14 @@ export interface ImportRepoParams extends CreateRepoParams {
 export async function importRepo(env: Env, p: ImportRepoParams): Promise<ServiceResult<RepoRow>> {
   const url = p.sourceUrl.trim();
   if (!/^https:\/\/[^\s]+$/.test(url)) {
-    return { ok: false, status: 400, error: 'url must be an HTTPS git remote' };
+    return { ok: false, status: 400, error: 'url must be an HTTPS git remote', code: 'INVALID_URL' };
   }
   const name = p.name.trim().replace(/\.git$/, '');
   if (!isValidRepoName(name)) {
-    return { ok: false, status: 400, error: 'invalid repo name' };
+    return { ok: false, status: 400, error: 'invalid repo name', code: 'INVALID_REPO_NAME' };
   }
   if (await getRepo(env.DB, p.ownerLogin, name)) {
-    return { ok: false, status: 409, error: 'you already have a repo with that name' };
+    return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
   }
   const artifactsName = artifactsRepoName(p.ownerLogin, name);
 
@@ -96,7 +96,7 @@ export async function importRepo(env: Env, p: ImportRepoParams): Promise<Service
       target: { name: artifactsName },
     });
   } catch (err) {
-    return { ok: false, status: 502, error: `Artifacts import failed: ${String(err)}` };
+    return { ok: false, status: 502, error: `Artifacts import failed: ${String(err)}`, code: 'ARTIFACTS_UNAVAILABLE' };
   }
 
   const row = await createRepoRow(env, {
@@ -120,10 +120,10 @@ export async function forkRepo(
 ): Promise<ServiceResult<RepoRow>> {
   const forkName = name.trim();
   if (!isValidRepoName(forkName)) {
-    return { ok: false, status: 400, error: 'invalid fork name' };
+    return { ok: false, status: 400, error: 'invalid fork name', code: 'INVALID_REPO_NAME' };
   }
   if (await getRepo(env.DB, ownerLogin, forkName)) {
-    return { ok: false, status: 409, error: 'you already have a repo with that name' };
+    return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
   }
   const artifactsName = artifactsRepoName(ownerLogin, forkName);
   let forked;
@@ -131,7 +131,7 @@ export async function forkRepo(
     const handle = await env.ARTIFACTS.get(parent.artifacts_name);
     forked = await handle.fork(artifactsName, { readOnly: false });
   } catch (err) {
-    return { ok: false, status: 502, error: `Artifacts fork failed: ${String(err)}` };
+    return { ok: false, status: 502, error: `Artifacts fork failed: ${String(err)}`, code: 'ARTIFACTS_UNAVAILABLE' };
   }
   const row = await createRepoRow(env, {
     owner_login: ownerLogin,
@@ -153,7 +153,7 @@ export async function deleteRepo(
   try {
     await env.ARTIFACTS.delete(repo.artifacts_name);
   } catch (err) {
-    return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}` };
+    return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}`, code: 'ARTIFACTS_UNAVAILABLE' };
   }
   // One batch: the repo row with its workspace, change and snapshot rows,
   // returning the tarball keys. Those rows reference the repo (and workspaces

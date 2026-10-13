@@ -373,7 +373,7 @@ Dev-loop and CI turnaround, client-side wall clock, from the committed table (me
 | runner claim → report, cold install / warm workdir | 5 / 5 | 2669 ms / 1573 ms |
 | Container CI run 1 cold / run 2 snapshot-warm (total) | 1 / 1 | 18.9 s / 8.7 s |
 
-Measured scale: one 100-workspace fleet run published 99 changes through the train at 15.91 publications per minute (enqueue → published p50 94.0 s, p90 219.1 s, [fleet-100](docs/benchmarks/fleet-100.md)).
+Measured scale: one 100-workspace fleet run published 99 changes through the train — 96 in the initial burst and 3 more after conflict resolution. The 96 initial-burst publications took 361.9 s (15.91 per minute; enqueue → published p50 94.0 s, p90 219.1 s, [fleet-100](docs/benchmarks/fleet-100.md)).
 
 Configured limits (constants in the code, documented with their behavior in the API reference above):
 

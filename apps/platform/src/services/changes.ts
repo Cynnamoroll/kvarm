@@ -894,14 +894,19 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
     };
     if (p.title !== undefined) set('title', p.title);
     if (p.body !== undefined) set('body', p.body);
+    let current: ChangeRow | null = null;
     if (cx.actor?.agent && (p.mergePolicy === 'auto' || p.state === 'open')) {
       // Setting auto or reopening an auto change publishes to the base: the agent's ref ceiling applies.
-      const current = await readChange(cx.env, cx.repo.id, number);
+      current = await readChange(cx.env, cx.repo.id, number);
       if (!current) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
       if ((p.mergePolicy ?? current.merge_policy) === 'auto' && (p.state ?? current.state) === 'open') {
         const denied = agentMergeDenial(cx.actor, current.base_ref, p.mergePolicy === 'auto' ? 'auto' : 'merge');
         if (denied) return denied;
       }
+    } else if (p.state === 'open') {
+      // The reopen reconcile below needs the pre-patch head.
+      current = await readChange(cx.env, cx.repo.id, number);
+      if (!current) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     }
     if (p.mergePolicy !== undefined) set('merge_policy', p.mergePolicy);
     if (p.state === 'closed') set('state', 'closed');
@@ -919,11 +924,47 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
         ...args,
       ),
       ...(p.state === 'closed' ? [retireConflictTaskStatement(cx.env.DB, cx.repo.id, number, now)] : []),
+      // Reopening after the branch moved while the change was closed: pushes
+      // refresh open changes only, so the recorded head is stale and every
+      // merge attempt would answer HEAD_MOVED until another push. The change
+      // adopts the recorded ref position under the same monotonic guard the
+      // event ingest uses, so an older delivery never rolls it back.
+      ...(p.state === 'open'
+        ? [
+            cx.env.DB.prepare(
+              `UPDATE change_sets
+                  SET head_sha = (SELECT f.sha FROM repo_refs f WHERE f.repo_id = change_sets.repo_id AND f.ref = 'refs/heads/' || change_sets.head_ref),
+                      head_event_at = (SELECT f.event_at FROM repo_refs f WHERE f.repo_id = change_sets.repo_id AND f.ref = 'refs/heads/' || change_sets.head_ref),
+                      updated_at = ?3
+                WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted')
+                  AND EXISTS (SELECT 1 FROM repo_refs f
+                                WHERE f.repo_id = change_sets.repo_id AND f.ref = 'refs/heads/' || change_sets.head_ref
+                                  AND f.sha != '${ZERO_OID}' AND f.event_at > COALESCE(change_sets.head_event_at, 0)
+                                  AND f.sha IS NOT change_sets.head_sha)`,
+            ).bind(cx.repo.id, number, now),
+          ]
+        : []),
       changeSelect(cx.env.DB, cx.repo.id, number),
     ]);
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (row.state === 'merged') return fail(409, 'a merged change cannot be updated', 'CHANGE_MERGED');
+    if (p.state === 'open' && row.head_sha !== null && current !== null && row.head_sha !== current.head_sha) {
+      // The adopted head needs the same effects a push would have run for it:
+      // the guard verdict and the change-level CI dispatch. They are
+      // idempotent per (change, head), exactly like the event's own effects.
+      const adopted = row.head_sha;
+      const { id, number: changeNumber, merge_policy: policy } = row;
+      cx.waitUntil(
+        (async () => {
+          for (const hook of HEAD_MOVED_HOOKS) {
+            await hook({ env: cx.env, repoId: cx.repo.id, change: { id, number: changeNumber, policy, headSha: adopted }, headSha: adopted });
+          }
+        })().catch((err: unknown) =>
+          console.warn(JSON.stringify({ reopenHeadHooks: { repo: cx.repo.id, number: changeNumber, error: String(err).slice(0, 200) } })),
+        ),
+      );
+    }
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
     return { ok: true, value: changeView(row) };
   });
@@ -1215,17 +1256,29 @@ async function performMerge(
               .bind(cx.repo.id, row.id, prepared.value.treeSha)
               .first<string>('head_sha');
             const staged = await sources.readCommit(live);
-            if (
-              live !== expected ||
-              !staged ||
-              staged.treeHash !== prepared.value.treeSha ||
-              staged.parents.length !== 2 ||
-              staged.parents[0] !== prepared.value.targetSha ||
-              staged.parents[1] !== prepared.value.headSha
-            ) {
-              return fail(503, 'the prepared CI commit identity is invalid', 'CI_PREPARED_COMMIT_INVALID');
+            const usable =
+              staged !== null &&
+              live === expected &&
+              staged.treeHash === prepared.value.treeSha &&
+              staged.parents.length === 2 &&
+              staged.parents[0] === prepared.value.targetSha &&
+              staged.parents[1] === prepared.value.headSha;
+            if (usable) {
+              prepared.value.mergeCommit = live;
+            } else if (prepared.value.mergeCommit === live) {
+              // Only the queueing was lost (a crash between the staging push
+              // and the job rows): the ref already holds this preparation.
+            } else {
+              // The staging ref holds a commit prepared for another attempt at
+              // this tree: the base moved under an unchanged result tree. The
+              // namespace is platform-reserved, so this preparation re-points
+              // it (expected old value = the stale commit) instead of
+              // refusing forever.
+              const restaged = await pusher.updateRef({ ref: checkRef, oldOid: live, newOid: prepared.value.mergeCommit }, prepared.value.objects);
+              if (restaged.status !== 'ok') {
+                return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
+              }
             }
-            prepared.value.mergeCommit = live;
           } else {
             const staged = await pusher.updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: prepared.value.mergeCommit }, prepared.value.objects);
             if (staged.status !== 'ok') return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');

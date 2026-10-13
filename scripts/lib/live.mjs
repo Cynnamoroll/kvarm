@@ -163,19 +163,54 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
     }
   }
 
-  /** Read-only remote D1 query through wrangler (needs `. "$HOME/.config/vite-plus/env"`). */
+  /**
+   * Deletes one scratch resource and confirms it is really gone: a 2xx DELETE,
+   * then a readback that must answer 404 (a lost reply can still have deleted
+   * it). Retries within a small bound, so a DELETE that is still settling does
+   * not report a leak. `first` is the first DELETE response, for cost samples.
+   */
+  async function remove(path, { attempts = 3, waitMs = 1500 } = {}) {
+    let detail = 'no attempt';
+    let first = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const del = await http(path, { method: 'DELETE' });
+      first ??= del;
+      const suffix = del.error ? ` (${del.error})` : '';
+      if (del.status === 404 || (del.status >= 200 && del.status < 300)) {
+        const after = await http(path);
+        detail = `DELETE ${del.status}${suffix}, GET ${after.status}`;
+        if (after.status === 404) return { ok: true, detail, attempts: attempt, first };
+      } else {
+        detail = `DELETE ${del.status}${suffix}`;
+      }
+      if (attempt < attempts) await sleep(waitMs * attempt);
+    }
+    return { ok: false, detail, attempts, first };
+  }
+
+  /** Read-only remote D1 query: runs the repository's own wrangler through node, so it needs no PATH entry. */
   function d1(sql) {
     const r = spawnSync(process.execPath, remoteD1Args(sql), { cwd: PLATFORM, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     if (r.status !== 0) throw new Error(`wrangler d1 execute failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
     return JSON.parse(r.stdout).map((x) => x.results ?? []);
   }
 
+  /**
+   * Captures `wrangler tail` into a file. The binary comes from PATH (`. "$HOME/.config/vite-plus/env"`);
+   * unlike d1(), which runs the repository's wrangler through node, this spawn needs it there.
+   */
   function startTail(file = join(work, 'tail.jsonl')) {
     const stream = createWriteStream(file);
     const child = spawn('wrangler', ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(stream);
     let err = '';
+    let spawnError = null;
     child.stderr.on('data', (d) => (err += d));
+    // Without this listener a host with no `wrangler` on PATH dies on an unhandled
+    // ENOENT; stop() reports the recorded error instead.
+    child.on('error', (e) => {
+      spawnError = e;
+    });
     let stopped = false;
     return {
       file,
@@ -184,13 +219,17 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
         if (stopped) return err;
         stopped = true;
         await sleep(graceMs);
-        child.kill('SIGINT');
-        await new Promise((r) => (child.exitCode !== null ? r() : child.once('close', r)));
+        // A spawn that never started has no process to signal or to wait for.
+        if (!spawnError) {
+          child.kill('SIGINT');
+          await new Promise((r) => (child.exitCode !== null ? r() : child.once('close', r)));
+        }
         stream.end();
+        if (spawnError) throw new Error(`wrangler tail did not start: ${spawnError.message}`);
         return err;
       },
     };
   }
 
-  return { work, askpass, state, http, git, d1, startTail };
+  return { work, askpass, state, http, git, remove, d1, startTail };
 }

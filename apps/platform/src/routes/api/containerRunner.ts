@@ -46,5 +46,7 @@ containerRunnerApi.post('/repos/:owner/:repo/ci/container-runs', async (c) => {
 containerRunnerApi.delete('/repos/:owner/:repo/ci/container-runs/snapshot', async (c) => {
   const x = await adminContext(c);
   if ('denied' in x) return x.denied;
-  return actorJson(c, await c.env.CI_SANDBOX.getByName(x.repo.id).reset());
+  const r = await c.env.CI_SANDBOX.getByName(x.repo.id).reset();
+  if ('ok' in r && r.ok === false) return c.json({ error: r.error, code: r.code }, r.status as never);
+  return actorJson(c, r);
 });

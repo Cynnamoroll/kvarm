@@ -153,7 +153,7 @@ tenancyApi.get('/repos/:owner/:repo/grants', async (c) => {
 tenancyApi.put('/repos/:owner/:repo/grants/:login', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await jsonBody<{ role: string }>(c);
   if (!isRepoNeed(body.role)) {
     return c.json({ error: 'role must be read, write or admin', code: 'INVALID_ROLE' }, 400);

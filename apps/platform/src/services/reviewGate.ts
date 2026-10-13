@@ -246,15 +246,24 @@ export function recordMissingEscalation(db: D1Database, changeId: string, reason
     .bind(crypto.randomUUID(), changeId, reason, detail, now);
 }
 
-/** Opens a final-selection escalation on the live change linked to `workspaceId` (a new selection asks again). */
-export function finalSelectionEscalation(db: D1Database, repoId: string, workspaceId: string, now: number): D1PreparedStatement {
+/**
+ * Opens a final-selection escalation on the live change linked to `workspaceId`
+ * (a new selection asks again). With `arenaId`, the row is written only when
+ * the arena still names `workspaceId` as its winner, so a selection that lost
+ * a race to another winner cannot orphan an escalation.
+ */
+export function finalSelectionEscalation(db: D1Database, repoId: string, workspaceId: string, now: number, arenaId?: string): D1PreparedStatement {
+  const onlyIfSelected =
+    arenaId === undefined
+      ? ''
+      : ` AND EXISTS (SELECT 1 FROM arenas a2 WHERE a2.repo_id = ?2 AND a2.id = ?5 AND a2.selected_workspace = ?3 AND a2.state = 'selected')`;
   return db
     .prepare(
       `INSERT OR IGNORE INTO change_escalations (id, repo_id, change_set_id, change_number, reason, state, head_sha, detail, opened_by, opened_at)
        SELECT ?1, c.repo_id, c.id, c.number, 'final-selection', 'open', c.head_sha,
               'an arena selection names this change''s workspace as the winner; a human confirms the selection', 'system', ?4
          FROM workspaces w JOIN change_sets c ON c.id = w.change_set_id
-        WHERE w.repo_id = ?2 AND w.id = ?3 AND c.state IN ('open', 'conflicted')`,
+        WHERE w.repo_id = ?2 AND w.id = ?3 AND c.state IN ('open', 'conflicted')${onlyIfSelected}`,
     )
-    .bind(crypto.randomUUID(), repoId, workspaceId, now);
+    .bind(crypto.randomUUID(), repoId, workspaceId, now, arenaId ?? null);
 }

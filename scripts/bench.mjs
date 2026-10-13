@@ -27,9 +27,11 @@
  *
  * Isolation: scratch repos m7-benchmarks-cost-sweep-bench-<ts> and
  * m7-benchmarks-cost-sweep-loopci-<ts> plus two scratch agents, removed at the
- * end unless --keep. Bounded: <= 5 HTTP requests and <= 3 git children in
- * flight (child benchmarks run one at a time), 429/Retry-After honored, a
- * 10,000-request ceiling. Tokens are never printed.
+ * end unless --keep; every removal is confirmed (2xx, then a 404 readback) and
+ * a cleanup that leaves a scratch resource behind fails the run. Bounded: <= 5
+ * HTTP requests and <= 3 git children in flight (child benchmarks run one at a
+ * time), 429/Retry-After honored, a 10,000-request ceiling. Tokens are never
+ * printed.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -259,14 +261,14 @@ await phase('scratch repo, workspaces, overlap forecast and composition', async 
   const fc = [];
   let fcCost = null;
   for (let i = 0; i < N; i++) {
-    const r = await http(`${R(A)}/forecast?paths=src/util.js,docs/guide.md&exclude=${w2.json.id}`, { token: tokB });
+    const r = await http(`${R(A)}/forecast?paths=src/util.js&paths=docs/guide.md&exclude=${w2.json.id}`, { token: tokB });
     expect(r.status === 200 && r.json?.matches?.some((m) => m.workspace === w1.json.id), `forecast -> ${r.status} ${r.text.slice(0, 160)}`);
     fc.push(r.ms);
     fcCost = r.cost;
   }
   report.forecast = {
     stats: spanStats(fc),
-    method: `${N} identical calls (\`paths=src/util.js,docs/guide.md\`, excluding the caller's workspace) over 2 active agent workspaces with declared and observed paths overlapping on \`src/util.js\`, in a 6-file repo; the forecast has no response cache (\`cache=${fcCost?.cache ?? 'none'}\`), so every call reads the Nexus index (\`d1=${fcCost?.d1 ?? 0}\`)`,
+    method: `${N} identical calls (\`paths=src/util.js&paths=docs/guide.md\`, excluding the caller's workspace) over 2 active agent workspaces with declared and observed paths overlapping on \`src/util.js\`, in a 6-file repo; the forecast has no response cache (\`cache=${fcCost?.cache ?? 'none'}\`), so every call reads the Nexus index (\`d1=${fcCost?.d1 ?? 0}\`)`,
   };
   say(`   forecast ${fmtStats(report.forecast.stats)}`);
 
@@ -538,12 +540,22 @@ await phase('clone vs snapshot', async () => {
 
 // ---------------------------------------------------------------------------
 await phase('cleanup', async () => {
-  for (const id of agents) await http(`/api/v1/agents/${id}`, { method: 'DELETE' });
+  const failures = [];
+  for (const id of agents) {
+    const r = await http(`/api/v1/agents/${id}`, { method: 'DELETE' });
+    if (r.status !== 200) failures.push(`agent ${id}: DELETE ${r.status}${r.error ? ` (${r.error})` : ''}`);
+  }
   if (args.keep) {
     say(`   kept ${created.join(', ')}`);
-    return;
+  } else {
+    for (const name of created) {
+      const gone = await live.remove(R(name));
+      say(`   ${name}: ${gone.detail}${gone.ok ? '' : ` after ${gone.attempts} attempts`}`);
+      if (!gone.ok) failures.push(`${name}: ${gone.detail}`);
+    }
   }
-  for (const name of created) say(`   DELETE ${name} -> ${(await http(R(name), { method: 'DELETE' })).status}`);
+  // A scratch repo or agent left behind is a failed run, not a warning.
+  expect(failures.length === 0, `cleanup left ${failures.length} scratch resource(s): ${failures.join('; ')}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -553,6 +565,10 @@ report.fleet = {
   measuredAt: fleetJson.run.finishedAt,
   workspaces: fleetJson.fleet.workspaces,
   published: fleetJson.burst.accepted,
+  // The window, throughput and latency rows describe the initial burst only, not
+  // the 99 accepted publications: the 3 resolved after the burst are outside it.
+  publishedInBurst: fleetJson.burst.acceptedInBurstWindow,
+  resolvedAfterConflicts: fleetJson.burst.resolvedAndPublished,
   windowMs: fleetJson.burst.windowMs,
   throughputPerMin: fleetJson.burst.throughputPerMin,
   latency: fleetJson.burst.latencyMs,

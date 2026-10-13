@@ -263,12 +263,19 @@ function pkt(payload: Uint8Array): Uint8Array {
  * A receive-pack result body in the shape git's own receive-pack produces when
  * a pre-receive check declines refs: `unpack ok`, one `ok`/`ng` line per ref
  * and a flush, wrapped in side-band channel 1 when the client negotiated it.
+ *
+ * The builder never trusts its caller: a ref carrying control characters or
+ * an extreme length would corrupt the pkt-line stream the client parses (a
+ * crafted `ng` line could smuggle an `ok` for a ref that was denied), so the
+ * ref is sanitized exactly like the reason.
  */
 export function buildReportStatus(results: readonly RefResult[], sideband: Sideband): Uint8Array {
   const lines = [pkt(enc.encode('unpack ok\n'))];
   for (const r of results) {
-    const reason = (r.reason ?? 'rejected').replace(/[\r\n]/g, ' ');
-    lines.push(pkt(enc.encode(r.ok ? `ok ${r.ref}\n` : `ng ${r.ref} ${reason}\n`)));
+    // eslint-disable-next-line no-control-regex
+    const clean = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 512);
+    const reason = clean(r.reason ?? 'rejected');
+    lines.push(pkt(enc.encode(r.ok ? `ok ${clean(r.ref)}\n` : `ng ${clean(r.ref)} ${reason}\n`)));
   }
   lines.push(enc.encode('0000'));
   const inner = join(lines, lines.reduce((n, l) => n + l.length, 0));

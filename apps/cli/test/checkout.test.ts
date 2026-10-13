@@ -84,6 +84,33 @@ const ready = (sha: string, size: number, extra: Record<string, unknown> = {}) =
 });
 
 describe('kvarm checkout', () => {
+  it.each(['../secret', 'main/..', 'refs/heads/.'])('rejects unsafe ref path segments before any request (%s)', async (ref) => {
+    const f = fakeFetch({}, {});
+    const r = run(f.impl, { ref, dir: join(root, `bad-ref-${ref.replaceAll('/', '-')}`), pat: 'p' });
+    await expect(r.promise).rejects.toThrow(/invalid ref/);
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('does not request a snapshot download for a malformed metadata sha', async () => {
+    const f = fakeFetch({ main: ready('../outside', tarMain.length) }, {});
+    const r = run(f.impl, { ref: 'main', dir: join(root, 'bad-snapshot-sha'), pat: 'p' });
+    await expect(r.promise).resolves.toMatchObject({ source: 'clone', sha: repo.main });
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.url).toBe(`${SNAP}/main`);
+  });
+
+  it('caps a snapshot transfer even when its metadata understates the size', async () => {
+    const frames = new Uint8Array((1024 * 1024) + 8);
+    for (let off = 0; off < frames.length; off += 8) frames.set([0x50, 0x2a, 0x4d, 0x18], off);
+    const f = fakeFetch(
+      { main: ready(repo.main, 0, { encoding: 'zstd', encodedSize: 0 }) },
+      { [repo.main]: { status: 200, bytes: frames, contentType: 'application/zstd' } },
+    );
+    const r = run(f.impl, { ref: 'main', dir: join(root, 'oversized-snapshot'), pat: 'p' });
+    await expect(r.promise).resolves.toMatchObject({ source: 'clone', sha: repo.main });
+    expect(r.stderr.join('\n')).toMatch(/snapshot download exceeds the 1048576-byte transfer budget/);
+  });
+
   it('demands the snapshot, downloads it by sha and extracts a tree equal to git checkout', async () => {
     const f = fakeFetch({ main: ready(repo.main, tarMain.length) }, { [repo.main]: tarMain });
     const dir = join(root, 'snap-main');

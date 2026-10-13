@@ -28,7 +28,8 @@ import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
 import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type WorkspaceOwner } from '../services/workspaces';
-import { directHumanPushDenial, directPushDenial, type BranchRule } from '../services/branchRules';
+import { agentReservedRefDenial, directHumanPushDenial, directPushDenial, INVALID_REF_REASON, type BranchRule } from '../services/branchRules';
+import { isSafeRefName } from '@kvarm/gitops';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
@@ -181,18 +182,25 @@ export async function handleGitRequest(
   // Agent tokens are confined to their granted refs (workspace refs also to
   // an active workspace the agent may use), protected refs refuse direct
   // pushes from everyone (instance admin included), and human credentials
-  // cannot write platform-reserved namespaces. The push command list is
-  // checked before any upstream token mint or byte of the pack is forwarded.
+  // cannot write platform-reserved namespaces. Every command's ref name is
+  // validated before any grant check, so a malformed name is rejected up
+  // front and never echoed back into a report-status line. The push command
+  // list is checked before any upstream token mint or byte of the pack is
+  // forwarded.
   let pushBody: ReadableStream<Uint8Array> | null = null;
   if (subpath === 'git-receive-pack') {
     let owners: Promise<Map<string, WorkspaceOwner>> | null = null;
     const gate = await gateReceivePack(c.req.raw, async (cmd, commands) => {
+      if (!isSafeRefName(cmd.ref)) return INVALID_REF_REASON;
       if (actor?.agent) {
         if (!credentialMayUpdateRef(actor, cmd.ref)) return 'ref outside agent token grant';
         if (cmd.ref.startsWith(WORKSPACE_REF_PREFIX)) {
           owners ??= workspaceOwners(env, repo.id, commands);
           const denied = agentWorkspaceDenial(actor, cmd, await owners);
           if (denied) return denied;
+        } else {
+          const reserved = agentReservedRefDenial(cmd.ref);
+          if (reserved) return reserved;
         }
         return directPushDenial(branchRules, cmd.ref);
       }

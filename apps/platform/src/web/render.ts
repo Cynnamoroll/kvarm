@@ -31,6 +31,9 @@ code{font-family:var(--mono);font-size:12px}
 .flash{border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;margin:12px 0}
 .flash.ok{border-color:#238636;color:#3fb950}
 .flash.err{border-color:var(--danger);color:var(--danger)}
+.signout{display:inline;margin:0}
+.linklike{background:none;border:0;padding:0;color:var(--link);font:inherit;cursor:pointer}
+.linklike:hover{text-decoration:underline}
 `);
 
 export interface PageOptions {

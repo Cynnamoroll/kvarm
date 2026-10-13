@@ -19,7 +19,8 @@
  * Tokens come from env vars and are never printed.
  *   set -a; . ./.env.local; set +a
  *   node scripts/branch-rules-e2e.mjs [--keep]
- * Exit 0 only when every check holds.
+ * Exit 0 only when every check holds, 1 when a check failed, 2 on a fatal
+ * error; a fatal error still deletes the scratch repo.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -30,17 +31,19 @@ import { parseArgs } from 'node:util';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false } } });
 
-const BASE = process.env.KVARM_BASE_URL ?? die('KVARM_BASE_URL is not set');
-const OWNER_PAT = process.env.KVARM_PAT_BOT ?? die('KVARM_PAT_BOT is not set');
-const COLLAB_PAT = process.env.KVARM_PAT_MAINT ?? die('KVARM_PAT_MAINT is not set');
-const ADMIN_PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
+const BASE = process.env.KVARM_BASE_URL;
+const OWNER_PAT = process.env.KVARM_PAT_BOT;
+const COLLAB_PAT = process.env.KVARM_PAT_MAINT;
+const ADMIN_PAT = process.env.KVARM_PAT;
 const ts = Math.floor(Date.now() / 1000);
 const results = [];
 const Z = '0'.repeat(40);
 
+class FatalError extends Error {}
+
+/** Throws: exiting here would skip the `finally` that deletes the scratch repo. */
 function die(msg) {
-  console.error(`branch-rules-e2e: ${msg}`);
-  process.exit(2);
+  throw new FatalError(msg);
 }
 
 function check(name, ok, detail = '') {
@@ -168,18 +171,23 @@ async function pushWithRetry(args, token) {
 
 // ---------------------------------------------------------------------------
 
-const ownerLogin = (await api('GET', '/user', OWNER_PAT)).json?.user?.login ?? die('owner PAT rejected');
-const collab = await api('GET', '/user', COLLAB_PAT);
-const collabLogin = collab.json?.user?.login ?? die('collaborator PAT rejected');
-const admin = await api('GET', '/user', ADMIN_PAT);
-if (admin.json?.user?.isAdmin !== true) die('KVARM_PAT is not the instance admin');
-const adminLogin = admin.json.user.login;
-const name = `access-branch-rules-e2e-${ts}`;
-const repo = `${ownerLogin}/${name}`;
-const url = `${BASE}/${repo}.git`;
 let created = false;
+let exitCode = 0;
 
 try {
+  if (!BASE) die('KVARM_BASE_URL is not set');
+  if (!OWNER_PAT) die('KVARM_PAT_BOT is not set');
+  if (!COLLAB_PAT) die('KVARM_PAT_MAINT is not set');
+  if (!ADMIN_PAT) die('KVARM_PAT is not set');
+  const ownerLogin = (await api('GET', '/user', OWNER_PAT)).json?.user?.login ?? die('owner PAT rejected');
+  const collab = await api('GET', '/user', COLLAB_PAT);
+  const collabLogin = collab.json?.user?.login ?? die('collaborator PAT rejected');
+  const admin = await api('GET', '/user', ADMIN_PAT);
+  if (admin.json?.user?.isAdmin !== true) die('KVARM_PAT is not the instance admin');
+  const adminLogin = admin.json.user.login;
+  const name = `access-branch-rules-e2e-${ts}`;
+  const repo = `${ownerLogin}/${name}`;
+  const url = `${BASE}/${repo}.git`;
   const cr = await api('POST', '/repos', OWNER_PAT, { name, visibility: 'private' });
   if (cr.status !== 201) die(`create ${name}: ${cr.status} ${cr.text}`);
   created = true;
@@ -276,6 +284,14 @@ try {
   const r = await rawPush(repo, OWNER_PAT, [`${before['refs/heads/main']} ${ffTip} refs/heads/main`], `${ffTip}\n^${before['refs/heads/main']}\n`);
   const after = await refsOf(repo);
   check('unprotected main accepts the fast-forward again', r.status.includes('ok refs/heads/main') && after['refs/heads/main'] === ffTip, `HTTP ${r.http} ${JSON.stringify(r.status)} main -> ${after['refs/heads/main']} cost ${r.cost}`);
+  const failed = results.filter((x) => !x.ok);
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+  exitCode = failed.length === 0 ? 0 : 1;
+} catch (err) {
+  // A driver failure, not a crash: report it and let the `finally` clean up.
+  if (!(err instanceof FatalError)) throw err;
+  console.error(`branch-rules-e2e: ${err.message}`);
+  exitCode = 2;
 } finally {
   if (created && !opts.keep) {
     const d = await api('DELETE', `/repos/${repo}`, OWNER_PAT);
@@ -286,6 +302,4 @@ try {
   rmSync(work, { recursive: true, force: true });
 }
 
-const failed = results.filter((x) => !x.ok);
-console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
-process.exit(failed.length === 0 ? 0 : 1);
+process.exit(exitCode);

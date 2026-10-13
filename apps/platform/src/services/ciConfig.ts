@@ -49,10 +49,14 @@ export function parseCiConfig(text: string): CiConfigResult {
   for (const item of list) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) return fail('each CI job must be an object', 'INVALID_CI_JOB');
     const j = item as Record<string, unknown>;
-    if (typeof j.name !== 'string' || j.name.trim().length === 0 || j.name.trim().length > CI_LIMITS.name || j.name.toLowerCase().startsWith('kvarm/')) {
+    // The stored name is the trimmed one, so every rule (length and the
+    // kvarm/ reservation) must hold on the trimmed value: a raw " kvarm/x"
+    // would otherwise be stored as the reserved kvarm/x and a runner report
+    // could then overwrite the platform's own check run of that name.
+    const name = typeof j.name === 'string' ? j.name.trim() : '';
+    if (name.length === 0 || name.length > CI_LIMITS.name || name.toLowerCase().startsWith('kvarm/')) {
       return fail(`CI job names must be 1-${CI_LIMITS.name} characters and may not start with kvarm/`, 'INVALID_CI_JOB_NAME');
     }
-    const name = j.name.trim();
     if (names.has(name)) return fail(`duplicate CI job name: ${name}`, 'DUPLICATE_CI_JOB');
     names.add(name);
     if (typeof j.run !== 'string' || j.run.trim().length === 0 || j.run.length > CI_LIMITS.command) {

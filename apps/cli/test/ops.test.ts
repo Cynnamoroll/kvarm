@@ -320,4 +320,12 @@ describe('kvarm failures', () => {
     expect(r.stderr).toMatch(/could not reach http:\/\/127\.0\.0\.1:1/);
     expect(r.stderr).not.toContain(PAT);
   });
+
+  it('refuses a reply body past the 8 MiB read cap instead of buffering it whole', async () => {
+    reply = { status: 200, body: 'x'.repeat(9 * 1024 * 1024) };
+    const r = await kvarm(['repo', 'list']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/response body exceeds the 8388608-byte read cap/);
+    expect(r.stdout + r.stderr).not.toContain(PAT);
+  });
 });

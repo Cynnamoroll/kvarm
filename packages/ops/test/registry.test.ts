@@ -175,8 +175,8 @@ describe('buildRequest', () => {
   });
 
   it('joins list query parameters with commas', () => {
-    const r = buildRequest(op('forecast'), { repo: 'o/r', paths: ['a.ts', 'src/'] });
-    expect(r.query).toBe('paths=a.ts%2Csrc%2F');
+    const r = buildRequest(op('list_candidates'), { repo: 'o/r', workspaces: ['ab12', 'cd34'] });
+    expect(r.query).toBe('workspaces=ab12%2Ccd34');
   });
 
   it('sends literal path lists as one repeated parameter per path, so commas stay part of a path', () => {
@@ -185,8 +185,11 @@ describe('buildRequest', () => {
     expect(new URLSearchParams(ctx.query).getAll('path')).toEqual(['src/a,b.ts', 'c.md']);
     const rec = buildRequest(op('record_decision'), { repo: 'o/r', paths: ['src/a,b.ts'], chosen: 'c', rejected: [], reason: 'r' });
     expect(rec.body).toMatchObject({ paths: ['src/a,b.ts'] });
+    const fc = buildRequest(op('forecast'), { repo: 'o/r', paths: ['src/a,b.ts', 'src/'] });
+    expect(fc.query).toBe('paths=src%2Fa%2Cb.ts&paths=src%2F');
     expect(op('get_context').params.find((p) => p.name === 'path')?.literal).toBe(true);
     expect(op('record_decision').params.find((p) => p.name === 'paths')?.literal).toBe(true);
+    expect(op('forecast').params.find((p) => p.name === 'paths')?.literal).toBe(true);
   });
 
   it('registers the existing repository lifecycle routes as thin entries', () => {
