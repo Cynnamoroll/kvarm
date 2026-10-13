@@ -170,6 +170,7 @@ describe('branch rule evaluation', () => {
     pattern,
     requiredChecks: checks,
     requiredApprovals: approvals,
+    guardCompleteness: 'advisory',
     createdBy: null,
     createdAt: 0,
     updatedBy: null,
@@ -194,6 +195,7 @@ describe('branch rule evaluation', () => {
       directPush: 'denied',
       requiredChecks: ['ci', 'guard'],
       requiredApprovals: 2,
+      guardCompleteness: 'advisory',
       rules: ['r1', 'r2'],
     });
     expect(effectivePolicy(rules, 'refs/tags/v1').protected).toBe(false);
@@ -311,6 +313,7 @@ describe('branch rule management', () => {
       directPush: 'denied',
       requiredChecks: ['ci/test'],
       requiredApprovals: 1,
+      guardCompleteness: 'advisory',
       rules: [mainRule.id],
     });
     const free = await json(await call(`/api/v1/repos/${REPO}/branch-policy?ref=refs/heads/scratch`, as('reader')));

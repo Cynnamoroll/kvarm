@@ -1,8 +1,10 @@
 /**
- * Guard completeness (architecture §0.3): an incomplete kvarm/guard
+ * Guard completeness (architecture §0.3, §11.1): an incomplete kvarm/guard
  * verdict (files past the guard's read budgets) is reported as incomplete
- * everywhere the check is shown. Runs through the Worker's routes over the
- * in-memory Artifacts fake.
+ * everywhere the check is shown, and a branch rule with
+ * `guardCompleteness: 'required'` refuses to publish it into a matching ref
+ * through the explicit merge and the merge queue. Runs through the
+ * Worker's routes over the in-memory Artifacts fake.
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
@@ -11,7 +13,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import worker from '../src/index';
+import { effectivePolicy, type BranchRule } from '../src/services/branchRules';
 import { GUARD_BUDGETS } from '../src/services/checks';
+import { defaultTrainDeps, runTrain } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -181,5 +185,156 @@ describe('guard completeness: the check shows what it did not inspect', () => {
     expect(run.summary.uninspected).toBeUndefined();
     const status = (await call('GET', `${R('gc-clean')}/commits/${feature.sha}/status`, tok.owner)).json;
     expect(status.incomplete).toEqual([]);
+  });
+});
+
+describe('guard completeness: branch rules', () => {
+  it('guard completeness: rules default to advisory and validate the setting', async () => {
+    await seedRepo('gc-rules');
+    const created = await call('POST', `${R('gc-rules')}/branch-rules`, tok.owner, { pattern: 'main' });
+    expect(created.json.rule.guardCompleteness).toBe('advisory');
+    const bad = await call('POST', `${R('gc-rules')}/branch-rules`, tok.owner, { pattern: 'dev', guardCompleteness: 'strict' });
+    expect([bad.status, bad.json.code]).toEqual([400, 'INVALID_GUARD_COMPLETENESS']);
+    const patched = await call('PATCH', `${R('gc-rules')}/branch-rules/${created.json.rule.id}`, tok.owner, { guardCompleteness: 'required' });
+    expect([patched.status, patched.json.rule.guardCompleteness]).toEqual([200, 'required']);
+    const policy = (await call('GET', `${R('gc-rules')}/branch-policy?ref=main`, tok.owner)).json;
+    expect(policy.guardCompleteness).toBe('required');
+    const free = (await call('GET', `${R('gc-rules')}/branch-policy?ref=scratch`, tok.owner)).json;
+    expect(free.guardCompleteness).toBe('advisory');
+    const audit = await env.DB.prepare("SELECT payload FROM events WHERE type = 'branch_rule.updated' AND payload LIKE ?")
+      .bind(`%${created.json.rule.id}%`)
+      .first<{ payload: string }>();
+    expect(JSON.parse(audit!.payload)).toMatchObject({ guardCompleteness: 'required' });
+  });
+
+  it('guard completeness: the union of matching rules requires completeness when any one does', () => {
+    const rule = (id: string, pattern: string, guardCompleteness: 'advisory' | 'required'): BranchRule => ({
+      id,
+      pattern,
+      requiredChecks: [],
+      requiredApprovals: 0,
+      guardCompleteness,
+      createdBy: null,
+      createdAt: 0,
+      updatedBy: null,
+      updatedAt: 0,
+    });
+    const rules = [rule('a', 'refs/heads/main', 'advisory'), rule('b', 'refs/heads/*', 'required')];
+    expect(effectivePolicy(rules, 'refs/heads/main').guardCompleteness).toBe('required');
+    expect(effectivePolicy([rules[0]!], 'refs/heads/main').guardCompleteness).toBe('advisory');
+    expect(effectivePolicy(rules, 'refs/tags/v1').guardCompleteness).toBe('advisory');
+  });
+
+  it('guard completeness: incomplete guard + advisory rule merges', async () => {
+    const { repo, feature } = await scenario('gc-advisory', { 'big.txt': OVERSIZED }, [{ pattern: 'main' }]);
+    const merged = await merge('gc-advisory');
+    expect(merged.status, JSON.stringify(merged.json)).toBe(200);
+    expect(repo.refs.get(MAIN)).toBe(feature.sha);
+  });
+
+  it('guard completeness: incomplete guard + required rule is blocked with GUARD_INCOMPLETE', async () => {
+    const { repo, main } = await scenario('gc-required', { 'big.txt': OVERSIZED }, [{ pattern: 'main', guardCompleteness: 'required' }]);
+    const blocked = await merge('gc-required');
+    expect([blocked.status, blocked.json.code]).toEqual([409, 'GUARD_INCOMPLETE']);
+    expect(blocked.json.error).toContain('kvarm/guard');
+    expect(blocked.json.error).toContain('1 changed file(s)');
+    expect(repo.refs.get(MAIN)).toBe(main.sha);
+    expect((await call('GET', `${R('gc-required')}/changes/1`, tok.owner)).json.state).toBe('open');
+  });
+
+  it('guard completeness: complete guard + required rule merges', async () => {
+    const { repo, feature } = await scenario('gc-complete', { 'notes.txt': 'clean\n' }, [{ pattern: 'main', guardCompleteness: 'required' }]);
+    const merged = await merge('gc-complete');
+    expect(merged.status, JSON.stringify(merged.json)).toBe(200);
+    expect(repo.refs.get(MAIN)).toBe(feature.sha);
+  });
+
+  it('guard completeness: an advisory-only neutral finding + required rule merges', async () => {
+    const { repo } = await scenario(
+      'gc-neutral',
+      { 'package.json': pkg({ mylib: 'github:someone/mylib' }) },
+      [{ pattern: 'main', guardCompleteness: 'required' }],
+      { 'package.json': pkg({}) },
+    );
+    const run = (await call('GET', `${R('gc-neutral')}/changes/1/checks`, tok.owner)).json.checks[0];
+    expect(run).toMatchObject({ conclusion: 'neutral', summary: { complete: true } });
+    const merged = await merge('gc-neutral');
+    expect(merged.status, JSON.stringify(merged.json)).toBe(200);
+    expect(repo.refs.get(MAIN)).not.toBeUndefined();
+  });
+
+  it('guard completeness: a ref matching no rule keeps today\'s behavior (incomplete merges)', async () => {
+    const { repo, feature } = await scenario('gc-norule', { 'big.txt': OVERSIZED }, []);
+    const other = await call('POST', `${R('gc-norule')}/branch-rules`, tok.owner, { pattern: 'release/*', guardCompleteness: 'required' });
+    expect(other.status).toBe(201);
+    const merged = await merge('gc-norule');
+    expect(merged.status, JSON.stringify(merged.json)).toBe(200);
+    expect(repo.refs.get(MAIN)).toBe(feature.sha);
+  });
+
+  it('guard completeness: an advisory rule and a required rule on the same ref block together', async () => {
+    const { repo, main } = await scenario('gc-union', { 'big.txt': OVERSIZED }, [{ pattern: 'main' }, { pattern: 'refs/heads/*', guardCompleteness: 'required' }]);
+    const blocked = await merge('gc-union');
+    expect([blocked.status, blocked.json.code]).toEqual([409, 'GUARD_INCOMPLETE']);
+    expect(repo.refs.get(MAIN)).toBe(main.sha);
+  });
+
+  it('guard completeness: the merge queue ejects an incomplete guard bound for a required ref and lands a complete one', async () => {
+    const repo = await seedRepo('gc-queue');
+    const main = await commit(repo, BASE);
+    repo.refs.set(MAIN, main.sha);
+    const big = await commit(repo, { ...BASE, 'big.txt': OVERSIZED }, [main.sha]);
+    const small = await commit(repo, { ...BASE, 'small.txt': 'small\n' }, [main.sha]);
+    repo.refs.set('refs/heads/big', big.sha);
+    repo.refs.set('refs/heads/small', small.sha);
+    expect((await call('POST', `${R('gc-queue')}/branch-rules`, tok.owner, { pattern: 'main', guardCompleteness: 'required' })).status).toBe(201);
+    for (const [n, head] of [[1, 'big'], [2, 'small']] as const) {
+      expect((await call('POST', `${R('gc-queue')}/changes`, tok.owner, { title: head, base: 'main', head })).json.number).toBe(n);
+      expect((await call('POST', `${R('gc-queue')}/changes/${n}/approve`, tok.reviewer, {})).status).toBe(201);
+      const queued = await call('POST', `${R('gc-queue')}/changes/${n}/enqueue`, tok.owner);
+      expect(queued.status, JSON.stringify(queued.json)).toBe(201);
+    }
+    const run = await runTrain(env, repoIds['gc-queue']!, MAIN, { ...defaultTrainDeps, kick: async () => {} });
+    expect(run.ejected).toEqual([{ number: 1, code: 'GUARD_INCOMPLETE' }]);
+    expect(run.published).toEqual([2]);
+    expect(repo.refs.get(MAIN)).not.toBe(main.sha);
+  });
+
+  it('guard completeness: a rule raised to required while the queue prepares the pack ejects the incomplete head before sending', async () => {
+    const repo = await seedRepo('gc-queue-late');
+    const main = await commit(repo, BASE);
+    repo.refs.set(MAIN, main.sha);
+    const big = await commit(repo, { ...BASE, 'big.txt': OVERSIZED }, [main.sha]);
+    repo.refs.set('refs/heads/big', big.sha);
+    const rule = await call('POST', `${R('gc-queue-late')}/branch-rules`, tok.owner, { pattern: 'main' });
+    expect((await call('POST', `${R('gc-queue-late')}/changes`, tok.owner, { title: 'big', base: 'main', head: 'big' })).status).toBe(201);
+    expect((await call('POST', `${R('gc-queue-late')}/changes/1/approve`, tok.reviewer, {})).status).toBe(201);
+    expect((await call('POST', `${R('gc-queue-late')}/changes/1/enqueue`, tok.owner)).status).toBe(201);
+    let raised = false;
+    const run = await runTrain(env, repoIds['gc-queue-late']!, MAIN, {
+      ...defaultTrainDeps,
+      kick: async () => {},
+      pusher(e, r) {
+        const real = defaultTrainDeps.pusher(e, r);
+        return {
+          listRefs: () => real.listRefs(),
+          updateRef: (command, objects) => real.updateRef(command, objects),
+          async prepareUpdate(command, objects) {
+            const prepared = await real.prepareUpdate(command, objects);
+            if (!raised) {
+              raised = true;
+              const patched = await call('PATCH', `${R('gc-queue-late')}/branch-rules/${rule.json.rule.id}`, tok.owner, { guardCompleteness: 'required' });
+              expect(patched.status).toBe(200);
+            }
+            return prepared;
+          },
+        };
+      },
+    });
+    expect(raised).toBe(true);
+    expect(run.published).toEqual([]);
+    expect(run.ejected).toEqual([{ number: 1, code: 'GUARD_INCOMPLETE' }]);
+    expect(repo.count('receivePack:')).toBe(0);
+    expect(repo.refs.get(MAIN)).toBe(main.sha);
   });
 });

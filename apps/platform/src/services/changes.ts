@@ -23,9 +23,10 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
-import { effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
+import { BRANCH_RULE_COLUMNS, effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   CHECK_RUN_COLUMNS,
+  GUARD_CHECK,
   checkRunView,
   evaluateGuard,
   guardPending,
@@ -947,7 +948,10 @@ export function memoGate(inner: ChecksGate): ChecksGate {
 
 /**
  * Required checks of the target ref's branch rules that the checks-gate
- * answer does not satisfy. Approvals are the review gate's
+ * answer does not satisfy, then the rules' guard completeness: under
+ * `required` a passing kvarm/guard that did not inspect every changed file
+ * is refused (GUARD_INCOMPLETE, terminal for that head: the same head is
+ * judged the same way again). Approvals are the review gate's
  * (services/reviewGate.ts).
  */
 export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks): Fail | null {
@@ -958,6 +962,18 @@ export function branchPolicyBlock(policy: BranchPolicy, checks: RequiredChecks):
     }
     if (found?.state !== 'success') {
       return fail(409, `required check ${name} has not passed on the merge result`, 'REQUIRED_CHECKS_PENDING', { checks });
+    }
+  }
+  if (policy.guardCompleteness === 'required') {
+    const guard = checks.required.find((c) => c.name === GUARD_CHECK);
+    if (guard?.state === 'success' && guard.incomplete) {
+      return fail(
+        409,
+        `${policy.ref} requires a complete ${GUARD_CHECK} inspection; ${guard.uninspected ?? 0} changed file(s) were not fully inspected ` +
+          '(over the file budget, past the per-file read prefix, unreadable, or beyond a truncated change list); split the change so the guard can read all of it',
+        'GUARD_INCOMPLETE',
+        { checks },
+      );
     }
   }
   return null;
@@ -1474,7 +1490,7 @@ async function repoWithRules(env: Env, repoId: string): Promise<{ repo: RepoRow;
   const [repo, rules] = await env.DB.batch([
     env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
     env.DB.prepare(
-      `SELECT b.id, b.pattern, b.required_checks, b.required_approvals, b.created_at, b.updated_at
+      `SELECT ${BRANCH_RULE_COLUMNS}
          FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
     ).bind(repoId),
   ]);

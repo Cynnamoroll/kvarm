@@ -1163,7 +1163,7 @@ export const OPERATIONS = Object.freeze([
     name: 'create_branch_rule',
     command: ['branch-rule', 'create'],
     family: 'branch-rules',
-    description: 'Protect matching refs from direct pushes and set required checks/approvals (repo admins only).',
+    description: 'Protect matching refs from direct pushes and set required checks/approvals and guard completeness (repo admins only).',
     method: 'POST',
     path: '/repos/{repo}/branch-rules',
     params: [
@@ -1171,6 +1171,12 @@ export const OPERATIONS = Object.freeze([
       body('pattern', 'string', 'Branch name or ref pattern (main, release/*, refs/tags/*)', { required: true }),
       body('requiredChecks', 'string[]', 'Required check names'),
       body('requiredApprovals', 'integer', 'Required distinct human approvals (0-10)'),
+      body(
+        'guardCompleteness',
+        'string',
+        'advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)',
+        { enum: ['advisory', 'required'] },
+      ),
     ],
   }),
   define({
@@ -1186,7 +1192,7 @@ export const OPERATIONS = Object.freeze([
     name: 'update_branch_rule',
     command: ['branch-rule', 'update'],
     family: 'branch-rules',
-    description: "Change a branch rule's required checks or approvals (the pattern is immutable).",
+    description: "Change a branch rule's required checks, approvals or guard completeness (the pattern is immutable).",
     method: 'PATCH',
     path: '/repos/{repo}/branch-rules/{id}',
     params: [
@@ -1194,6 +1200,12 @@ export const OPERATIONS = Object.freeze([
       pathArg('id', 'Rule id'),
       body('requiredChecks', 'string[]', 'Required check names'),
       body('requiredApprovals', 'integer', 'Required distinct human approvals (0-10)'),
+      body(
+        'guardCompleteness',
+        'string',
+        'advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)',
+        { enum: ['advisory', 'required'] },
+      ),
     ],
   }),
   define({
@@ -1210,7 +1222,7 @@ export const OPERATIONS = Object.freeze([
     name: 'get_branch_policy',
     command: ['branch-rule', 'policy'],
     family: 'branch-rules',
-    description: 'The effective policy for one ref: protected, direct push, required checks and approvals.',
+    description: 'The effective policy for one ref: protected, direct push, required checks, approvals and guard completeness.',
     method: 'GET',
     path: '/repos/{repo}/branch-policy',
     params: [REPO, query('ref', 'string', 'Branch name or full ref', { required: true, positional: true })],
