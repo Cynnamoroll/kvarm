@@ -104,7 +104,7 @@ describe('mergeBase', () => {
     // The corpus must actually cover unrelated tips and multiple best bases.
     expect(shapes.none).toBeGreaterThan(0);
     expect(shapes.several).toBeGreaterThan(0);
-  });
+  }, 30_000); // spawns git per case; 5 s default is too tight on a loaded machine
 
   it('finds both bases of a criss-cross merge', async () => {
     // 0 <- 1, 0 <- 2, 3 = merge(1,2), 4 = merge(2,1), 5 <- 3, 6 <- 4
@@ -139,7 +139,7 @@ describe('mergeBase', () => {
     expect(r.bases).toEqual([g.commits[497]!.hash]);
     expect(r.commitReads).toBeLessThan(20);
     expect(new Set(log).size).toBe(log.length);
-  });
+  }, 30_000); // builds a 500-commit repo via git subprocesses
 
   it('truncates at the commit-read budget instead of walking on', async () => {
     // Two 300-commit branches off one root.
