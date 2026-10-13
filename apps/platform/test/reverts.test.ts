@@ -175,11 +175,12 @@ describe('POST reverts', () => {
     expect(r.json.revert.branch).toMatch(new RegExp(`^kvarm-revert/${bad.sha.slice(0, 7)}-[0-9a-f]{8}$`));
     const c = commitOf(repo, r.json.revert.commit);
     expect(c).toMatchObject({ tree: expectedTree, parents: [later.sha] });
-    expect(c.message).toBe(`Revert "m"\n\nThis reverts commit ${bad.sha}.\n\nerror rate doubled\n`);
+    const subject = commitOf(repo, bad.sha).message.split('\n', 1)[0];
+    expect(c.message).toBe(`Revert "${subject}"\n\nThis reverts commit ${bad.sha}.\n\nerror rate doubled\n`);
     expect(repo.refs.get(`refs/heads/${r.json.revert.branch}`)).toBe(r.json.revert.commit);
 
     const change = r.json.change;
-    expect(change).toMatchObject({ kind: 'revert', mergePolicy: 'draft', state: 'open', base: 'main', head: r.json.revert.branch, headSha: r.json.revert.commit, title: 'Revert "m"' });
+    expect(change).toMatchObject({ kind: 'revert', mergePolicy: 'draft', state: 'open', base: 'main', head: r.json.revert.branch, headSha: r.json.revert.commit, title: `Revert "${subject}"` });
     expect(change.body).toContain(`This reverts commit ${bad.sha}.`);
     expect(change.checks.map((k: any) => [k.name, k.status, k.headSha])).toEqual(
       expect.arrayContaining([
