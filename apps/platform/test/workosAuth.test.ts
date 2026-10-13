@@ -34,6 +34,10 @@ function configured(extra: Partial<Env> = {}): Env {
 
 let env = configured();
 
+function stateCookie(res: Response): string | undefined {
+  return res.headers.getSetCookie().find((line) => line.startsWith(`${STATE_COOKIE}-`));
+}
+
 async function call(path: string, init: RequestInit & { jar?: CookieJar; e?: Env } = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   if (init.jar && init.jar.header()) headers.set('cookie', init.jar.header());
@@ -137,6 +141,7 @@ async function csrfOf(jar: CookieJar, path = '/settings/tokens'): Promise<string
 beforeEach(() => {
   env = configured();
   fake.refreshAs = null;
+  fake.unavailable = false;
   fake.calls = [];
   fake.install();
 });
@@ -190,7 +195,7 @@ describe('sign-in', () => {
     expect(loc.searchParams.get('provider')).toBe('authkit');
     expect(loc.searchParams.get('code_challenge_method')).toBe('S256');
     expect(loc.searchParams.get('state')!.length).toBeGreaterThanOrEqual(32);
-    const cookie = setCookieNamed(res, STATE_COOKIE)!;
+    const cookie = stateCookie(res)!;
     expect(cookie).toMatch(/; Path=\/auth; Max-Age=600; HttpOnly; Secure; SameSite=Lax$/);
     // The verifier and state travel only sealed.
     expect(cookie).not.toContain(loc.searchParams.get('state')!);
@@ -207,7 +212,7 @@ describe('sign-in', () => {
     expect(callback.headers.get('location')).toBe('/settings/tokens');
     const session = setCookieNamed(callback, SESSION_COOKIE)!;
     expect(session).toMatch(/; Path=\/; Max-Age=604800; HttpOnly; Secure; SameSite=Lax$/);
-    expect(setCookieNamed(callback, STATE_COOKIE)).toMatch(/Max-Age=0/);
+    expect(stateCookie(callback)).toMatch(/Max-Age=0/);
 
     expect(await whoami(jar)).toEqual({ status: 200, login: local });
     const row = await env.DB.prepare('SELECT * FROM users WHERE login = ?').bind(local).first<{ is_admin: number; name: string }>();
@@ -232,6 +237,26 @@ describe('sign-in', () => {
     expect(jar.get(SESSION_COOKIE)).toBeUndefined();
     expect((await whoami(jar)).status).toBe(401);
     expect((await call(`/api/v1/repos/${owner.login}/granted`, { jar })).status).toBe(404);
+  });
+
+  it('completes sign-ins started in two tabs in either order', async () => {
+    const jar = new CookieJar();
+    const one = await call('/auth/login?returnTo=/one', { jar });
+    const two = await call('/auth/login?returnTo=/two', { jar });
+    const who = fakeUser(uniq('tabs'));
+    const a = fake.issueCode(one.headers.get('location')!, who);
+    const b = fake.issueCode(two.headers.get('location')!, who);
+    const first = await call(`/auth/callback?code=${a.code}&state=${a.state}`, { jar });
+    expect(first.status).toBe(302);
+    expect(first.headers.get('location')).toBe('/one');
+    const second = await call(`/auth/callback?code=${b.code}&state=${b.state}`, { jar });
+    expect(second.headers.get('location')).toBe('/two');
+    expect(setCookieNamed(second, SESSION_COOKIE)).toBeDefined();
+  });
+
+  it('defaults the redirect URI to the requesting origin, not APP_ORIGIN', async () => {
+    const res = await call('/auth/login', { e: configured({ WORKOS_REDIRECT_URI: '' as never }) });
+    expect(new URL(res.headers.get('location')!).searchParams.get('redirect_uri')).toBe(`${ORIGIN}/auth/callback`);
   });
 
   it('keeps returnTo on this site', async () => {
@@ -279,7 +304,7 @@ describe('callback rejection', () => {
 
   it('rejects an expired sign-in state', async () => {
     const jar = new CookieJar();
-    const old = await beginSignIn(env, httpWorkOSClient(env), '/', Date.now() - 11 * 60_000);
+    const old = await beginSignIn(env, httpWorkOSClient(env), '/', ORIGIN, Date.now() - 11 * 60_000);
     jar.absorb(new Response(null, { headers: { 'set-cookie': old.setCookie } }));
     const { code, state } = fake.issueCode(old.location, fakeUser(uniq('late')));
     const res = await call(`/auth/callback?code=${code}&state=${state}`, { jar });
@@ -479,6 +504,45 @@ describe('session lifecycle', () => {
     expect(setCookieNamed(gone, SESSION_COOKIE)).toMatch(/Max-Age=0/);
   });
 
+  it('lets a concurrent request with the pre-rotation cookie adopt the rotated session', async () => {
+    const user = await sessionUser();
+    const jar = await craft(user, { rat: Date.now() - 1 });
+    const stale = jar.get(SESSION_COOKIE)!;
+    const winner = await call('/api/v1/user', { jar });
+    expect(winner.status).toBe(200);
+    // The losing request carried the same cookie; WorkOS refuses its spent token.
+    const loser = new CookieJar();
+    loser.set(SESSION_COOKIE, stale);
+    const res = await call('/api/v1/user', { jar: loser });
+    expect(res.status).toBe(200);
+    expect(fake.calls.filter((c) => c.grant === 'refresh_token').length).toBe(2);
+    // The adopted session carries the rotated token: no further refresh is due.
+    fake.calls = [];
+    expect((await call('/api/v1/user', { jar: loser })).status).toBe(200);
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it('keeps the session through a WorkOS outage and retries later', async () => {
+    const jar = await craft(await sessionUser(), { rat: Date.now() - 1 });
+    fake.unavailable = true;
+    const res = await call('/api/v1/user', { jar });
+    expect(res.status).toBe(200);
+    expect(setCookieNamed(res, SESSION_COOKIE)).not.toMatch(/Max-Age=0/);
+    // The retry is deferred, so the next request does not call WorkOS again.
+    fake.calls = [];
+    expect((await call('/api/v1/user', { jar })).status).toBe(200);
+    expect(fake.calls.length).toBe(0);
+  });
+
+  it('applies WorkOS profile changes on refresh', async () => {
+    const user = await sessionUser();
+    const jar = await craft(user, { rat: Date.now() - 1 });
+    fake.refreshAs = { id: user.workos_user_id, email: 'renamed@example.test', firstName: 'New', lastName: 'Name' };
+    expect((await call('/api/v1/user', { jar })).status).toBe(200);
+    const row = await env.DB.prepare('SELECT email, name, login FROM users WHERE id = ?').bind(user.id).first<{ email: string; name: string; login: string }>();
+    expect(row).toEqual({ email: 'renamed@example.test', name: 'New Name', login: user.login });
+  });
+
   it('does not let a relinked account keep an old session', async () => {
     const user = await sessionUser();
     const jar = await craft(user, {});
@@ -587,6 +651,20 @@ describe('token settings page', () => {
     // Agents of other accounts are concealed.
     const stranger = (await signIn(fakeUser(uniq('str')))).jar;
     expect((await call(`/settings/agents/${agentId}`, { jar: stranger })).status).toBe(404);
+  });
+
+  it('keeps PATs manageable when the agent account cannot be managed or a scope row is malformed', async () => {
+    const { jar } = await signIn(fakeUser(uniq('own')));
+    const me = (await env.DB.prepare('SELECT id FROM users ORDER BY created_at DESC LIMIT 1').first<{ id: string }>())!;
+    await env.DB.prepare("INSERT INTO pat (id, user_id, name, prefix, hash, scopes, created_at) VALUES (?, ?, 'legacy', 'kvarm_pat_0000000', ?, 'not json', ?)")
+      .bind(crypto.randomUUID(), me.id, crypto.randomUUID(), Date.now())
+      .run();
+    const res = await call('/settings/tokens?owner=no-such-org', { jar });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('legacy');
+    expect(text).toContain('account not found');
+    expect(text).toContain('action="/settings/tokens"');
   });
 
   it('sends anonymous visitors to sign in', async () => {

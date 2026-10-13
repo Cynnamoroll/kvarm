@@ -14,7 +14,7 @@ import { html, raw, timeAgo } from '@kvarm/ui';
 import { listReposForOwner } from '../db/repos';
 import type { UserRow } from '../db/users';
 import { csrfTokenValid, isSameOriginRequest, type SessionInfo } from '../auth/workos';
-import { mintPAT, revokePAT, SCOPES, type Scope } from '../auth/pat';
+import { mintPAT, parseScopes, revokePAT, SCOPES, type Scope } from '../auth/pat';
 import { csrfInput, layout } from '../web/render';
 import * as svc from '../repos/service';
 import * as agents from '../services/agents';
@@ -230,8 +230,8 @@ web.get('/settings/tokens', async (c) => {
         WHERE m.user_id = ? AND m.role = 'owner' ORDER BY o.login LIMIT ?`,
     ).bind(ctx.user.id, SETTINGS_ORG_LIMIT),
   ]);
+  // An account the user cannot manage only empties the agent section; PATs stay manageable.
   const listed = await agents.listAgents(c.env, sessionActor(ctx), owner, { limit: SETTINGS_AGENT_LIMIT });
-  if (!listed.ok) return errorPage(c, ctx, listed.error, '/settings/tokens', listed.status);
   const csrf = raw(csrfInput(ctx.session.csrfToken));
 
   type PatRow = { id: string; name: string; prefix: string; scopes: string; created_at: number; last_used_at: number | null };
@@ -242,7 +242,7 @@ web.get('/settings/tokens', async (c) => {
           <div>
             <strong>${t.name}</strong>
             <code>${t.prefix}…</code>
-            <div class="muted">${(JSON.parse(t.scopes) as string[]).join(', ')}</div>
+            <div class="muted">${parseScopes(t.scopes).join(', ')}</div>
           </div>
           <div>
             <span class="muted">${t.last_used_at ? timeAgo(t.last_used_at) : 'never used'}</span>
@@ -263,7 +263,7 @@ web.get('/settings/tokens', async (c) => {
       login === owner ? html`<strong>${login}</strong>` : html`<a href="/settings/tokens?owner=${encodeURIComponent(login)}">${login}</a>`,
     )
     .join(' · ');
-  const agentRows = listed.value.agents
+  const agentRows = (listed.ok ? listed.value.agents : [])
     .map(
       (a) => html`
         <div class="repo-row">
@@ -277,7 +277,11 @@ web.get('/settings/tokens', async (c) => {
       `,
     )
     .join('');
-  const more = listed.value.nextCursor ? html`<p class="muted">More agents exist; use <code>kvarm agents list</code>.</p>` : '';
+  const more = !listed.ok
+    ? html`<div class="flash err">${listed.error}</div>`
+    : listed.value.nextCursor
+      ? html`<p class="muted">More agents exist; use <code>kvarm agents list</code>.</p>`
+      : '';
   const admin = ctx.user.is_admin
     ? html`
       <div class="card">
@@ -325,7 +329,7 @@ web.get('/settings/tokens', async (c) => {
           Agent tokens are minted per agent, scoped to one repository and expire. Create agents with
           <code>kvarm agents create</code> or <code>POST /api/v1/agents</code>.
         </p>
-        ${raw(agentRows || '<p class="muted">no agents for this account</p>')}
+        ${raw(agentRows || (listed.ok ? '<p class="muted">no agents for this account</p>' : ''))}
         ${raw(more)}
       </div>
       ${raw(admin)}

@@ -34,7 +34,22 @@ export function randomToken(bytes = 32): string {
   return b64url(crypto.getRandomValues(new Uint8Array(bytes)));
 }
 
-async function sealKey(password: string, purpose: SealPurpose): Promise<CryptoKey> {
+/** Derived keys per isolate; the password is fixed per deployment, so this stays tiny. */
+const keyCache = new Map<string, Promise<CryptoKey>>();
+
+function sealKey(password: string, purpose: SealPurpose): Promise<CryptoKey> {
+  const id = `${purpose}\u0000${password}`;
+  let key = keyCache.get(id);
+  if (!key) {
+    if (keyCache.size >= 8) keyCache.clear();
+    key = deriveSealKey(password, purpose);
+    keyCache.set(id, key);
+    key.catch(() => keyCache.delete(id));
+  }
+  return key;
+}
+
+async function deriveSealKey(password: string, purpose: SealPurpose): Promise<CryptoKey> {
   const material = await crypto.subtle.importKey('raw', encoder.encode(password), 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
     { name: 'HKDF', hash: 'SHA-256', salt: encoder.encode('kvarm-sealed-cookie'), info: encoder.encode(purpose) },

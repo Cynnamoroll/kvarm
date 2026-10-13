@@ -15,7 +15,7 @@ import {
   authConfigured,
   beginSignIn,
   clearSessionCookie,
-  clearStateCookie,
+  clearStateCookies,
   csrfTokenValid,
   getSessionInfo,
   httpWorkOSClient,
@@ -25,7 +25,6 @@ import {
   sessionCookie,
 } from '../auth/workos';
 import { provisionSessionUser } from '../services/identity';
-import { appOrigin } from '../config';
 import { layout } from '../web/render';
 
 export const authRoutes = new Hono<{ Bindings: Env }>();
@@ -59,21 +58,26 @@ function htmlPage(c: C, title: string, body: string, status: number, cookies: st
   return res;
 }
 
-function signInFailed(c: C, status = 400): Response {
+function signInFailed(c: C, state: string | undefined, status = 400): Response {
   return htmlPage(
     c,
     'Sign-in failed',
     html`<div class="card"><div class="flash err">Sign-in could not be completed.</div>
       <p><a class="btn primary" href="/auth/login">Try again</a></p></div>`,
     status,
-    [clearStateCookie()],
+    clearStateCookies(state),
   );
 }
 
 async function login(c: C): Promise<Response> {
   const bail = unconfigured(c);
   if (bail) return bail;
-  const { location, setCookie } = await beginSignIn(c.env, httpWorkOSClient(c.env), c.req.query('returnTo') ?? '/');
+  const { location, setCookie } = await beginSignIn(
+    c.env,
+    httpWorkOSClient(c.env),
+    c.req.query('returnTo') ?? '/',
+    new URL(c.req.url).origin,
+  );
   return redirect(location, [setCookie]);
 }
 
@@ -85,19 +89,19 @@ authRoutes.get('/callback', async (c) => {
   if (bail) return bail;
   const code = c.req.query('code');
   const state = c.req.query('state');
-  if (!code || !state || c.req.query('error')) return signInFailed(c);
+  if (!code || !state || c.req.query('error')) return signInFailed(c, state);
   const pending = await pendingSignIn(c.req.raw, c.env, state);
-  if (!pending) return signInFailed(c);
+  if (!pending) return signInFailed(c, state);
   let auth;
   try {
     auth = await httpWorkOSClient(c.env).authenticateWithCode({ code, codeVerifier: pending.verifier });
   } catch {
-    return signInFailed(c);
+    return signInFailed(c, state);
   }
   const user = await provisionSessionUser(c.env, auth.user);
-  if (!user.ok) return signInFailed(c, user.status);
+  if (!user.ok) return signInFailed(c, state, user.status);
   const session = await sessionCookie(c.env, newSessionPayload(user.value, auth));
-  return redirect(pending.returnTo, [clearStateCookie(), session]);
+  return redirect(pending.returnTo, [...clearStateCookies(state), session]);
 });
 
 async function logoutForm(c: C): Promise<Response> {
@@ -133,7 +137,7 @@ authRoutes.post('/logout', async (c) => {
   if (!csrfTokenValid(session, form._csrf)) return c.text('invalid or missing CSRF token', 403);
   // Ending the WorkOS session too keeps the next sign-in from silently reusing it.
   const location = session.sessionId
-    ? httpWorkOSClient(c.env).logoutUrl({ sessionId: session.sessionId, returnTo: appOrigin(c.env) })
+    ? httpWorkOSClient(c.env).logoutUrl({ sessionId: session.sessionId, returnTo: new URL(c.req.url).origin })
     : '/';
   return redirect(location, [clearSessionCookie()]);
 });

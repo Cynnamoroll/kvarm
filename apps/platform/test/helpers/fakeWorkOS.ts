@@ -41,6 +41,8 @@ export class FakeWorkOS {
   /** When set, refreshes answer as this user instead. */
   refreshAs: FakeUser | null = null;
   calls: Array<{ grant: string }> = [];
+  /** When true, WorkOS answers 503 (an outage). */
+  unavailable = false;
 
   /** What AuthKit does after the person signs in: a code for the challenge in the authorize URL. */
   issueCode(authorizeUrl: string, user: FakeUser): { code: string; state: string } {
@@ -82,6 +84,7 @@ export class FakeWorkOS {
   private async authenticate(req: Request): Promise<Response> {
     const body = (await req.json()) as Record<string, string>;
     this.calls.push({ grant: body.grant_type ?? '' });
+    if (this.unavailable) return new Response('unavailable', { status: 503 });
     if (body.client_id !== this.clientId || body.client_secret !== this.apiKey) {
       return Response.json({ error: 'invalid_client' }, { status: 401 });
     }

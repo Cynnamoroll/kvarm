@@ -10,15 +10,19 @@
  * Identity comes only from the server-to-server code exchange (authenticated
  * with the API key, PKCE-bound to the browser that started sign-in), so no
  * access-token JWT is verified or used for authorization here. The WorkOS
- * refresh token is redeemed every SESSION_REFRESH_SECONDS; a failed refresh
- * (session revoked or user removed in WorkOS) ends the Kvarm session.
+ * refresh token is redeemed every SESSION_REFRESH_SECONDS; a refused refresh
+ * (session revoked or user removed in WorkOS) ends the Kvarm session
+ * (refreshSession explains races and outages).
  *
  * Never log codes, tokens, cookies or the cookie password.
  */
 
+import { sha256Hex } from '@kvarm/gitops';
 import { getUserById, type UserRow } from '../db/users';
+import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
+import { refreshProfile } from '../services/identity';
 import { appOrigin } from '../config';
-import { pkceChallenge, randomToken, safeEqual, seal, unseal } from './sealed';
+import { fromB64url, pkceChallenge, randomToken, safeEqual, seal, unseal } from './sealed';
 
 /** Kept from the AuthKit default: cache scoping (cache/scope.ts) and repo pages key off it. */
 export const SESSION_COOKIE = 'wos-session';
@@ -96,9 +100,10 @@ function str(v: unknown): string | null {
 function sessionIdOf(accessToken: unknown): string | null {
   if (typeof accessToken !== 'string') return null;
   const part = accessToken.split('.')[1];
-  if (!part) return null;
+  const bytes = part ? fromB64url(part) : null;
+  if (!bytes) return null;
   try {
-    const json = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as { sid?: unknown };
+    const json = JSON.parse(new TextDecoder().decode(bytes)) as { sid?: unknown };
     return str(json.sid);
   } catch {
     return null;
@@ -158,8 +163,12 @@ export function httpWorkOSClient(env: Env): WorkOSClient {
   };
 }
 
-export function redirectUri(env: Env): string {
-  return env.WORKOS_REDIRECT_URI || `${appOrigin(env)}/auth/callback`;
+/**
+ * The configured callback, else this request's own origin: the state cookie
+ * is host-only, so the callback must land on the host that started sign-in.
+ */
+export function redirectUri(env: Env, requestOrigin: string): string {
+  return env.WORKOS_REDIRECT_URI || `${requestOrigin}/auth/callback`;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,8 +194,19 @@ export function clearSessionCookie(): string {
   return cookie(SESSION_COOKIE, '', '/', 0);
 }
 
-export function clearStateCookie(): string {
-  return cookie(STATE_COOKIE, '', '/auth', 0);
+/**
+ * One state cookie per pending sign-in, named by a prefix of its state, so
+ * sign-ins started in two tabs do not overwrite each other.
+ */
+const STATE_RE = /^[A-Za-z0-9_-]{43}$/;
+
+function stateCookieName(state: string): string {
+  return `${STATE_COOKIE}-${state.slice(0, 12)}`;
+}
+
+/** The Set-Cookie clearing the pending sign-in for `state`; none for a malformed state. */
+export function clearStateCookies(state: string | undefined): string[] {
+  return state && STATE_RE.test(state) ? [cookie(stateCookieName(state), '', '/auth', 0)] : [];
 }
 
 /** Only same-site absolute paths; anything else (`//host`, `/\host`, URLs) returns home. */
@@ -211,6 +231,7 @@ export async function beginSignIn(
   env: Env,
   client: WorkOSClient,
   returnTo: string,
+  requestOrigin: string,
   now = Date.now(),
 ): Promise<{ location: string; setCookie: string }> {
   const state = randomToken(32);
@@ -218,8 +239,8 @@ export async function beginSignIn(
   const payload: StatePayload = { state, verifier, returnTo: safeReturnTo(returnTo), exp: now + STATE_MAX_AGE_SECONDS * 1000 };
   const sealed = await seal(env.WORKOS_COOKIE_PASSWORD, 'auth-state', payload);
   return {
-    location: client.authorizationUrl({ redirectUri: redirectUri(env), state, codeChallenge: await pkceChallenge(verifier) }),
-    setCookie: cookie(STATE_COOKIE, sealed, '/auth', STATE_MAX_AGE_SECONDS),
+    location: client.authorizationUrl({ redirectUri: redirectUri(env, requestOrigin), state, codeChallenge: await pkceChallenge(verifier) }),
+    setCookie: cookie(stateCookieName(state), sealed, '/auth', STATE_MAX_AGE_SECONDS),
   };
 }
 
@@ -230,7 +251,8 @@ export async function pendingSignIn(
   state: string,
   now = Date.now(),
 ): Promise<{ verifier: string; returnTo: string } | null> {
-  const raw = readCookie(request, STATE_COOKIE);
+  if (!STATE_RE.test(state)) return null;
+  const raw = readCookie(request, stateCookieName(state));
   if (!raw) return null;
   const p = await unseal<StatePayload>(env.WORKOS_COOKIE_PASSWORD, 'auth-state', raw);
   if (!p || typeof p.state !== 'string' || typeof p.verifier !== 'string' || typeof p.exp !== 'number') return null;
@@ -319,22 +341,67 @@ export async function getSessionInfo(
   const cleared: SessionLookup = { session: null, setCookies: [clearSessionCookie()] };
   let p = await unseal<SessionPayload>(env.WORKOS_COOKIE_PASSWORD, 'session', raw);
   if (!validPayload(p) || p.exp <= now) return cleared;
-  const user = await getUserById(env.DB, p.uid);
+  let user = await getUserById(env.DB, p.uid);
   if (!user || user.workos_user_id !== p.wid) return cleared;
   const setCookies: string[] = [];
   if (p.rat <= now) {
-    try {
-      const auth = await (opts.client ?? httpWorkOSClient(env)).authenticateWithRefreshToken({ refreshToken: p.rt });
-      if (auth.user.id !== p.wid) return cleared;
-      p = { ...p, rt: auth.refreshToken, sid: auth.sessionId ?? p.sid, rat: now + SESSION_REFRESH_SECONDS * 1000 };
-      setCookies.push(await sessionCookie(env, p, now));
-    } catch {
-      // Revoked in WorkOS, or WorkOS unreachable: fail closed rather than
-      // retrying the refresh on every request until the session expires.
-      return cleared;
-    }
+    const refreshed = await refreshSession(env, opts.client ?? httpWorkOSClient(env), p, now);
+    if (refreshed === 'rejected') return cleared;
+    p = refreshed.payload;
+    setCookies.push(await sessionCookie(env, p, now));
+    if (refreshed.identity) user = await refreshProfile(env.DB, user, refreshed.identity);
   }
   return { session: { user, sessionId: p.sid, csrfToken: p.csrf, expiresAt: p.exp }, setCookies };
+}
+
+/** How long a rotated refresh token's successor stays findable for a concurrent request. */
+export const ROTATION_GRACE_SECONDS = 60;
+/** Retry delay after WorkOS could not be reached. */
+export const REFRESH_RETRY_SECONDS = 60;
+const ROTATION_POLLS = 4;
+const ROTATION_POLL_MS = 150;
+
+function rotationKey(refreshToken: string): Promise<Request> {
+  return sha256Hex(refreshToken).then((h) => internalKey('session-rotation', h));
+}
+
+/**
+ * Redeems the session's refresh token. WorkOS refresh tokens are single-use,
+ * so a page and its parallel requests may race: the winner records the sealed
+ * successor (colo-local Cache API, keyed by a hash of the spent token) and a
+ * request that then sees its token refused adopts that successor instead of
+ * signing the browser out. Only a definite refusal with no successor ends the
+ * session. When WorkOS is unreachable the session continues on its current
+ * D1-checked authority and retries after REFRESH_RETRY_SECONDS.
+ */
+async function refreshSession(
+  env: Env,
+  client: WorkOSClient,
+  p: SessionPayload,
+  now: number,
+): Promise<{ payload: SessionPayload; identity: WorkOSIdentity | null } | 'rejected'> {
+  const key = await rotationKey(p.rt);
+  let auth: WorkOSAuthentication;
+  try {
+    auth = await client.authenticateWithRefreshToken({ refreshToken: p.rt });
+  } catch (err) {
+    if (!(err instanceof WorkOSError) || err.status >= 500) {
+      return { payload: { ...p, rat: now + REFRESH_RETRY_SECONDS * 1000 }, identity: null };
+    }
+    for (let i = 0; i < ROTATION_POLLS; i++) {
+      const sealed = await readCachedJson<string>(key);
+      const next = typeof sealed === 'string' ? await unseal<SessionPayload>(env.WORKOS_COOKIE_PASSWORD, 'session', sealed) : null;
+      if (validPayload(next) && next.uid === p.uid && next.wid === p.wid && next.exp === p.exp) {
+        return { payload: next, identity: null };
+      }
+      await new Promise((resolve) => setTimeout(resolve, ROTATION_POLL_MS));
+    }
+    return 'rejected';
+  }
+  if (auth.user.id !== p.wid) return 'rejected';
+  const next: SessionPayload = { ...p, rt: auth.refreshToken, sid: auth.sessionId ?? p.sid, rat: now + SESSION_REFRESH_SECONDS * 1000 };
+  await writeCachedJson(key, await seal(env.WORKOS_COOKIE_PASSWORD, 'session', next), ROTATION_GRACE_SECONDS);
+  return { payload: next, identity: auth.user };
 }
 
 // ---------------------------------------------------------------------------

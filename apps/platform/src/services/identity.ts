@@ -56,7 +56,7 @@ async function byWorkOSId(db: D1Database, workosUserId: string): Promise<UserRow
 }
 
 /** Display fields follow WorkOS; the login never changes after provisioning. */
-async function refreshProfile(db: D1Database, user: UserRow, identity: WorkOSIdentity): Promise<UserRow> {
+export async function refreshProfile(db: D1Database, user: UserRow, identity: WorkOSIdentity): Promise<UserRow> {
   if (user.email === identity.email && user.name === identity.name && user.avatar_url === identity.avatarUrl) return user;
   await db
     .prepare('UPDATE users SET email = ?, name = ?, avatar_url = ? WHERE id = ?')
