@@ -18,7 +18,7 @@
  */
 
 import { sha256Hex } from '@kvarm/gitops';
-import { getUserById, type UserRow } from '../db/users';
+import { toUserRow, type UserRow } from '../db/users';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import { refreshProfile } from '../services/identity';
 import { appOrigin } from '../config';
@@ -277,9 +277,13 @@ export interface SessionPayload {
   rat: number;
   /** Synchronizer CSRF token for this session. */
   csrf: string;
+  /** Session id, recorded in session_revocations at sign-out. */
+  jti: string;
 }
 
 export interface SessionInfo {
+  /** Session id (not the WorkOS session id). */
+  id: string;
   user: UserRow;
   sessionId: string | null;
   csrfToken: string;
@@ -306,6 +310,7 @@ export function newSessionPayload(user: UserRow, auth: WorkOSAuthentication, now
     exp: now + SESSION_MAX_AGE_SECONDS * 1000,
     rat: now + SESSION_REFRESH_SECONDS * 1000,
     csrf: randomToken(32),
+    jti: randomToken(16),
   };
 }
 
@@ -318,7 +323,9 @@ function validPayload(p: SessionPayload | null): p is SessionPayload {
     typeof p.exp === 'number' &&
     typeof p.rat === 'number' &&
     typeof p.csrf === 'string' &&
-    p.csrf.length >= 32
+    p.csrf.length >= 32 &&
+    typeof p.jti === 'string' &&
+    p.jti.length > 0
   );
 }
 
@@ -332,7 +339,7 @@ const NO_SESSION: SessionLookup = { session: null, setCookies: [] };
 export async function getSessionInfo(
   request: Request,
   env: Env,
-  opts: { client?: WorkOSClient; now?: number } = {},
+  opts: { client?: WorkOSClient; now?: number; refresh?: boolean } = {},
 ): Promise<SessionLookup> {
   if (!authConfigured(env)) return NO_SESSION;
   const raw = readCookie(request, SESSION_COOKIE);
@@ -341,17 +348,24 @@ export async function getSessionInfo(
   const cleared: SessionLookup = { session: null, setCookies: [clearSessionCookie()] };
   let p = await unseal<SessionPayload>(env.WORKOS_COOKIE_PASSWORD, 'session', raw);
   if (!validPayload(p) || p.exp <= now) return cleared;
-  let user = await getUserById(env.DB, p.uid);
-  if (!user || user.workos_user_id !== p.wid) return cleared;
+  const row = await env.DB.prepare(
+    `SELECT u.*, EXISTS (SELECT 1 FROM session_revocations WHERE id = ?2) AS session_revoked FROM users u WHERE u.id = ?1`,
+  )
+    .bind(p.uid, p.jti)
+    .first<Parameters<typeof toUserRow>[0] & { session_revoked: number }>();
+  if (!row || row.session_revoked) return cleared;
+  const { session_revoked: _revoked, ...userFields } = row;
+  let user = toUserRow(userFields);
+  if (user.workos_user_id !== p.wid) return cleared;
   const setCookies: string[] = [];
-  if (p.rat <= now) {
+  if (p.rat <= now && opts.refresh !== false) {
     const refreshed = await refreshSession(env, opts.client ?? httpWorkOSClient(env), p, now);
     if (refreshed === 'rejected') return cleared;
     p = refreshed.payload;
     setCookies.push(await sessionCookie(env, p, now));
     if (refreshed.identity) user = await refreshProfile(env.DB, user, refreshed.identity);
   }
-  return { session: { user, sessionId: p.sid, csrfToken: p.csrf, expiresAt: p.exp }, setCookies };
+  return { session: { id: p.jti, user, sessionId: p.sid, csrfToken: p.csrf, expiresAt: p.exp }, setCookies };
 }
 
 /** How long a rotated refresh token's successor stays findable for a concurrent request. */
@@ -385,13 +399,15 @@ async function refreshSession(
   try {
     auth = await client.authenticateWithRefreshToken({ refreshToken: p.rt });
   } catch (err) {
-    if (!(err instanceof WorkOSError) || err.status >= 500) {
+    // Only an explicit refusal means the WorkOS session is gone; throttling,
+    // timeouts and server errors are outages.
+    if (!(err instanceof WorkOSError) || ![400, 401, 403].includes(err.status)) {
       return { payload: { ...p, rat: now + REFRESH_RETRY_SECONDS * 1000 }, identity: null };
     }
     for (let i = 0; i < ROTATION_POLLS; i++) {
       const sealed = await readCachedJson<string>(key);
       const next = typeof sealed === 'string' ? await unseal<SessionPayload>(env.WORKOS_COOKIE_PASSWORD, 'session', sealed) : null;
-      if (validPayload(next) && next.uid === p.uid && next.wid === p.wid && next.exp === p.exp) {
+      if (validPayload(next) && next.uid === p.uid && next.wid === p.wid && next.jti === p.jti) {
         return { payload: next, identity: null };
       }
       await new Promise((resolve) => setTimeout(resolve, ROTATION_POLL_MS));
@@ -402,6 +418,24 @@ async function refreshSession(
   const next: SessionPayload = { ...p, rt: auth.refreshToken, sid: auth.sessionId ?? p.sid, rat: now + SESSION_REFRESH_SECONDS * 1000 };
   await writeCachedJson(key, await seal(env.WORKOS_COOKIE_PASSWORD, 'session', next), ROTATION_GRACE_SECONDS);
   return { payload: next, identity: auth.user };
+}
+
+/** Expired revocation rows removed per sign-out; keeps the table bounded without a cron. */
+const REVOCATION_SWEEP = 100;
+
+/**
+ * Sign-out: the session id is refused until the cookie would have expired
+ * anyway, so a copy of the cookie dies with the browser's.
+ */
+export async function revokeSession(env: Env, session: SessionInfo, now = Date.now()): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      'INSERT OR IGNORE INTO session_revocations (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)',
+    ).bind(session.id, session.user.id, session.expiresAt, now),
+    env.DB.prepare(
+      'DELETE FROM session_revocations WHERE rowid IN (SELECT rowid FROM session_revocations WHERE expires_at < ? LIMIT ?)',
+    ).bind(now, REVOCATION_SWEEP),
+  ]);
 }
 
 // ---------------------------------------------------------------------------

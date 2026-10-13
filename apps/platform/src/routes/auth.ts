@@ -22,6 +22,7 @@ import {
   isSameOriginRequest,
   newSessionPayload,
   pendingSignIn,
+  revokeSession,
   sessionCookie,
 } from '../auth/workos';
 import { provisionSessionUser } from '../services/identity';
@@ -98,7 +99,12 @@ authRoutes.get('/callback', async (c) => {
   } catch {
     return signInFailed(c, state);
   }
-  const user = await provisionSessionUser(c.env, auth.user);
+  let user;
+  try {
+    user = await provisionSessionUser(c.env, auth.user);
+  } catch {
+    return signInFailed(c, state, 500);
+  }
   if (!user.ok) return signInFailed(c, state, user.status);
   const session = await sessionCookie(c.env, newSessionPayload(user.value, auth));
   return redirect(pending.returnTo, [...clearStateCookies(state), session]);
@@ -131,10 +137,12 @@ authRoutes.post('/logout', async (c) => {
   const bail = unconfigured(c);
   if (bail) return bail;
   if (!isSameOriginRequest(c.req.raw, c.env)) return c.text('cross-origin request refused', 403);
-  const { session } = await getSessionInfo(c.req.raw, c.env);
+  // No refresh: the session is about to end, so redeeming its token is wasted.
+  const { session } = await getSessionInfo(c.req.raw, c.env, { refresh: false });
   if (!session) return redirect('/', [clearSessionCookie()]);
   const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
   if (!csrfTokenValid(session, form._csrf)) return c.text('invalid or missing CSRF token', 403);
+  await revokeSession(c.env, session);
   // Ending the WorkOS session too keeps the next sign-in from silently reusing it.
   const location = session.sessionId
     ? httpWorkOSClient(c.env).logoutUrl({ sessionId: session.sessionId, returnTo: new URL(c.req.url).origin })

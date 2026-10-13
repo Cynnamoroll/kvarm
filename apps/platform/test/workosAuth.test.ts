@@ -5,7 +5,9 @@ import worker from '../src/index';
 import { mintPAT } from '../src/auth/pat';
 import {
   beginSignIn,
+  getSessionInfo,
   httpWorkOSClient,
+  WorkOSError,
   newSessionPayload,
   SESSION_COOKIE,
   sessionCookie,
@@ -227,6 +229,8 @@ describe('sign-in', () => {
 
     // Sign-out: a confirmation form, then a CSRF-checked POST.
     const csrf = await csrfOf(jar, '/auth/logout');
+    const copied = new CookieJar();
+    copied.set(SESSION_COOKIE, jar.get(SESSION_COOKIE)!);
     const out = await post('/auth/logout', jar, { _csrf: csrf });
     expect(out.status).toBe(302);
     const logoutUrl = new URL(out.headers.get('location')!);
@@ -235,6 +239,8 @@ describe('sign-in', () => {
     expect(logoutUrl.searchParams.get('return_to')).toBe(ORIGIN);
     expect(setCookieNamed(out, SESSION_COOKIE)).toMatch(/Max-Age=0/);
     expect(jar.get(SESSION_COOKIE)).toBeUndefined();
+    // A copy of the cookie taken before sign-out is refused too.
+    expect((await whoami(copied)).status).toBe(401);
     expect((await whoami(jar)).status).toBe(401);
     expect((await call(`/api/v1/repos/${owner.login}/granted`, { jar })).status).toBe(404);
   });
@@ -410,6 +416,12 @@ describe('provisioning and linking', () => {
     // Linked accounts cannot be relinked to someone else.
     const again = await post('/settings/link-identity', jar, { _csrf: csrf, login: target.login, workosUserId: fakeUser('z').id });
     expect(again.status).toBe(409);
+    const same = await post('/settings/link-identity', jar, { _csrf: csrf, login: target.login, workosUserId: person.id });
+    expect(same.status).toBe(409);
+    const events = await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'user.identity.linked' AND payload LIKE ?")
+      .bind(`%"${target.login}"%`)
+      .first<{ n: number }>();
+    expect(events?.n).toBe(1);
   });
 });
 
@@ -520,6 +532,23 @@ describe('session lifecycle', () => {
     fake.calls = [];
     expect((await call('/api/v1/user', { jar: loser })).status).toBe(200);
     expect(fake.calls.length).toBe(0);
+  });
+
+  it('treats WorkOS throttling as an outage, not a sign-out', async () => {
+    const user = await sessionUser();
+    const jar = await craft(user, { rat: Date.now() - 1 });
+    const client = {
+      ...httpWorkOSClient(env),
+      authenticateWithRefreshToken: async () => {
+        throw new WorkOSError(429);
+      },
+    };
+    const lookup = await getSessionInfo(new Request(`${ORIGIN}/`, { headers: { cookie: jar.header() } }), env, { client });
+    expect(lookup.session?.user.id).toBe(user.id);
+    expect(lookup.setCookies.join()).not.toMatch(/Max-Age=0/);
+    const refused = { ...client, authenticateWithRefreshToken: async () => { throw new WorkOSError(400); } };
+    const gone = await getSessionInfo(new Request(`${ORIGIN}/`, { headers: { cookie: jar.header() } }), env, { client: refused });
+    expect(gone.session).toBeNull();
   });
 
   it('keeps the session through a WorkOS outage and retries later', async () => {

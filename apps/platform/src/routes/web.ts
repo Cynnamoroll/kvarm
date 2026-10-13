@@ -221,7 +221,8 @@ web.get('/settings/tokens', async (c) => {
   const ctx = await requireSessionPage(c);
   if (ctx instanceof Response) return ctx;
   const owner = c.req.query('owner') || ctx.user.login;
-  const [pats, orgs] = await c.env.DB.batch([
+  const [[pats, orgs], listed] = await Promise.all([
+    c.env.DB.batch([
     c.env.DB.prepare(
       'SELECT id, name, prefix, scopes, created_at, last_used_at FROM pat WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
     ).bind(ctx.user.id, SETTINGS_PAT_LIMIT),
@@ -229,9 +230,10 @@ web.get('/settings/tokens', async (c) => {
       `SELECT o.login FROM orgs o JOIN org_members m ON m.org_id = o.id
         WHERE m.user_id = ? AND m.role = 'owner' ORDER BY o.login LIMIT ?`,
     ).bind(ctx.user.id, SETTINGS_ORG_LIMIT),
+    ]),
+    // An account the user cannot manage only empties the agent section; PATs stay manageable.
+    agents.listAgents(c.env, sessionActor(ctx), owner, { limit: SETTINGS_AGENT_LIMIT }),
   ]);
-  // An account the user cannot manage only empties the agent section; PATs stay manageable.
-  const listed = await agents.listAgents(c.env, sessionActor(ctx), owner, { limit: SETTINGS_AGENT_LIMIT });
   const csrf = raw(csrfInput(ctx.session.csrfToken));
 
   type PatRow = { id: string; name: string; prefix: string; scopes: string; created_at: number; last_used_at: number | null };
@@ -358,9 +360,12 @@ web.get('/settings/agents/:id', async (c) => {
   const ctx = await requireSessionPage(c);
   if (ctx instanceof Response) return ctx;
   const actor = sessionActor(ctx);
-  const agent = await agents.getAgent(c.env, actor, c.req.param('id'));
+  // Both calls check manageability themselves, so they can run together.
+  const [agent, tokens] = await Promise.all([
+    agents.getAgent(c.env, actor, c.req.param('id')),
+    agents.listAgentTokens(c.env, actor, c.req.param('id')),
+  ]);
   if (!agent.ok) return errorPage(c, ctx, agent.error, '/settings/tokens', agent.status);
-  const tokens = await agents.listAgentTokens(c.env, actor, agent.value.id);
   if (!tokens.ok) return errorPage(c, ctx, tokens.error, '/settings/tokens', tokens.status);
   const a = agent.value;
   const csrf = raw(csrfInput(ctx.session.csrfToken));
@@ -399,7 +404,7 @@ web.get('/settings/agents/:id', async (c) => {
             <option value="read">read</option>
             <option value="write">write</option>
           </select>
-          <label for="arefs">Ref patterns (write tokens; one per line)</label>
+          <label for="arefs">Ref patterns (write tokens; separated by spaces or commas)</label>
           <input id="arefs" name="refs" type="text" placeholder="refs/heads/agents/*" />
           <label for="attl">Expires in</label>
           <select id="attl" name="expiresIn">

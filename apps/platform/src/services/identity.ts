@@ -177,6 +177,9 @@ export async function linkWorkOSIdentity(
     return fail(403, 'only an instance admin signed in through WorkOS links accounts', 'FORBIDDEN');
   }
   if (!WORKOS_USER_ID_RE.test(workosUserId)) return fail(400, 'WorkOS user ids look like user_…', 'INVALID_WORKOS_USER_ID');
+  const current = await env.DB.prepare('SELECT workos_user_id FROM users WHERE login = ?').bind(login).first<{ workos_user_id: string }>();
+  if (!current) return fail(404, 'user not found', 'NOT_FOUND');
+  if (!current.workos_user_id.startsWith(UNLINKED_WORKOS_PREFIX)) return fail(409, 'that account is already linked', 'ALREADY_LINKED');
   let results: D1Result[];
   try {
     results = await env.DB.batch([
