@@ -31,7 +31,7 @@ import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
 import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
 import { continueDependencySettlement } from './dependencies';
-import { COMMIT_SCAN_MAX, commitCloseStatement, commitClosingRefs } from './issues';
+import { COMMIT_SCAN_MAX, commitCloseStatement, commitClosingRefs, retireIssueTasksStatement } from './issues';
 import { withRepo } from '../artifacts/repo';
 
 export interface PushEvent {
@@ -401,7 +401,7 @@ const issueCommitsEffect: PushEffect = {
     return {
       state: 'done',
       detail: `closes ${closes.map((c) => `${c.repo ?? ''}#${c.number}`).join(', ')}${truncated}`,
-      statements: [commitCloseStatement(ctx.env.DB, ctx.repoId, closes, Date.now())],
+      statements: [commitCloseStatement(ctx.env.DB, ctx.repoId, closes, Date.now()), retireIssueTasksStatement(ctx.env.DB, ctx.repoId, Date.now())],
     };
   },
 };

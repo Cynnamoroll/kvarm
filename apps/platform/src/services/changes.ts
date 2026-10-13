@@ -91,7 +91,7 @@ import {
 import type { ChangeRating } from './risk';
 import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
-import { actorName, changeLinkStatements, mergeCloseStatement } from './issues';
+import { actorName, changeLinkStatements, mergeCloseStatement, retireIssueTasksStatement } from './issues';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -1135,6 +1135,7 @@ export function mergedRecordStatements(
     changeSignalCleanup(db, repoId, row.id),
     retireConflictTaskStatement(db, repoId, row.number, mergedAt),
     mergeCloseStatement(db, repoId, row.id, pub.mergeCommit, mergedAt),
+    retireIssueTasksStatement(db, repoId, mergedAt),
     // Pins of the landed head are satisfied with the merge (each with its dependent's wake mark, written first under the
     // same predicate); the last statement finds the rest and the marks.
     ...(opts.dependents === false

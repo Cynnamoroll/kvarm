@@ -367,20 +367,21 @@ export function issueSignalStatements(db: D1Database, repoId: string, s: IssueSi
  * filed it has passed again (for example the check passed on a newer
  * default-branch commit). A fingerprint with no open issue changes nothing.
  */
-export function resolveSignalStatement(
+export function resolveSignalStatements(
   db: D1Database,
   repoId: string,
   fingerprint: string,
   verified: { commit?: string | null; evidence?: IssueEvidence | null },
   now: number,
-): D1PreparedStatement {
-  return db
+): D1PreparedStatement[] {
+  const close = db
     .prepare(
       `UPDATE issues SET state = 'closed', closed_reason = 'verified', closed_at = ?3, updated_at = ?3, closed_by_change_id = NULL,
               closed_by_commit = ?4, evidence = COALESCE(?5, evidence)
         WHERE repo_id = ?1 AND fingerprint = ?2 AND state = 'open'`,
     )
     .bind(repoId, normalizeFingerprint(fingerprint) ?? '', now, verified.commit ?? null, verified.evidence ? JSON.stringify(verified.evidence) : null);
+  return [close, retireIssueTasksStatement(db, repoId, now)];
 }
 
 export interface FiledIssue {
@@ -464,16 +465,39 @@ export async function listIssues(env: Env, repo: RepoRow, q: IssueQuery): Promis
   return { ok: true, value: { issues: kept.map(issueView), nextCursor: rows.length > limit ? String(kept[kept.length - 1]!.number) : null } };
 }
 
+export interface IssueTaskView {
+  id: string;
+  /** `open` also for a claim whose lease ran out. */
+  status: 'open' | 'claimed' | 'completed' | 'obsolete';
+  claimedBy: string | null;
+  /** The workspace created for the claimant. */
+  workspace: string | null;
+  createdAt: string;
+}
+
 export interface IssueDetail extends IssueView {
   links: IssueLinkView[];
+  /** The issue's fix-issue agent tasks, newest first. */
+  tasks: IssueTaskView[];
 }
+
+interface IssueTaskRow {
+  id: string;
+  status: IssueTaskView['status'];
+  claimed_by: string | null;
+  claim_workspace_id: string | null;
+  lease_expires_at: number | null;
+  created_at: number;
+}
+
+const ISSUE_TASKS_MAX = 5;
 
 /** GET issues/:number — the issue and its links to changes and workspaces, in one batch. */
 export async function getIssue(cx: IssueContext, rawNumber: string): Promise<ServiceResult<IssueDetail>> {
   const number = parseNumber(rawNumber);
   if (number === null) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
   const db = cx.env.DB;
-  const [issue, links] = await db.batch([
+  const [issue, links, tasks] = await db.batch([
     db.prepare(`${ISSUE_SELECT} WHERE i.repo_id = ?1 AND i.number = ?2`).bind(cx.repo.id, number),
     db
       .prepare(
@@ -482,10 +506,25 @@ export async function getIssue(cx: IssueContext, rawNumber: string): Promise<Ser
           ORDER BY l.created_at, l.id LIMIT ${ISSUE_LIMITS.linksMax}`,
       )
       .bind(cx.repo.id, number),
+    db
+      .prepare(
+        `SELECT id, status, claimed_by, claim_workspace_id, lease_expires_at, created_at FROM agent_tasks
+          WHERE repo_id = ?1 AND kind = '${FIX_ISSUE}' AND json_extract(payload, '$.issue') = ?2
+          ORDER BY created_at DESC, id DESC LIMIT ${ISSUE_TASKS_MAX}`,
+      )
+      .bind(cx.repo.id, number),
   ]);
   const row = (issue?.results as IssueRow[] | undefined)?.[0];
   if (!row) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
-  return { ok: true, value: { ...issueView(row), links: ((links?.results as LinkRow[] | undefined) ?? []).map(linkView) } };
+  const now = Date.now();
+  const taskViews = ((tasks?.results as IssueTaskRow[] | undefined) ?? []).map((t) => ({
+    id: t.id,
+    status: t.status === 'claimed' && t.lease_expires_at !== null && t.lease_expires_at <= now ? ('open' as const) : t.status,
+    claimedBy: t.claimed_by,
+    workspace: t.claim_workspace_id,
+    createdAt: iso(t.created_at),
+  }));
+  return { ok: true, value: { ...issueView(row), links: ((links?.results as LinkRow[] | undefined) ?? []).map(linkView), tasks: taskViews } };
 }
 
 /**
@@ -544,6 +583,7 @@ export function updateIssue(cx: IssueContext, rawNumber: string, input: unknown)
     const results = await db.batch([
       db.prepare(`UPDATE issues SET ${sets.join(', ')} WHERE repo_id = ?1 AND number = ?2`).bind(cx.repo.id, number, ...args),
       ...(newPaths !== null ? issuePathsReplaceStatements(db, cx.repo.id, number, newPaths) : []),
+      ...(b.state === 'closed' ? [retireIssueTasksStatement(db, cx.repo.id, now)] : []),
       db.prepare(`${ISSUE_SELECT} WHERE i.repo_id = ?1 AND i.number = ?2`).bind(cx.repo.id, number),
     ]);
     const read = results[results.length - 1];
@@ -648,13 +688,14 @@ export async function openIssueExists(env: Env, repoId: string, number: number):
   return (await env.DB.prepare(`SELECT 1 FROM issues WHERE repo_id = ? AND number = ? AND state = 'open'`).bind(repoId, number).first()) !== null;
 }
 
-/** Links a new workspace to the open issue it was created for (a confirmed `closes` link). */
+/** Links a new workspace (inserted earlier in the same batch) to the open issue it was created for (a confirmed `closes` link). */
 export function workspaceIssueStatement(db: D1Database, repoId: string, workspaceId: string, issue: number, actor: string | null, now: number): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO issue_links (id, repo_id, issue_id, change_set_id, workspace_id, kind, source, state, actor, created_at, updated_at)
        SELECT lower(hex(randomblob(16))), ?1, i.id, NULL, ?2, 'closes', 'workspace', 'confirmed', ?3, ?4, ?4
          FROM issues i WHERE i.repo_id = ?1 AND i.number = ?5 AND i.state = 'open'
+          AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ?2 AND w.repo_id = ?1)
        ON CONFLICT (workspace_id, issue_id) WHERE workspace_id IS NOT NULL DO NOTHING`,
     )
     .bind(repoId, workspaceId, actor, now, issue);
@@ -813,6 +854,87 @@ export function commitCloseStatement(db: D1Database, repoId: string, closes: rea
         WHERE repo_id = ?1 AND state = 'open' AND ${closer} IS NOT NULL`,
     )
     .bind(repoId, JSON.stringify(closes), now);
+}
+
+// ---------------------------------------------------------------------------
+// fix-issue agent tasks
+// ---------------------------------------------------------------------------
+
+/** Agent task kind that asks an agent to fix an issue (services/tasks.ts claims and completes it). */
+export const FIX_ISSUE = 'fix-issue';
+
+const TASK_CREATED_EVENT = 'kvarm.task.created';
+
+/**
+ * Ends the live fix-issue tasks of issues that are closed now: `completed`
+ * when the claimant's workspace merged (its change closed the issue),
+ * `obsolete` otherwise. Runs in every batch that closes issues.
+ */
+export function retireIssueTasksStatement(db: D1Database, repoId: string, now: number): D1PreparedStatement {
+  const merged = `claim_workspace_id IN (SELECT w.id FROM workspaces w WHERE w.repo_id = ?1 AND w.status = 'merged')`;
+  return db
+    .prepare(
+      `UPDATE agent_tasks
+          SET status = CASE WHEN ${merged} THEN 'completed' ELSE 'obsolete' END,
+              completed_at = CASE WHEN ${merged} THEN ?2 ELSE completed_at END,
+              completed_by = CASE WHEN ${merged} THEN claimed_by ELSE completed_by END,
+              lease_expires_at = NULL, updated_at = ?2
+        WHERE repo_id = ?1 AND kind = '${FIX_ISSUE}' AND status IN ('open', 'claimed')
+          AND EXISTS (SELECT 1 FROM issues i WHERE i.repo_id = ?1 AND i.number = json_extract(agent_tasks.payload, '$.issue') AND i.state = 'closed')`,
+    )
+    .bind(repoId, now);
+}
+
+/**
+ * POST issues/:number/dispatch: one live fix-issue task per open issue. The
+ * task and its `kvarm.task.created` event are written together, only when
+ * the issue is open and has no live task; otherwise the live task is
+ * returned as it is.
+ */
+export async function dispatchIssue(cx: IssueContext, rawNumber: string): Promise<ServiceResult<{ task: string; created: boolean }>> {
+  const number = parseNumber(rawNumber);
+  if (number === null) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
+  const db = cx.env.DB;
+  const taskId = crypto.randomUUID();
+  const now = Date.now();
+  const noLiveTask = `NOT EXISTS (SELECT 1 FROM agent_tasks t WHERE t.repo_id = ?2 AND t.kind = '${FIX_ISSUE}' AND t.status IN ('open', 'claimed')
+                       AND json_extract(t.payload, '$.issue') = ?3)`;
+  const [, , issue, live] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO events (id, type, payload, processed_at, created_at)
+         SELECT ?4, '${TASK_CREATED_EVENT}',
+                json_object('specversion', '1.0', 'id', ?4, 'type', '${TASK_CREATED_EVENT}',
+                            'source', '/repos/' || r.owner_login || '/' || r.name, 'subject', ?1, 'time', ?6,
+                            'datacontenttype', 'application/json',
+                            'data', json_object('task', ?1, 'kind', '${FIX_ISSUE}', 'repo', r.owner_login || '/' || r.name,
+                                                'issue', i.number, 'title', i.title, 'paths', json(COALESCE(i.paths, '[]')))),
+                NULL, ?5
+           FROM issues i JOIN repos r ON r.id = i.repo_id
+          WHERE i.repo_id = ?2 AND i.number = ?3 AND i.state = 'open' AND ${noLiveTask}`,
+      )
+      .bind(taskId, cx.repo.id, number, crypto.randomUUID(), now, new Date(now).toISOString()),
+    db
+      .prepare(
+        `INSERT INTO agent_tasks (id, repo_id, kind, change_set_id, workspace_id, status, generation, head_sha, base_sha, payload, created_at, updated_at)
+         SELECT ?1, i.repo_id, '${FIX_ISSUE}', NULL, NULL, 'open', 0, NULL, NULL, json_object('issue', i.number, 'title', i.title), ?4, ?4
+           FROM issues i WHERE i.repo_id = ?2 AND i.number = ?3 AND i.state = 'open' AND ${noLiveTask}`,
+      )
+      .bind(taskId, cx.repo.id, number, now),
+    db.prepare('SELECT state FROM issues WHERE repo_id = ?1 AND number = ?2').bind(cx.repo.id, number),
+    db
+      .prepare(
+        `SELECT id FROM agent_tasks WHERE repo_id = ?1 AND kind = '${FIX_ISSUE}' AND status IN ('open', 'claimed')
+           AND json_extract(payload, '$.issue') = ?2 ORDER BY created_at DESC LIMIT 1`,
+      )
+      .bind(cx.repo.id, number),
+  ]);
+  const state = (issue?.results as Array<{ state: string }> | undefined)?.[0]?.state;
+  if (!state) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
+  if (state !== 'open') return fail(409, 'a closed issue cannot be dispatched; reopen it first', 'ISSUE_CLOSED');
+  const id = (live?.results as Array<{ id: string }> | undefined)?.[0]?.id;
+  if (!id) return fail(500, 'the task could not be created', 'CREATE_FAILED');
+  return { ok: true, value: { task: id, created: id === taskId } };
 }
 
 /** Statements that remove a repo's issues and their links and comments, for the repo DELETE batch (before the repo row). */

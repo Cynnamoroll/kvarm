@@ -680,7 +680,7 @@ export const OPERATIONS = Object.freeze([
     command: ['task', 'list'],
     family: 'tasks',
     description:
-      'Agent tasks of a repository, newest first: resolve-conflict tasks name the conflicted change, its head and base commits and the conflicting paths (lockfiles marked needsRegeneration).',
+      'Agent tasks of a repository, newest first: resolve-conflict tasks name the conflicted change, its head and base commits and the conflicting paths (lockfiles marked needsRegeneration); fix-issue tasks name the issue to fix.',
     method: 'GET',
     path: '/repos/{repo}/tasks',
     params: [
@@ -705,7 +705,7 @@ export const OPERATIONS = Object.freeze([
     command: ['task', 'claim'],
     family: 'tasks',
     description:
-      "Claim an open task under an expiring lease. Creates (or on a reclaim reuses) a workspace whose branch sits at the conflicting change's head; push the resolution there. A live claim by another agent is refused 409 CLAIMED; a lapsed lease is taken over under the next generation.",
+      "Claim an open task under an expiring lease. Creates (or on a reclaim reuses) a workspace: for resolve-conflict at the conflicting change's head (push the resolution there), for fix-issue at the default branch, linked to the issue. A live claim by another agent is refused 409 CLAIMED; a lapsed lease is taken over under the next generation.",
     method: 'POST',
     path: '/repos/{repo}/tasks/{task}/claim',
     params: [
@@ -735,7 +735,7 @@ export const OPERATIONS = Object.freeze([
     command: ['task', 'complete'],
     family: 'tasks',
     description:
-      "Complete a claimed resolve-conflict task: the workspace head must descend from the change's head and merge with the base without conflicts. The change moves to the resolution, reopens and follows its merge policy (auto merges, review waits, draft stays draft).",
+      "Complete a claimed task. resolve-conflict: the workspace head must descend from the change's head and merge with the base without conflicts; the change moves to the resolution, reopens and follows its merge policy (auto merges, review waits, draft stays draft). fix-issue: the claim workspace must have opened a change (create_change_set); that change closes the issue when it merges.",
     method: 'POST',
     path: '/repos/{repo}/tasks/{task}/complete',
     params: [
@@ -1210,6 +1210,16 @@ export const OPERATIONS = Object.freeze([
       body('state', 'string', 'open or closed', { enum: ['open', 'closed'] }),
       body('closedReason', 'string', 'Why it is closed (with state closed)', { enum: ['completed', 'not_planned', 'duplicate'] }),
     ],
+  }),
+  define({
+    name: 'dispatch_issue',
+    command: ['issue', 'dispatch'],
+    family: 'issues',
+    description:
+      "Hand an open issue to agents as a fix-issue task (one live task per issue; 201 created, 200 the live one). An agent claims it with claim_task, gets a workspace at the default branch that declares the issue's paths as its intent, opens a change from it (create_change_set) and completes the task; the change closes the issue when it merges.",
+    method: 'POST',
+    path: '/repos/{repo}/issues/{number}/dispatch',
+    params: [REPO, ISSUE],
   }),
   define({
     name: 'list_change_issues',

@@ -184,6 +184,20 @@ describe('issue pages', () => {
     expect(shown.text).toContain(`change <strong>#${change.json.number}</strong> at commit`);
   });
 
+  it('hands an issue to an agent from its page', async () => {
+    await seedRepo('dispatch');
+    await request('POST', api('dispatch', '/issues'), { token: tok.owner, json: { title: 'Leak' } });
+    let shown = await request('GET', pages('dispatch', '/1'), { token: tok.owner });
+    expect(shown.text).toContain('Hand to an agent');
+    expect((await request('GET', pages('dispatch', '/1'))).text).not.toContain('Hand to an agent');
+    const posted = await request('POST', pages('dispatch', '/1/dispatch'), { token: tok.owner, form: {} });
+    expect(posted.location).toMatch(/notice=Task/);
+    shown = await request('GET', pages('dispatch', '/1'), { token: tok.owner });
+    expect(shown.text).toContain('waiting for an agent');
+    expect(shown.text).not.toContain('Hand to an agent');
+    expect((await request('POST', pages('dispatch', '/1/dispatch'), { token: tok.owner, form: {}, headers: { origin: 'https://evil.test' } })).status).toBe(403);
+  });
+
   it('refuses cross-site posts, readers and anonymous writers, and conceals private repositories', async () => {
     await seedRepo('guarded');
     const evil = await request('POST', pages('guarded'), { token: tok.owner, form: { title: 'x' }, headers: { origin: 'https://evil.test' } });

@@ -8,6 +8,7 @@
  *   GET   issues?state=&source=&limit=&cursor=
  *   GET   issues/:number          the issue and its links
  *   PATCH issues/:number          {title?, body?, paths?, state?, closedReason?}
+ *   POST  issues/:number/dispatch a fix-issue agent task → 201 created | 200 the live one
  *   GET   changes/:number/issues  issues linked to the change (or its workspace) and whether each will close
  *   POST  changes/:number/issues  {issue, kind?, state?} confirm or reject a link
  */
@@ -16,6 +17,7 @@ import { Hono, type Context } from 'hono';
 import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
 import * as svc from '../../services/issues';
+import { getTask } from '../../services/tasks';
 
 export const issuesApi = new Hono<App>();
 
@@ -86,4 +88,14 @@ issuesApi.post('/repos/:owner/:repo/changes/:number/issues', async (c) => {
   const r = await svc.linkIssue({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
+});
+
+issuesApi.post('/repos/:owner/:repo/issues/:number/dispatch', async (c) => {
+  const d = await authorizeRoute(c, 'write');
+  if (!d.ok) return denyJson(c, d);
+  const r = await svc.dispatchIssue({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'));
+  if (!r.ok) return failJson(c, r);
+  const task = await getTask(c.env, d.repo, r.value.task);
+  if (!task.ok) return failJson(c, task);
+  return actorJson(c, { task: task.value, created: r.value.created }, r.value.created ? 201 : 200);
 });

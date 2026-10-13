@@ -1,7 +1,7 @@
 /**
  * Issue pages under /:owner/:repo: the list (with a new-issue form), one
- * issue with its links, edit, close and reopen, and confirming or rejecting
- * a proposed link. SSR HTML over services/issues.ts, the same service the
+ * issue with its links and agent tasks, edit, close and reopen, confirming
+ * or rejecting a proposed link, and handing the issue to an agent. SSR HTML over services/issues.ts, the same service the
  * REST, MCP and CLI surfaces use; no client JS.
  *
  * Issues change without a push, so these pages are never edge-cached.
@@ -302,6 +302,22 @@ issuePages.get('/issues/:number', async (c) => {
       </details>
     </div>`
     : '';
+  const live = i.tasks.find((t) => t.status === 'open' || t.status === 'claimed');
+  const taskRows = i.tasks
+    .map(
+      (t) => html`<div class="commit-row"><div><code>${t.id.slice(0, 8)}</code> <span class="badge">${t.status}</span>
+        <span class="muted">${t.claimedBy ? `claimed by ${t.claimedBy}` : 'waiting for an agent'}${t.workspace ? ` · workspace ${t.workspace}` : ''} · created ${timeAgo(Date.parse(t.createdAt))}</span></div></div>`,
+    )
+    .join('');
+  const dispatch =
+    writable && i.state === 'open' && !live
+      ? html`<form method="post" action="${raw(`${at}/dispatch`)}" class="inline"><button class="btn" type="submit">Hand to an agent</button>
+          <span class="muted">creates a fix-issue task any agent can claim (<code>claim_task</code>)</span></form>`
+      : '';
+  const tasksCard =
+    taskRows || dispatch
+      ? html`<div class="card"><div class="card-title">Agent tasks</div>${raw(taskRows)}${raw(dispatch)}</div>`
+      : '';
   const body = html`
     ${raw(flash(c))}
     <div class="issue-head">
@@ -314,6 +330,7 @@ issuePages.get('/issues/:number', async (c) => {
       <div class="card-title">Linked changes and workspaces</div>
       ${raw(links || '<p class="muted">Nothing links this issue yet. A change closes it with <code>fixes #' + i.number + '</code> in its title, body or a commit message, a branch named like <code>fix/' + i.number + '-…</code>, or a workspace created for it.</p>')}
     </div>
+    ${raw(tasksCard)}
     ${raw(controls)}
     <p><a href="${raw(`${base(r.repo)}/issues`)}">← All issues</a></p>`;
   return page(c, r, `${i.title} · Issue #${i.number}`, body);
@@ -352,4 +369,18 @@ issuePages.post('/issues/:number/links', async (c) => {
   });
   if (!linked.ok) return redirect(c, at, { error: linked.error });
   return redirect(c, at, { notice: form.state === 'rejected' ? `Change #${change} will not close this issue.` : `Change #${change} will close this issue when it merges.` });
+});
+
+issuePages.post('/issues/:number/dispatch', async (c) => {
+  const r = await resolveRepo(c, 'write');
+  if (!r || !canWrite(r)) return notFound();
+  if (crossSite(c)) return new Response('cross-site form posts are refused', { status: 403 });
+  const number = c.req.param('number');
+  const at = `${base(r.repo)}/issues/${number}`;
+  const d = await svc.dispatchIssue({ env: c.env, repo: r.repo, actor: r.viewer }, number);
+  if (!d.ok) {
+    if (d.status === 404) return notFound();
+    return redirect(c, at, { error: d.error });
+  }
+  return redirect(c, at, { notice: d.value.created ? `Task ${d.value.task.slice(0, 8)} is waiting for an agent to claim it.` : 'An agent task for this issue is already live.' });
 });

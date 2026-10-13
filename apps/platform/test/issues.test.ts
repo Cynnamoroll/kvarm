@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { checkFingerprint } from '@kvarm/issues';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import { issueSignalStatements, resolveSignalStatement } from '../src/services/issues';
+import { issueSignalStatements, resolveSignalStatements } from '../src/services/issues';
 import { issueProbe, touchedIssuesBinds, touchedIssuesSql } from '../src/services/intents/issuePaths';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
@@ -414,6 +414,79 @@ describe('commits pushed to the default branch', () => {
   });
 });
 
+describe('fix-issue tasks', () => {
+  const claim = (repo: string, id: string, body: unknown = { agent: 'fixer' }) => call('POST', api(repo, `/tasks/${id}/claim`), tok.owner, body);
+  const complete = (repo: string, id: string, generation: number) => call('POST', api(repo, `/tasks/${id}/complete`), tok.owner, { agent: 'fixer', generation });
+
+  it('dispatches one live task per open issue, with its created event', async () => {
+    await seedRepo('dispatch');
+    await fileIssue('dispatch', { title: 'Leak in limiter', paths: ['src/limiter/'] });
+    const first = await call('POST', api('dispatch', '/issues/1/dispatch'), tok.owner);
+    expect(first.status).toBe(201);
+    expect(first.json).toMatchObject({ created: true, task: { kind: 'fix-issue', status: 'open', issue: { number: 1, title: 'Leak in limiter' }, change: null } });
+    const again = await call('POST', api('dispatch', '/issues/1/dispatch'), tok.owner);
+    expect([again.status, again.json.created, again.json.task.id]).toEqual([200, false, first.json.task.id]);
+    const listed = await call('GET', api('dispatch', '/tasks?kind=fix-issue'), tok.owner);
+    expect(listed.json.tasks.map((t: any) => t.id)).toEqual([first.json.task.id]);
+    const events = await env.DB.prepare(`SELECT payload FROM events WHERE type = 'kvarm.task.created' AND json_extract(payload, '$.subject') = ?`)
+      .bind(first.json.task.id)
+      .all<{ payload: string }>();
+    expect(events.results).toHaveLength(1);
+    expect(JSON.parse(events.results[0]!.payload).data).toMatchObject({ kind: 'fix-issue', issue: 1, repo: `${OWNER}/dispatch`, paths: ['src/limiter/'] });
+    expect((await getIssue('dispatch', 1)).json.tasks).toEqual([expect.objectContaining({ id: first.json.task.id, status: 'open', claimedBy: null })]);
+
+    await call('PATCH', api('dispatch', '/issues/1'), tok.owner, { state: 'closed' });
+    expect((await getIssue('dispatch', 1)).json.tasks[0].status).toBe('obsolete');
+    const closed = await call('POST', api('dispatch', '/issues/1/dispatch'), tok.owner);
+    expect([closed.status, closed.json.code]).toEqual([409, 'ISSUE_CLOSED']);
+    const late = await claim('dispatch', first.json.task.id);
+    expect([late.status, late.json.code]).toEqual([409, 'TASK_OBSOLETE']);
+    expect((await call('POST', api('dispatch', '/issues/1/dispatch'), tok.reader)).status).toBe(403);
+  });
+
+  it('claim gives a workspace at the default branch that declares the issue paths; completion needs a change; the merge closes the issue', async () => {
+    const r = await seedRepo('fixflow');
+    await fileIssue('fixflow', { title: 'Leak in limiter', paths: ['src/limiter/'] });
+    const task = (await call('POST', api('fixflow', '/issues/1/dispatch'), tok.owner)).json.task;
+    const claimed = await claim('fixflow', task.id);
+    expect(claimed.status).toBe(200);
+    expect(claimed.json.task).toMatchObject({ status: 'claimed', claimedBy: 'fixer', issue: { number: 1 } });
+    const ws = claimed.json.workspace;
+    expect(ws).toMatchObject({ base: 'main', baseSha: r.main, headSha: r.main, agent: 'fixer' });
+    expect(r.repo.refs.get(ws.ref)).toBe(r.main);
+    expect((await call('GET', api('fixflow', `/workspaces/${ws.id}/intent`), tok.owner)).json).toMatchObject({ declaredPaths: ['src/limiter/'], index: { declared: 1 } });
+    expect((await getIssue('fixflow', 1)).json.links).toEqual([expect.objectContaining({ workspace: ws.id, source: 'workspace', state: 'confirmed' })]);
+
+    const early = await complete('fixflow', task.id, claimed.json.lease.generation);
+    expect([early.status, early.json.code]).toEqual([409, 'NO_CHANGE_OPENED']);
+
+    const c = await commit(r.repo, { 'README.md': 'readme\n', 'src/limiter/bucket.ts': 'fixed\n' }, [r.main]);
+    r.repo.refs.set(ws.ref, c.sha);
+    const opened = await call('POST', api('fixflow', `/workspaces/${ws.id}/change-set`), tok.owner, { title: 'Release the bucket' });
+    expect(opened.status).toBe(201);
+    const done = await complete('fixflow', task.id, claimed.json.lease.generation);
+    expect(done.status).toBe(200);
+    expect(done.json).toMatchObject({ task: { status: 'completed', completedBy: 'fixer', resolutionSha: c.sha }, change: { number: opened.json.number } });
+    expect(done.json.headBranch).toBeUndefined();
+
+    expect((await merge('fixflow', opened.json.number)).status).toBe(200);
+    expect((await getIssue('fixflow', 1)).json).toMatchObject({ state: 'closed', closedBy: { change: opened.json.number } });
+    expect((await call('GET', api('fixflow', `/tasks/${task.id}`), tok.owner)).json.status).toBe('completed');
+  });
+
+  it('a claimed task whose change merges without an explicit completion completes with the merge', async () => {
+    const r = await seedRepo('fixmerge');
+    await fileIssue('fixmerge', { title: 'x' });
+    const task = (await call('POST', api('fixmerge', '/issues/1/dispatch'), tok.owner)).json.task;
+    const ws = (await claim('fixmerge', task.id)).json.workspace;
+    const c = await commit(r.repo, { 'README.md': 'readme\n', 'x.txt': 'x\n' }, [r.main]);
+    r.repo.refs.set(ws.ref, c.sha);
+    const opened = await call('POST', api('fixmerge', `/workspaces/${ws.id}/change-set`), tok.owner, { title: 'x' });
+    await merge('fixmerge', opened.json.number);
+    expect((await call('GET', api('fixmerge', `/tasks/${task.id}`), tok.owner)).json).toMatchObject({ status: 'completed', completedBy: 'fixer' });
+  });
+});
+
 describe('signals', () => {
   it('files one issue per open check fingerprint and closes it as verified when the check passes again', async () => {
     await seedRepo('signals');
@@ -426,7 +499,7 @@ describe('signals', () => {
     const open = (await call('GET', api('signals', '/issues?source=flake'), tok.owner)).json.issues;
     expect(open).toEqual([expect.objectContaining({ number: 1, fingerprint: 'check:test', occurrences: 2, evidence: { check: 'test', sha: 'd'.repeat(40) } })]);
 
-    await db.batch([resolveSignalStatement(db, repoId, fp, { commit: 'e'.repeat(40) }, Date.now())]);
+    await db.batch(resolveSignalStatements(db, repoId, fp, { commit: 'e'.repeat(40) }, Date.now()));
     expect((await getIssue('signals', 1)).json).toMatchObject({ state: 'closed', closedReason: 'verified', closedBy: { change: null, commit: 'e'.repeat(40) } });
     // A later failure is a recurrence: a new issue.
     await db.batch(issueSignalStatements(db, repoId, signal, Date.now()));
