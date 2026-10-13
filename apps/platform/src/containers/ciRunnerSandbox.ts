@@ -272,7 +272,13 @@ export class CiRunnerSandbox extends DurableObject<Env> {
     }
   }
 
-  async reset(): Promise<{ reset: true; snapshot: SnapshotView | null }> {
+  async reset(): Promise<{ reset: true; snapshot: SnapshotView | null } | { ok: false; status: number; code: string; error: string }> {
+    // A reset destroys the container: refusing while a run is executing keeps
+    // the admin's delete from failing an in-flight job (run() refuses its own
+    // concurrency the same way).
+    if (this.busy) {
+      return { ok: false, status: 409, code: 'RUN_IN_PROGRESS', error: 'a container run for this repository is in progress' };
+    }
     const stored = await this.ctx.storage.get<ContainerSnapshot>(SNAPSHOT_KEY);
     await this.ctx.storage.delete(SNAPSHOT_KEY);
     if (this.ctx.container?.running) await this.ctx.container.destroy();
