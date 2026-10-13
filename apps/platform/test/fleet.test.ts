@@ -1,7 +1,9 @@
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
+import { newSessionPayload, sessionCookie, type SessionPayload } from '../src/auth/workos';
+import { toUserRow } from '../src/db/users';
 import type { RepoRow } from '../src/db/repos';
 import type { Actor } from '../src/services/authz';
 import {
@@ -362,5 +364,186 @@ describe('fleet services', () => {
     expect(approval).toMatchObject({ ok: false, status: 409, code: 'APPROVAL_REQUIRED' });
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM sandbox_commands WHERE sandbox_id = ?').bind(id).first()).toMatchObject({ n: 2 });
     expect(await execSandbox(sandboxContext(writer), id, { command: 'npm test' })).toMatchObject({ ok: false, status: 403, code: 'SANDBOX_NOT_OWNED' });
+  });
+});
+
+describe('fleet pages: session CSRF (architecture §11.1)', () => {
+  const ORIGIN = 'https://kvarm.test';
+  const BASE = `/${OWNER}/fleet`;
+  const form = { 'content-type': 'application/x-www-form-urlencoded' };
+  let authEnv: Env;
+  let payload: SessionPayload;
+  let otherPayload: SessionPayload;
+  let cookie = '';
+
+  async function signedIn(userId: string): Promise<SessionPayload> {
+    const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first<Parameters<typeof toUserRow>[0]>();
+    return newSessionPayload(toUserRow(row!), {
+      user: { id: row!.workos_user_id, email: row!.email, emailVerified: true, name: null, avatarUrl: null },
+      refreshToken: 'rt_unused',
+      sessionId: null,
+    });
+  }
+
+  async function send(path: string, init: RequestInit = {}) {
+    const ctx = createExecutionContext();
+    const req = new Request(`${ORIGIN}${path}`, { ...init, redirect: 'manual' });
+    const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, authEnv, ctx);
+    await waitOnExecutionContext(ctx);
+    return { status: res.status, location: res.headers.get('location'), text: await res.text() };
+  }
+
+  const browser = (path: string, init: RequestInit = {}) =>
+    send(path, { ...init, headers: { cookie, ...(init.headers as Record<string, string>) } });
+
+  /** A session post from `origin`; an undefined `csrf` leaves the field out. */
+  const post = (path: string, body: string, csrf?: string, origin = ORIGIN) =>
+    browser(path, {
+      method: 'POST',
+      headers: { ...form, origin },
+      body: csrf === undefined ? body : `_csrf=${encodeURIComponent(csrf)}${body ? `&${body}` : ''}`,
+    });
+
+  const tokenFields = (text: string) => text.split(`name="_csrf" value="${payload.csrf}"`).length - 1;
+
+  beforeAll(async () => {
+    authEnv = {
+      ...env,
+      WORKOS_CLIENT_ID: 'client_fake',
+      WORKOS_API_KEY: 'sk_fake_not_a_real_key',
+      WORKOS_COOKIE_PASSWORD: 'test-cookie-password-0123456789abcdef',
+    } as Env;
+    payload = await signedIn(ownerId);
+    // Another live session of the same user: its token must not stand in for this one's.
+    otherPayload = await signedIn(ownerId);
+    cookie = (await sessionCookie(authEnv, payload)).split(';')[0]!;
+  });
+
+  async function seedRunningSandbox() {
+    const agentId = await seedAgent(owner, `csrf-${crypto.randomUUID()}`);
+    const environment = await seedEnvironment({ ready: true });
+    const workspace = await seedWorkspace(agentId);
+    const id = await seedSandbox({ agentId, environmentId: environment.id, buildId: environment.buildId!, workspaceId: workspace.id });
+    return { id, environment };
+  }
+
+  const sandboxStatus = async (id: string) =>
+    (await env.DB.prepare('SELECT status FROM sandboxes WHERE id = ?').bind(id).first<{ status: string }>())?.status;
+
+  it('refuses an environment create without the session token and writes nothing', async () => {
+    const page = await browser(`${BASE}/environments/new`);
+    expect(page.status).toBe(200);
+    expect(tokenFields(page.text)).toBe(1);
+    const name = `csrf-${crypto.randomUUID().slice(0, 8)}`;
+    const rows = async () =>
+      (await env.DB.prepare('SELECT COUNT(*) AS n FROM environments WHERE repo_id = ? AND name = ?').bind(repo.id, name).first<{ n: number }>())?.n;
+    const body = `name=${name}&baseRef=main&instance=standard-1&idleMinutes=30&maxBuildAgeHours=72`;
+
+    expect((await post(`${BASE}/environments`, body)).status).toBe(403);
+    expect((await post(`${BASE}/environments`, body, '')).status).toBe(403);
+    expect((await post(`${BASE}/environments`, body, otherPayload.csrf)).status).toBe(403);
+    // Cross-origin the session does not count: the browser is anonymous and the private repository is hidden.
+    expect((await post(`${BASE}/environments`, body, payload.csrf, 'https://evil.test')).status).toBe(404);
+    expect(await rows()).toBe(0);
+
+    const created = await post(`${BASE}/environments`, body, payload.csrf);
+    expect(created.status, created.text).toBe(302);
+    expect(created.location).toBe(`${BASE}/environments/${name}`);
+    expect(await rows()).toBe(1);
+  });
+
+  it('refuses environment edit, rebuild and archive without the session token', async () => {
+    const { id } = await seedEnvironment({ ready: true });
+    const row = () =>
+      env.DB.prepare('SELECT name, instance, pending, archived_at FROM environments WHERE id = ?').bind(id).first<{ name: string; instance: string; pending: number; archived_at: number | null }>();
+    const builds = async () =>
+      (await env.DB.prepare('SELECT COUNT(*) AS n FROM environment_builds WHERE environment_id = ?').bind(id).first<{ n: number }>())?.n;
+    const before = (await row())!;
+    const buildsBefore = await builds();
+    const envBase = `${BASE}/environments/${before.name}`;
+
+    const detail = await browser(envBase);
+    expect(detail.status).toBe(200);
+    expect(tokenFields(detail.text)).toBe(2);
+    expect(tokenFields((await browser(`${envBase}/edit`)).text)).toBe(1);
+
+    const edit = 'baseRef=main&instance=standard-2&idleMinutes=30&maxBuildAgeHours=72';
+    for (const [path, body] of [[envBase, edit], [`${envBase}/rebuild`, ''], [`${envBase}/archive`, '']] as const) {
+      expect((await post(path, body)).status, path).toBe(403);
+      expect((await post(path, body, otherPayload.csrf)).status, path).toBe(403);
+      expect((await post(path, body, payload.csrf, 'https://evil.test')).status, path).toBe(404);
+    }
+    expect(await row()).toEqual(before);
+    expect(await builds()).toBe(buildsBefore);
+
+    expect((await post(envBase, edit, payload.csrf)).status).toBe(302);
+    expect((await row())?.instance).toBe('standard-2');
+    expect((await post(`${envBase}/archive`, '', payload.csrf)).status).toBe(302);
+    expect((await row())?.archived_at).toEqual(expect.any(Number));
+  });
+
+  it('refuses a sandbox stop or discard without the session token and leaves the sandbox running', async () => {
+    const { id } = await seedRunningSandbox();
+    const page = await browser(`${BASE}/sandboxes/${id}`);
+    expect(page.status).toBe(200);
+    expect(tokenFields(page.text)).toBe(2);
+    const fleet = await browser('/fleet');
+    expect(fleet.text).toContain(`action="${BASE}/sandboxes/${id}/discard"`);
+    expect(tokenFields(fleet.text)).toBeGreaterThan(0);
+
+    for (const action of ['stop', 'discard']) {
+      expect((await post(`${BASE}/sandboxes/${id}/${action}`, '')).status, action).toBe(403);
+      expect((await post(`${BASE}/sandboxes/${id}/${action}`, '', otherPayload.csrf)).status, action).toBe(403);
+      expect((await post(`${BASE}/sandboxes/${id}/${action}`, '', payload.csrf, 'https://evil.test')).status, action).toBe(404);
+    }
+    expect(await sandboxStatus(id)).toBe('running');
+
+    expect((await post(`${BASE}/sandboxes/${id}/discard`, '', payload.csrf)).status).toBe(302);
+    expect(await sandboxStatus(id)).toBe('stopped');
+  });
+
+  it('refuses an approval decision without the session token and keeps it pending', async () => {
+    const { id: sandboxId } = await seedRunningSandbox();
+    const approvalId = crypto.randomUUID();
+    await env.DB.prepare(`INSERT INTO sandbox_approvals (id, sandbox_id, repo_id, command, requested_by, status, created_at, expires_at) VALUES (?, ?, ?, 'npm publish', ?, 'pending', ?, ?)`)
+      .bind(approvalId, sandboxId, repo.id, ownerId, Date.now(), Date.now() + 60_000).run();
+    const status = async () =>
+      (await env.DB.prepare('SELECT status FROM sandbox_approvals WHERE id = ?').bind(approvalId).first<{ status: string }>())?.status;
+
+    const fleet = await browser('/fleet');
+    expect(fleet.text).toContain(`action="/fleet/approvals/${approvalId}"`);
+    expect(tokenFields(fleet.text)).toBeGreaterThan(0);
+    const sandboxPage = await browser(`${BASE}/sandboxes/${sandboxId}`);
+    expect(sandboxPage.text).toContain(`action="/fleet/approvals/${approvalId}"`);
+    // Sleep, discard and the approval form.
+    expect(tokenFields(sandboxPage.text)).toBe(3);
+
+    const body = `repo=${encodeURIComponent(`${OWNER}/fleet`)}&decision=approve`;
+    expect((await post(`/fleet/approvals/${approvalId}`, body)).status).toBe(403);
+    expect((await post(`/fleet/approvals/${approvalId}`, body, otherPayload.csrf)).status).toBe(403);
+    // Cross-origin the session does not count, and a decision needs one.
+    const cross = await post(`/fleet/approvals/${approvalId}`, body, payload.csrf, 'https://evil.test');
+    expect(cross.status).toBe(302);
+    expect(cross.location).toContain('/auth/sign-in');
+    expect(await status()).toBe('pending');
+
+    const approved = await post(`/fleet/approvals/${approvalId}`, body, payload.csrf);
+    expect(approved.status).toBe(302);
+    expect(approved.location).toBe('/fleet');
+    expect(await status()).toBe('approved');
+  });
+
+  it('still accepts bearer-token posts without a CSRF token', async () => {
+    const pat = (await mintPAT(env, ownerId, 'fleet-pages', scopes)).token;
+    const bearer = (path: string) =>
+      send(path, { method: 'POST', headers: { ...form, authorization: `Bearer ${pat}` }, body: '' });
+    const { id: environmentId } = await seedEnvironment({ ready: true });
+    const name = (await env.DB.prepare('SELECT name FROM environments WHERE id = ?').bind(environmentId).first<{ name: string }>())!.name;
+    const rebuilt = await bearer(`${BASE}/environments/${name}/rebuild`);
+    expect(rebuilt.status).toBe(302);
+    expect(rebuilt.location).toContain('rebuilt=1');
+    const { id } = await seedRunningSandbox();
+    expect((await bearer(`${BASE}/sandboxes/${id}/discard`)).status).toBe(302);
+    expect(await sandboxStatus(id)).toBe('stopped');
   });
 });
