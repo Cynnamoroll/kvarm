@@ -6,7 +6,7 @@
  * tokens included).
  *
  *   POST commits/:sha/attribution  {agent, session, promptHash, model?, evidence?}
- *   GET  commits/:sha/attribution
+ *   GET  commits/:sha/attribution  (evidence.principal/tokenPrefix only for repo admins)
  *   GET  audit?since=&until=&format=json|ndjson&limit=&cursor=   (admin)
  *   GET/POST provenance-keys, DELETE provenance-keys/:id           (admin)
  *   POST decisions                 {task?, paths[], chosen, rejected[], reason}
@@ -50,7 +50,9 @@ attributionApi.get('/repos/:owner/:repo/commits/:sha/attribution', async (c) => 
   const cx = { env: c.env, repo: d.repo, actor: d.actor, waitUntil: (p: Promise<unknown>) => c.executionCtx.waitUntil(p) };
   const r = await attribution.getAttribution(cx, c.req.param('sha'));
   if (!r.ok) return failJson(c, r);
-  return actorJson(c, r.value);
+  // The submitting principal id and token prefix are admin-only; a plain reader sees the note's own display name.
+  const evidence = attribution.evidenceForReader(r.value.evidence, d.role === 'admin');
+  return actorJson(c, { ...r.value, evidence });
 });
 
 // Audit export and trusted keys need admin access; anonymous callers get 401 and others the shared concealment answer.

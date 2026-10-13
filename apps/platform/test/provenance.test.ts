@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { KVARM_NOTES_REF, buildNotesCommit, decode, encode, parseTree, pktLine } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import { canonicalPayload, keyFingerprint } from '../src/services/provenance';
+import { canonicalPayload, keyFingerprint, legacyCanonicalPayload } from '../src/services/provenance';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
@@ -231,7 +231,7 @@ describe('attribution evidence levels', () => {
     expect((await call('POST', repoPath('lvl-ver', '/provenance-keys'), tok.owner, { name: 'bad', publicKey: 'not-a-key' })).json.code).toBe('INVALID_PUBLIC_KEY');
 
     const fields = { agent: 'ver-agent-a', session: 'run-7', promptHash: HASH, model: 'claude-x' };
-    const signature = await key.sign(canonicalPayload({ runId: 'run-7', model: 'claude-x', promptHash: HASH, commit: c1.sha }));
+    const signature = await key.sign(canonicalPayload({ repoId: repoIds['lvl-ver']!, principal: `agent:${a.id}`, runId: 'run-7', model: 'claude-x', promptHash: HASH, commit: c1.sha }));
     const ok = await setAttr('lvl-ver', c1.sha, { ...fields, evidence: { keyId: key.id, runId: 'run-7', signature } }, a.token);
     expect(ok.status).toBe(201);
     expect(ok.json.evidence).toMatchObject({ level: 'verified', reasons: [], runId: 'run-7', keyId: key.id, principal: `agent:${a.id}` });
@@ -242,10 +242,10 @@ describe('attribution evidence levels', () => {
     cases.push(['tampered signature', { ...fields, evidence: { keyId: key.id, runId: 'run-7', signature: flipped } }, 'bad-signature', 'authenticated']);
     cases.push(['tampered model', { ...fields, model: 'claude-y', evidence: { keyId: key.id, runId: 'run-7', signature } }, 'bad-signature', 'authenticated']);
     cases.push(['other commit', { ...fields, evidence: { keyId: key.id, runId: 'run-7', signature } }, 'bad-signature', 'authenticated']);
-    cases.push(['unknown key', { ...fields, evidence: { keyId: stranger.id, runId: 'run-7', signature: await stranger.sign(canonicalPayload({ runId: 'run-7', model: 'claude-x', promptHash: HASH, commit: c2.sha })) } }, 'unknown-key', 'authenticated']);
+    cases.push(['unknown key', { ...fields, evidence: { keyId: stranger.id, runId: 'run-7', signature: await stranger.sign(canonicalPayload({ repoId: repoIds['lvl-ver']!, principal: `agent:${a.id}`, runId: 'run-7', model: 'claude-x', promptHash: HASH, commit: c2.sha })) } }, 'unknown-key', 'authenticated']);
     cases.push(['no model', { agent: 'ver-agent-a', session: 's', promptHash: HASH, evidence: { keyId: key.id, runId: 'run-7', signature } }, 'evidence-without-model', 'authenticated']);
     // A newline in a signed field would shift the payload's lines, so such a record is never verified.
-    const forgedLines = await key.sign(canonicalPayload({ runId: 'run-7', model: 'claude-x\ninput:x', promptHash: HASH, commit: c2.sha }));
+    const forgedLines = await key.sign(canonicalPayload({ repoId: repoIds['lvl-ver']!, principal: `agent:${a.id}`, runId: 'run-7', model: 'claude-x\ninput:x', promptHash: HASH, commit: c2.sha }));
     cases.push(['line in model', { ...fields, model: 'claude-x\ninput:x', evidence: { keyId: key.id, runId: 'run-7', signature: forgedLines } }, 'unsignable-field', 'authenticated']);
     for (const [label, body, reason, level] of cases) {
       const target = label === 'other commit' || label === 'unknown key' || label === 'no model' || label === 'line in model' ? c2.sha : c1.sha;
@@ -256,15 +256,76 @@ describe('attribution evidence levels', () => {
       expect(r.json.evidence.runId, label).toBeNull();
     }
 
-    // A valid signature does not lift a record its submitter cannot claim: agent B replaying A's evidence.
+    // A valid signature does not lift a record its submitter cannot claim: agent B naming agent A.
     const replay = await setAttr('lvl-ver', c1.sha, { ...fields, evidence: { keyId: key.id, runId: 'run-7', signature } }, b.token);
     expect(replay.json.evidence).toMatchObject({ level: 'declared', principal: `agent:${b.id}` });
-    expect(replay.json.evidence.reasons).toEqual(['agent-not-submitter']);
+    expect(replay.json.evidence.reasons).toContain('agent-not-submitter');
+    expect(replay.json.evidence.reasons).not.toContain('legacy-payload');
 
     // A revoked key verifies nothing new.
     expect((await call('DELETE', repoPath('lvl-ver', `/provenance-keys/${key.id}`), tok.owner)).json.revokedAt).not.toBeNull();
     const revoked = await setAttr('lvl-ver', c1.sha, { ...fields, evidence: { keyId: key.id, runId: 'run-7', signature } }, a.token);
     expect(revoked.json.evidence).toMatchObject({ level: 'authenticated', reasons: ['unknown-key'] });
+  });
+
+  it('binds a signature to the submitting agent and the repository, and never verifies the legacy payload', async () => {
+    const repo = await seedRepo('lvl-bind');
+    await seedRepo('lvl-bind-other');
+    const c1 = await commit(repo, { 'a.txt': 'a\n' });
+    const a = await mintAgent('lvl-bind', 'bind-agent-a', 'claude');
+    const b = await mintAgent('lvl-bind', 'bind-agent-b', 'gpt');
+    const key = await keyPair();
+    expect((await call('POST', repoPath('lvl-bind', '/provenance-keys'), tok.owner, { name: 'svc', publicKey: key.publicKey })).status).toBe(201);
+    const fields = { session: 'run-9', promptHash: HASH, model: 'claude-x' };
+    const bind = (repoId: string, principal: string) =>
+      key.sign(canonicalPayload({ repoId, principal, runId: 'run-9', model: 'claude-x', promptHash: HASH, commit: c1.sha }));
+    const sigA = await bind(repoIds['lvl-bind']!, `agent:${a.id}`);
+
+    // The submitter's own signature over its own principal and repository verifies.
+    const own = await setAttr('lvl-bind', c1.sha, { agent: 'bind-agent-a', ...fields, evidence: { keyId: key.id, runId: 'run-9', signature: sigA } }, a.token);
+    expect(own.json.evidence).toMatchObject({ level: 'verified', principal: `agent:${a.id}`, runId: 'run-9', keyId: key.id });
+
+    // Agent B replaying A's signature under its own name does not verify: the payload names A's principal.
+    const replayed = await setAttr('lvl-bind', c1.sha, { agent: 'bind-agent-b', ...fields, evidence: { keyId: key.id, runId: 'run-9', signature: sigA } }, b.token);
+    expect(replayed.json.evidence.level).toBe('authenticated');
+    expect(replayed.json.evidence.reasons).toContain('bad-signature');
+    expect(replayed.json.evidence.principal).toBe(`agent:${b.id}`);
+    expect(replayed.json.evidence.runId).toBeNull();
+
+    // The same signature, but bound to another repository, does not verify here.
+    const cross = await setAttr('lvl-bind', c1.sha, { agent: 'bind-agent-a', ...fields, evidence: { keyId: key.id, runId: 'run-9', signature: await bind(repoIds['lvl-bind-other']!, `agent:${a.id}`) } }, a.token);
+    expect(cross.json.evidence.level).toBe('authenticated');
+    expect(cross.json.evidence.reasons).toContain('bad-signature');
+    expect(cross.json.evidence.runId).toBeNull();
+
+    // A signature over the retired payload reads as legacy, never verified.
+    const legacySig = await key.sign(legacyCanonicalPayload({ runId: 'run-9', model: 'claude-x', promptHash: HASH, commit: c1.sha }));
+    const legacy = await setAttr('lvl-bind', c1.sha, { agent: 'bind-agent-a', ...fields, evidence: { keyId: key.id, runId: 'run-9', signature: legacySig } }, a.token);
+    expect(legacy.json.evidence.level).toBe('authenticated');
+    expect(legacy.json.evidence.reasons).toContain('legacy-payload');
+    expect(legacy.json.evidence.runId).toBeNull();
+  });
+
+  it('shows the submitting principal id and token prefix only to repo admins', async () => {
+    const repo = await seedRepo('lvl-redact', 'public');
+    const c1 = await commit(repo, { 'a.txt': 'a\n' });
+    const a = await mintAgent('lvl-redact', 'redact-agent', 'claude');
+    await setAttr('lvl-redact', c1.sha, { agent: 'redact-agent', session: 's1', promptHash: HASH, model: 'm' }, a.token);
+
+    // Anonymous visitor on a public repo: the note and its level, no principal id or token prefix.
+    const anon = await call('GET', repoPath('lvl-redact', `/commits/${c1.sha}/attribution`));
+    expect(anon.status).toBe(200);
+    expect(anon.json).toMatchObject({ agent: 'redact-agent', evidence: { level: 'authenticated', principal: null, tokenPrefix: null } });
+    expect(anon.text).not.toContain(a.token.slice(0, 18));
+
+    // A plain reader sees the same redaction.
+    const reader = await getAttr('lvl-redact', c1.sha, tok.reader);
+    expect(reader.json.evidence).toMatchObject({ level: 'authenticated', principal: null, tokenPrefix: null });
+    expect(reader.text).not.toContain(`agent:${a.id}`);
+
+    // The repo admin sees them.
+    const admin = await getAttr('lvl-redact', c1.sha, tok.owner);
+    expect(admin.json.evidence).toMatchObject({ principal: `agent:${a.id}`, tokenPrefix: a.token.slice(0, 18) });
   });
 
   it('reads the evidence of the note the ref holds when concurrent writers stored theirs out of order', async () => {
@@ -306,7 +367,7 @@ describe('attribution evidence levels', () => {
     const a = await mintAgent('lvl-inst', 'inst-agent');
     const key = await keyPair();
     const instEnv = { ...env, KVARM_PROVENANCE_KEYS: `  ${key.publicKey}, ` } as Env;
-    const signature = await key.sign(canonicalPayload({ runId: 'r', model: 'm', promptHash: HASH, commit: c1.sha }));
+    const signature = await key.sign(canonicalPayload({ repoId: repoIds['lvl-inst']!, principal: `agent:${a.id}`, runId: 'r', model: 'm', promptHash: HASH, commit: c1.sha }));
     const body = { agent: 'inst-agent', session: 's', promptHash: HASH, model: 'm', evidence: { keyId: key.id, runId: 'r', signature } };
     expect((await setAttr('lvl-inst', c1.sha, body, a.token)).json.evidence.reasons).toContain('unknown-key');
     const r = await setAttr('lvl-inst', c1.sha, body, a.token, instEnv);
