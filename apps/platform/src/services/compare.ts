@@ -261,14 +261,15 @@ async function loadSides(
   artifacts: LazyRepo,
   change: Pick<TreeChange, 'oldMode' | 'newMode' | 'oldHash' | 'newHash'>,
   counter?: BlobCounter,
+  maxBytes?: number,
 ): Promise<[SideContent, SideContent]> {
   const old = sideSpec(change.oldMode, change.oldHash);
   const neu = sideSpec(change.newMode, change.newHash);
   if (old.kind === 'blob' && neu.kind === 'blob' && old.hash === neu.hash) {
-    const side = await loadSide(artifacts, old, counter);
+    const side = await loadSide(artifacts, old, counter, maxBytes);
     return [side, side];
   }
-  return Promise.all([loadSide(artifacts, old, counter), loadSide(artifacts, neu, counter)]);
+  return Promise.all([loadSide(artifacts, old, counter, maxBytes), loadSide(artifacts, neu, counter, maxBytes)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -731,10 +732,20 @@ async function findChange(ctx: Ctx, body: CompareBody, baseTree: string, headTre
   return { path, status, oldMode: b?.mode ?? null, newMode: h?.mode ?? null, oldHash: b?.hash ?? null, newHash: h?.hash ?? null };
 }
 
-async function computeFileDiff(ctx: Ctx, change: CompareFile | TreeChange): Promise<FileDiffBody> {
-  const [a, b] = await loadSides(ctx.artifacts, change);
-  if ('tooLarge' in a || 'tooLarge' in b) return { hunks: [], approximate: false, tooLarge: true };
-  if ('binary' in a || 'binary' in b) return { hunks: [], approximate: false, binary: true };
+export interface FileDiffMaterial {
+  body: FileDiffBody;
+  oldText?: string;
+  newText?: string;
+}
+
+async function computeFileDiffMaterial(
+  ctx: Ctx,
+  change: CompareFile | TreeChange,
+  maxBlobBytes = COMPARE_BUDGETS.maxBlobBytes,
+): Promise<FileDiffMaterial> {
+  const [a, b] = await loadSides(ctx.artifacts, change, undefined, maxBlobBytes);
+  if ('tooLarge' in a || 'tooLarge' in b) return { body: { hunks: [], approximate: false, tooLarge: true } };
+  if ('binary' in a || 'binary' in b) return { body: { hunks: [], approximate: false, binary: true } };
   if ('missing' in a || 'missing' in b) throw new Error('blob missing from the repository');
   const diff = diffToHunks(a.text, b.text, {
     eolAware: true,
@@ -745,14 +756,18 @@ async function computeFileDiff(ctx: Ctx, change: CompareFile | TreeChange): Prom
     ...h,
     lines: h.lines.map((l) => ({ ...l, text: displayText(l.text) })),
   }));
-  const out: FileDiffBody = {
+  const body: FileDiffBody = {
     hunks,
     totalAdditions: diff.totalAdditions,
     totalDeletions: diff.totalDeletions,
     approximate: diff.approximate,
   };
-  if (diff.truncated) out.truncated = true;
-  return out;
+  if (diff.truncated) body.truncated = true;
+  return { body, oldText: displayText(a.text), newText: displayText(b.text) };
+}
+
+async function computeFileDiff(ctx: Ctx, change: CompareFile | TreeChange): Promise<FileDiffBody> {
+  return (await computeFileDiffMaterial(ctx, change)).body;
 }
 
 /** A cached per-file diff for other services deriving facts from the same trees. */
@@ -772,6 +787,34 @@ export async function cachedFileDiff(ctx: ResolveContext, change: CompareFile | 
   if (!ctx.bypass && !literal) ctx.waitUntil(writeJson(cacheKey, JSON.stringify(body)));
   markOutcome(ctx.bypass ? 'bypass' : literal ? 'bypass' : 'miss');
   return body;
+}
+
+/** Materialized diff text for bounded analyses that share the hunk blob reads. */
+export async function cachedFileDiffWithTexts(
+  ctx: ResolveContext,
+  change: CompareFile | TreeChange,
+  maxBlobBytes: number,
+): Promise<FileDiffMaterial> {
+  if ('binary' in change && change.binary) return { body: { hunks: [], approximate: false, binary: true } };
+  if ('tooLarge' in change && change.tooLarge) return { body: { hunks: [], approximate: false, tooLarge: true } };
+  const cacheKey = compareKeys.filediff(change.oldHash, change.newHash);
+  const literal = statKey(change) === null;
+  if (!ctx.bypass && !literal) {
+    const hit = await readJson<FileDiffBody>(cacheKey);
+    if (hit?.binary || hit?.tooLarge) return { body: hit };
+    if (hit) {
+      const [a, b] = await loadSides(ctx.artifacts, change, undefined, maxBlobBytes);
+      if ('tooLarge' in a || 'tooLarge' in b) return { body: hit };
+      if ('binary' in a || 'binary' in b) return { body: hit };
+      if ('missing' in a || 'missing' in b) throw new Error('blob missing from the repository');
+      markOutcome('hit');
+      return { body: hit, oldText: displayText(a.text), newText: displayText(b.text) };
+    }
+  }
+  const material = await computeFileDiffMaterial(ctx, change, maxBlobBytes);
+  if (!ctx.bypass && !literal && !material.body.tooLarge) ctx.waitUntil(writeJson(cacheKey, JSON.stringify(material.body)));
+  markOutcome(ctx.bypass ? 'bypass' : literal ? 'bypass' : 'miss');
+  return material;
 }
 
 export interface FileDiffResult {

@@ -41,7 +41,12 @@ async function call(method: string, path: string, token: string, body?: unknown)
   return { status: response.status, json: JSON.parse(text) as Record<string, any>, cost: cost! };
 }
 
-async function setup(name: string, changedPath = 'src/a.ts', contracts: string[] = []) {
+async function setup(
+  name: string,
+  changedPath = 'src/a.ts',
+  contracts: string[] = [],
+  overrides: { base?: Record<string, string>; head?: Record<string, string> } = {},
+) {
   const artifactsName = `${OWNER}--${name}`;
   const repo = new FakeRepo();
   fakeRepos.set(artifactsName, repo);
@@ -56,19 +61,22 @@ async function setup(name: string, changedPath = 'src/a.ts', contracts: string[]
     env.DB.prepare(`INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, 'write', ?, ?, ?)`)
       .bind(id, reviewerId!.id, ownerId!.id, now, now),
   ]);
-  const base = await commit(repo, {
+  const baseFiles = {
     'README.md': 'base\n',
     'src/a.ts': 'export const a = 1;\n',
     'src/b.ts': 'export const b = 1;\n',
     '.kvarm/review.json': JSON.stringify({ contracts }),
-  });
-  const head = await commit(repo, {
-    'README.md': 'base\n',
+    ...overrides.base,
+  };
+  const headFiles = {
+    ...baseFiles,
     'src/a.ts': 'export const a = 2;\n',
     'src/b.ts': 'export const b = 2;\n',
-    '.kvarm/review.json': JSON.stringify({ contracts }),
+    ...overrides.head,
     ...(changedPath.startsWith('apps/platform/migrations/') ? { [changedPath]: 'CREATE TABLE example (id TEXT);\n' } : {}),
-  }, [base.sha]);
+  };
+  const base = await commit(repo, baseFiles);
+  const head = await commit(repo, headFiles, [base.sha]);
   repo.refs.set(MAIN, base.sha);
   repo.refs.set('refs/heads/feature', head.sha);
   return { repo, base: base.sha, head: head.sha, repoId: id };
@@ -109,6 +117,144 @@ beforeAll(async () => {
 afterAll(() => restoreFetch());
 
 describe('guided review endpoints', () => {
+  it('lists import consumers and test evidence, and serves warm impact from cache', async () => {
+    await setup('impact-flow', 'src/a.ts', ['src/*.ts'], {
+      base: {
+        'src/use.ts': "import { a } from './a';\nexport const useA = a;\n",
+        'tests/a.test.ts': "import { a } from '../src/a';\n",
+      },
+    });
+    await openChange('impact-flow');
+    const path = api('impact-flow', '/changes/1/review/impact');
+    const cold = await call('GET', path, tokens.owner);
+    expect(cold.status).toBe(200);
+    const file = (cold.json.files as Array<{ path: string; consumers: Array<{ path: string; line: number; specifier: string; test: boolean }>; affected: Array<{ name: string }>; tests: string[] }>).find((item) => item.path === 'src/a.ts')!;
+    expect(file.consumers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'src/use.ts', line: 1, specifier: './a', test: false }),
+      expect.objectContaining({ path: 'tests/a.test.ts', line: 1, specifier: '../src/a', test: true }),
+    ]));
+    expect(file.affected).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'a', path: 'src/use.ts' })]));
+    expect(file.tests).toContain('tests/a.test.ts');
+    const warm = await call('GET', path, tokens.owner);
+    costs['GET review impact'] = warm.cost;
+    expect(warm.cost.art).toBe(0);
+    expect(warm.json).toEqual(cold.json);
+  });
+
+  it('truncates import impact at the per-file consumer budget', async () => {
+    const consumers = Object.fromEntries(Array.from({ length: 51 }, (_, index) => [`src/consumer-${index}.ts`, "import { a } from './a';\n"]));
+    await setup('impact-truncated', 'src/a.ts', [], { head: consumers });
+    await openChange('impact-truncated');
+    const response = await call('GET', api('impact-truncated', '/changes/1/review/impact'), tokens.owner);
+    const file = (response.json.files as Array<{ path: string; consumers: unknown[]; truncated: boolean }>).find((item) => item.path === 'src/a.ts')!;
+    expect(file.consumers).toHaveLength(50);
+    expect(file.truncated).toBe(true);
+    expect(response.json.truncated).toBe(true);
+    expect(response.json.truncatedReason).toContain('consumer-budget');
+  });
+
+  it('reports export breaks and requires breaking-impact declarations', async () => {
+    const { head } = await setup('export-breaks', 'src/a.ts', ['src/*.ts']);
+    await openChange('export-breaks');
+    await call('PUT', api('export-breaks', '/review-policy'), tokens.owner, { guideRequired: true });
+    const guidePath = api('export-breaks', '/changes/1/review-guide');
+    const fallback = await call('GET', guidePath, tokens.owner);
+    const changedA = (fallback.json.contracts as { breaks: Array<{ path: string; name: string; change: string; declared: boolean }> }).breaks
+      .find((item) => item.path === 'src/a.ts' && item.name === 'a');
+    expect(changedA).toMatchObject({ change: 'changed', declared: false });
+    const unitKeys = (fallback.json.units as Array<{ key: string }>).map((unit) => unit.key);
+    const additive = await call('POST', guidePath, tokens.owner, {
+      headSha: head,
+      guide: { intent: 'change exports', chapters: [{ id: 'api', title: 'API', tier: 'scrutinize', hunks: unitKeys }], contracts: [{ surface: 'src/*.ts', impact: 'additive' }] },
+    });
+    expect(additive.status).toBe(201);
+    expect(((additive.json.guide as { contracts: { breaks: Array<{ declared: boolean }> } }).contracts).breaks.every((item) => !item.declared)).toBe(true);
+    expect(((additive.json.guide as { contracts: { undeclared: string[] } }).contracts).undeclared.some((item) => item.includes('#'))).toBe(true);
+    expect((await call('POST', api('export-breaks', '/changes/1/merge'), tokens.owner)).json.code).toBe('CONTRACT_UNDECLARED');
+    const breaking = await call('POST', guidePath, tokens.owner, {
+      headSha: head,
+      guide: { intent: 'change exports', chapters: [{ id: 'api', title: 'API', tier: 'scrutinize', hunks: unitKeys }], contracts: [{ surface: 'src/*.ts', impact: 'breaking' }] },
+    });
+    expect(breaking.status).toBe(200);
+    expect(((breaking.json.guide as { contracts: { breaks: Array<{ declared: boolean }> } }).contracts).breaks.every((item) => item.declared)).toBe(true);
+    expect(((breaking.json.guide as { contracts: { undeclared: string[] } }).contracts).undeclared).toEqual([]);
+  });
+
+  it('classifies guide evidence against same-head checks and the head tree', async () => {
+    const { head, repoId } = await setup('guide-evidence');
+    const opened = await openChange('guide-evidence');
+    expect(opened.status).toBe(201);
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = 1').bind(repoId).first<{ id: string }>();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), repoId, change!.id, head, 'unit-tests', 'success', 'success', Date.now()),
+      env.DB.prepare(`INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), repoId, change!.id, head, 'lint', 'failure', 'failure', Date.now()),
+    ]);
+    const map = await call('GET', api('guide-evidence', '/changes/1/review-guide'), tokens.owner);
+    const unitKeys = (map.json.units as Array<{ key: string }>).map((unit) => unit.key);
+    const submitted = await call('POST', api('guide-evidence', '/changes/1/review-guide'), tokens.owner, {
+      headSha: head,
+      guide: {
+        intent: 'verify change',
+        chapters: [{ id: 'checks', title: 'Checks', tier: 'read', hunks: unitKeys }],
+        evidence: [
+          { kind: 'check', ref: 'unit-tests' },
+          { kind: 'check', ref: 'lint' },
+          { kind: 'check', ref: 'missing-check' },
+          { kind: 'test', ref: 'README.md' },
+          { kind: 'test', ref: 'src/missing.test.ts' },
+          { kind: 'manual', ref: 'manual review' },
+        ],
+      },
+    });
+    expect(submitted.status).toBe(201);
+    expect((submitted.json.guide as { guide: { evidence: Array<{ ref: string; status: string }> } }).guide.evidence).toEqual([
+      { kind: 'check', ref: 'unit-tests', status: 'verified' },
+      { kind: 'check', ref: 'lint', status: 'failed' },
+      { kind: 'check', ref: 'missing-check', status: 'missing' },
+      { kind: 'test', ref: 'README.md', status: 'verified' },
+      { kind: 'test', ref: 'src/missing.test.ts', status: 'missing' },
+      { kind: 'manual', ref: 'manual review', status: 'unverifiable' },
+    ]);
+  });
+
+  it('blocks approval until scrutinize units are acknowledged when policy requires it', async () => {
+    const { head } = await setup('danger-ack');
+    await openChange('danger-ack');
+    const policy = await call('PUT', api('danger-ack', '/review-policy'), tokens.owner, { dangerAckRequired: true });
+    expect(policy.json.dangerAckRequired).toBe(true);
+    expect((await call('GET', api('danger-ack', '/review-policy'), tokens.owner)).json.dangerAckRequired).toBe(true);
+    const guidePath = api('danger-ack', '/changes/1/review-guide');
+    const map = await call('GET', guidePath, tokens.owner);
+    const unitKeys = (map.json.units as Array<{ key: string }>).map((unit) => unit.key);
+    await call('POST', guidePath, tokens.owner, {
+      headSha: head,
+      guide: { intent: 'inspect danger', chapters: [{ id: 'danger', title: 'Danger', tier: 'scrutinize', hunks: unitKeys }] },
+    });
+    const approvalPath = api('danger-ack', '/changes/1/approve');
+    const blocked = await call('POST', approvalPath, tokens.reviewer, { headSha: head });
+    expect(blocked.status).toBe(409);
+    expect(blocked.json).toMatchObject({ code: 'DANGER_UNACKED', unacked: unitKeys });
+    const ack = await call('POST', api('danger-ack', '/changes/1/review-acks'), tokens.reviewer, { headSha: head, keys: unitKeys });
+    expect(ack.status).toBe(200);
+    expect((await call('POST', approvalPath, tokens.reviewer, { headSha: head })).status).toBe(201);
+  });
+
+  it('blocks approvals without cached coverage but still accepts request-changes', async () => {
+    const { head } = await setup('danger-ack-no-guide');
+    await openChange('danger-ack-no-guide');
+    await call('PUT', api('danger-ack-no-guide', '/review-policy'), tokens.owner, { dangerAckRequired: true });
+    const changePath = api('danger-ack-no-guide', '/changes/1');
+    expect((await call('POST', `${changePath}/request-changes`, tokens.reviewer, { headSha: head })).status).toBe(201);
+    const blocked = await call('POST', `${changePath}/approve`, tokens.reviewer, { headSha: head });
+    expect(blocked.status).toBe(409);
+    expect(blocked.json).toMatchObject({ code: 'DANGER_UNACKED', unacked: [] });
+    expect(blocked.json.error).toContain('Fetch the review guide');
+    expect(blocked.cost.art).toBe(0);
+    expect(blocked.cost.d1).toBeLessThanOrEqual(3);
+  });
+
   it('serves fallback, validates guides, carries acknowledgements, filters since/unacked, and reads config at base', async () => {
     const { repo, head } = await setup('guide-flow');
     expect((await openChange('guide-flow')).status).toBe(201);

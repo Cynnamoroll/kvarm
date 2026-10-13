@@ -21,7 +21,7 @@ import { compositionCleanupStatements } from '../services/compositions';
 
 export type ServiceResult<T> =
   | { ok: true; value: T }
-  | { ok: false; status: number; error: string; code?: string };
+  | { ok: false; status: number; error: string; code?: string; details?: Record<string, unknown> };
 
 export interface CreateRepoParams {
   ownerLogin: string;

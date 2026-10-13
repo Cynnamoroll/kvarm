@@ -93,7 +93,9 @@ describe('operation registry', () => {
     expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')?.params.find((p) => p.name === 'requiredReviews')?.required).toBeFalsy();
+    expect(findOperation('set_review_policy')?.params.find((p) => p.name === 'dangerAckRequired')).toBeDefined();
     expect(findOperation('get_review_guide')).toMatchObject({ command: ['review', 'guide'], method: 'GET', path: '/repos/{repo}/changes/{number}/review-guide', readOnly: true });
+    expect(findOperation('get_review_impact')).toMatchObject({ command: ['review', 'impact'], method: 'GET', path: '/repos/{repo}/changes/{number}/review/impact', family: 'reviews', readOnly: true });
     expect(findOperation('submit_review_guide')).toMatchObject({ command: ['review', 'submit-guide'], method: 'POST', path: '/repos/{repo}/changes/{number}/review-guide' });
     expect(findOperation('ack_review_units')).toMatchObject({ command: ['review', 'ack'], method: 'POST', path: '/repos/{repo}/changes/{number}/review-acks' });
     expect(findOperation('submit_findings')).toMatchObject({ command: ['finding', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/findings' });

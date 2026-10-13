@@ -673,6 +673,7 @@ export const OPERATIONS = Object.freeze([
       body('requiredReviews', 'integer', 'Required approving reviews (0-10)', { positional: true }),
       body('guideRequired', 'boolean', 'Require a guide for the current head'),
       body('blockingFindings', 'string', 'Which open findings block publication', { enum: ['none', 'high-confirmed'] }),
+      body('dangerAckRequired', 'boolean', 'Require acknowledgements for scrutinize coverage before approval'),
     ],
   }),
   define({
@@ -683,6 +684,15 @@ export const OPERATIONS = Object.freeze([
     method: 'GET',
     path: '/repos/{repo}/changes/{number}/review-guide',
     params: [REPO, CHANGE, query('since', 'string', 'Only include units added since this commit SHA'), query('unacked', 'boolean', 'Only return units not acknowledged by you'), query('include', 'string', 'Include inline hunk details', { enum: ['hunks'] })],
+  }),
+  define({
+    name: 'get_review_impact',
+    command: ['review', 'impact'],
+    family: 'reviews',
+    description: 'Show changed-file consumers, test consumers and import evidence for this change.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/review/impact',
+    params: [REPO, CHANGE],
   }),
   define({
     name: 'submit_review_guide',

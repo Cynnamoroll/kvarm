@@ -39,7 +39,7 @@ This inversion is why the merge engine and the integration train do not depend o
 
 ### 0.4.1 Guided review
 
-`services/reviewGuide.ts` builds deterministic coverage from the base/head trees, reuses cached per-file diffs, and validates author or reviewer guides against that map. Acknowledgements follow stable content keys across pushes; findings, declared contract surfaces and the review policy feed the shared publication gate and `services/attention.ts`. The REST routes are thin adapters and `packages/ops/src/index.js` exposes the same operations to CLI and MCP.
+`services/reviewGuide.ts` builds deterministic coverage from the base/head trees, reuses cached per-file diffs, and validates author or reviewer guides against that map. It records moved-code provenance, export-signature breaks and evidence status; `services/reviewImpact.ts` separately caches import consumers and test spillover so reviewers can fetch impact before approving contract changes. Acknowledgements follow stable content keys across pushes; findings, declared contract surfaces and the review policy feed the shared publication gate and `services/attention.ts`. The `dangerAckRequired` policy rejects human and agent approvals until the current guide's scrutinize units are acknowledged, but does not block request-changes. The REST routes are thin adapters and `packages/ops/src/index.js` exposes the same operations to CLI and MCP.
 
 ### 0.5 Execution posture
 
@@ -222,6 +222,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0032_session_revocations` | signed-out browser sessions, refused until their cookie would expire (§11.1) |
 | `0033_webhooks` | outbound webhooks, their delivery log, and the triggers that record platform events for delivery (§11.5) |
 | `0034_review_guides` | review guides, content-keyed acknowledgements, structured findings, guide/finding policy and approval coverage (§0.4.1) |
+| `0035_review_danger_ack` | the danger-acknowledgement policy flag (§0.4.1) |
 
 ## 7. Testing
 

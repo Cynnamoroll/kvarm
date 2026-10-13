@@ -2,7 +2,7 @@
  * Deterministic review coverage and author-supplied guide validation.
  */
 
-import type { Hunk } from '@kvarm/diffcore';
+import type { DetectedMove, Hunk } from '@kvarm/diffcore';
 import { byteOrder } from './content';
 import { isTestPath } from './paths';
 import type { RiskTag } from './risk';
@@ -20,6 +20,7 @@ export interface CoverageFileInput {
   deletions?: number;
   tags: RiskTag[];
   hunks: Hunk[] | null;
+  moves?: DetectedMove[];
   protected?: boolean;
   /** True when hunks were omitted because a service budget was exhausted. */
   truncated?: boolean;
@@ -39,13 +40,25 @@ export interface CoverageUnit {
   floor: ReviewTier;
   defaultTier: ReviewTier;
   contract: boolean;
+  moved?: { from: string };
   receipt?: string;
 }
 
 export interface CoverageMap {
   units: CoverageUnit[];
   contracts: string[];
+  breaks: ExportBreak[];
+  headFiles?: string[];
+  headFilesTruncated?: boolean;
   truncated: boolean;
+}
+
+export interface ExportBreak {
+  path: string;
+  name: string;
+  change: 'removed' | 'changed' | 'added';
+  before?: string;
+  after?: string;
 }
 
 export interface ReviewConfig {
@@ -224,6 +237,16 @@ export async function buildCoverage(files: readonly CoverageFileInput[], config:
     }
     const seen = new Map<string, number>();
     for (const [index, hunk] of hunks.entries()) {
+      const changed = hunk.lines.filter((line) => line.type !== 'eq');
+      const moved = changed.some((line) => line.type === 'ins')
+        ? file.moves?.find((move) =>
+          move.to.path === file.path &&
+          changed.every((line) => line.type === 'ins'
+            ? line.newNo !== undefined && line.newNo >= move.to.start && line.newNo <= move.to.end
+            : move.from.path === file.path && line.oldNo !== undefined && line.oldNo >= move.from.start && line.oldNo <= move.from.end),
+        )
+        : undefined;
+      const unitFloor = moved && floor === 'read' ? 'receipt' : floor;
       const baseKey = await hunkIdentity(file.path, hunk);
       const ordinal = (seen.get(baseKey) ?? 0) + 1;
       seen.set(baseKey, ordinal);
@@ -240,13 +263,14 @@ export async function buildCoverage(files: readonly CoverageFileInput[], config:
         newLines: hunk.newLines,
         additions,
         deletions,
-        floor,
-        defaultTier: floor,
+        floor: unitFloor,
+        defaultTier: unitFloor,
         contract,
+        ...(moved ? { moved: { from: moved.from.path } } : {}),
       });
     }
   }
-  return { units, contracts: [...contracts].sort(byteOrder), truncated };
+  return { units, contracts: [...contracts].sort(byteOrder), breaks: [], truncated };
 }
 
 export interface GuideNote {
@@ -274,7 +298,7 @@ export interface ResolvedGuide {
   chapters: ResolvedChapter[];
   contracts?: Array<{ surface: string; impact: 'breaking' | 'additive' | 'none'; note?: string }>;
   unchanged?: string[];
-  evidence?: Array<{ kind: 'test' | 'check' | 'manual'; ref: string; covers?: string[] }>;
+  evidence?: Array<{ kind: 'test' | 'check' | 'manual'; ref: string; covers?: string[]; status?: 'verified' | 'failed' | 'missing' | 'unverifiable' }>;
   source: 'author' | 'reviewer' | 'carried' | 'fallback';
   tiers: Record<string, ReviewTier>;
 }
@@ -314,6 +338,10 @@ function stringList(value: unknown, maxItems: number, maxLength: number, field: 
 function tier(value: unknown, field: string): ReviewTier {
   if (value !== 'scrutinize' && value !== 'read' && value !== 'receipt') throw new Error(`${field} must be scrutinize, read or receipt`);
   return value;
+}
+
+function contractSurfaceMatches(surface: string, path: string): boolean {
+  return surface === path || surface.startsWith(`${path}#`) || matchReviewGlob(surface, path);
 }
 
 function parseChapter(value: unknown, index: number): GuideChapter {
@@ -457,9 +485,12 @@ export function validateGuide(input: unknown, map: CoverageMap): GuideValidation
         if (effective !== 'read') raised.push({ key, from: 'read', to: effective });
       }
     }
-    const undeclared = map.contracts.filter(
-      (path) => !contracts?.some((declaration) => declaration.surface === path || declaration.surface.startsWith(`${path}#`)),
-    );
+    const undeclaredPaths = map.contracts.filter((path) => !contracts?.some((declaration) => contractSurfaceMatches(declaration.surface, path)));
+    const undeclaredBreaks = (map.breaks ?? [])
+      .filter((item) => item.change !== 'added' && !contracts?.some((declaration) =>
+        declaration.impact === 'breaking' && contractSurfaceMatches(declaration.surface, item.path)))
+      .map((item) => `${item.path}#${item.name}`);
+    const undeclared = [...new Set([...undeclaredPaths, ...undeclaredBreaks])];
     const guide: ResolvedGuide = {
       intent,
       ...(steps ? { steps } : {}),

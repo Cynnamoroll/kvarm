@@ -2,13 +2,19 @@
  * Content-addressed review coverage, guides, acknowledgements and findings.
  */
 
-import type { Hunk } from '@kvarm/diffcore';
+import { detectMoves, type Hunk } from '@kvarm/diffcore';
 import {
   buildCoverage,
   carryGuide,
+  diffExports,
+  extractExports,
   fallbackGuide,
+  isCodePath,
+  isContractPath,
+  matchReviewGlob,
   parseReviewConfig,
   validateGuide,
+  type ExportBreak,
   type CoverageFileInput,
   type CoverageMap,
   type CoverageUnit,
@@ -21,13 +27,16 @@ import { compareKeys, readJson, writeJson } from '../cache/compare';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
 import { branchRef, parseNumber, type ChangeContext, type ChangeRow } from './changes';
-import { cachedFileDiff, treePairBody, type CompareBody, type CompareFile } from './compare';
+import { cachedFileDiff, cachedFileDiffWithTexts, treePairBody, type CompareBody, type CompareFile } from './compare';
 import { effectivePolicy } from './branchRules';
 import { readCommitInfo, type ResolveContext } from './refs';
 import { attentionFor, type AttentionFacts } from './attention';
 import { parseReviewFacts, reviewFactsColumns, reviewGate, type ReviewFactsRow } from './reviewGate';
 
 export const REVIEW_BUDGETS = { maxHunkFiles: 300, maxUnits: 5000, maxInlineHunkLines: 4000 } as const;
+const MAX_EXPORT_FILES = 50;
+const MAX_EXPORT_BYTES = 512 * 1024;
+const MAX_HEAD_TREE_ENTRIES = 20_000;
 export const REVIEW_GUIDE_PATH = '.kvarm/review.json';
 export const FINDING_CATEGORIES = ['bug', 'risk', 'security', 'breaking', 'maintainability', 'question'] as const;
 export const FINDING_SEVERITIES = ['high', 'medium', 'low'] as const;
@@ -40,11 +49,12 @@ type FindingConfidence = (typeof FINDING_CONFIDENCES)[number];
 type FindingStatus = (typeof FINDING_STATUSES)[number];
 
 const SHA_RE = /^[0-9a-f]{40}$/;
+const TREE_MODE = /^0?40000$/;
 const fail = <T>(status: number, error: string, code: string): ServiceResult<T> => ({ ok: false, status, error, code });
 
 export interface GuideChange extends Pick<ChangeRow, 'id' | 'number' | 'title' | 'base_ref' | 'head_ref' | 'head_sha' | 'base_sha' | 'state' | 'author_id' | 'agent_meta' | 'merge_policy' | 'risk_level' | 'updated_at'> {}
 
-interface CoverageBuild {
+export interface CoverageBuild {
   change: GuideChange;
   baseTree: string;
   headTree: string;
@@ -66,6 +76,7 @@ interface ReviewMapPointer {
   truncated: boolean;
   configError?: string;
   tiers?: Record<string, ReviewTier>;
+  changedPaths?: string[];
 }
 
 function actorPrincipal(actor: Actor): { id: string; userId: string; agentId: string | null; tokenId: string | null } {
@@ -121,17 +132,51 @@ function receiptEligible(file: CompareFile): boolean {
   return file.status === 'removed' || file.risk.tags.some((tag) => tag === 'lockfile' || tag === 'generated' || tag === 'mechanical');
 }
 
+async function headTreeFiles(ctx: ResolveContext, tree: string): Promise<{ files: string[]; truncated: boolean }> {
+  const key = compareKeys.reviewFiles(tree);
+  const cached = await readJson<{ files: string[]; truncated: boolean }>(key);
+  if (cached && Array.isArray(cached.files)) return cached;
+  const repo = await ctx.artifacts.get();
+  const stack: Array<{ path: string; hash: string }> = [{ path: '', hash: tree }];
+  const files: string[] = [];
+  let entriesRead = 0;
+  let truncated = false;
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    const entries = await repo.readTree(current.hash);
+    if (!entries) continue;
+    for (const entry of entries) {
+      entriesRead++;
+      if (entriesRead > MAX_HEAD_TREE_ENTRIES) {
+        truncated = true;
+        stack.length = 0;
+        break;
+      }
+      const path = current.path ? `${current.path}/${entry.name}` : entry.name;
+      if (TREE_MODE.test(entry.mode)) stack.push({ path, hash: entry.hash });
+      else files.push(path);
+    }
+  }
+  const result = { files: files.sort(), truncated };
+  ctx.waitUntil(writeJson(key, JSON.stringify(result)));
+  return result;
+}
+
 async function computeMap(
   cx: ChangeContext,
   ctx: ResolveContext,
   change: GuideChange,
   compare: CompareBody,
   config: ReviewConfig,
+  headTree: string,
 ): Promise<{ map: CoverageMap; truncated: boolean }> {
   const protectedTarget = effectivePolicy(cx.branchRules ?? [], branchRef(change.base_ref)).protected;
   const files: CoverageFileInput[] = [];
+  const breaks: ExportBreak[] = [];
   let materializedFiles = 0;
   let materializedUnits = 0;
+  let exportFileCount = 0;
+  let exportTruncated = false;
   let truncated = compare.truncated;
   for (const entry of compare.files) {
     const base: CoverageFileInput = {
@@ -146,6 +191,24 @@ async function computeMap(
       hunks: null,
       protected: protectedTarget,
     };
+    const exportSurface =
+      (isCodePath(entry.path) && isContractPath(entry.path, config.contracts)) ||
+      Boolean(entry.oldPath && isCodePath(entry.oldPath) && isContractPath(entry.oldPath, config.contracts));
+    let material: Awaited<ReturnType<typeof cachedFileDiffWithTexts>> | undefined;
+    if (exportSurface && !entry.binary && !entry.tooLarge && exportFileCount < MAX_EXPORT_FILES) {
+      exportFileCount++;
+      material = await cachedFileDiffWithTexts(ctx, entry, MAX_EXPORT_BYTES);
+      if (material.oldText !== undefined && material.newText !== undefined) {
+        const before = extractExports(entry.oldPath ?? entry.path, material.oldText);
+        const after = extractExports(entry.path, material.newText);
+        if (before.truncated || after.truncated) exportTruncated = true;
+        breaks.push(...diffExports(before, after).map((item) => ({ path: entry.path, ...item })));
+      } else if (material.body.tooLarge) {
+        exportTruncated = true;
+      }
+    } else if (exportSurface && exportFileCount >= MAX_EXPORT_FILES) {
+      exportTruncated = true;
+    }
     if (receiptEligible(entry) || entry.binary || entry.tooLarge) {
       files.push(base);
       continue;
@@ -156,7 +219,7 @@ async function computeMap(
       continue;
     }
     materializedFiles++;
-    const diff = await cachedFileDiff(ctx, entry);
+    const diff = material?.body.tooLarge ? await cachedFileDiff(ctx, entry) : material?.body ?? await cachedFileDiff(ctx, entry);
     if (diff.binary || diff.tooLarge || materializedUnits + diff.hunks.length > REVIEW_BUDGETS.maxUnits) {
       files.push({ ...base, truncated: materializedUnits + diff.hunks.length > REVIEW_BUDGETS.maxUnits });
       if (materializedUnits + diff.hunks.length > REVIEW_BUDGETS.maxUnits) truncated = true;
@@ -166,12 +229,25 @@ async function computeMap(
     files.push({ ...base, hunks: diff.hunks, ...(diff.truncated ? { truncated: true } : {}) });
     truncated ||= diff.truncated === true;
   }
-  const map = await buildCoverage(files, config);
+  const moves = detectMoves(files.flatMap((file) => file.hunks ? [{ path: file.path, hunks: file.hunks }] : []));
+  const filesWithMoves = files.map((file) => {
+    const relevant = moves.filter((move) => move.from.path === file.path || move.to.path === file.path);
+    return relevant.length ? { ...file, moves: relevant } : file;
+  });
+  const [map, headFiles] = await Promise.all([buildCoverage(filesWithMoves, config), headTreeFiles(ctx, headTree)]);
   const overUnitBudget = map.units.length > REVIEW_BUDGETS.maxUnits;
   const boundedMap = overUnitBudget ? { ...map, units: map.units.slice(0, REVIEW_BUDGETS.maxUnits) } : map;
+  const allBreaksTruncated = map.truncated || truncated || overUnitBudget || exportTruncated || headFiles.truncated;
+  const resultMap = {
+    ...boundedMap,
+    breaks: breaks.sort((a, b) => a.path.localeCompare(b.path) || a.name.localeCompare(b.name)),
+    headFiles: headFiles.files,
+    headFilesTruncated: headFiles.truncated,
+    truncated: allBreaksTruncated,
+  };
   return {
-    map: { ...boundedMap, truncated: map.truncated || truncated || overUnitBudget },
-    truncated: map.truncated || truncated || overUnitBudget,
+    map: resultMap,
+    truncated: allBreaksTruncated,
   };
 }
 
@@ -214,7 +290,7 @@ async function coverageBuild(cx: ChangeContext, change: GuideChange, since = fal
     } else {
       const pair = await treePairBody(ctx, base.tree, head.tree);
       compare = pair.body;
-      result = await computeMap(cx, ctx, change, compare, config.config);
+      result = await computeMap(cx, ctx, change, compare, config.config, head.tree);
       cx.waitUntil(writeJson(cacheKey, JSON.stringify(result)));
     }
     const nextPointer: ReviewMapPointer = {
@@ -227,6 +303,7 @@ async function coverageBuild(cx: ChangeContext, change: GuideChange, since = fal
       truncated: result.truncated,
       ...(config.configError ? { configError: config.configError } : {}),
       ...(pointer?.tiers ? { tiers: pointer.tiers } : {}),
+      changedPaths: compare.files.flatMap((file) => (file.oldPath ? [file.path, file.oldPath] : [file.path])),
     };
     await writeJson(pointerKey, JSON.stringify(nextPointer));
     return {
@@ -263,6 +340,12 @@ async function findChange(cx: ChangeContext, rawNumber: string): Promise<Service
 export async function coverageFor(cx: ChangeContext, change: GuideChange, headSha?: string): Promise<ServiceResult<CoverageBuild>> {
   const selected = headSha === undefined ? change : { ...change, head_sha: headSha };
   return coverageBuild(cx, selected, headSha !== undefined);
+}
+
+export async function coverageForNumber(cx: ChangeContext, rawNumber: string): Promise<ServiceResult<CoverageBuild>> {
+  const change = await findChange(cx, rawNumber);
+  if (!change.ok) return change;
+  return coverageFor(cx, change.value);
 }
 
 export async function reviewMapAckKeys(
@@ -331,6 +414,19 @@ function fallbackFromCoverage(map: CoverageMap): ResolvedGuide {
   return fallbackGuide(map);
 }
 
+function contractSurfaceMatches(surface: string, path: string): boolean {
+  return surface === path || surface.startsWith(`${path}#`) || matchReviewGlob(surface, path);
+}
+
+function undeclaredContracts(map: CoverageMap, declarations: NonNullable<ResolvedGuide['contracts']>): string[] {
+  const paths = map.contracts.filter((path) => !declarations.some((item) => contractSurfaceMatches(item.surface, path)));
+  const breaks = (map.breaks ?? [])
+    .filter((item) => item.change !== 'added' && !declarations.some((entry) =>
+      entry.impact === 'breaking' && contractSurfaceMatches(entry.surface, item.path)))
+    .map((item) => `${item.path}#${item.name}`);
+  return [...new Set([...paths, ...breaks])];
+}
+
 function resolveGuide(
   coverage: CoverageBuild,
   guideRows: GuideRow[],
@@ -359,8 +455,7 @@ function resolveGuide(
     .find((value) => value.guide !== null);
   if (prior?.guide) {
     const carried = carryGuide(prior.guide, coverage.map);
-    const declared = carried.contracts ?? [];
-    const undeclared = coverage.map.contracts.filter((path) => !declared.some((item) => item.surface === path || item.surface.startsWith(`${path}#`)));
+    const undeclared = undeclaredContracts(coverage.map, []);
     return {
       guide: carried,
       source: 'carried',
@@ -378,7 +473,7 @@ function resolveGuide(
     guideRow: null,
     gaps: [],
     raised: [],
-    undeclared: coverage.map.contracts,
+    undeclared: undeclaredContracts(coverage.map, []),
   };
 }
 
@@ -405,22 +500,25 @@ export interface ReviewGuideView {
     tier: ReviewTier;
     floor: ReviewTier;
     contract: boolean;
+    moved?: { from: string };
     receipt?: string;
     acked: boolean;
     ackCount: number;
     hunks?: Hunk[];
   }>;
-  contracts: { changed: string[]; declared: Array<{ surface: string; impact: string; note?: string }>; undeclared: string[] };
+  contracts: {
+    changed: string[];
+    declared: Array<{ surface: string; impact: string; note?: string }>;
+    undeclared: string[];
+    breaks: Array<ExportBreak & { declared: boolean }>;
+  };
+  impact: { cached: boolean };
   findings: { open: number; resolved: number; items: Array<Record<string, unknown>> };
   attention: ReturnType<typeof attentionFor>;
   review: { satisfied: boolean; blockers: unknown[]; approvals: { count: number; required: number } };
   configError?: string;
   truncated: boolean;
   hunksTruncated?: boolean;
-}
-
-function declaredContracts(guide: ResolvedGuide, paths: string[]): string[] {
-  return paths.filter((path) => (guide.contracts ?? []).some((item) => item.surface === path || item.surface.startsWith(`${path}#`)));
 }
 
 function currentAttentionFacts(change: GuideChange, blocking: number, guideRequired: boolean, guidePresent: boolean, undeclared: number): AttentionFacts {
@@ -453,6 +551,7 @@ interface GuideSnapshot {
   change: GuideChange;
   guideRows: GuideRow[];
   ackRows: Array<{ unit_key: string; ack_count: number; mine: number }>;
+  checks: Array<{ name: string; status: string; conclusion: string | null }>;
   findings: FindingRow[];
   openFindings: number;
   reviewRow: ReviewSummaryRow | null;
@@ -494,6 +593,13 @@ async function loadGuideSnapshot(cx: ChangeContext, rawNumber: string, mine: str
               (SELECT p.blocking_findings FROM review_policies p WHERE p.repo_id = c.repo_id) AS rv_blocking_policy
          FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2`,
     ).bind(cx.repo.id, number),
+    db.prepare(
+      `SELECT name, status, conclusion
+         FROM check_runs
+        WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2)
+          AND head_sha = (SELECT head_sha FROM change_sets WHERE repo_id = ?1 AND number = ?2)
+        ORDER BY created_at DESC, id DESC LIMIT 200`,
+    ).bind(cx.repo.id, number),
   ]);
   const change = (results[0]?.results?.[0] as GuideChange | undefined) ?? null;
   if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
@@ -503,6 +609,7 @@ async function loadGuideSnapshot(cx: ChangeContext, rawNumber: string, mine: str
       change,
       guideRows: (results[1]?.results ?? []) as GuideRow[],
       ackRows: (results[2]?.results ?? []) as Array<{ unit_key: string; ack_count: number; mine: number }>,
+      checks: (results[6]?.results ?? []) as Array<{ name: string; status: string; conclusion: string | null }>,
       findings: (results[3]?.results ?? []) as FindingRow[],
       openFindings: Number((results[4]?.results?.[0] as { n?: number } | undefined)?.n ?? 0),
       reviewRow: (results[5]?.results?.[0] as ReviewSummaryRow | undefined) ?? null,
@@ -568,6 +675,29 @@ export async function getGuide(
     )).body;
   }
   const selected = resolveGuide(built, snapshot.guideRows);
+  const activeContracts = selected.source === 'author' || selected.source === 'reviewer' ? selected.guide.contracts ?? [] : [];
+  const undeclared = undeclaredContracts(built.map, activeContracts);
+  const evidenceChecks = new Map<string, string>();
+  for (const check of snapshot.checks) {
+    if (!evidenceChecks.has(check.name)) evidenceChecks.set(check.name, check.conclusion ?? '');
+  }
+  const guide = selected.guide.evidence
+    ? {
+        ...selected.guide,
+        evidence: selected.guide.evidence.map((item) => ({
+          ...item,
+          status: item.kind === 'manual'
+            ? 'unverifiable' as const
+            : item.kind === 'check'
+              ? evidenceChecks.get(item.ref) === 'success'
+                ? 'verified' as const
+                : evidenceChecks.get(item.ref) === 'failure'
+                  ? 'failed' as const
+                  : 'missing' as const
+              : built.map.headFiles?.includes(item.ref) ? 'verified' as const : 'missing' as const,
+        })),
+      }
+    : selected.guide;
   const ackMap = new Map(snapshot.ackRows.map((row) => [row.unit_key, row]));
   let sinceKeys: Set<string> | null = null;
   if (query.since !== undefined) {
@@ -624,6 +754,7 @@ export async function getGuide(
       tier: selected.guide.tiers[unit.key] ?? unit.defaultTier,
       floor: unit.floor,
       contract: unit.contract,
+      ...(unit.moved ? { moved: unit.moved } : {}),
       ...(unit.receipt ? { receipt: unit.receipt } : {}),
       acked: Boolean(ack?.mine),
       ackCount: Number(ack?.ack_count ?? 0),
@@ -634,8 +765,6 @@ export async function getGuide(
     }
     return value;
   });
-  const declared = selected.guide.contracts ?? [];
-  const undeclared = built.map.contracts.filter((path) => !declared.some((item) => item.surface === path || item.surface.startsWith(`${path}#`)));
   const blockingPolicy = snapshot.reviewRow?.rv_blocking_policy ?? 'high-confirmed';
   const validKeys = JSON.stringify(built.map.units.map((unit) => unit.key));
   if (built.map.units.length && !preload) {
@@ -659,6 +788,7 @@ export async function getGuide(
   const attention = attentionFor({
     ...currentAttentionFacts(built.change, blocking, guideRequired, selected.guideRow?.head_sha === built.change.head_sha, undeclared.length),
     ...review.facts,
+    undeclared: undeclared.length,
   });
   const reviews = { satisfied: review.satisfied, blockers: review.blockers, approvals: review.approvals };
   built.pointer.tiers = Object.fromEntries(built.map.units.map((unit) => [unit.key, selected.guide.tiers[unit.key] ?? unit.defaultTier]));
@@ -669,7 +799,7 @@ export async function getGuide(
     baseSha: built.change.base_sha,
     source: selected.source,
     ...(selected.fromHead ? { fromHead: selected.fromHead } : {}),
-    guide: selected.guide,
+    guide,
     coverage: {
       units: built.map.units.length,
       guided: built.map.units.length - selected.gaps.length,
@@ -677,7 +807,19 @@ export async function getGuide(
       truncated: built.truncated,
     },
     units,
-    contracts: { changed: built.map.contracts, declared: declaredContracts(selected.guide, built.map.contracts).map((path) => declared.find((item) => item.surface === path)!), undeclared },
+    contracts: {
+      changed: built.map.contracts,
+      declared: activeContracts.filter((item) => built.map.contracts.some((path) => contractSurfaceMatches(item.surface, path))),
+      undeclared,
+      breaks: (built.map.breaks ?? []).map((item) => ({
+        ...item,
+        declared: item.change === 'added' || activeContracts.some((entry) =>
+          entry.impact === 'breaking' && contractSurfaceMatches(entry.surface, item.path)),
+      })),
+    },
+    impact: {
+      cached: Boolean(await readJson(compareKeys.reviewImpact(built.baseTree, built.headTree, built.configSha))),
+    },
     findings: { open: snapshot.openFindings, resolved: snapshot.findings.filter((row) => row.status === 'resolved').length, items },
     attention,
     review: reviews,

@@ -6,7 +6,7 @@
  * escalations are resolved by humans only.
  *
  *   GET  review-policy
- *   PUT  review-policy                          {requiredReviews}
+ *   PUT  review-policy                          {requiredReviews, guideRequired, blockingFindings, dangerAckRequired}
  *   GET  reviews/pending?limit=&cursor=
  *   GET  changes/:number/reviews                the review packet
  *   POST changes/:number/reviews                {verdict, headSha?, body?}
@@ -22,12 +22,13 @@ import type { ServiceResult } from '../../repos/service';
 import type { ChangeContext } from '../../services/changes';
 import * as reviews from '../../services/reviews';
 import * as guide from '../../services/reviewGuide';
+import * as impact from '../../services/reviewImpact';
 
 export const reviewsApi = new Hono<App>();
 
 function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
+  const { ok: _ok, status, details, ...body } = r;
+  return c.json({ ...body, ...details }, status as never);
 }
 
 async function jsonBody(c: Context<App>): Promise<unknown> {
@@ -121,6 +122,15 @@ reviewsApi.get('/repos/:owner/:repo/changes/:number/review-guide', async (c) => 
     unacked: c.req.query('unacked'),
     include: c.req.query('include'),
   });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/changes/:number/review/impact', async (c) => {
+  const d = await authorizeRoute(c, 'read');
+  if (!d.ok) return denyJson(c, d);
+  const cx: ChangeContext = { env: c.env, repo: d.repo, actor: d.actor, role: d.role, waitUntil: (p) => c.executionCtx.waitUntil(p) };
+  const r = await impact.getReviewImpact(cx, c.req.param('number'));
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });
