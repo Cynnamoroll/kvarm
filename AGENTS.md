@@ -59,7 +59,7 @@ The project, its packages and every brand-bearing identifier are Kvarm. Use exac
 
 - packages `@kvarm/*`; the `kvarm` CLI and its `KVARM_*` environment variables; tokens `kvarm_pat_…` and `kvarm_agt_…`
 - platform check names `kvarm/guard`, `kvarm/ci-config`, `kvarm/checks-window` (CI job names may not start with `kvarm/`); CI configuration `.kvarm/ci.json`
-- response headers `x-kvarm-*`; attribution notes `refs/notes/kvarm-attribution`; the platform-reserved CI staging namespace `refs/heads/kvarm-ci/**`
+- response headers `x-kvarm-*` (and the incident delivery request headers `x-kvarm-timestamp`, `x-kvarm-signature`); attribution notes `refs/notes/kvarm-attribution`; the platform-reserved CI staging namespace `refs/heads/kvarm-ci/**` and revert branch namespace `refs/heads/kvarm-revert/**` (no git credential may push there, agent tokens included)
 - Cloudflare resources as named in `apps/platform/wrangler.jsonc`: worker `kvarm-platform`, D1 `kvarm`, R2 `kvarm-snapshots`, queues `kvarm-events` and `kvarm-events-dlq`, and the Artifacts subscription `kvarm-artifacts-pushed`
 
 These identifiers are stable interfaces and carry no brand. Never rename them:

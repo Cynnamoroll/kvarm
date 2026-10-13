@@ -1651,6 +1651,56 @@ export const OPERATIONS = Object.freeze([
       CURSOR,
     ],
   }),
+  // --- reverts and incident webhooks (issue #14) ----------------------------
+  // The signed delivery itself (POST /repos/{repo}/incidents) authenticates by
+  // its HMAC, not a token, so it is a webhook endpoint and not an operation.
+  define({
+    name: 'create_revert',
+    command: ['revert', 'create'],
+    family: 'reverts',
+    description:
+      'Revert a commit or a merged change set: builds the revert commit (git revert; merges relative to their first parent) on a kvarm-revert/ branch and opens a change set of kind revert (draft by default) that runs guard, CI and the merge queue like any change. 404 unknown commit; 409 REVERT_CONFLICT with the conflicting paths, nothing written.',
+    method: 'POST',
+    path: '/repos/{repo}/reverts',
+    params: [
+      REPO,
+      body('sha', 'string', 'Commit to revert (40 hex); or pass changeNumber'),
+      body('changeNumber', 'integer', 'Merged change set to revert, relative to the target it landed on; or pass sha'),
+      body('reason', 'string', 'Why: added to the revert commit message and the change body'),
+      body('base', 'string', 'Branch the revert applies to (default: the reverted change set base, else the default branch)'),
+      body('title', 'string', 'Change title (default: Revert "<subject>")'),
+      body('mergePolicy', 'string', 'draft (default), review or auto', { enum: MERGE_POLICIES }),
+    ],
+  }),
+  define({
+    name: 'get_incident_webhook',
+    command: ['incident', 'webhook'],
+    family: 'reverts',
+    description: 'Incident webhook status for the repository (repo admins): whether a secret exists, its generation and fingerprint, and the signature headers. The secret itself is never shown again.',
+    method: 'GET',
+    path: '/repos/{repo}/incidents/webhook',
+    params: [REPO],
+  }),
+  define({
+    name: 'rotate_incident_secret',
+    command: ['incident', 'rotate'],
+    family: 'reverts',
+    description:
+      'Create or rotate the incident webhook secret (repo admins). The reply shows the new secret once; the previous secret stops verifying immediately. Deliveries sign "<x-kvarm-timestamp>.<raw body>" with HMAC-SHA256.',
+    method: 'POST',
+    path: '/repos/{repo}/incidents/webhook/rotate',
+    params: [REPO],
+  }),
+  define({
+    name: 'delete_incident_webhook',
+    command: ['incident', 'delete'],
+    family: 'reverts',
+    description: 'Remove the incident webhook secret (repo admins); every later delivery is refused with 401.',
+    method: 'DELETE',
+    path: '/repos/{repo}/incidents/webhook',
+    params: [REPO],
+    destructive: true,
+  }),
 ]);
 
 const BY_NAME = new Map(OPERATIONS.map((op) => [op.name, op]));

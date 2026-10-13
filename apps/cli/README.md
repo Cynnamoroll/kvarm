@@ -43,6 +43,8 @@ kvarm compare get <owner>/demo main feature/x --order=risk
 kvarm workspace create <owner>/demo --task "fix parser" --intent '{"paths":["src/parse.ts"]}'
 kvarm workspace change-set <owner>/demo <workspace-id> --title "Fix parser" --merge-policy review
 kvarm change merge <owner>/demo 3
+kvarm revert create <owner>/demo --sha <40-hex sha> --reason "error rate doubled"
+kvarm incident rotate <owner>/demo     # repo admins: prints the incident webhook secret once
 ```
 
 Positional arguments come in the order shown by the usage line; the other

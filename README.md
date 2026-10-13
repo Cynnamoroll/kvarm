@@ -68,6 +68,8 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 **Issues.** Issues are filed by people, by agents (`create_issue`, for example a bug noticed outside the current task) and by platform signals. A report with a fingerprint lands on the open issue with that fingerprint as one more occurrence instead of a duplicate. A change closes issues without anyone remembering to tag them: closing keywords in its title or body (`fixes #12`, `Closes: #4`) link it, an issue number in its branch name (`fix/12-crash`) proposes a link that one `link_issue` call confirms or rejects, and a workspace created for an issue (`create_workspace {issue}`) links whatever change it opens. Confirmed links close their issues in the same batch that records the change merged into the default branch, from an explicit merge or the train; `list_change_issues` shows beforehand which will close. A new change whose files touch the paths of an open issue (`src/auth/` covers `src/auth/login.ts`) proposes a link to it through the Nexus issue-path index; each push to the change replaces the proposals nobody has answered yet with those of its new head. Commits pushed straight to the default branch close the issues their messages close (`fixes #12`), read from the commits the push brought in: its first-parent line down to the previous tip and, for each merge, the side branch it merged down to the merge base (bounded at 100 commits), so commits already on the branch are never read again. Flaky checks are tracked the same way: every flake the CI retry registers files or counts on the check's open issue (`source: flake`), quarantining a check makes sure one is open, and restoring it closes the issue (`closedReason: restored`), so a later flake opens a new one. The platform's own guard reaches the default branch too: a push that moved it without the platform publishing it (the publication path is recognized by its recorded merge commit) is scanned with the same `kvarm/guard` evaluation a change gets, and each failing finding files or counts a fingerprinted issue (`source: guard`) that the push repairing the path closes as verified. `dispatch_issue` hands an open issue to agents as a `fix-issue` task: the claimant gets a workspace at the default branch that is linked to the issue and declares its paths as a Nexus intent, opens a change from it and completes the task, and the merge closes the issue (closing it any other way retires the task). Each repository has an issues tab: the list with state and source filters and a new-issue form, and each issue's occurrences, evidence, linked changes (proposed links confirmed or rejected in one click), comment thread (`comment_issue` for agents, a Markdown form for people), and close, reopen and edit forms.
 
+**Reverts and incidents.** `POST …/reverts` (`kvarm revert create`) reverts a commit or a merged change set server-side, with the tree `git revert` would commit (a merge reverts relative to its first parent, like `git revert -m 1`), and opens it as a change set of kind `revert` on a platform-reserved `kvarm-revert/` branch. The revert runs `kvarm/guard`, CI and the merge queue exactly like any change; it is a `draft` unless you ask for `review` or `auto`, and it queues behind earlier entries (no priority lane). A revert that does not apply cleanly answers `409 REVERT_CONFLICT` with the conflicting paths and writes nothing. An incident system can open the same revert by posting a signed CloudEvents event to the repository's incident webhook (see [Sending a Kvarm incident](#sending-a-kvarm-incident)).
+
 **Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), zstd-compressed snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
 
 ## Interfaces
@@ -82,6 +84,8 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 | response headers | `x-kvarm-cost`, `x-kvarm-cache`, `x-kvarm-snapshot-sha` |
 | attribution notes ref | `refs/notes/kvarm-attribution` |
 | CI staging refs (platform-reserved) | `refs/heads/kvarm-ci/**` |
+| revert branches (platform-reserved) | `refs/heads/kvarm-revert/**` |
+| incident delivery request headers | `x-kvarm-timestamp`, `x-kvarm-signature` |
 | outbound event type | `kvarm.task.created` |
 | MCP server identity, site name | `Kvarm` |
 
@@ -183,6 +187,12 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 
    The deploy also registers the Worker's once-a-minute cron trigger, which enqueues webhook deliveries recorded on request paths and prunes the delivery log.
 
+   Incident webhooks (optional) derive every repository's webhook secret from one Worker secret; without it they stay off (`rotate` answers 503, deliveries 401). Changing it later invalidates every repository's incident secret.
+
+   ```sh
+   npx wrangler secret put INCIDENT_WEBHOOK_KEY      # a random value of 32+ characters, e.g. openssl rand -hex 32
+   ```
+
 8. **Bootstrap admin and token.** `scripts/mint-pat.mjs` creates the user (non-admin) if the login is new, inserts a `kvarm_pat_` token row into remote D1 and writes the plaintext token only to a gitignored env file (it refuses any other file and prints only the token prefix). The second command makes that user the instance admin (needed for the `?nocache=1` compare bypass and the Container CI runner).
 
    ```sh
@@ -260,6 +270,7 @@ npx kvarm runner --repo <owner>/<repo> --drain        # claim until the queue is
 npx kvarm ci jobs <owner>/<repo>                      # the CI queue: queued, running and finished jobs
 npx kvarm status <owner>/<repo>                       # workspaces with their pins, the train, open tasks
 npx kvarm change merge <owner>/<repo> 3               # any registry operation: kvarm <group> <verb>
+npx kvarm revert create <owner>/<repo> --change-number 3 --reason "p99 doubled"  # a draft revert change
 npx kvarm help change merge                           # usage, REST endpoint and MCP tool name
 ```
 
@@ -275,7 +286,7 @@ Details (warm working directories, extraction safety, exit codes): [`apps/cli/RE
 
 `POST /mcp` is a stateless Streamable HTTP MCP server (`@modelcontextprotocol/sdk`). Authenticate with `Authorization: Bearer <token>`: a personal access token with the `api` scope or an agent token. Every tool runs the same service code and the same authorization as REST.
 
-The 126 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`set_attribution`, `get_attribution`, `record_decision`, `get_context`), `provenance` (`get_audit`, `list_provenance_keys`, `add_provenance_key`, `revoke_provenance_key`), `branch-rules`, `issues`, `environments`, `sandboxes`, `ci` (runner jobs, flakes, hosted CI) and `webhooks`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
+The 130 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`set_attribution`, `get_attribution`, `record_decision`, `get_context`), `provenance` (`get_audit`, `list_provenance_keys`, `add_provenance_key`, `revoke_provenance_key`), `branch-rules`, `issues`, `environments`, `sandboxes`, `ci` (runner jobs, flakes, hosted CI), `webhooks` and `reverts` (`create_revert`, `get_incident_webhook`, `rotate_incident_secret`, `delete_incident_webhook`). `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
 
 Setup guides for Claude Code, Codex CLI, Cursor and generic MCP clients, the agent workflow and an `AGENTS.md` template are in [`docs/agents/`](docs/agents/README.md).
 
@@ -298,6 +309,7 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | snapshots | `GET/POST …/snapshots/:ref`, `GET …/snapshots/:sha/download` (zstd-compressed tar; `Accept: application/zstd` serves stored bytes, otherwise the Worker decompresses) |
 | changes | `POST/GET …/changes`, `GET/PATCH …/changes/:n`, `POST …/changes/:n/merge`, `GET …/changes/:n/mergeability`, `GET …/changes/:n/checks` |
 | merge queue | `POST/DELETE …/changes/:n/enqueue`, `GET …/queue`, `GET …/train` |
+| reverts and incidents | `POST …/reverts` (`{sha \| changeNumber, reason?, base?, title?, mergePolicy?}` → `201 {revert, change}`; `404 COMMIT_NOT_FOUND`, `409 REVERT_CONFLICT`, `409 NOTHING_TO_REVERT`), `GET/DELETE …/incidents/webhook`, `POST …/incidents/webhook/rotate` (repo admins; the secret is shown once), `POST …/incidents` (signed delivery, no token) |
 | checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope), `GET …/ci/jobs` (queue view), `GET …/ci/flakes`, `POST …/ci/flakes/:check/quarantine`, `POST …/ci/flakes/:check/restore`, `GET …/ci/hosted`, `POST …/ci/hosted/enable`, `POST …/ci/hosted/disable` (repo admins) |
 | reviews | `GET/PUT …/review-policy`, `GET/POST …/changes/:n/reviews`, `POST …/changes/:n/approve`, `…/request-changes`, `…/reviewers/assign`, `…/escalations/:id/resolve`, `GET …/reviews/pending` |
 | workspaces and Nexus | `POST/GET …/workspaces`, `GET …/workspaces/:id`, `POST …/workspaces/:id/change-set`, `POST …/workspaces/:id/abandon`, `GET/POST …/workspaces/:id/intent`, `GET …/forecast`, `GET …/workspaces/overlap` |
@@ -347,6 +359,21 @@ export function verifyKvarmWebhook(secret, headers, rawBody, toleranceSeconds = 
 ```
 
 Then drop any event whose `x-kvarm-event-id` you have already processed.
+
+### Sending a Kvarm incident
+
+A repository admin creates the webhook secret once (`kvarm incident rotate <owner>/<repo>` or `POST …/incidents/webhook/rotate`); the reply is the only time the secret is shown, and rotating again invalidates it at once. The incident system then posts a [CloudEvents 1.0](https://cloudevents.io) event in structured JSON mode: `subject` is the full id of the commit to revert, `source` and `id` together are the idempotency key (a second delivery of the same event answers `200` with the change the first one opened, never a second change), and `data` may carry `reason`, `base` and `mergePolicy` (default `draft`). The signature is HMAC-SHA256 with the secret over `<timestamp>.<raw body>`, where the timestamp is Unix seconds and must be within 300 seconds of the platform's clock:
+
+```sh
+body='{"specversion":"1.0","id":"inc-4711","source":"https://pager.example/alerts","type":"com.example.incident.opened","subject":"<40-hex sha>","data":{"reason":"checkout errors spiked"}}'
+ts=$(date +%s)
+sig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$KVARM_INCIDENT_SECRET" | sed 's/^.*= //')
+curl -s -X POST "$KVARM_BASE_URL/api/v1/repos/<owner>/<repo>/incidents" \
+  -H 'content-type: application/cloudevents+json' \
+  -H "x-kvarm-timestamp: $ts" -H "x-kvarm-signature: sha256=$sig" --data-binary "$body"
+```
+
+A verified event answers `201 {duplicate: false, eventId, revert, change}`. A missing, stale or wrong signature, an unknown repository and a repository without a webhook all answer the same `401 INVALID_SIGNATURE` and write nothing. The revert change is authored by Kvarm and goes through guard, CI and the queue like any other. To land a draft revert at once, set its policy to `review` and merge it (`kvarm change update <owner>/<repo> <n> --merge-policy review`, then `kvarm change merge <owner>/<repo> <n>`); its required checks still apply.
 
 ## Demo harness
 
@@ -398,7 +425,6 @@ Configured limits (constants in the code, documented with their behavior in the 
 Not built in this version, recorded for after the submission:
 
 - The collaborative UI pass (new pages and the visual direction); the existing pages are unchanged.
-- Revert change sets, inbound incident webhooks.
 - Contract capsules, semantic packets, hotspot suggestions, priority credits and resource lifecycle.
 - Advisory low-signal test flags and an auto-updating repository wiki.
 - Adopting Effect TS across the codebase.

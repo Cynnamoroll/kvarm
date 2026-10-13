@@ -728,6 +728,8 @@ export interface CreateChangeOptions {
    * their change set here so admission is decided before publication.
    */
   admit?: (change: { id: string; number: number }) => Promise<Extract<ServiceResult<never>, { ok: false }> | null>;
+  /** `change_sets.kind`; a revert change set (services/reverts.ts) is otherwise created like any change. */
+  kind?: 'change' | 'revert';
 }
 
 export function createChange(cx: ChangeContext, input: unknown, opts: CreateChangeOptions = {}): Promise<ServiceResult<ChangeDetail>> {
@@ -778,7 +780,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
            agent_meta, merge_policy, risk_score, risk_level, risk_reasons, kind, created_at, updated_at, head_event_at)
          SELECT ?1, ?2, COALESCE(MAX(number), 0) + 1, ?3, ?4, ?5, ?6,
                 COALESCE((SELECT f.sha FROM repo_refs f WHERE ${newerPush}), ?7),
-                ?8, 'open', ?9, ?10, ?11, ?12, ?13, ?14, 'change', ?15, ?15,
+                ?8, 'open', ?9, ?10, ?11, ?12, ?13, ?14, ?18, ?15, ?15,
                 COALESCE((SELECT f.event_at FROM repo_refs f WHERE (${newerPush}) OR (f.repo_id = ?2 AND f.ref = ?16 AND f.sha = ?7)), ?17)
            FROM change_sets WHERE repo_id = ?2`,
       ).bind(
@@ -799,6 +801,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
         now,
         branchRef(p.head),
         observedAt,
+        opts.kind ?? 'change',
       ),
       ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now, changed),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.

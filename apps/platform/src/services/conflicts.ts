@@ -102,6 +102,13 @@ export function conflictTransition(row: ConflictSubject, m: ConflictEvaluation):
 }
 
 /**
+ * Changes whose head a resolve-conflict completion can move. A revert's head
+ * is platform-reserved, so no completion could; the remedy is a fresh revert
+ * on the new tip (architecture §11.9), and it gets no task.
+ */
+const TASKABLE_HEAD = `c.kind != 'revert'`;
+
+/**
  * Marks the change conflicted at the record's head and upserts its one live
  * resolve-conflict task (refreshing head, base and conflicts of an existing
  * one). Both are guarded by the change still being live at that head.
@@ -123,7 +130,7 @@ export function markConflictedStatements(db: D1Database, changeId: string, recor
         `INSERT INTO agent_tasks (id, repo_id, kind, change_set_id, workspace_id, status, generation, head_sha, base_sha, payload, created_at, updated_at)
          SELECT ?1, c.repo_id, '${RESOLVE_CONFLICT}', c.id, (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1), 'open', 0,
                 ?3, ?4, ?5, ?6, ?6
-           FROM change_sets c WHERE c.id = ?2 AND c.state = 'conflicted' AND c.head_sha = ?3
+           FROM change_sets c WHERE c.id = ?2 AND c.state = 'conflicted' AND c.head_sha = ?3 AND ${TASKABLE_HEAD}
          ON CONFLICT (change_set_id, kind) WHERE status IN ('open', 'claimed') DO UPDATE SET
            head_sha = excluded.head_sha, base_sha = excluded.base_sha, payload = excluded.payload, updated_at = excluded.updated_at`,
       )
@@ -153,7 +160,7 @@ function taskCreatedEventStatement(db: D1Database, taskId: string, changeId: str
                                               'change', c.number, 'headSha', ?4, 'baseSha', ?5, 'conflicts', json(?6))),
               NULL, ?8
          FROM change_sets c JOIN repos r ON r.id = c.repo_id
-        WHERE c.id = ?3 AND c.state = 'conflicted' AND c.head_sha = ?4
+        WHERE c.id = ?3 AND c.state = 'conflicted' AND c.head_sha = ?4 AND ${TASKABLE_HEAD}
           AND NOT EXISTS (SELECT 1 FROM agent_tasks t WHERE t.change_set_id = c.id AND t.kind = '${RESOLVE_CONFLICT}' AND t.status IN ('open', 'claimed'))`,
     )
     .bind(crypto.randomUUID(), taskId, changeId, record.headSha, record.baseSha, JSON.stringify(record.conflicts), new Date(now).toISOString(), now);
