@@ -7,8 +7,8 @@
 import { Hono, type Context } from 'hono';
 import { html } from '@kvarm/ui';
 import type { App } from './api';
-import { clientIp, requestCredential } from './api';
-import { finish, notFound, type Resolved } from './repoPages';
+import { clientIp, requestCredential, requestSession } from './api';
+import { finish, notFound, sessionFormRefused, type Resolved } from './repoPages';
 import { repoPage } from '../render/repoShell';
 import { changesInboxBody, reviewPageBody, type InboxItem, type ReviewView } from '../render/reviewPage';
 import { resolveRepoAccess } from '../services/access';
@@ -87,6 +87,7 @@ async function renderReview(c: Context<App>, r: PageResolved, flash: string | nu
     focus,
     canWrite: writable,
     canReview: writable,
+    csrf: (await requestSession(c))?.csrfToken,
     flash,
   });
   return page(c, r, `#${guide.value.number} ${title?.title ?? ''}`, body);
@@ -115,9 +116,11 @@ reviewPages.get('/changes/:number{[0-9]+}', async (c) => {
 
 reviewPages.post('/changes/:number{[0-9]+}/ack', async (c) => {
   const r = await resolve(c, 'write');
-  if (!r || !canWrite(r)) return notFound(c);
+  if (!r || !r.viewer || !canWrite(r)) return notFound(c);
   const number = c.req.param('number') ?? '';
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, r.viewer, form);
+  if (refused) return refused;
   const keys = String(form.units ?? '')
     .split(',')
     .map((k) => k.trim())
@@ -130,9 +133,11 @@ reviewPages.post('/changes/:number{[0-9]+}/ack', async (c) => {
 
 reviewPages.post('/changes/:number{[0-9]+}/review', async (c) => {
   const r = await resolve(c, 'write');
-  if (!r || !canWrite(r)) return notFound(c);
+  if (!r || !r.viewer || !canWrite(r)) return notFound(c);
   const number = c.req.param('number') ?? '';
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, r.viewer, form);
+  if (refused) return refused;
   const note = String(form.body ?? '').trim();
   const result = await submitReview(changeCx(c, r), number, {
     verdict: String(form.verdict ?? ''),

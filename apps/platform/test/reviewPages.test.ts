@@ -4,7 +4,9 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
+import { newSessionPayload, sessionCookie } from '../src/auth/workos';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { toUserRow } from '../src/db/users';
 import worker from '../src/index';
 import { reviewPageBody } from '../src/render/reviewPage';
 import type { ReviewGuideView } from '../src/services/reviewGuide';
@@ -12,6 +14,7 @@ import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, resto
 
 const baseEnv = cfEnv as unknown as Env;
 const OWNER = 'review-page-owner';
+const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const MAIN = 'refs/heads/main';
 const env = {
@@ -154,6 +157,53 @@ describe('guided review pages', () => {
     expect(view.text).not.toContain('name="verdict"');
     expect((await pageCall('POST', pg('anon', 'changes/1/ack'), null, { units: 'x' })).status).toBe(404);
     expect((await pageCall('GET', pg('anon', 'changes/9'), null)).status).toBe(404);
+  });
+
+  it('requires a valid same-origin session CSRF token for guided-review writes', async () => {
+    const { head } = await setup('session-csrf');
+    await openChange('session-csrf');
+    const authEnv = {
+      ...env,
+      WORKOS_CLIENT_ID: 'client_fake',
+      WORKOS_API_KEY: 'sk_fake_not_a_real_key',
+      WORKOS_COOKIE_PASSWORD: 'test-cookie-password-0123456789abcdef',
+    } as Env;
+    const row = await env.DB.prepare('SELECT * FROM users WHERE login = ?1').bind(OWNER).first<Parameters<typeof toUserRow>[0]>();
+    const payload = newSessionPayload(toUserRow(row!), {
+      user: { id: row!.workos_user_id, email: row!.email, emailVerified: true, name: null, avatarUrl: null },
+      refreshToken: 'rt_unused',
+      sessionId: null,
+    });
+    const cookie = (await sessionCookie(authEnv, payload)).split(';')[0]!;
+    const browser = async (method: string, path: string, form?: Record<string, string>) => {
+      const ctx = createExecutionContext();
+      const headers: Record<string, string> = { cookie };
+      if (form) {
+        headers.origin = ORIGIN;
+        headers['content-type'] = 'application/x-www-form-urlencoded';
+      }
+      const response = await worker.fetch!(
+        new Request(`${ORIGIN}${path}`, {
+          method,
+          headers,
+          ...(form ? { body: new URLSearchParams(form) } : {}),
+          redirect: 'manual',
+        }) as Request<unknown, IncomingRequestCfProperties>,
+        authEnv,
+        ctx,
+      );
+      const text = await response.text();
+      await waitOnExecutionContext(ctx);
+      return { status: response.status, text };
+    };
+    const page = await browser('GET', pg('session-csrf', 'changes/1'));
+    expect(page.status).toBe(200);
+    expect(page.text).toContain(`name="_csrf" value="${payload.csrf}"`);
+
+    const missing = await browser('POST', pg('session-csrf', 'changes/1/ack'), { units: 'unit', head });
+    expect(missing.status).toBe(403);
+    const wrong = await browser('POST', pg('session-csrf', 'changes/1/review'), { _csrf: 'incorrect', verdict: 'approve', head });
+    expect(wrong.status).toBe(403);
   });
 
   it('records a verdict at the shown head and reports a moved head inline', async () => {

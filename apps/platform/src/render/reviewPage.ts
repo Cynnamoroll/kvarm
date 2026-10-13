@@ -8,6 +8,7 @@
 import { escapeHtml as esc, html, raw, timeAgo } from '@kvarm/ui';
 import type { DiffLine, Hunk } from '@kvarm/diffcore';
 import type { ReviewGuideView } from '../services/reviewGuide';
+import { csrfInput } from '../web/render';
 
 export type ReviewView = 'guided' | 'risk' | 'files';
 
@@ -128,7 +129,7 @@ function unitBlock(u: Unit, chapterTier: Unit['tier'], findings: Finding[], ctx:
       ? hunkTable(u.hunks)
       : `<p class="muted">Diff not inlined for this unit; open it in <a href="${ctx.base}/compare/${encodeURIComponent(`${ctx.view.baseSha}...${ctx.view.headSha}`)}">compare</a>.</p>`;
   const ack = ctx.canWrite
-    ? `<form method="post" action="${ctx.pageBase}/ack" class="rv-ack"><input type="hidden" name="head" value="${esc(ctx.view.headSha)}"><input type="hidden" name="units" value="${esc(u.key)}"><input type="hidden" name="return" value="${esc(ctx.returnTo)}#${anchor(u.key)}"><button class="btn" type="submit"${u.acked ? ' disabled' : ''}>${u.acked ? 'Reviewed' : 'Mark reviewed'}</button></form>`
+    ? `<form method="post" action="${ctx.pageBase}/ack" class="rv-ack">${csrfInput(ctx.csrf)}<input type="hidden" name="head" value="${esc(ctx.view.headSha)}"><input type="hidden" name="units" value="${esc(u.key)}"><input type="hidden" name="return" value="${esc(ctx.returnTo)}#${anchor(u.key)}"><button class="btn" type="submit"${u.acked ? ' disabled' : ''}>${u.acked ? 'Reviewed' : 'Mark reviewed'}</button></form>`
     : '';
   return `<section class="rv-unit tier-${u.tier}${u.acked ? ' acked' : ''}" id="${anchor(u.key)}" data-key="${esc(u.key)}" tabindex="-1">
     <header><code>${esc(u.path)}</code> <span class="muted">${range}</span> ${chips}<span class="spacer"></span>${ack}</header>
@@ -143,6 +144,7 @@ interface PageCtx {
   pageBase: string;
   returnTo: string;
   canWrite: boolean;
+  csrf?: string | null;
 }
 
 function stackCard(view: ReviewGuideView, base: string, pageBase: string, mode: ReviewView, focus: boolean): string {
@@ -170,6 +172,7 @@ export interface ReviewPageInput {
   mode: ReviewView;
   canWrite: boolean;
   canReview: boolean;
+  csrf?: string | null;
   /** Focused on this stack layer: units inherited from a parent change are hidden. */
   focus?: boolean;
   flash?: string | null;
@@ -180,7 +183,7 @@ export function reviewPageBody(input: ReviewPageInput): string {
   const pageBase = `${base}/changes/${view.number}`;
   const focus = input.focus === true;
   const returnTo = `${pageBase}?view=${mode}${focus ? '&since=parent' : ''}`;
-  const ctx: PageCtx = { view, base, pageBase, returnTo, canWrite: input.canWrite };
+  const ctx: PageCtx = { view, base, pageBase, returnTo, canWrite: input.canWrite, csrf: input.csrf };
   const sections = sectionsFor(view, mode);
   const findingsByUnit = new Map<string, Finding[]>();
   const loose: Finding[] = [];
@@ -216,7 +219,7 @@ export function reviewPageBody(input: ReviewPageInput): string {
       const unackedKeys = s.units.filter((u) => !u.acked).map((u) => u.key);
       const ackAll =
         input.canWrite && unackedKeys.length > 1
-          ? `<form method="post" action="${pageBase}/ack" class="rv-ack"><input type="hidden" name="head" value="${esc(view.headSha)}"><input type="hidden" name="units" value="${esc(unackedKeys.join(','))}"><input type="hidden" name="return" value="${esc(returnTo)}#ch-${esc(s.id)}"><button class="btn" type="submit">Mark chapter reviewed</button></form>`
+          ? `<form method="post" action="${pageBase}/ack" class="rv-ack">${csrfInput(input.csrf)}<input type="hidden" name="head" value="${esc(view.headSha)}"><input type="hidden" name="units" value="${esc(unackedKeys.join(','))}"><input type="hidden" name="return" value="${esc(returnTo)}#ch-${esc(s.id)}"><button class="btn" type="submit">Mark chapter reviewed</button></form>`
           : '';
       return `<section class="rv-chapter" id="ch-${esc(s.id)}">
         <h2><span class="chip tier-${s.tier}">${s.tier}</span> ${esc(s.title)} <span class="spacer"></span>${ackAll}</h2>
@@ -296,6 +299,7 @@ export function reviewPageBody(input: ReviewPageInput): string {
         <div class="card-title">Verdict at <code>${short(view.headSha)}</code></div>
         ${scrutinizeOpen ? raw(`<p class="flash warn">${scrutinizeOpen} scrutinize unit(s) are not marked reviewed yet.</p>`) : ''}
         <form method="post" action="${raw(pageBase)}/review">
+          ${raw(csrfInput(input.csrf))}
           <input type="hidden" name="head" value="${view.headSha}">
           <textarea name="body" rows="3" placeholder="Optional note"></textarea>
           <p><button class="btn primary" name="verdict" value="approve" type="submit">Approve</button>
