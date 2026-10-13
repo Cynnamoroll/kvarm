@@ -33,6 +33,7 @@ MCP client  --/mcp------->   MCP tools (thin) ----/                         \-> 
 Artifacts push event --> queue kvarm-events --> queue() consumer --> cache purge, snapshot build, kvarm/guard,
                                                                     CI dispatch, change head refresh, train kicks
 CI pipeline workflow --> ci_jobs (D1) <-- claim/report -- `kvarm runner` on the user's machine
+platform event --> events ledger + webhook_deliveries (D1 triggers) --> kvarm-events --> signed POST to the hook URL
 merge queue --> parallel preparation and checks --> short MergeLock publication lease --> receive-pack with expected old value
 ```
 
@@ -172,6 +173,14 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 
    The settings form and the email opt-in record a `user.identity.linked` event. Organizations are not mapped to WorkOS organizations.
 
+   Outbound webhooks need one more secret, from which the key that encrypts each hook's signing secret at rest is derived. Without it the webhooks API answers `503 WEBHOOKS_NOT_CONFIGURED`; changing it later makes existing hook secrets undecryptable (rotate each hook's secret afterwards).
+
+   ```sh
+   npx wrangler secret put WEBHOOK_SECRET_KEY        # a random value of 32+ characters, e.g. openssl rand -hex 32
+   ```
+
+   The deploy also registers the Worker's once-a-minute cron trigger, which enqueues webhook deliveries recorded on request paths and prunes the delivery log.
+
 8. **Bootstrap admin and token.** `scripts/mint-pat.mjs` creates the user (non-admin) if the login is new, inserts a `kvarm_pat_` token row into remote D1 and writes the plaintext token only to a gitignored env file (it refuses any other file and prints only the token prefix). The second command makes that user the instance admin (needed for the `?nocache=1` compare bypass and the Container CI runner).
 
    ```sh
@@ -264,7 +273,7 @@ Details (warm working directories, extraction safety, exit codes): [`apps/cli/RE
 
 `POST /mcp` is a stateless Streamable HTTP MCP server (`@modelcontextprotocol/sdk`). Authenticate with `Authorization: Bearer <token>`: a personal access token with the `api` scope or an agent token. Every tool runs the same service code and the same authorization as REST.
 
-The 91 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`record_decision`, `get_context`) and `branch-rules`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
+The 106 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`record_decision`, `get_context`), `branch-rules`, `ci` (runner jobs, flakes, hosted CI) and `webhooks`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
 
 Setup guides for Claude Code, Codex CLI, Cursor and generic MCP clients, the agent workflow and an `AGENTS.md` template are in [`docs/agents/`](docs/agents/README.md).
 
@@ -296,11 +305,43 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | attribution | `GET/POST …/commits/:sha/attribution`, `POST …/decisions`, `GET …/context?task=\|path=` |
 | organizations | `POST /orgs`, `GET /orgs/:org`, `GET /user/orgs`, `GET /orgs/:org/members`, `PUT/DELETE /orgs/:org/members/:login` (`owner`/`maintainer`/`member`), `GET/POST /orgs/:org/repos` |
 | access | `GET …/grants`, `PUT/DELETE …/grants/:login`, `POST/GET /agents`, `GET/DELETE /agents/:id`, `POST/GET /agents/:id/tokens`, `DELETE /agents/:id/tokens/:tokenId`, `GET/POST …/branch-rules`, `GET/PATCH/DELETE …/branch-rules/:id`, `GET …/branch-policy` |
+| webhooks | `GET/POST …/webhooks` `{url, events[]}`, `GET/PATCH/DELETE …/webhooks/:id`, `POST …/webhooks/:id/rotate-secret`, `POST …/webhooks/:id/ping`, `GET …/webhooks/:id/deliveries` (`state`, `limit` ≤ 50, `cursor`); human repo admins only |
 
 The exact path, parameters and reply of every registry operation are printed by `kvarm help <group> <verb>`, and its JSON schema is in `packages/ops/src/index.js`. Two behaviors worth knowing:
 
 - An explicit merge of a head whose required checks have not been recorded yet answers `409 REQUIRED_CHECKS_PENDING` and publishes nothing. This applies to a conflict task's resolution head right after `complete_task`: its `kvarm/guard` run arrives with the push event a few seconds later (completion records it directly only for `auto` changes). `enqueue_change` takes the queue path instead and publishes once the checks are recorded.
 - Merge, queue and validation answers are synchronous or recorded, never stale: an explicit merge publishes inside the request, and `kvarm/guard` and CI dispatch are recorded by the push-event consumer; until then the checks gate answers pending.
+
+### Outbound webhooks
+
+A repository admin subscribes an `https` URL to platform events: `kvarm.task.created`, `kvarm.change.merged`, `kvarm.change.ejected` (left the merge queue for good: `data.state` is `ejected` or `stale`), `kvarm.check_run.completed`, `kvarm.escalation.opened`, `kvarm.queue.publication_reconciled` (a crashed merge-queue publication whose outcome was decided from the actual ref) and `kvarm.webhook.disabled`. The signing secret is returned once, by create and by `rotate-secret`. Each delivery is a `POST` of one CloudEvents 1.0 JSON envelope (`content-type: application/cloudevents+json`) with these headers:
+
+| header | value |
+| --- | --- |
+| `x-kvarm-event` | the event type |
+| `x-kvarm-event-id`, `idempotency-key` | the envelope `id`; the same for every attempt and every hook, so deduplicate on it |
+| `x-kvarm-delivery`, `x-kvarm-attempt` | this hook's delivery id and the attempt number (1-6) |
+| `x-kvarm-timestamp` | Unix seconds when the attempt was signed |
+| `x-kvarm-signature` | `sha256=` + hex HMAC-SHA256, keyed by the hook secret, of `<x-kvarm-timestamp>.<raw body>` |
+
+Delivery is at least once and unordered (order by the envelope's `time`). Events recorded by the queue consumer (the merge train, push processing) are sent right after their batch; events recorded by an API request (an explicit merge, a check-run report, a review) wait for the once-a-minute cron, so they can take up to about a minute. Any 2xx answer within 10 s is success; anything else, a redirect (never followed) or a network error is a failed attempt, retried after 30 s, 2 min, 8 min, 32 min and 1 h. After 15 consecutive failed attempts the hook is disabled (a `kvarm.webhook.disabled` event goes to the repository's other hooks); `PATCH …/webhooks/:id {"active": true}` re-enables it. `GET …/webhooks/:id/deliveries` shows each delivery's state, attempts, response status, latency and the first 512 characters of the response; the log keeps 14 days. Targets must be `https` without credentials and may not be IP literals in private, loopback, link-local or reserved ranges or local names such as `localhost` or `*.internal`. The Worker cannot resolve DNS before sending, so a public name that resolves to a private address is not detected; subrequests leave from Cloudflare's network.
+
+Verifying Kvarm webhooks (Node):
+
+```js
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+// rawBody: the request body exactly as received (a string or Buffer, before JSON parsing).
+export function verifyKvarmWebhook(secret, headers, rawBody, toleranceSeconds = 300) {
+  const timestamp = headers['x-kvarm-timestamp'];
+  const signature = headers['x-kvarm-signature'] ?? '';
+  if (!/^\d+$/.test(timestamp ?? '') || Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false;
+  const expected = 'sha256=' + createHmac('sha256', secret).update(`${timestamp}.`).update(rawBody).digest('hex');
+  return signature.length === expected.length && timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+```
+
+Then drop any event whose `x-kvarm-event-id` you have already processed.
 
 ## Demo harness
 
@@ -350,7 +391,7 @@ Configured limits (constants in the code, documented with their behavior in the 
 Not built in this version, recorded for after the submission:
 
 - The collaborative UI pass (new pages and the visual direction); the existing pages are unchanged.
-- Revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
+- Revert change sets, inbound incident webhooks, audit export and `get_audit`.
 - Contract capsules, semantic packets, hotspot suggestions, priority credits and resource lifecycle.
 - Advisory low-signal test flags and an auto-updating repository wiki.
 - Adopting Effect TS across the codebase.

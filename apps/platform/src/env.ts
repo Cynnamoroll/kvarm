@@ -17,6 +17,12 @@ declare global {
      * PAT-only user with the same, WorkOS-verified email (services/identity.ts).
      */
     WORKOS_LINK_VERIFIED_EMAIL?: string;
+    /**
+     * >= 32 char secret from which the key encrypting webhook signing secrets
+     * at rest is derived (services/webhookSafety.ts). Optional: without it the
+     * webhooks API answers 503 WEBHOOKS_NOT_CONFIGURED.
+     */
+    WEBHOOK_SECRET_KEY?: string;
     /** Workers Rate Limiting: 600 requests/min per key. */
     READ_LIMITER: RateLimit;
     /** Workers Rate Limiting: 120 requests/min per key. */

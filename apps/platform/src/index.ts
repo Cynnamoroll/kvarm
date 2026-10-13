@@ -19,7 +19,9 @@ import { attributionApi } from './routes/api/attribution';
 import { checksApi } from './routes/api/checks';
 import { ciApi } from './routes/api/ci';
 import { containerRunnerApi } from './routes/api/containerRunner';
+import { webhooksApi } from './routes/api/webhooks';
 import { handleEventBatch } from './services/events';
+import { runWebhookCron } from './services/webhooks';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
@@ -83,6 +85,7 @@ app.route('/api/v1', attributionApi);
 app.route('/api/v1', checksApi);
 app.route('/api/v1', ciApi);
 app.route('/api/v1', containerRunnerApi);
+app.route('/api/v1', webhooksApi);
 // MCP tool calls are dispatched back through this router to their REST routes.
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
 app.route('/', web);
@@ -115,4 +118,7 @@ export default {
   // Artifacts push events, through the account-level event subscription
   // (services/events.ts).
   queue: (batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) => handleEventBatch(batch, env),
+  // Outbound webhooks: enqueue due deliveries and prune the delivery log
+  // (services/webhooks.ts).
+  scheduled: (_controller: ScheduledController, env: Env, ctx: ExecutionContext) => ctx.waitUntil(runWebhookCron(env)),
 } satisfies ExportedHandler<Env>;

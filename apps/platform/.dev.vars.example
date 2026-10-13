@@ -4,3 +4,6 @@ WORKOS_API_KEY=YOUR_WORKOS_API_KEY
 # Also required in .dev.vars (kept as a comment here so secret scanners
 # don't match it): WORKOS_COOKIE_PASSWORD — a random secret of at least 32
 # characters, generated with: openssl rand -hex 32
+# Optional, for outbound webhooks: WEBHOOK_SECRET_KEY — a random secret of at
+# least 32 characters (openssl rand -hex 32). Without it the webhooks API
+# answers 503.

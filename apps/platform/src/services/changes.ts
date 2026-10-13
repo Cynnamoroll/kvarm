@@ -1703,5 +1703,8 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM change_escalations WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM review_policies WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),
+    // Hooks hold encrypted signing secrets; they and their log go with the repo.
+    db.prepare('DELETE FROM webhook_deliveries WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM webhooks WHERE repo_id = ?').bind(repoId),
   ];
 }

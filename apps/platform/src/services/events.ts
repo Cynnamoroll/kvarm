@@ -31,6 +31,7 @@ import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
 import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
 import { continueDependencySettlement } from './dependencies';
+import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
 
 export interface PushEvent {
   namespace: string;
@@ -372,7 +373,10 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect,
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle';
+/** Webhook attempts one consumer invocation runs at once. */
+export const WEBHOOK_ATTEMPT_LANES = 3;
+
+export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'webhook';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
 export function retryDelaySeconds(attempts: number): number {
@@ -386,6 +390,7 @@ interface MessageResult {
   error?: string;
   train?: TrainRunResult & { reason: string };
   settle?: SettleContinuationResult;
+  webhook?: AttemptResult;
 }
 
 async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
@@ -395,6 +400,10 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
   }
   if (isSettleMessage(msg.body)) {
     return { outcome: 'settle', settle: await continueDependencySettlement(env, msg.body) };
+  }
+  // An endpoint failure is a recorded attempt with its own delayed retry, never a queue retry.
+  if (isWebhookDeliveryMessage(msg.body)) {
+    return { outcome: 'webhook', webhook: await deliverWebhook(env, msg.body.deliveryId) };
   }
   const event = parsePushEvent(msg.body);
   if (!event) return { outcome: 'ignored' };
@@ -461,37 +470,74 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
 }
 
 /**
- * Queue consumer for `kvarm-events`. Messages are handled in order, each under
- * its own cost meter, and each logs one `{cost: …}` line. A message whose
+ * Queue consumer for `kvarm-events`. Messages are handled in order (webhook
+ * attempts beside them, see below), each under its own cost meter, and each
+ * logs one `{cost: …}` line. A message whose
  * effects did not all complete is retried with backoff; everything else
  * (including malformed messages and unknown repos) is acked.
  */
 export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): Promise<void> {
+  // Webhook attempts wait on outside endpoints (up to their timeout each), so
+  // they run concurrently with each other and alongside the in-order work,
+  // never in front of it.
+  const hooks = batch.messages.filter((m) => isWebhookDeliveryMessage(m.body));
+  // A Worker invocation holds at most six outbound connections, and an
+  // attempt's timeout starts when it calls fetch: a few lanes keep every
+  // attempt on an open connection and leave room for the in-order work.
+  const lanes = Array.from({ length: Math.min(WEBHOOK_ATTEMPT_LANES, hooks.length) }, async (_, lane) => {
+    for (let i = lane; i < hooks.length; i += WEBHOOK_ATTEMPT_LANES) await handleMessage(batch.queue, env, hooks[i]!);
+  });
+  const hookRuns = Promise.all(lanes);
   for (const msg of batch.messages) {
-    const meter = new CostMeter();
-    const counters = { wf: 0 };
-    let result: MessageResult;
-    try {
-      result = await runWithMeter(meter, () => processMessage(meter.wrapEnv(env), msg, counters));
-    } catch (err) {
-      result = { outcome: 'retry', error: String(err).slice(0, 200) };
-    }
-    if (result.outcome === 'retry') msg.retry({ delaySeconds: retryDelaySeconds(msg.attempts) });
-    else msg.ack();
-    console.log(
-      JSON.stringify({
-        cost: meter.snapshot(),
-        queue: batch.queue,
-        outcome: result.outcome,
-        attempts: msg.attempts,
-        wf: counters.wf,
-        ...(result.eventId ? { eventId: result.eventId } : {}),
-        ...(result.effects ? { effects: result.effects } : {}),
-        ...(result.train ? { train: result.train } : {}),
-        ...(result.settle ? { settle: result.settle } : {}),
-        ...(result.error ? { error: result.error } : {}),
-      }),
-    );
+    if (!isWebhookDeliveryMessage(msg.body)) await handleMessage(batch.queue, env, msg);
+  }
+  await hookRuns;
+  // Only platform work records new deliveries (an attempt's disablement
+  // notice waits for the cron), so a batch of attempts does not pump again.
+  if (hooks.length < batch.messages.length) await pumpWebhooks(env, batch.queue);
+}
+
+async function handleMessage(queue: string, env: Env, msg: Message<unknown>): Promise<void> {
+  const meter = new CostMeter();
+  const counters = { wf: 0 };
+  let result: MessageResult;
+  try {
+    result = await runWithMeter(meter, () => processMessage(meter.wrapEnv(env), msg, counters));
+  } catch (err) {
+    result = { outcome: 'retry', error: String(err).slice(0, 200) };
+  }
+  if (result.outcome === 'retry') msg.retry({ delaySeconds: retryDelaySeconds(msg.attempts) });
+  else msg.ack();
+  console.log(
+    JSON.stringify({
+      cost: meter.snapshot(),
+      queue,
+      outcome: result.outcome,
+      attempts: msg.attempts,
+      wf: counters.wf,
+      ...(result.eventId ? { eventId: result.eventId } : {}),
+      ...(result.effects ? { effects: result.effects } : {}),
+      ...(result.train ? { train: result.train } : {}),
+      ...(result.settle ? { settle: result.settle } : {}),
+      ...(result.webhook ? { webhook: result.webhook } : {}),
+      ...(result.error ? { error: result.error } : {}),
+    }),
+  );
+}
+
+/**
+ * Enqueues webhook deliveries recorded by this batch's effects (merges and
+ * ejections of a train run, for example), so they do not wait for the cron.
+ * One indexed read when nothing is due; a failure is logged and left to the
+ * cron.
+ */
+async function pumpWebhooks(env: Env, queue: string): Promise<void> {
+  const meter = new CostMeter();
+  try {
+    const r = await runWithMeter(meter, () => pumpWebhookDeliveries(meter.wrapEnv(env)));
+    if (r.enqueued > 0) console.log(JSON.stringify({ cost: meter.snapshot(), queue, webhooksEnqueued: r.enqueued }));
+  } catch (err) {
+    console.log(JSON.stringify({ cost: meter.snapshot(), queue, webhookPumpError: String(err).slice(0, 200) }));
   }
 }
 
