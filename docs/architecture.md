@@ -39,9 +39,13 @@ This inversion is why the merge engine and the integration train do not depend o
 
 ### 0.5 Execution posture
 
-Kvarm runs no agents and calls no hosted model. Agents run where their users run them (Claude Code, Devin, a laptop, an on-premises runner) and coordinate through git workspace refs, MCP tools, declared intents, the merge queue and task dispatch. CI is user-owned: `kvarm runner` claims jobs on the user's machine. A claim carries the job's provenance (its change, head ref, whether the commit is the change head or a platform-prepared merge commit, whether a human or an agent opened the change, and whether any agent token grant matches the head ref). The runner's execution-trust policy uses it to run the job on the host, run it in a docker or podman container, or refuse it and report a failure, before any of the job's code reaches the machine; by default only heads of human changes on refs no agent credential may write run on the host. The pusher of a head is not recorded, so the policy reasons about who could have pushed it.
+Kvarm does not call a hosted model. Agents can run where their users run them (Claude Code, Devin, a laptop, an on-premises runner) and coordinate through git workspace refs, MCP tools, declared intents, the merge queue and task dispatch. The opt-in fleet additionally provides Cloudflare-hosted Linux build environments and resumable agent sandboxes (§0.6). CI remains user-owned: `kvarm runner` claims jobs on the user's machine. A claim carries the job's provenance (its change, head ref, whether the commit is the change head or a platform-prepared merge commit, whether a human or an agent opened the change, and whether any agent token grant matches the head ref). The runner's execution-trust policy uses it to run the job on the host, run it in a docker or podman container, or refuse it and report a failure, before any of the job's code reaches the machine; by default only heads of human changes on refs no agent credential may write run on the host. The pusher of a head is not recorded, so the policy reasons about who could have pushed it.
 
-Cloudflare Containers (public beta) have exactly one hosted use: an opt-in CI check runner showcase. A Durable Object controller (`containers/ciRunnerSandbox.ts`) starts a container through the native `ctx.container` API that runs the same claim → snapshot checkout → run → report loop as `kvarm runner`. The first run prepares the workspace and saves a container snapshot; a later run restores it and skips setup. Credentials pass per `exec()` environment and are never written to the container filesystem, because snapshots capture the writable root.
+Cloudflare Containers (public beta) host opt-in CI runner, environment builder and agent sandbox workloads. The `CiRunnerSandbox` Durable Object remains the user-owned runner showcase; `EnvironmentBuilder` and `AgentSandbox` provide the Linux-only reusable fleet (§0.6). Runtime credentials are supplied to the owning Durable Object and never stored in build snapshots or container filesystems.
+
+### 0.6 Agent fleet
+
+The opt-in fleet provides reusable Linux build environments and resumable agent sandboxes on Cloudflare Containers. Environment builds run from immutable repository snapshots with internet disabled except for explicitly allowed package hosts; successful builds become reusable container snapshots. A sandbox restores that build once, persists workspace state across sleep/wake snapshots, and keeps its agent token only in the owning Durable Object. Each start or wake receives a fresh, workspace-ref-scoped token; sleep revokes it. Wake fetches the workspace and base refs and fast-forwards only a clean local ancestor, never resetting agent work. Commands follow environment deny/approval policy and are audited; files remain confined to `/workspace`. Non-Linux environments are rejected until another `SandboxProvider` implementation exists.
 
 Agent-facing capabilities follow one test: they change a surface every user already touches (merge, review, queue, forecast, CI, status), work through the existing identity, gate and cost machinery, and help a user who never thinks about agents.
 
@@ -53,7 +57,7 @@ REST client --/api/v1/*-->   Hono routers (thin) --> services/* (all logic) --> 
 MCP client  --/mcp------->   MCP tools (thin) ----/                         \-> Artifacts writes (receive-pack client)
                                   D1 (registry and state)   Cache API (content-addressed)   R2 (snapshots)
 Artifacts push event --> queue kvarm-events --> queue() consumer --> cache purge, snapshot build, kvarm/guard,
-                                                                    CI dispatch, change head refresh, train kicks
+                                                                    CI dispatch, environment builds, change head refresh, train kicks
 CI pipeline workflow --> ci_jobs (D1) <-- claim/report -- `kvarm runner` on the user's machine
 merge queue --> parallel preparation and checks --> short MergeLock publication lease --> receive-pack with expected old value
 workspace intents and pushes --> Nexus path index --> advisory forecast --> opt-in pinned dependencies
@@ -61,7 +65,7 @@ workspace intents and pushes --> Nexus path index --> advisory forecast --> opt-
 
 **Layering.** Routers (`routes/**`) and MCP tools (`mcp/server.ts`) are thin adapters. All behavior lives in `apps/platform/src/services/*.ts`; service functions return `ServiceResult<T>` (`{ok: true, value}` or `{ok: false, status, error}`). Pure algorithms live in `packages/*` and are tested in Node.
 
-**Bindings.** D1 `DB` (registry and state), Artifacts `ARTIFACTS` (git storage, namespace `default`), R2 `SNAPSHOTS`, the `EVENTS` queue (`kvarm-events`, with `kvarm-events-dlq`), the Workers Rate Limiting bindings `READ_LIMITER` and `WRITE_LIMITER`, the Durable Objects `MergeLock` and `CiRunnerSandbox` (plus `TokenCache` and `RateLimiter`, which stay exported to keep the Durable Object migration history intact but are no longer used), and the Workflows `snapshot-builder`, `ci-pipeline`, `merge` and `repo-import`.
+**Bindings.** D1 `DB` (registry and state), Artifacts `ARTIFACTS` (git storage, namespace `default`), R2 `SNAPSHOTS`, the `EVENTS` queue (`kvarm-events`, with `kvarm-events-dlq`), the Workers Rate Limiting bindings `READ_LIMITER` and `WRITE_LIMITER`, the Durable Objects `MergeLock`, `CiRunnerSandbox`, `EnvironmentBuilder` and `AgentSandbox` (plus `TokenCache` and `RateLimiter`, which stay exported to keep the Durable Object migration history intact but are no longer used), and the Workflows `snapshot-builder`, `ci-pipeline`, `merge`, `repo-import` and `environment-build`.
 
 ### 1.1 Git gate
 
@@ -175,6 +179,7 @@ All repository routes live under `/api/v1/repos/:owner/:repo/...`. The README's 
 | checks and CI | `GET commits/:sha/status`, `POST check-runs`, `PATCH check-runs/:id`, `POST ci/jobs/claim`, `POST ci/jobs/:id/heartbeat`, `POST ci/jobs/:id/report` (`ci` scope) |
 | merge queue | `POST/DELETE changes/:n/enqueue`, `GET queue`, `GET train` |
 | workspaces and Nexus | `POST workspaces {task, agent}`, `GET workspaces`, `POST workspaces/:id/change-set`, `POST workspaces/:id/abandon`, `GET/POST workspaces/:id/intent`, `GET forecast`, `GET workspaces/overlap` (the only overlap surface, §0.1) |
+| environments and sandboxes | `GET/POST environments`, `GET/PATCH/DELETE environments/:id`, `GET environments/:id/builds`, `POST environments/:id/rebuild`, `GET/POST sandboxes`, `GET sandboxes/mine`, `GET sandboxes/:id`, `POST sandboxes/:id/stop|exec`, `GET/PUT sandboxes/:id/files`, sandbox command and approval routes |
 | candidates | `GET candidates?base=&workspaces=a,b,c` (the list is the explicit candidate set), `POST candidates/compose`, arenas |
 | tasks | `GET tasks`, `POST tasks/:id/claim`, `POST tasks/:id/heartbeat`, `POST tasks/:id/complete` |
 | attribution | `GET/POST commits/:sha/attribution`, `POST decisions`, `GET context?task=\|path=` |

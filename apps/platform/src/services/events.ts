@@ -31,6 +31,12 @@ import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
 import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
 import { continueDependencySettlement } from './dependencies';
+import { withLazyRepo } from '../artifacts/repo';
+import { changedPaths } from './compare';
+import { matchesAnyGlob } from '../containers/fleetJob';
+import { readCommitInfo, type ResolveContext } from './refs';
+import { requestEnvironmentBuild } from './environments';
+import type { RepoRow } from '../db/repos';
 
 export interface PushEvent {
   namespace: string;
@@ -366,7 +372,60 @@ const changeHooksEffect: PushEffect = {
   },
 };
 
-export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect, changeHooksEffect];
+const environmentBuildEffect: PushEffect = {
+  name: 'environment-builds',
+  async run(ctx) {
+    if (!ctx.event.ref.startsWith(BRANCH_PREFIX)) return { state: 'skipped', detail: 'not a branch' };
+    const environments = await ctx.env.DB.prepare(
+      'SELECT id, rebuild_paths FROM environments WHERE repo_id = ?1 AND base_ref = ?2 AND archived_at IS NULL LIMIT 100',
+    )
+      .bind(ctx.repoId, ctx.event.ref.slice(BRANCH_PREFIX.length))
+      .all<{ id: string; rebuild_paths: string }>();
+    const rows = environments.results ?? [];
+    if (rows.length === 0) return { state: 'skipped', detail: 'no environment uses this base ref' };
+    let paths: string[] = [];
+    let truncated = false;
+    if (ctx.event.after === ZERO_OID) {
+      truncated = true;
+    } else if (ctx.event.before === ctx.event.after) {
+      return { state: 'skipped', detail: 'push did not change the commit' };
+    } else {
+      const repo = await ctx.env.DB.prepare('SELECT * FROM repos WHERE id = ?1')
+        .bind(ctx.repoId)
+        .first<RepoRow>();
+      if (!repo) return { state: 'skipped', detail: 'repository no longer exists' };
+      const diff = await withLazyRepo(ctx.env, repo.artifacts_name, async (artifacts) => {
+        const context: ResolveContext = { env: ctx.env, repo, artifacts, bypass: true, waitUntil: () => undefined };
+        const [before, after] = await Promise.all([
+          ctx.event.before === ZERO_OID ? Promise.resolve(null) : readCommitInfo(context, ctx.event.before),
+          readCommitInfo(context, ctx.event.after),
+        ]);
+        if (!before || !after) return { paths: [] as string[], truncated: true };
+        const result = await changedPaths(context, before.tree, after.tree);
+        return { paths: result.paths, truncated: result.truncated };
+      });
+      paths = diff.paths;
+      truncated = diff.truncated;
+    }
+    let requested = 0;
+    for (const environment of rows) {
+      let patterns: string[] = [];
+      try {
+        const parsed: unknown = JSON.parse(environment.rebuild_paths);
+        if (Array.isArray(parsed)) patterns = parsed.filter((pattern): pattern is string => typeof pattern === 'string');
+      } catch {
+        truncated = true;
+      }
+      if (!truncated && !paths.some((path) => matchesAnyGlob(path, patterns))) continue;
+      const result = await requestEnvironmentBuild(ctx.env, environment.id, 'push');
+      if (!result.ok) throw new Error(`environment ${environment.id} build request failed: ${result.error}`);
+      requested += 1;
+    }
+    return { state: requested ? 'done' : 'skipped', detail: `requested ${requested} build(s)${truncated ? ' after a truncated diff' : ''}` };
+  },
+};
+
+export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect, changeHooksEffect, environmentBuildEffect];
 
 // ---------------------------------------------------------------------------
 // Dispatcher

@@ -56,6 +56,12 @@ Median of each counter over n requests of the same endpoint in the same state, c
 | candidates (2 workspaces) | 5 | 3 | 0 | 0 | 0 | 0 | hit | `d1=3;art=0;do=0;sub=0` | within |
 | MCP `read_file` | 5 | 1 | 0 | 0 | 0 | 0 | hit | `d1=1;art=0;do=0;r2b=0;sub=0 (= the REST contents read)` | within |
 
+Agent fleet lifecycle rows are currently `workerd-only`: the local workerd pool
+does not provide Cloudflare Containers or snapshot storage. The budget
+specifications and required authorization/coalescing checks are in
+`scripts/lib/cost-catalog.mjs`; a deployed-container run will add measured
+`x-kvarm-cost` rows without changing these API contracts.
+
 ## Overlap forecast and composition
 
 | call | n | min | p50 | max | methodology |

@@ -247,7 +247,7 @@ Details (warm working directories, extraction safety, exit codes): [`apps/cli/RE
 
 `POST /mcp` is a stateless Streamable HTTP MCP server (`@modelcontextprotocol/sdk`). Authenticate with `Authorization: Bearer <token>`: a personal access token with the `api` scope or an agent token. Every tool runs the same service code and the same authorization as REST.
 
-The 91 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`record_decision`, `get_context`) and `branch-rules`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
+The 99 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`record_decision`, `get_context`), `branch-rules`, `environments` and `sandboxes`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
 
 Setup guides for Claude Code, Codex CLI, Cursor and generic MCP clients, the agent workflow and an `AGENTS.md` template are in [`docs/agents/`](docs/agents/README.md).
 
@@ -273,6 +273,7 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope) |
 | reviews | `GET/PUT …/review-policy`, `GET/POST …/changes/:n/reviews`, `POST …/changes/:n/approve`, `…/request-changes`, `…/reviewers/assign`, `…/escalations/:id/resolve`, `GET …/reviews/pending` |
 | workspaces and Nexus | `POST/GET …/workspaces`, `GET …/workspaces/:id`, `POST …/workspaces/:id/change-set`, `POST …/workspaces/:id/abandon`, `GET/POST …/workspaces/:id/intent`, `GET …/forecast`, `GET …/workspaces/overlap` |
+| environments and sandboxes | `GET/POST …/environments`, `GET/PATCH/DELETE …/environments/:id`, `GET …/environments/:id/builds`, `POST …/environments/:id/rebuild`, `GET/POST …/sandboxes`, `GET /sandboxes/mine`, `POST …/sandboxes/:id/exec|stop`, `GET/PUT …/sandboxes/:id/files` |
 | dependencies | `POST/GET …/workspaces/:id/dependencies`, `POST …/workspaces/:id/dependencies/:dep/repin`, `DELETE …/workspaces/:id/dependencies/:dep` |
 | candidates | `GET …/candidates`, `POST …/candidates/compose`, `GET …/compositions`, `GET …/compositions/:id`, `POST/GET …/arenas`, `GET …/arenas/:id`, `GET …/arenas/:id/candidates`, `POST …/arenas/:id/select` |
 | tasks | `GET …/tasks`, `GET …/tasks/:id`, `POST …/tasks/:id/claim`, `…/heartbeat`, `…/complete` |

@@ -218,7 +218,7 @@ describe('queue dispatcher', () => {
     expect(lines).toHaveLength(1);
     const line = JSON.parse(lines[0]!) as { cost: { d1: number; art: number; do: number }; outcome: string; wf: number };
     expect(line.outcome).toBe('processed');
-    expect(line.cost.d1).toBeLessThanOrEqual(2);
+    expect(line.cost.d1).toBeLessThanOrEqual(3);
     expect(line.cost.art).toBe(0);
     expect(line.cost.do).toBe(0);
     expect(line.wf).toBe(1);
@@ -276,6 +276,7 @@ describe('queue dispatcher', () => {
       purge: { state: 'done', detail: null },
       'intent-index': expect.objectContaining({ state: 'skipped' }) as unknown,
       'change-hooks': { state: 'skipped', detail: 'no open changes' },
+      'environment-builds': { state: 'skipped', detail: 'no environment uses this base ref' },
     });
     const gen = await refGeneration(repo.id);
 
@@ -542,7 +543,7 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     expect(list[2]!.eventAt).toBe(iso(T0 + 1000));
     expect(list[0]!.id).not.toBe(list[2]!.id);
     expect(list[0]!.completedAt).toMatch(/Z$/);
-    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['change-hooks', 'intent-index', 'purge', 'snapshot']);
+    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['change-hooks', 'environment-builds', 'intent-index', 'purge', 'snapshot']);
     expect(r.body.nextCursor).toBeNull();
     expect(r.cost.d1).toBeLessThanOrEqual(2);
     expect(r.cost.art).toBe(0);

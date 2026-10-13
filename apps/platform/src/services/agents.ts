@@ -247,6 +247,10 @@ export interface MintedToken {
   row: AgentTokenListRow;
 }
 
+export function hashAgentToken(token: string): Promise<string> {
+  return patHash(token);
+}
+
 type ValidMint = { owner: string; name: string; role: AgentRole; refs: string[]; ttlSeconds: number };
 
 export function validateMint(input: MintTokenInput): ServiceResult<ValidMint> {
@@ -327,7 +331,7 @@ export async function mintAgentToken(
   const now = Date.now();
   const id = crypto.randomUUID();
   const { token, prefix } = newAgentToken();
-  const hash = await patHash(token);
+  const hash = await hashAgentToken(token);
   const expiresAt = now + v.ttlSeconds * 1000;
   const [inserted, , row] = await env.DB.batch([
     env.DB.prepare(

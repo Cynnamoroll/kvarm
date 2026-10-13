@@ -19,7 +19,9 @@ import { attributionApi } from './routes/api/attribution';
 import { checksApi } from './routes/api/checks';
 import { ciApi } from './routes/api/ci';
 import { containerRunnerApi } from './routes/api/containerRunner';
+import { fleetApi } from './routes/api/fleet';
 import { handleEventBatch } from './services/events';
+import { handleFleetScheduled } from './services/sandboxes/sweeps';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
@@ -28,7 +30,11 @@ import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
 export { TokenCache, RateLimiter, MergeLock } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
+export { EnvironmentBuild } from './workflows/environmentBuild';
 export { CiRunnerSandbox } from './containers/ciRunnerSandbox';
+export { EnvironmentBuilder } from './containers/environmentBuilder';
+export { AgentSandbox } from './containers/agentSandbox';
+export { SandboxEgress } from './containers/sandboxEgress';
 
 installFetchMeter();
 
@@ -77,6 +83,7 @@ app.route('/api/v1', attributionApi);
 app.route('/api/v1', checksApi);
 app.route('/api/v1', ciApi);
 app.route('/api/v1', containerRunnerApi);
+app.route('/api/v1', fleetApi);
 // MCP tool calls are dispatched back through this router to their REST routes.
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
 app.route('/', web);
@@ -93,15 +100,20 @@ app.all('*', async (c) => {
   return res;
 });
 
+export function dispatchPlatformRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  return serveMetered(request, env, ctx, async (req, e, cx) => {
+    const response = await app.fetch(req, e, cx);
+    return presentsCredential(req) ? withPrivateCacheControl(response) : response;
+  });
+}
+
 export default {
   // Every response carries x-kvarm-cost (src/cost/meter.ts). Responses to a
   // presented credential are never shared-cacheable, on every transport.
   fetch: (request, env, ctx) =>
-    serveMetered(request, env, ctx, async (req, e, cx) => {
-      const res = await app.fetch(req, e, cx);
-      return presentsCredential(req) ? withPrivateCacheControl(res) : res;
-    }),
+    dispatchPlatformRequest(request, env, ctx),
   // Artifacts push events, through the account-level event subscription
   // (services/events.ts).
   queue: (batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) => handleEventBatch(batch, env),
+  scheduled: (_controller: ScheduledController, env: Env, ctx: ExecutionContext) => handleFleetScheduled(env, ctx),
 } satisfies ExportedHandler<Env>;
