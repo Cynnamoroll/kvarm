@@ -80,6 +80,7 @@ const R3 = 'scrutiny repair round 3';
 const CI = 'ci runner (m5';
 const FLEET = 'fleet run';
 const CONT = 'container ci runner route';
+const SANDBOX = 'agent sandbox fleet';
 const PERF = 'performance audit';
 const TWO = 'two-pin publication read';
 
@@ -364,6 +365,11 @@ export const CATALOG = [
   // Container CI runner route
   L('cont-run', CONT, 'POST …/ci/container-runs', 'container.run', 'd1=1;do=1;q=0;art=0', { status: 200 }),
   L('cont-reset', CONT, 'DELETE …/ci/container-runs/snapshot', 'container.reset', 'd1=1;do=1', { status: 200 }),
+
+  // Reusable environments and resumable agent sandboxes. These rows remain
+  // non-live until a deployment with Cloudflare Containers is available.
+  N('sandbox-environment-lifecycle', SANDBOX, 'Environment CRUD and build request', 'workerd-only', 'requires a deployed Workflow and EnvironmentBuilder container; workerd tests cover authorization and request coalescing'),
+  N('sandbox-lifecycle', SANDBOX, 'Sandbox start/resume/stop and scheduled retention sweep', 'workerd-only', 'requires a deployed AgentSandbox container and snapshot runtime; workerd tests cover policy and lifecycle state transitions'),
 
   // Performance audit, platform half
   L('perf-overlap', PERF, 'GET …/workspaces/overlap (limit 50), per page', 'overlap', 'd1=2;art=0;do=0;sub=0;rr<=80', { status: 200 }),

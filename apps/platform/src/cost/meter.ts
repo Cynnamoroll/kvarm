@@ -56,6 +56,8 @@ export const METERED_BINDINGS: Readonly<Record<string, BindingKind>> = {
   RATE_LIMIT: 'do',
   MERGE_LOCK: 'do',
   CI_SANDBOX: 'do',
+  ENV_BUILDER: 'do',
+  AGENT_SANDBOX: 'do',
 };
 
 interface D1Meta {

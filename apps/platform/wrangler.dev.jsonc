@@ -63,7 +63,9 @@
     "bindings": [
       { "name": "TOKENS", "class_name": "TokenCache" },
       { "name": "RATE_LIMIT", "class_name": "RateLimiter" },
-      { "name": "MERGE_LOCK", "class_name": "MergeLock" }
+      { "name": "MERGE_LOCK", "class_name": "MergeLock" },
+      { "name": "ENV_BUILDER", "class_name": "EnvironmentBuilder" },
+      { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" }
     ]
   },
   "migrations": [
@@ -74,14 +76,26 @@
     {
       "tag": "v2",
       "deleted_classes": ["RealtimeHub"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["EnvironmentBuilder", "AgentSandbox"]
     }
+  ],
+  "containers": [
+    { "class_name": "EnvironmentBuilder", "scheduling_policy": "durable_object" },
+    { "class_name": "AgentSandbox", "scheduling_policy": "durable_object" }
   ],
   "workflows": [
     { "name": "snapshot-builder", "binding": "SNAPSHOT_BUILDER", "class_name": "SnapshotBuilder" },
     { "name": "ci-pipeline", "binding": "CI_PIPELINE", "class_name": "CiPipeline" },
     { "name": "merge", "binding": "MERGE_WORKFLOW", "class_name": "MergeWorkflow" },
-    { "name": "repo-import", "binding": "REPO_IMPORT", "class_name": "RepoImport" }
+    { "name": "repo-import", "binding": "REPO_IMPORT", "class_name": "RepoImport" },
+    { "name": "environment-build", "binding": "ENVIRONMENT_BUILD", "class_name": "EnvironmentBuild" }
   ],
+  "triggers": {
+    "crons": ["0 */6 * * *"]
+  },
   "vars": {
     "SITE_NAME": "Kvarm",
     "APP_ORIGIN": "http://localhost:8787",

@@ -53,9 +53,15 @@ describe('operation registry', () => {
 
   it('covers every implemented operation family', () => {
     const families = new Set(OPERATIONS.map((o) => o.family));
-    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'provenance', 'queue', 'tasks', 'reviews', 'dependencies', 'webhooks']) {
+    for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'provenance', 'queue', 'tasks', 'reviews', 'dependencies', 'issues', 'environments', 'sandboxes', 'ci', 'webhooks']) {
       expect(families, f).toContain(f);
     }
+    expect(findOperation('start_sandbox')).toMatchObject({
+      command: ['sandbox', 'start'],
+      family: 'sandboxes',
+      path: '/repos/{repo}/sandboxes',
+    });
+    expect(findOperation('stop_sandbox')?.description).toMatch(/sleep.*discard/is);
     expect(families).toContain('issues');
     expect(findOperation('create_issue')).toMatchObject({ command: ['issue', 'create'], method: 'POST', path: '/repos/{repo}/issues', readOnly: false });
     expect(findOperation('link_issue')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'issue', 'kind', 'state']);

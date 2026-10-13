@@ -1,0 +1,145 @@
+import { describe, expect, it } from 'vitest';
+import {
+  isAllowedEgressHost,
+  matchCommandPolicy,
+  runEnvironmentBuild,
+  tailText,
+  type BuildContainerLike,
+} from '../../../apps/platform/src/containers/fleetJob';
+
+function readable(text: string): ReadableStream<Uint8Array> {
+  return new Blob([text]).stream();
+}
+
+function fakeExec(exitCode = 0, stdout = '', stderr = '') {
+  return {
+    stdout: readable(stdout),
+    stderr: readable(stderr),
+    exitCode: Promise.resolve(exitCode),
+  };
+}
+
+class FakeBuildContainer implements BuildContainerLike {
+  calls: Array<{ cmd: string[]; env?: Record<string, string>; stdin?: ReadableStream }> = [];
+  snapshotCalls = 0;
+  setupFails = false;
+  validateFails = false;
+  output = '';
+
+  async exec(cmd: string[], options?: { cwd?: string; env?: Record<string, string>; stdin?: ReadableStream }) {
+    this.calls.push({ cmd, env: options?.env, stdin: options?.stdin });
+    const text = cmd.join(' ');
+    const setupFailure = this.setupFails && text.includes('setup marker');
+    const validateFailure = this.validateFails && text.includes('validate marker');
+    const failed = setupFailure || validateFailure;
+    return fakeExec(failed ? 1 : 0, this.output, setupFailure ? 'setup failed' : validateFailure ? 'validation failed' : '');
+  }
+
+  async snapshotContainer() {
+    this.snapshotCalls += 1;
+    return { id: 'snapshot-1', size: 100 };
+  }
+}
+
+describe('fleet policy helpers', () => {
+  it('matches egress host globs and always allows the platform origin only', () => {
+    const allowed = ['registry.npmjs.org', '*.pythonhosted.org', 'github.com'];
+    expect(isAllowedEgressHost('registry.npmjs.org', allowed, 'https://kvarm.test')).toBe(true);
+    expect(isAllowedEgressHost('files.pythonhosted.org', allowed, 'https://kvarm.test')).toBe(true);
+    expect(isAllowedEgressHost('api.github.com', allowed, 'https://kvarm.test')).toBe(false);
+    expect(isAllowedEgressHost('kvarm.test', allowed, 'https://kvarm.test')).toBe(true);
+    expect(isAllowedEgressHost('evil.test', allowed, 'https://kvarm.test')).toBe(false);
+  });
+
+  it('matches command policy over the complete command and gives deny precedence', () => {
+    expect(matchCommandPolicy('rm -rf /tmp/a', { deny: ['rm -rf *'], approve: ['rm *'] })).toBe('denied');
+    expect(matchCommandPolicy('npm install', { deny: [], approve: ['npm *'] })).toBe('approved');
+    expect(matchCommandPolicy('prefix npm install', { deny: [], approve: ['npm *'] })).toBe('allowed');
+  });
+
+  it('runs extraction, git bootstrap, setup, validation, then snapshots without credentials', async () => {
+    const container = new FakeBuildContainer();
+    const result = await runEnvironmentBuild(container, {
+      snapshotTar: readable('snapshot tar'),
+      repoDirectory: '/workspace/demo',
+      setupScript: 'setup marker',
+      validateScript: 'validate marker',
+      envVars: { MODE: 'test', PUBLIC_SETTING: 'safe-value' },
+    });
+    expect(result.ok).toBe(true);
+    expect(container.calls.map((call) => call.cmd.join(' '))).toEqual([
+      'cp /etc/cloudflare/certs/cloudflare-containers-ca.crt /usr/local/share/ca-certificates/cloudflare-containers-ca.crt',
+      'update-ca-certificates',
+      'mkdir -p /workspace/demo',
+      'tar -xf - -C /workspace/demo',
+      'git init',
+      'git config http.sslCAInfo /etc/cloudflare/certs/cloudflare-containers-ca.crt',
+      'bash -euo pipefail -c setup marker',
+      'bash -euo pipefail -c validate marker',
+    ]);
+    expect(container.snapshotCalls).toBe(1);
+    for (const call of container.calls) {
+      const argumentsAndEnvironment = `${JSON.stringify(call.cmd)}${JSON.stringify(call.env ?? {})}`;
+      expect(argumentsAndEnvironment).not.toMatch(/kvarm_(?:agt|pat)_/);
+      if (call.stdin) {
+        const streamText = await new Response(call.stdin).text();
+        expect(streamText).not.toMatch(/kvarm_(?:agt|pat)_/);
+      }
+    }
+    expect(container.calls.find((call) => call.cmd.includes('setup marker'))?.env).toEqual({
+      MODE: 'test',
+      PUBLIC_SETTING: 'safe-value',
+    });
+  });
+
+  it('fails validation without saving a snapshot', async () => {
+    const container = new FakeBuildContainer();
+    container.validateFails = true;
+    const result = await runEnvironmentBuild(container, {
+      snapshotTar: readable('snapshot tar'),
+      repoDirectory: '/workspace/demo',
+      setupScript: '',
+      validateScript: 'validate marker',
+      envVars: {},
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('validation failed');
+    expect(container.snapshotCalls).toBe(0);
+  });
+
+  it('stops after a setup failure without running validation or snapshotting', async () => {
+    const container = new FakeBuildContainer();
+    container.setupFails = true;
+    const result = await runEnvironmentBuild(container, {
+      snapshotTar: readable('snapshot tar'),
+      repoDirectory: '/workspace/demo',
+      setupScript: 'setup marker',
+      validateScript: 'validate marker',
+      envVars: { MODE: 'test' },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('setup failed');
+    expect(container.calls.some((call) => call.cmd.includes('validate marker'))).toBe(false);
+    expect(container.snapshotCalls).toBe(0);
+  });
+
+  it('bounds the captured build output tail', async () => {
+    const container = new FakeBuildContainer();
+    container.output = 'x'.repeat(70 * 1024);
+    const result = await runEnvironmentBuild(container, {
+      snapshotTar: readable('snapshot tar'),
+      repoDirectory: '/workspace/demo',
+      setupScript: '',
+      validateScript: '',
+      envVars: { MODE: 'test' },
+    });
+    expect(result.ok).toBe(true);
+    expect(new TextEncoder().encode(result.outputTail).byteLength).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it('bounds output by UTF-8 bytes', () => {
+    expect(new TextEncoder().encode(tailText('0123456789', 5)).byteLength).toBeLessThanOrEqual(5);
+    expect(tailText('0123456789', 5)).toBe('56789');
+    expect(new TextEncoder().encode(tailText('a🙂b🙂c', 5)).byteLength).toBeLessThanOrEqual(5);
+  });
+});
