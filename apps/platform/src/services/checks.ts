@@ -386,12 +386,14 @@ export function checkRunsProducer(env: Pick<Env, 'DB'>): ChecksProducer {
       const trees = [...new Set(batch.map((p) => p.treeSha))].map((value) => ({ kind: 'tree' as const, value }));
       const guards = new Map(
         batch.flatMap((p) =>
-          p.subject ? [[`${p.subject.changeId}:${p.subject.headSha}`, { kind: 'guard' as const, value: p.subject.headSha, changeId: p.subject.changeId }] as const] : [],
+          p.subject
+            ? [[`${p.subject.changeId}:${p.subject.headSha}:${p.subject.guardBaseTree}`, { kind: 'guard' as const, value: p.subject.headSha, changeId: p.subject.changeId, baseTree: p.subject.guardBaseTree }] as const] : [],
         ),
       ).values();
-      const keys: Array<{ kind: 'tree'; value: string } | { kind: 'guard'; value: string; changeId: string }> = [...trees, ...guards];
+      const keys: Array<{ kind: 'tree'; value: string } | { kind: 'guard'; value: string; changeId: string; baseTree: string }> = [...trees, ...guards];
       // One statement per key, each a bounded index range (a tree's newest counted runs, a head's newest
-      // guard run), in one batch: D1 caps the terms of a compound SELECT well below the keys of a request.
+      // guard run judged against the asked base tree), in one batch: D1 caps the terms of a compound
+      // SELECT well below the keys of a request.
       const statements = keys.map((k) =>
         k.kind === 'tree'
           ? env.DB.prepare(
@@ -399,18 +401,26 @@ export function checkRunsProducer(env: Pick<Env, 'DB'>): ChecksProducer {
                 WHERE k.repo_id = ?1 AND k.tree_sha = ?2 AND k.required = 1 AND k.quarantined = 0
                 ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHECK_LIMITS.gateRowsPerTree}`,
             ).bind(repoId, k.value)
-          : env.DB.prepare(
+          : // The gate names the merge-base tree its plan publishes, so the
+            // run judged against exactly that tree answers; the newest run
+            // of the head alone must not decide (a base that returns to an
+            // earlier tree would otherwise answer pending forever, because
+            // recordGuard never re-records a (head, base tree) it judged).
+            env.DB.prepare(
               `SELECT ${GATE_COLUMNS} FROM check_runs k INDEXED BY idx_checks_sha_name_newest
                 WHERE k.repo_id = ?1 AND k.head_sha = ?2 AND k.name = '${GUARD_CHECK}' AND k.change_set_id = ?3
                   AND k.required = 1 AND k.quarantined = 0
+                  AND json_extract(k.summary, '$.baseTree') = ?4
                 ORDER BY k.created_at DESC, k.id DESC LIMIT 1`,
-            ).bind(repoId, k.value, k.changeId),
+            ).bind(repoId, k.value, k.changeId, k.baseTree),
       );
       const results = await env.DB.batch<GateRow>(statements);
-      const rows = new Map(keys.map((k, i) => [`${k.kind}:${k.kind === 'guard' ? `${k.changeId}:` : ''}${k.value}`, results[i]?.results ?? []]));
+      const rows = new Map(
+        keys.map((k, i) => [`${k.kind}:${k.kind === 'guard' ? `${k.changeId}:${k.baseTree}:` : ''}${k.value}`, results[i]?.results ?? []]),
+      );
       for (const p of batch) {
         const treeRows = rows.get(`tree:${p.treeSha}`) ?? [];
-        const guardRows = p.subject ? (rows.get(`guard:${p.subject.changeId}:${p.subject.headSha}`) ?? []) : [];
+        const guardRows = p.subject ? (rows.get(`guard:${p.subject.changeId}:${p.subject.guardBaseTree}:${p.subject.headSha}`) ?? []) : [];
         p.resolve(answer(treeRows, guardRows, p.subject, treeRows.length === CHECK_LIMITS.gateRowsPerTree));
       }
     } catch (err) {
