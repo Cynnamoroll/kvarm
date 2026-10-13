@@ -314,7 +314,7 @@ The exact path, parameters and reply of every registry operation are printed by 
 
 ### Outbound webhooks
 
-A repository admin subscribes an `https` URL to platform events: `kvarm.task.created`, `kvarm.change.merged`, `kvarm.change.ejected` (left the merge queue), `kvarm.check_run.completed`, `kvarm.escalation.opened` and `kvarm.webhook.disabled`. The signing secret is returned once, by create and by `rotate-secret`. Each delivery is a `POST` of one CloudEvents 1.0 JSON envelope (`content-type: application/cloudevents+json`) with these headers:
+A repository admin subscribes an `https` URL to platform events: `kvarm.task.created`, `kvarm.change.merged`, `kvarm.change.ejected` (left the merge queue), `kvarm.check_run.completed`, `kvarm.escalation.opened`, `kvarm.queue.publication_reconciled` (a crashed merge-queue publication whose outcome was decided from the actual ref) and `kvarm.webhook.disabled`. The signing secret is returned once, by create and by `rotate-secret`. Each delivery is a `POST` of one CloudEvents 1.0 JSON envelope (`content-type: application/cloudevents+json`) with these headers:
 
 | header | value |
 | --- | --- |

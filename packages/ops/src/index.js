@@ -1323,7 +1323,7 @@ export const OPERATIONS = Object.freeze([
     params: [
       REPO,
       body('url', 'string', 'https URL that receives the events', { required: true }),
-      body('events', 'string[]', 'Event types: kvarm.task.created, kvarm.change.merged, kvarm.change.ejected, kvarm.check_run.completed, kvarm.escalation.opened, kvarm.webhook.disabled', { required: true }),
+      body('events', 'string[]', 'Event types: kvarm.task.created, kvarm.change.merged, kvarm.change.ejected, kvarm.check_run.completed, kvarm.escalation.opened, kvarm.queue.publication_reconciled, kvarm.webhook.disabled', { required: true }),
     ],
   }),
   define({

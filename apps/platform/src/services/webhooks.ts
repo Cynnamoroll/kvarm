@@ -55,6 +55,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'kvarm.change.ejected',
   'kvarm.check_run.completed',
   'kvarm.escalation.opened',
+  'kvarm.queue.publication_reconciled',
   'kvarm.webhook.disabled',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];

@@ -361,7 +361,14 @@ describe('recording platform events', () => {
   it('fans each subscribed event type out to the active hooks of its repository only', async () => {
     const repo = await seedRepo('emit');
     await seedRepo('emit-other');
-    const all = await createHook('emit', ['kvarm.change.merged', 'kvarm.change.ejected', 'kvarm.check_run.completed', 'kvarm.escalation.opened', 'kvarm.task.created']);
+    const all = await createHook('emit', [
+      'kvarm.change.merged',
+      'kvarm.change.ejected',
+      'kvarm.check_run.completed',
+      'kvarm.escalation.opened',
+      'kvarm.task.created',
+      'kvarm.queue.publication_reconciled',
+    ]);
     const merges = await createHook('emit', ['kvarm.change.merged'], `${HOOK_URL}/merges`);
     const other = await createHook('emit-other', ['kvarm.change.merged']);
     const off = await createHook('emit', ['kvarm.change.merged'], `${HOOK_URL}/off`);
@@ -398,6 +405,14 @@ describe('recording platform events', () => {
     // Task created: the existing conflicts path writes the envelope to the ledger.
     const conflicted = await seedChange('emit', 3);
     await env.DB.batch(markConflictedStatements(env.DB, conflicted, { headSha: SHA, baseSha: 'c'.repeat(40), conflicts: [{ path: 'a.txt', kind: 'content' }] }, now));
+    // A type another service already writes to the ledger as an envelope is subscribable by listing it.
+    await env.DB.prepare(
+      `INSERT INTO events (id, type, payload, processed_at, created_at)
+       VALUES ('reconciled-1', 'kvarm.queue.publication_reconciled',
+               json_object('specversion', '1.0', 'id', 'reconciled-1', 'type', 'kvarm.queue.publication_reconciled',
+                           'source', '/repos/' || ?1 || '/emit', 'time', '2026-01-01T00:00:00.000Z', 'datacontenttype', 'application/json',
+                           'data', json_object('repo', ?1 || '/emit', 'change', 2, 'outcome', 'not_applied')), NULL, ?2)`,
+    ).bind(logins.owner, now).run();
 
     const rows = await deliveries(all.id);
     expect(rows.map((r) => r.event_type).sort()).toEqual([
@@ -407,6 +422,7 @@ describe('recording platform events', () => {
       'kvarm.check_run.completed',
       'kvarm.check_run.completed',
       'kvarm.escalation.opened',
+      'kvarm.queue.publication_reconciled',
       'kvarm.task.created',
     ]);
     expect(rows.every((r) => r.state === 'pending' && r.attempts === 0)).toBe(true);
