@@ -2,15 +2,17 @@
  * Fleet pages: repository environments (definitions, builds, rebuilds) and the
  * signed-in user's sandboxes across repositories, with command approvals and
  * the command audit log. SSR only; every mutation is a plain form post that
- * the environments and sandboxes services authorize (architecture §0.6).
+ * the environments and sandboxes services authorize (architecture §0.6). A
+ * session's post also carries its CSRF token (architecture §11.1).
  */
 
 import { Hono, type Context } from 'hono';
 import { html, raw, timeAgo } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
 import { listReposForOwner } from '../db/repos';
-import { clientIp, requestCredential, type ApiActor, type App as ApiApp } from './api';
-import { appLayout } from '../web/render';
+import { clientIp, requestCredential, requestSession, type ApiActor, type App as ApiApp } from './api';
+import { sessionFormRefused } from './repoPages';
+import { appLayout, csrfInput } from '../web/render';
 import { resolveRepoAccess } from '../services/access';
 import { getRepo } from '../db/repos';
 import * as environments from '../services/environments';
@@ -66,6 +68,41 @@ async function resolveRepo(c: Context<App>): Promise<Resolved | null> {
 async function sessionActor(c: Context<App>): Promise<ApiActor | null> {
   const credential = await requestCredential(c);
   return credential.kind === 'session' ? credential.actor : null;
+}
+
+/** The session's hidden CSRF field for this page's forms; empty for a bearer caller. */
+async function csrfField(c: Context<App>): Promise<string> {
+  return csrfInput((await requestSession(c))?.csrfToken);
+}
+
+/**
+ * The posted form, or the 403 for a session post without its CSRF token
+ * (architecture §11.1). Handlers read their form only through here, before
+ * any write, so a new handler cannot skip the check by reading the body itself.
+ */
+async function postedForm(c: Context<App>, viewer: ApiActor): Promise<Record<string, unknown> | Response> {
+  const form = await readForm(c);
+  return (await sessionFormRefused(c, viewer, form)) ?? form;
+}
+
+/**
+ * postedForm for handlers that use no form fields: a bearer post's body is
+ * never read, so these routes accept any body from it as they did before.
+ */
+async function csrfRefused(c: Context<App>, viewer: ApiActor): Promise<Response | null> {
+  return viewer.via === 'session' ? sessionFormRefused(c, viewer, await readForm(c)) : null;
+}
+
+/** An unparseable body reads as an empty form, which a session post then fails for its missing token. */
+async function readForm(c: Context<App>): Promise<Record<string, unknown>> {
+  return ((await c.req.parseBody().catch(() => ({}))) as Record<string, unknown>);
+}
+
+/** A same-origin Referer to return to; a missing, foreign or malformed one falls back to `/fleet`. */
+function sameOriginReferer(c: Context<App>): string {
+  const back = c.req.header('referer');
+  if (!back || !URL.canParse(back)) return '/fleet';
+  return new URL(back).origin === new URL(c.req.url).origin ? back : '/fleet';
 }
 
 function sandboxContext(c: Context<App>, repo: RepoRow, actor: ApiActor | null): sandboxes.SandboxContext {
@@ -246,7 +283,7 @@ function formFromBody(form: Record<string, unknown>): FormValues {
   };
 }
 
-function environmentForm(action: string, values: FormValues, creating: boolean, error?: string): string {
+function environmentForm(action: string, values: FormValues, creating: boolean, csrf: string, error?: string): string {
   const instanceOptions = INSTANCES.map(
     (i) => html`<option value="${i}" ${raw(values.instance === i ? 'selected' : '')}>${i}</option>`,
   ).join('');
@@ -254,6 +291,7 @@ function environmentForm(action: string, values: FormValues, creating: boolean, 
   return html`
     ${raw(flash(error))}
     <form method="post" action="${raw(action)}" class="env-form">
+      ${raw(csrf)}
       <div class="k-form-sections">
         <section class="panel k-consent">
           <div class="panel-head"><span class="hud">01 / BASICS</span></div>
@@ -501,21 +539,22 @@ fleetRepoPages.get('/environments/new', async (c) => {
       `kvarm environment create --repo ${resolved.repo.owner_login}/${resolved.repo.name}`,
       [{ label: 'OS', value: 'LINUX' }, { label: 'DEFAULT INSTANCE', value: 'STANDARD-1' }],
     ))}
-    ${raw(environmentForm(`${base}/environments`, formValues(null, resolved.repo.default_branch), true))}`;
+    ${raw(environmentForm(`${base}/environments`, formValues(null, resolved.repo.default_branch), true, await csrfField(c)))}`;
   return repoShell(c, resolved, 'New environment', body);
 });
 
 fleetRepoPages.post('/environments', async (c) => {
   const resolved = await resolveRepo(c);
   if (!resolved || !resolved.viewer) return notFound(c);
-  const form = (await c.req.parseBody()) as Record<string, unknown>;
+  const form = await postedForm(c, resolved.viewer);
+  if (form instanceof Response) return form;
   const created = await environments.createEnvironment(
     { env: c.env, repo: resolved.repo, actor: resolved.viewer },
     formInput(form, true) as unknown as environments.CreateEnvironmentInput,
   );
   const base = repoBase(resolved.repo);
   if (!created.ok) {
-    const body = html`<h2>New environment</h2>${raw(environmentForm(`${base}/environments`, formFromBody(form), true, created.error))}`;
+    const body = html`<h2>New environment</h2>${raw(environmentForm(`${base}/environments`, formFromBody(form), true, await csrfField(c), created.error))}`;
     return repoShell(c, resolved, 'New environment', body, created.status === 403 ? 403 : 422);
   }
   return finish(c, c.redirect(`${base}/environments/${encodeURIComponent(created.value.environment.name)}`));
@@ -545,10 +584,11 @@ fleetRepoPages.get('/environments/:name', async (c) => {
   const duration = latest?.startedAt && latest.finishedAt
     ? `${Math.max(1, Math.round((Date.parse(latest.finishedAt) - Date.parse(latest.startedAt)) / 1000))}s`
     : '—';
+  const csrf = isAdmin ? await csrfField(c) : '';
   const actions = isAdmin ? html`
-      <form method="post" action="${raw(`${envBase}/rebuild`)}"><button class="btn btn-primary" type="submit">Rebuild</button></form>
+      <form method="post" action="${raw(`${envBase}/rebuild`)}">${raw(csrf)}<button class="btn btn-primary" type="submit">Rebuild</button></form>
       <a class="btn" href="${raw(`${envBase}/edit`)}">Edit</a>
-      <form method="post" action="${raw(`${envBase}/archive`)}" onsubmit="return confirm('Archive this environment?')"><button class="btn btn-danger" type="submit">Archive</button></form>
+      <form method="post" action="${raw(`${envBase}/archive`)}" onsubmit="return confirm('Archive this environment?')">${raw(csrf)}<button class="btn btn-danger" type="submit">Archive</button></form>
     ` : '';
   const body = html`
     ${raw(notice)}
@@ -609,16 +649,17 @@ fleetRepoPages.get('/environments/:name/edit', async (c) => {
   const envBase = `${repoBase(resolved.repo)}/environments/${encodeURIComponent(env.name)}`;
   const body = html`
     ${raw(pageHead(`${resolved.repo.owner_login}/${resolved.repo.name} · CONFIGURATION`, 'EDIT', `${env.name.toUpperCase()}.`, 'Adjust the build, network and command policy for this environment.', `kvarm environment update ${env.name} --repo ${resolved.repo.owner_login}/${resolved.repo.name}`, [{ label: 'Build age', value: `${env.maxBuildAgeHours}H` }, { label: 'Idle', value: `${env.idleMinutes}M` }]))}
-    ${raw(environmentForm(envBase, formValues(env, resolved.repo.default_branch), false))}`;
+    ${raw(environmentForm(envBase, formValues(env, resolved.repo.default_branch), false, await csrfField(c)))}`;
   return repoShell(c, resolved, `Edit ${env.name}`, body);
 });
 
 fleetRepoPages.post('/environments/:name', async (c) => {
   const loaded = await loadEnvironment(c);
   if (!loaded || !loaded.resolved.viewer) return notFound(c);
+  const form = await postedForm(c, loaded.resolved.viewer);
+  if (form instanceof Response) return form;
   const { resolved, env } = loaded;
   const envBase = `${repoBase(resolved.repo)}/environments/${encodeURIComponent(env.name)}`;
-  const form = (await c.req.parseBody()) as Record<string, unknown>;
   const updated = await environments.updateEnvironment(
     { env: c.env, repo: resolved.repo, actor: resolved.viewer },
     env.id,
@@ -626,7 +667,7 @@ fleetRepoPages.post('/environments/:name', async (c) => {
   );
   if (!updated.ok) {
     const values = { ...formFromBody(form), name: env.name };
-    const body = html`${raw(pageHead(`${resolved.repo.owner_login}/${resolved.repo.name} · CONFIGURATION`, 'EDIT', `${env.name.toUpperCase()}.`, 'Adjust the build, network and command policy for this environment.', `kvarm environment update ${env.name} --repo ${resolved.repo.owner_login}/${resolved.repo.name}`, []))}${raw(environmentForm(envBase, values, false, updated.error))}`;
+    const body = html`${raw(pageHead(`${resolved.repo.owner_login}/${resolved.repo.name} · CONFIGURATION`, 'EDIT', `${env.name.toUpperCase()}.`, 'Adjust the build, network and command policy for this environment.', `kvarm environment update ${env.name} --repo ${resolved.repo.owner_login}/${resolved.repo.name}`, []))}${raw(environmentForm(envBase, values, false, await csrfField(c), updated.error))}`;
     return repoShell(c, resolved, `Edit ${env.name}`, body, updated.status === 403 ? 403 : 422);
   }
   return finish(c, c.redirect(envBase));
@@ -635,6 +676,8 @@ fleetRepoPages.post('/environments/:name', async (c) => {
 fleetRepoPages.post('/environments/:name/rebuild', async (c) => {
   const loaded = await loadEnvironment(c);
   if (!loaded || !loaded.resolved.viewer) return notFound(c);
+  const refused = await csrfRefused(c, loaded.resolved.viewer);
+  if (refused) return refused;
   const { resolved, env } = loaded;
   const result = await environments.rebuildEnvironment({ env: c.env, repo: resolved.repo, actor: resolved.viewer }, env.id);
   if (!result.ok) return notFound(c);
@@ -644,6 +687,8 @@ fleetRepoPages.post('/environments/:name/rebuild', async (c) => {
 fleetRepoPages.post('/environments/:name/archive', async (c) => {
   const loaded = await loadEnvironment(c);
   if (!loaded || !loaded.resolved.viewer) return notFound(c);
+  const refused = await csrfRefused(c, loaded.resolved.viewer);
+  if (refused) return refused;
   const { resolved, env } = loaded;
   const result = await environments.archiveEnvironment({ env: c.env, repo: resolved.repo, actor: resolved.viewer }, env.id);
   if (!result.ok) return notFound(c);
@@ -728,10 +773,11 @@ fleetRepoPages.get('/sandboxes/:id', async (c) => {
     : [];
   const live = sandbox.status === 'running' || sandbox.status === 'sleeping' || sandbox.status === 'starting';
   const startedFrom = sandbox.startedFrom ?? (sandbox.resumed ? 'resume' : 'build');
+  const csrf = await csrfField(c);
   const approvalRows = pending.map((approval) => html`
     <div class="k-dec" style="--c:var(--heat-4)">
       <div><span class="hud">${approval.repo} · ${approval.id.slice(0, 8)}</span><h3 class="k-mono">${approval.command}</h3><div class="k-approval-agent">${raw(agentIdentity(approval.agentId ?? 'unknown', approval.agentName ?? null))}</div><p class="m-human">Waiting for your approval.</p><p class="m-agent k-mono">approval=${approval.id} · expires=${approval.expiresAt}</p></div>
-      <div class="acts"><form method="post" action="/fleet/approvals/${approval.id}"><input type="hidden" name="repo" value="${approval.repo}" /><button class="btn btn-primary btn-sm" name="decision" value="approve" type="submit">Approve</button><button class="btn btn-sm" name="decision" value="deny" type="submit">Deny</button></form></div>
+      <div class="acts"><form method="post" action="/fleet/approvals/${approval.id}">${raw(csrf)}<input type="hidden" name="repo" value="${approval.repo}" /><button class="btn btn-primary btn-sm" name="decision" value="approve" type="submit">Approve</button><button class="btn btn-sm" name="decision" value="deny" type="submit">Deny</button></form></div>
     </div>`).join('');
   const body = html`
     ${raw(pageHead(
@@ -747,7 +793,7 @@ fleetRepoPages.get('/sandboxes/:id', async (c) => {
         { label: 'Last active', value: ago(sandbox.lastActiveAt) },
         { label: 'Expires', value: new Date(sandbox.expiresAt).toISOString().slice(0, 10) },
       ],
-      live ? stopForms(`${repoBase(resolved.repo)}/sandboxes/${sandbox.id}`, sandbox.status) : '',
+      live ? stopForms(`${repoBase(resolved.repo)}/sandboxes/${sandbox.id}`, sandbox.status, csrf) : '',
     ))}
     <div class="k-content">
       ${raw(sandbox.error ? flash(sandbox.error) : '')}
@@ -773,20 +819,22 @@ fleetRepoPages.get('/sandboxes/:id', async (c) => {
     return repoShell(c, resolved, `Sandbox ${shortSandboxId(sandbox.id)}`, body);
 });
 
-function stopForms(action: string, status: string): string {
+function stopForms(action: string, status: string, csrf: string): string {
   return html`<div class="actions k-action-buttons">
-    ${raw(status === 'running' ? html`<form method="post" action="${raw(`${action}/stop`)}"><button class="btn btn-sm" type="submit">Sleep</button></form>` : '')}
-    <form method="post" action="${raw(`${action}/discard`)}" onsubmit="return confirm('Discard this sandbox and its saved state?')"><button class="btn btn-danger btn-sm" type="submit">Discard</button></form>
+    ${raw(status === 'running' ? html`<form method="post" action="${raw(`${action}/stop`)}">${raw(csrf)}<button class="btn btn-sm" type="submit">Sleep</button></form>` : '')}
+    <form method="post" action="${raw(`${action}/discard`)}" onsubmit="return confirm('Discard this sandbox and its saved state?')">${raw(csrf)}<button class="btn btn-danger btn-sm" type="submit">Discard</button></form>
   </div>`;
 }
 
 async function stopFromPage(c: Context<App>, discard: boolean): Promise<Response> {
   const resolved = await resolveRepo(c);
   if (!resolved || !resolved.viewer) return notFound(c);
+  const refused = await csrfRefused(c, resolved.viewer);
+  if (refused) return refused;
   const result = await sandboxes.stopSandbox(sandboxContext(c, resolved.repo, resolved.viewer), c.req.param('id') ?? '', { discard });
   if (!result.ok) return notFound(c);
-  const back = c.req.header('referer');
-  return finish(c, c.redirect(back && new URL(back).origin === new URL(c.req.url).origin ? back : '/fleet'));
+  // The sandbox has already changed state: a bad Referer must not turn that into a 500.
+  return finish(c, c.redirect(sameOriginReferer(c)));
 }
 
 fleetRepoPages.post('/sandboxes/:id/stop', (c) => stopFromPage(c, false));
@@ -796,7 +844,7 @@ fleetRepoPages.post('/sandboxes/:id/discard', (c) => stopFromPage(c, true));
 // Fleet dashboard
 // ---------------------------------------------------------------------------
 
-function sandboxRow(sandbox: SandboxView): string {
+function sandboxRow(sandbox: SandboxView, csrf: string): string {
   const href = `/${sandbox.repo}/sandboxes/${sandbox.id}`;
   return html`
     <tr>
@@ -806,11 +854,11 @@ function sandboxRow(sandbox: SandboxView): string {
       <td>${raw(pill(sandbox.status))}</td>
       <td class="k-mono">${sandbox.startedFrom ?? (sandbox.resumed ? 'resume' : 'build')}</td>
       <td class="muted">${ago(sandbox.lastActiveAt)}</td>
-      <td class="right">${raw(sandbox.status === 'stopped' || sandbox.status === 'failed' ? '' : stopForms(`/${sandbox.repo}/sandboxes/${sandbox.id}`, sandbox.status))}</td>
+      <td class="right">${raw(sandbox.status === 'stopped' || sandbox.status === 'failed' ? '' : stopForms(`/${sandbox.repo}/sandboxes/${sandbox.id}`, sandbox.status, csrf))}</td>
     </tr>`;
 }
 
-function approvalRow(approval: SandboxApprovalView & { repo?: string }): string {
+function approvalRow(approval: SandboxApprovalView & { repo?: string }, csrf: string): string {
   const agentId = approval.agentId ?? 'unknown';
   return html`
     <div class="k-dec" style="--c:var(--heat-4)">
@@ -823,6 +871,7 @@ function approvalRow(approval: SandboxApprovalView & { repo?: string }): string 
       </div>
       <div class="acts">
         <form method="post" action="/fleet/approvals/${approval.id}">
+          ${raw(csrf)}
           <input type="hidden" name="repo" value="${approval.repo ?? ''}" />
           <button class="btn btn-primary btn-sm" name="decision" value="approve" type="submit">Approve</button>
           <button class="btn btn-sm" name="decision" value="deny" type="submit">Deny</button>
@@ -850,9 +899,10 @@ fleetPages.get('/', async (c) => {
      WHERE r.owner_login = ? AND e.archived_at IS NULL`,
   ).bind(actor.user.login).first<{ count: number }>();
   const repositories = await listReposForOwner(c.env.DB, actor.user.login, 12);
+  const csrf = await csrfField(c);
   const table = (rows: SandboxView[]) =>
     html`<div class="tscroll"><table class="table"><thead><tr><th>Agent / sandbox</th><th>Repository</th><th>Environment</th><th>Status</th><th>Started from</th><th>Last active</th><th></th></tr></thead>
-      <tbody>${raw(rows.map(sandboxRow).join(''))}</tbody></table></div>`;
+      <tbody>${raw(rows.map((row) => sandboxRow(row, csrf)).join(''))}</tbody></table></div>`;
   const runningRows = all.filter((sandbox) => sandbox.status === 'running' || sandbox.status === 'starting').map((sandbox) => html`
     <li><span class="k-ag ok">${sandbox.agentId.slice(0, 2).toUpperCase()}</span><div>
       <b><a href="${raw(`/${sandbox.repo}/sandboxes/${sandbox.id}`)}">${sandbox.task || shortSandboxId(sandbox.id)}</a></b>
@@ -877,7 +927,7 @@ fleetPages.get('/', async (c) => {
     <div class="k-grid">
       <div class="k-col">
         ${raw(pending.length
-          ? html`<section class="panel" id="approvals"><div class="panel-head"><span class="hud">NEEDS YOU · <b>${pending.length}</b></span><span class="hud">APPROVALS</span></div>${raw(pending.map(approvalRow).join(''))}</section>`
+          ? html`<section class="panel" id="approvals"><div class="panel-head"><span class="hud">NEEDS YOU · <b>${pending.length}</b></span><span class="hud">APPROVALS</span></div>${raw(pending.map((approval) => approvalRow(approval, csrf)).join(''))}</section>`
           : html`<section class="panel" id="approvals"><div class="panel-head"><span class="hud">NEEDS YOU · <b>0</b></span></div><div class="k-empty">No sandbox approvals are waiting.</div></section>`)}
         ${raw(empty
           ? html`<section class="panel"><div class="panel-head"><span class="hud">SANDBOXES · EMPTY</span></div><div class="k-empty"><p class="m-human">No sandboxes yet. Create an environment, then ask an agent to start a workspace.</p><pre class="k-term m-agent"><code>kvarm sandbox start --repo acme/web --env default
@@ -915,7 +965,8 @@ stop_sandbox &lt;id&gt; --discard</code></pre>
 fleetPages.post('/approvals/:id', async (c) => {
   const actor = await sessionActor(c);
   if (!actor) return finish(c, c.redirect('/auth/sign-in?returnTo=%2Ffleet'));
-  const form = (await c.req.parseBody()) as Record<string, unknown>;
+  const form = await postedForm(c, actor);
+  if (form instanceof Response) return form;
   const [owner, name] = String(form.repo ?? '').split('/');
   if (!owner || !name) return notFound(c);
   const repo = await getRepo(c.env.DB, owner, name);
