@@ -28,6 +28,7 @@ import { artifactsPusher, type GitPusher } from './gitwrite';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
 import { normalizeDeclaration, type Declaration } from './intents/paths';
 import { declaredInsertStatement, repoShareCleanup, repoSignalCleanup, workspaceSignalCleanup } from './intents/store';
+import { actorName, openIssueExists, workspaceIssueStatement } from './issues';
 
 export const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
 export const WORKSPACE_STATUSES = ['active', 'merged', 'abandoned'] as const;
@@ -239,6 +240,8 @@ interface CreateInput {
   agent: string;
   base: string;
   intent: Declaration | null;
+  /** The issue the workspace is created to resolve; its change closes the issue on merge. */
+  issue: number | null;
 }
 
 function parseCreate(cx: WorkspaceContext, input: unknown): ServiceResult<CreateInput> {
@@ -264,7 +267,12 @@ function parseCreate(cx: WorkspaceContext, input: unknown): ServiceResult<Create
     if (!d.ok) return fail(422, d.error, 'INVALID_INTENT');
     intent = d.value;
   }
-  return { ok: true, value: { task, agent, base, intent } };
+  let issue: number | null = null;
+  if (b.issue !== undefined && b.issue !== null) {
+    if (typeof b.issue !== 'number' || !Number.isInteger(b.issue) || b.issue < 1) return fail(422, 'issue must be an issue number', 'INVALID_ISSUE');
+    issue = b.issue;
+  }
+  return { ok: true, value: { task, agent, base, intent, issue } };
 }
 
 export interface WorkspaceSpec {
@@ -359,6 +367,9 @@ export function createWorkspace(
     if (cx.actor?.agent && !credentialMayUpdateRef(cx.actor, ref)) {
       return fail(403, `this agent token may not create ${WORKSPACE_REF_PREFIX}<id>/ refs`, 'AGENT_REF_FORBIDDEN');
     }
+    if (p.issue !== null && !(await openIssueExists(cx.env, cx.repo.id, p.issue))) {
+      return fail(422, `no open issue #${p.issue}`, 'ISSUE_NOT_OPEN');
+    }
     const baseRef = `refs/heads/${p.base}`;
     const baseSha = (await liveRefs(cx, [baseRef])).get(baseRef) ?? null;
     if (!baseSha) return fail(422, `base branch not found: ${p.base}`, 'REF_NOT_FOUND', { ref: p.base });
@@ -376,6 +387,7 @@ export function createWorkspace(
     const results = await cx.env.DB.batch([
       workspaceInsertStatement(cx, { id, ref, task: p.task, agent: p.agent, base: p.base, baseSha }, now, intentJson, expiresAt),
       ...(intentJson ? [declaredInsertStatement(cx.env.DB, cx.repo.id, id, intentJson)] : []),
+      ...(p.issue !== null ? [workspaceIssueStatement(cx.env.DB, cx.repo.id, id, p.issue, actorName(cx.actor), now)] : []),
       cx.env.DB.prepare(`${WORKSPACE_SELECT} WHERE w.id = ?`).bind(id),
     ]);
     const read = results[results.length - 1];

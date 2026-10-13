@@ -136,7 +136,8 @@ function parseCommit(content: Uint8Array, hash: string): ArtifactsCommitMetadata
   const parents = [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!);
   const time = Number(/^committer .* (\d+) [+-]\d{4}$/m.exec(head)?.[1] ?? 0);
   const who = { name: 't', email: 't@kvarm.invalid' };
-  return { hash, treeHash: tree, message: 'm', author: who, committer: who, parents, authoredAt: time, committedAt: time };
+  const message = text.slice(text.indexOf('\n\n') + 2);
+  return { hash, treeHash: tree, message, author: who, committer: who, parents, authoredAt: time, committedAt: time };
 }
 
 function handle(name: string): ArtifactsRepo {
@@ -350,10 +351,10 @@ export async function writeTree(repo: FakeRepo, files: Files): Promise<string> {
 }
 
 let clock = 1_700_000_000;
-export async function commit(repo: FakeRepo, files: Files, parents: string[] = []): Promise<{ sha: string; tree: string }> {
+export async function commit(repo: FakeRepo, files: Files, parents: string[] = [], message?: string): Promise<{ sha: string; tree: string }> {
   const tree = await writeTree(repo, files);
   const who = { name: 't', email: 't@kvarm.invalid', time: clock++ };
-  const c = await buildCommit({ tree, parents, author: who, committer: who, message: `c${clock}` });
+  const c = await buildCommit({ tree, parents, author: who, committer: who, message: message ?? `c${clock}` });
   repo.objects.set(c.hash, { type: 'commit', content: c.raw.subarray(c.raw.indexOf(0) + 1) });
   return { sha: c.hash, tree };
 }

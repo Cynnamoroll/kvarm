@@ -13,11 +13,17 @@
  * the checks gate and the commit-status rollup, so they never satisfy or
  * block a merge, and their failures never retry. Restore clears the flag on
  * the recorded runs and returns the name to normal handling.
+ *
+ * Both are tracked as issues (services/issues.ts): every registered flake
+ * files or counts on the check's open issue (fingerprint `check:<name>`), a
+ * quarantine makes sure one is open, and a restore closes it as `restored`.
  */
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { checkFingerprint } from '@kvarm/issues';
 import { CI_LIMITS } from './ciConfig';
+import { quarantineIssueStatement, resolveSignalStatements } from './issues';
 
 const FLAKE_PAGE_DEFAULT = 50;
 const FLAKE_PAGE_MAX = 100;
@@ -170,7 +176,13 @@ export interface QuarantineAction {
  * existing runs of that name, so an in-flight or historical verdict stops
  * counting immediately. Jobs of the name keep queueing and running.
  */
-export async function quarantineCheck(env: Env, repo: RepoRow, actorId: string | null, input: unknown): Promise<ServiceResult<QuarantineAction>> {
+export async function quarantineCheck(
+  env: Env,
+  repo: RepoRow,
+  actorId: string | null,
+  input: unknown,
+  actorLogin: string | null = null,
+): Promise<ServiceResult<QuarantineAction>> {
   const name = checkNameOf(input);
   if (!name.ok) return name;
   const now = Date.now();
@@ -180,6 +192,8 @@ export async function quarantineCheck(env: Env, repo: RepoRow, actorId: string |
          ON CONFLICT(repo_id, name) DO UPDATE SET quarantined_by = excluded.quarantined_by, quarantined_at = excluded.quarantined_at`,
     ).bind(repo.id, name.value, actorId, now),
     env.DB.prepare('UPDATE check_runs SET quarantined = 1 WHERE repo_id = ? AND name = ? AND quarantined = 0').bind(repo.id, name.value),
+    // A quarantined check is tracked by an open issue until it is restored (services/issues.ts).
+    quarantineIssueStatement(env.DB, repo.id, name.value, actorLogin, now),
   ]);
   return {
     ok: true,
@@ -195,8 +209,10 @@ export async function restoreCheck(env: Env, repo: RepoRow, input: unknown): Pro
   if (!removed) {
     return { ok: false, status: 404, error: `check ${name.value} is not quarantined`, code: 'NOT_QUARANTINED' };
   }
-  const restored = await env.DB.prepare('UPDATE check_runs SET quarantined = 0 WHERE repo_id = ? AND name = ? AND quarantined = 1')
-    .bind(repo.id, name.value)
-    .run();
-  return { ok: true, value: { name: name.value, quarantined: false, quarantinedAt: null, checkRuns: restored.meta?.changes ?? 0 } };
+  const [restored] = await env.DB.batch([
+    env.DB.prepare('UPDATE check_runs SET quarantined = 0 WHERE repo_id = ? AND name = ? AND quarantined = 1').bind(repo.id, name.value),
+    // Restoring the check closes the issue that tracked it; a later flake files a new one.
+    ...resolveSignalStatements(env.DB, repo.id, checkFingerprint(name.value), { evidence: { check: name.value }, reason: 'restored' }, Date.now()),
+  ]);
+  return { ok: true, value: { name: name.value, quarantined: false, quarantinedAt: null, checkRuns: restored?.meta?.changes ?? 0 } };
 }
