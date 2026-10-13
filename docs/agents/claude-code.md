@@ -1,6 +1,6 @@
 # Claude Code
 
-Status: the HTTP/`.mcp.json` syntax below follows the Claude Code MCP documentation. Against a Kvarm instance, only the MCP protocol path was exercised with a generic client (see [generic.md](generic.md)); the `claude` binary itself was not run against it. Check `claude mcp add --help` if your version differs.
+Status: verified with Claude Code 2.1.283 against a local Kvarm instance (`wrangler dev -c wrangler.dev.jsonc`) and an agent token: both forms below connect, `${KVARM_AGENT_TOKEN}` is expanded from the environment, and `get_repo` returns the repository. Check `claude mcp add --help` if your version differs.
 
 ## Prerequisites
 
@@ -40,8 +40,10 @@ The shell expands `$KVARM_AGENT_TOKEN` before Claude Code sees it, so the real t
 ## Verify
 
 ```sh
-claude mcp list          # kvarm should be listed as connected
+claude mcp list
 ```
+
+With the `claude mcp add` form, `kvarm` is listed as `✔ Connected`. With the project `.mcp.json` form it is listed as `⏸ Pending approval` until you approve it: start `claude` in the project once and accept the `kvarm` server. For a one-off non-interactive check, `claude -p "…" --mcp-config .mcp.json` loads the file without the approval step.
 
 In a Claude Code session, ask: "Call the kvarm `get_repo` tool for `<owner>/<repo>`." Expect a `repo` object. With a personal access token (human use), ask for `list_repos` instead; an agent token answers `list_repos` with `AGENT_FORBIDDEN` because it is account-level.
 
