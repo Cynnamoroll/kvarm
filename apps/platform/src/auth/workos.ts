@@ -70,6 +70,11 @@ function ensureConfigured(env: Env): void {
     apiKey: env.WORKOS_API_KEY,
     redirectUri: env.WORKOS_REDIRECT_URI,
     cookiePassword: env.WORKOS_COOKIE_PASSWORD,
+    // The session cookie carries every human credential: its SameSite policy
+    // is the CSRF backstop for the cookie-authenticated routes, so it is set
+    // here instead of relying on the library's default. 'lax' keeps top-level
+    // navigations working; cross-site POSTs (the form routes) never ride it.
+    cookieSameSite: 'lax',
   });
   configured = true;
 }

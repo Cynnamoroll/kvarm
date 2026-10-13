@@ -51,7 +51,12 @@ authRoutes.get('/callback', async (c) => {
     const result = await authService.handleCallback(c.req.raw, new Response(), { code, state });
     const res = result.response instanceof Response ? result.response : new Response(null, { status: 302 });
     applyHeaderBag(res, (result as { headers?: Record<string, string | string[]> }).headers);
-    res.headers.set('Location', '/');
+    // The library carries the sign-in's sanitized returnTo through the flow
+    // and sets it here, so a session-gated page (requireSessionPage builds
+    // ?returnTo= links) lands where the visitor started. Only a same-origin
+    // path is accepted; anything else is the root.
+    const target = res.headers.get('Location');
+    res.headers.set('Location', target !== null && target.startsWith('/') && !target.startsWith('//') ? target : '/');
     return res;
   } catch (err) {
     // Clear the PKCE verifier cookie so the next sign-in starts clean.
@@ -62,7 +67,9 @@ authRoutes.get('/callback', async (c) => {
   }
 });
 
-authRoutes.get('/sign-out', async (c) => {
+// POST-only: sign-out is a state change, and a GET link could be triggered by
+// any third-party page (the Lax cookie rides top-level navigations).
+authRoutes.post('/sign-out', async (c) => {
   const bail = unconfigured(c);
   if (bail) return bail;
   requireConfigured(c.env);
