@@ -17,6 +17,7 @@ Kvarm is a git platform for teams of people and coding agents, built on [Cloudfl
 - [Benchmarks and measured limits](#benchmarks-and-measured-limits)
 - [Deferred roadmap](#deferred-roadmap)
 - [License](#license)
+- [Contributing](#contributing)
 
 ## Architecture
 
@@ -92,61 +93,58 @@ Stable surfaces that never carry the brand:
 
 ## Deploy from zero
 
-These are the commands for a new Cloudflare account. They were written from the configuration of the running deployment; the provisioning commands below have not been re-executed against a new account for this README. For the existing deployment, skip to [Redeploy an existing deployment](#redeploy-an-existing-deployment).
+These are the steps for a new Cloudflare account. `scripts/bootstrap.mjs` provisions the resources idempotently; read [Bootstrap limits](#bootstrap-limits) for what has and has not been verified. For the existing deployment, skip to [Redeploy an existing deployment](#redeploy-an-existing-deployment).
 
-Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Paid plan with access to Artifacts (open beta) and Containers (public beta). Run every `npx wrangler` command from `apps/platform`, so wrangler reads `wrangler.jsonc` there.
+Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Paid plan with access to Artifacts (open beta) and Containers (public beta).
 
 1. **Clone, install and authenticate.**
 
    ```sh
-   git clone <repository-url> kvarm && cd kvarm
-   npm install
-   cd apps/platform
-   npx wrangler login        # or export CLOUDFLARE_API_TOKEN=...
-   npx wrangler whoami
+   git clone https://github.com/kvarm-git/kvarm.git kvarm && cd kvarm
+   npm ci
+   cd apps/platform && npx wrangler login && npx wrangler whoami && cd ../..   # or export CLOUDFLARE_API_TOKEN=...
    ```
 
-   npm may report that it skipped the `workerd`/`esbuild` install scripts; the binaries work regardless.
+   npm may report that it skipped the `workerd`/`esbuild` install scripts; the binaries work regardless. If your login can see more than one account, set `CLOUDFLARE_ACCOUNT_ID` in the environment or in `apps/platform/.env.deploy` (step 3).
 
-2. **D1 database and deployment target.** The committed `wrangler.jsonc` pins no deployment: its `database_id` and `APP_ORIGIN` are neutral placeholders. Your own values go in `apps/platform/.env.deploy` (gitignored), which `npm run deploy`, `npm run db:migrate:remote` and the scripts that query remote D1 read through `scripts/wrangler-target.mjs`. Environment variables of the same name take precedence over the file. Create the database, then copy the example and put the printed `database_id` into `KVARM_D1_DATABASE_ID`.
+2. **Provision the resources with the bootstrap script.** It reads every name from `apps/platform/wrangler.jsonc`: the D1 database `kvarm`, the R2 snapshot bucket `kvarm-snapshots`, the event queue `kvarm-events` and its dead-letter queue `kvarm-events-dlq` (3 retries, see `queues.consumers`), the Artifacts namespace `default`, and the account-level subscription `kvarm-artifacts-pushed` that delivers Artifacts `repo.pushed` events to `kvarm-events`. The default run is a dry run: it lists your account and prints what is missing. `--apply` creates only the missing resources, lists the account again to verify, and writes the new database's id to `KVARM_D1_DATABASE_ID` in `apps/platform/.env.deploy` (gitignored, created from `.env.deploy.example`; an existing different id is never overwritten). Running it again creates nothing.
+
+   ```sh
+   node scripts/bootstrap.mjs            # dry run
+   node scripts/bootstrap.mjs --apply    # create what is missing, verify
+   ```
+
+   The Durable Objects, Workflows, the Container class, the rate limiters and the queue consumer are not created here; the deploy in step 6 creates them. Wrangler has no Artifacts namespace create command, so when the namespace is missing the script creates one Artifacts repository, `kvarm-bootstrap`, in it; the namespace exists from then on, and the platform ignores push events from that repository because it has no Kvarm record.
+
+   The manual equivalent, for reference (run from an empty directory so wrangler does not offer to edit the committed config):
 
    ```sh
    npx wrangler d1 create kvarm
-   cp .env.deploy.example .env.deploy   # set KVARM_D1_DATABASE_ID
-   ```
-
-3. **R2 bucket for snapshots.**
-
-   ```sh
    npx wrangler r2 bucket create kvarm-snapshots
-   ```
-
-4. **Queues.** `kvarm-events` carries Artifacts push events and internal train kicks; `kvarm-events-dlq` is its dead-letter queue (3 retries, see `queues.consumers` in `wrangler.jsonc`).
-
-   ```sh
    npx wrangler queues create kvarm-events
    npx wrangler queues create kvarm-events-dlq
+   npx wrangler artifacts repos create kvarm-bootstrap --namespace default     # only if `artifacts namespaces get default` fails
+   npx wrangler queues subscription create kvarm-events --source artifacts --events repo.pushed --name kvarm-artifacts-pushed
    ```
 
-5. **Origin.** In `apps/platform/.env.deploy` set `KVARM_APP_ORIGIN` to your worker's origin (`https://kvarm-platform.<your-subdomain>.workers.dev`, or a custom domain); the deploy writes it into `vars.APP_ORIGIN`. Set `CLOUDFLARE_ACCOUNT_ID` there too if your login can see more than one account. Clone URLs and links are built from it. `ARTIFACTS_NAMESPACE` stays `default`.
+3. **Deployment target and origin.** The committed `wrangler.jsonc` pins no deployment: its `database_id` and `APP_ORIGIN` are neutral placeholders. Your values live in `apps/platform/.env.deploy`, which `npm run deploy`, `npm run db:migrate:remote` and the scripts that query remote D1 read through `scripts/wrangler-target.mjs`; environment variables of the same name take precedence. After the bootstrap, set `KVARM_APP_ORIGIN` there to your worker's origin (`https://kvarm-platform.<your-subdomain>.workers.dev`, or a custom domain); the deploy writes it into `vars.APP_ORIGIN`, and clone URLs and links are built from it. `ARTIFACTS_NAMESPACE` stays `default`.
 
-6. **Rate limiting binding.** `READ_LIMITER` (600 requests per 60 s) and `WRITE_LIMITER` (120 per 60 s) are declared in the `ratelimits` block of `wrangler.jsonc`. Workers Rate Limiting has no create command: the binding is created by the deploy in step 8. If the `namespace_id` values (`4601`, `4602`) collide with another Worker in your account, pick other unique integers.
+4. **Rate limiting binding.** `READ_LIMITER` (600 requests per 60 s) and `WRITE_LIMITER` (120 per 60 s) are declared in the `ratelimits` block of `wrangler.jsonc`. Workers Rate Limiting has no create command: the deploy creates the binding. If the `namespace_id` values (`4601`, `4602`) collide with another Worker in your account, pick other unique integers.
 
-7. **Apply the D1 migrations** (from the repository root).
+5. **Apply the D1 migrations.**
 
    ```sh
-   cd ../..
    npm run db:migrate:remote --workspace apps/platform
    ```
 
-8. **Deploy.** This creates the Worker, its Durable Objects, Workflows, the Container class, the rate limiters and the queue consumer.
+6. **Deploy.** This creates the Worker, its Durable Objects, Workflows, the Container class, the rate limiters and the queue consumer.
 
    ```sh
    npm run deploy            # runs `wrangler deploy` with your target (scripts/wrangler-target.mjs)
    curl -s https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # ok
    ```
 
-9. **Secrets.** None are required. WorkOS sign-in is deferred: without its secrets `/auth/*` answers 503 and personal access tokens are the way in. To enable it later:
+7. **Secrets.** None are required. WorkOS sign-in is deferred: without its secrets `/auth/*` answers 503 and personal access tokens are the way in. To enable it later:
 
    ```sh
    cd apps/platform
@@ -157,44 +155,41 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
 
    and set `vars.WORKOS_REDIRECT_URI` to `<APP_ORIGIN>/auth/callback`.
 
-10. **Bootstrap admin and token.** `scripts/mint-pat.mjs` creates the user (non-admin) if the login is new, inserts a `kvarm_pat_` token row into remote D1 and writes the plaintext token only to a gitignored env file (it refuses any other file and prints only the token prefix). The second command makes that user the instance admin (needed for the `?nocache=1` compare bypass and the Container CI runner).
+8. **Bootstrap admin and token.** `scripts/mint-pat.mjs` creates the user (non-admin) if the login is new, inserts a `kvarm_pat_` token row into remote D1 and writes the plaintext token only to a gitignored env file (it refuses any other file and prints only the token prefix). The second command makes that user the instance admin (needed for the `?nocache=1` compare bypass and the Container CI runner).
 
-    ```sh
-    node scripts/mint-pat.mjs --login <admin-login> --scopes read,write,api,ci \
-      --name bootstrap --env-file .env.local --key KVARM_PAT
-    node scripts/wrangler-target.mjs d1 execute DB --remote \
-      --command "UPDATE users SET is_admin = 1 WHERE login = '<admin-login>'"
-    printf 'KVARM_BASE_URL=%s\nKVARM_USER=%s\n' https://kvarm-platform.<your-subdomain>.workers.dev <admin-login> >> .env.local
-    ```
+   ```sh
+   node scripts/mint-pat.mjs --login <admin-login> --scopes read,write,api,ci \
+     --name bootstrap --token-file .env.local --key KVARM_PAT
+   node scripts/wrangler-target.mjs d1 execute DB --remote \
+     --command "UPDATE users SET is_admin = 1 WHERE login = '<admin-login>'"
+   printf 'KVARM_BASE_URL=%s\nKVARM_USER=%s\n' https://kvarm-platform.<your-subdomain>.workers.dev <admin-login> >> .env.local
+   ```
 
-    `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
+   `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
 
-11. **First repository and the Artifacts namespace.** The Worker's `ARTIFACTS` binding uses the namespace `default`. Wrangler 4.148 has no namespace create command (only `artifacts namespaces list|get`); the namespace appears with the first repository created in it.
+9. **Smoke test.** Create a repository, push to it and read its events:
 
-    ```sh
-    curl -s -X POST "$KVARM_BASE_URL/api/v1/repos" -H "Authorization: Bearer $KVARM_PAT" \
-      -H 'content-type: application/json' -d '{"name":"hello","visibility":"private"}'
-    cd apps/platform
-    npx wrangler artifacts namespaces get default
-    ```
+   ```sh
+   curl -s -X POST "$KVARM_BASE_URL/api/v1/repos" -H "Authorization: Bearer $KVARM_PAT" \
+     -H 'content-type: application/json' -d '{"name":"hello","visibility":"private"}'
+   git push "$KVARM_BASE_URL/<admin-login>/hello.git" main        # username anything, password the PAT
+   curl -s -H "Authorization: Bearer $KVARM_PAT" "$KVARM_BASE_URL/api/v1/repos/<admin-login>/hello/events"
+   ```
 
-12. **Artifacts push-event subscription.** One account-level subscription delivers `repo.pushed` events from Artifacts to `kvarm-events`. The consumer acknowledges events for Artifacts repositories that have no Kvarm row.
+   The push event shows as processed within seconds. To run this repository's own gate on your deployment, see [Kvarm CI](CONTRIBUTING.md#kvarm-ci-the-gate-runs-on-kvarm).
 
-    ```sh
-    npx wrangler queues subscription create kvarm-events --source artifacts --events repo.pushed --name kvarm-artifacts-pushed
-    npx wrangler queues subscription list kvarm-events     # Source artifacts, Events repo.pushed, Enabled Yes
-    ```
+### Bootstrap limits
 
-    Wrangler 4.148 has no `--namespace` flag for this command. The per-repository form (`--source artifacts.repo --source-namespace default --source-repo-name <name> --events pushed`) exists but is not used.
-
-13. **Smoke test.** Push to the new repository with `git push "$KVARM_BASE_URL/<admin-login>/hello.git" main` (username anything, password the PAT), then `GET /api/v1/repos/<admin-login>/hello/events` shows the push event processed within seconds.
+- `scripts/bootstrap.mjs` is covered by unit tests against a simulated account (`scripts/test/bootstrap.test.ts`: a first `--apply` creates the six missing resources, a second creates none, and a failed listing stops the run before anything is created). It has been run in `--local` mode, and as a dry run and with `--apply` against an account that already held every resource, where it created nothing. Its create path has not been run against a brand-new Cloudflare account. If a create fails there, the script stops with wrangler's error; fix the cause and run it again, and it continues with whatever is still missing.
+- Cloudflare allows one subscription per account-level Artifacts event source. If another queue in your account already subscribes to Artifacts `repo.pushed`, the subscription step fails and the script cannot see that subscription (it lists only `kvarm-events`); move that subscription to `kvarm-events` yourself.
+- The script checks resources by name only. A resource that exists with the right name but different settings (for example a queue in another jurisdiction) is reported as present.
 
 ## Redeploy an existing deployment
 
 With the resources above already provisioned (this is the path for the running deployment):
 
 ```sh
-git clone <repository-url> kvarm && cd kvarm
+git clone https://github.com/kvarm-git/kvarm.git kvarm && cd kvarm
 git checkout <commit>
 npm install
 cd apps/platform && npx wrangler whoami && cd ../..          # wrangler must be authenticated for the account
@@ -208,16 +203,22 @@ curl -s -o /dev/null -w '%{http_code}\n' https://kvarm-platform.<your-subdomain>
 
 ## Local development and tests
 
+[CONTRIBUTING.md](CONTRIBUTING.md#fresh-clone-no-credentials) walks a fresh clone through install, local D1 migrations, the offline Worker and a self-minted local token, with no Cloudflare account or credentials. In short:
+
 ```sh
-npm run typecheck                                   # tsc over packages, scripts, the Worker and the CLI
-npm run test                                        # vitest: `packages` (Node) and `platform` (workerd) projects
-npm run lint                                        # oxlint
-npx vitest run --project platform                   # one project
+npm ci
 npm run db:migrate:local --workspace apps/platform  # local D1 for wrangler dev
+npm run typecheck                                   # tsc over packages, scripts, the Worker and the CLI
+npm run lint                                        # oxlint
+npm run test -- --maxWorkers=3                      # vitest: `packages` (Node) and `platform` (workerd) projects
+npx vitest run --project platform                   # one project
 cd apps/platform && npx wrangler dev -c wrangler.dev.jsonc --port 8787   # offline, without the Artifacts binding
+node scripts/mint-pat.mjs --local --login dev --scopes read,write,api,ci --name local --token-file .env.local --key KVARM_PAT
 ```
 
 The `platform` project runs the Worker in workerd with real D1 (every migration applied) and in-memory fakes for Artifacts; the real binding is exercised by the live drivers. Plain `npm run dev` uses `wrangler.jsonc` and needs `CLOUDFLARE_API_TOKEN`, because the Artifacts binding is remote-only. Live end-to-end drivers (`scripts/*-e2e.mjs`, for example `ci-e2e.mjs`, `merge-queue-e2e.mjs`, `review-approvals-e2e.mjs`) create their own repositories against a deployed worker using `KVARM_BASE_URL` and `KVARM_PAT`, and delete them afterwards.
+
+This repository's automated gate is Kvarm's own CI: [`.kvarm/ci.json`](.kvarm/ci.json) runs the typecheck, lint and test jobs on a Kvarm deployment, and `scripts/dogfood-ci.mjs` drives one change through it. There is no third-party CI. See [Kvarm CI](CONTRIBUTING.md#kvarm-ci-the-gate-runs-on-kvarm), and [AGENTS.md](AGENTS.md) for agent contributors.
 
 ## CLI
 
@@ -336,3 +337,7 @@ Not built in this version, recorded for after the submission:
 ## License
 
 Kvarm is released under the [MIT License](LICENSE). [`docs/licenses.md`](docs/licenses.md) lists every dependency in `package-lock.json` with its declared license and names the non-permissive ones; regenerate it with `node scripts/license-audit.mjs` (`--check` fails when it is stale). The report is an inventory, not legal clearance.
+
+## Contributing
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md): the credential-free setup, the gate, Kvarm CI, and the commit and pull-request guide. Coding agents also read [AGENTS.md](AGENTS.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md); everyone in the project follows the [Code of Conduct](CODE_OF_CONDUCT.md).

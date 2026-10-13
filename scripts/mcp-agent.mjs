@@ -9,7 +9,7 @@
  *   node scripts/mcp-agent.mjs call <tool> ['<json args>']
  *       one tools/call; prints the /mcp HTTP status, x-kvarm-cost, isError
  *       and the result JSON
- *   node scripts/mcp-agent.mjs e2e [--keep] [--api-doc <library/api.md>]
+ *   node scripts/mcp-agent.mjs e2e [--keep] [--api-doc <registry table .md>]
  *         [--only auth,registry,parity,visibility,cost,two-agent,dependencies,arena,attribution,dispatch]
  *       live checks for the MCP surface (VAL-MCP-001..010, VAL-COST-017,
  *       VAL-CROSS-012, VAL-ATTR-001..006, VAL-DECISION-001..003, the repo
@@ -54,8 +54,7 @@
  *
  * The registry section checks VAL-MCP-003: the 15 original tool names, a
  * description and input schema on every tool and, with --api-doc, that
- * tools/list equals the registry of record table in library/api.md in both
- * directions.
+ * tools/list equals the --api-doc registry table in both directions.
  *
  * The dependencies scenario (VAL-CROSS-007, VAL-CLI-004) has two agents
  * declare intents, read the forecast, pin the consumer to the interface
@@ -432,7 +431,7 @@ async function e2eChecks(argv, scratch) {
     check('registry', 'every existing repos-family route is a tool (incl. delete, fork, import)', lifecycle.every((n) => names.includes(n)), lifecycle.filter((n) => !names.includes(n)).join(',') || 'all present');
     const del = tools.find((t) => t.name === 'delete_repo');
     check('registry', 'delete_repo is annotated destructive', del?.annotations?.destructiveHint === true);
-    // VAL-MCP-003: the 15 original names, and tools/list = the library/api.md registry of record both ways.
+    // VAL-MCP-003: the 15 original names, and tools/list = the --api-doc registry table both ways.
     const fifteen = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'list_tasks', 'claim_task', 'complete_task', 'get_attribution', 'set_attribution'];
     check('VAL-MCP-003', 'all 15 original tool names are listed', fifteen.every((n) => names.includes(n)), fifteen.filter((n) => !names.includes(n)).join(',') || 'all 15 present');
     const schemaless = tools.filter((t) => !(typeof t.description === 'string' && t.description.trim() && t.inputSchema?.type === 'object' && t.inputSchema.properties)).map((t) => t.name);
@@ -442,9 +441,9 @@ async function e2eChecks(argv, scratch) {
       const missing = documented.filter((n) => !names.includes(n));
       const undocumented = names.filter((n) => !documented.includes(n));
       console.log(`registry of record ${opts['api-doc']}: ${documented.length} entries; documented but not listed: ${missing.join(',') || 'none'}; listed but undocumented: ${undocumented.join(',') || 'none'}`);
-      check('VAL-MCP-003', 'tools/list equals the library/api.md registry in both directions', missing.length === 0 && undocumented.length === 0 && documented.length === names.length && fifteen.every((n) => documented.includes(n)));
+      check('VAL-MCP-003', 'tools/list equals the --api-doc registry table in both directions', missing.length === 0 && undocumented.length === 0 && documented.length === names.length && fifteen.every((n) => documented.includes(n)));
     } else {
-      console.log('(--api-doc not given: skipping the library/api.md comparison)');
+      console.log('(--api-doc not given: skipping the registry table comparison)');
     }
   }
 

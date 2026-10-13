@@ -296,7 +296,7 @@ describe('path normalization (pure)', () => {
     expect(d.paths.length).toBeLessThanOrEqual(INTENT_LIMITS.observedMax);
     for (const p of deep.slice(0, 500)) expect(d.paths.some((e) => p === e || (e.endsWith('/') && p.startsWith(e)))).toBe(true);
     expect(cover).toHaveLength(n);
-    // The push-consumer CPU budget for the intent-index effect's cover work (library/cost.md).
+    // The push-consumer CPU budget for the intent-index effect's cover work (architecture §10).
     expect(elapsed).toBeLessThan(1_000);
   });
 });
@@ -894,7 +894,7 @@ describe('Nexus reads at fleet scale', () => {
     }
     console.log(JSON.stringify(Object.fromEntries(Object.entries(results).map(([k, c]) => [k, `d1=${c.d1};rr=${c.rr};rw=${c.rw}`]))));
     for (const c of Object.values(results)) expect(c).toMatchObject({ d1: 2, art: 0, do: 0, sub: 0 });
-    // Rows read follow the shared paths and the page, not the fleet size (library/cost.md overlap/forecast rows).
+    // Rows read follow the shared paths and the page, not the fleet size (the overlap/forecast budget rows).
     expect(results['fleet-100 overlap']!.rr).toBeLessThanOrEqual(80);
     expect(results['fleet-100 overlap page 2']!.rr).toBeLessThanOrEqual(80);
     expect(results['fleet-100 forecast']!.rr).toBeLessThanOrEqual(40);

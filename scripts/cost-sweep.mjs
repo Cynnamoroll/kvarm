@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Final cost sweep: every table row of library/cost.md against the live worker.
+ * Final cost sweep: every row of a markdown budget table against the live worker.
  *
  *   set -a; . ./.env.local; set +a
  *   . "$HOME/.config/vite-plus/env"          # wrangler (tail + read-only D1)
- *   node scripts/cost-sweep.mjs --cost-md <path to library/cost.md> [--out report.json] [--keep]
+ *   node scripts/cost-sweep.mjs --cost-md <budget table .md> [--out report.json] [--keep]
  *   node scripts/cost-sweep.mjs --cost-md <path> --coverage-only   # no network
  *
  * Each row of the budget document is matched to one entry of
@@ -43,7 +43,7 @@ const { values: args } = parseArgs({
   },
 });
 if (!args['cost-md']) {
-  console.error('usage: node scripts/cost-sweep.mjs --cost-md <path to library/cost.md> [--coverage-only] [--out file] [--keep]');
+  console.error('usage: node scripts/cost-sweep.mjs --cost-md <budget table .md> [--coverage-only] [--out file] [--keep]');
   process.exit(2);
 }
 const costMd = readFileSync(args['cost-md'], 'utf8');
@@ -312,10 +312,10 @@ await phase('repo basics, git gate, pages, tokens', async () => {
   rec('repo.patch', await http(R(A), { method: 'PATCH', json: { description: 'cost-sweep scratch repo (patched)' } }));
 
   // a disposable PAT: its first use is a cold PAT read, then it is revoked
-  // mint-pat refuses a file that is not gitignored, and Node 26 loads an `--env-file` argument itself, so the file must exist first
+  // mint-pat refuses a file that is not gitignored
   const envFile = join(ROOT, `apps/platform/.dev.vars.cost-sweep-${TS}`);
   writeFileSync(envFile, '', { mode: 0o600 });
-  const mint = spawnSync(process.execPath, ['scripts/mint-pat.mjs', '--login', OWNER, '--scopes', 'read,api', '--name', `cost-sweep-${TS}`, '--env-file', envFile, '--key', 'SWEEP_PAT'], { cwd: ROOT, encoding: 'utf8', env: process.env });
+  const mint = spawnSync(process.execPath, ['scripts/mint-pat.mjs', '--login', OWNER, '--scopes', 'read,api', '--name', `cost-sweep-${TS}`, '--token-file', envFile, '--key', 'SWEEP_PAT'], { cwd: ROOT, encoding: 'utf8', env: process.env });
   if (mint.status === 0) {
     const patId = JSON.parse(mint.stdout.slice(mint.stdout.indexOf('{'))).patId;
     const token = /SWEEP_PAT=(\S+)/.exec(readFileSync(envFile, 'utf8'))?.[1];

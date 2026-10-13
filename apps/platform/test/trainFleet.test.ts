@@ -5,7 +5,7 @@
  * Covers the train's liveness while entries wait on pins or on candidates
  * ahead, and the recorded publication window (`merge_queue.cost`) of
  * workspace-backed publications, with and without incoming pins, against
- * the publication row in library/cost.md.
+ * the documented publication budget row.
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
@@ -288,7 +288,7 @@ describe('train liveness while entries wait', () => {
 });
 
 describe('workspace-backed enqueue', () => {
-  // library/cost.md: POST …/changes/:n/enqueue (new entry) of a workspace-backed change.
+  // Budget row: POST …/changes/:n/enqueue (new entry) of a workspace-backed change.
   const ROW = { d1: 2, rr: 12, rw: 4, art: 0, do: 1, q: 1 };
   const within = (c: CostCounters) => c.d1 <= ROW.d1 && c.rr <= ROW.rr && c.rw <= ROW.rw && c.art === ROW.art && c.do <= ROW.do && c.q <= ROW.q;
 

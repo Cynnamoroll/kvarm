@@ -10,7 +10,7 @@
  * - clone vs snapshot: scripts/bench-clone-vs-snapshot.mjs --write (3 runs per variant)
  * - compare cold/warm on the fixture (cold = instance-admin ?nocache=1 bypass)
  * - edge cache hit rates and per-endpoint x-kvarm-cost medians (>= 5 requests
- *   per endpoint, each checked against its library/cost.md row through
+ *   per endpoint, each checked against its budget spec in
  *   scripts/lib/cost-catalog.mjs)
  * - overlap forecast and composition timings over two overlapping agent workspaces
  * - the committed 100-workspace fleet run (docs/benchmarks/fleet-100.json)

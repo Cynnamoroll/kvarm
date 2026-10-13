@@ -2,7 +2,7 @@
  * Opt-in live check: the Worker-side GitPusher, running in workerd, writes to
  * a real Artifacts repo. Skipped unless LIVE_GITWRITE_REMOTE,
  * LIVE_GITWRITE_NAME and LIVE_GITWRITE_TOKEN (a repo-scoped write token) are
- * set; see `library/user-testing.md` for the driver. The token is seeded into
+ * set; `scripts/gitwrite-live-e2e.mjs` is the driver. The token is seeded into
  * the write-token cache, so the production `getGitToken(env, name, 'write')`
  * path supplies it.
  *

@@ -334,7 +334,7 @@ export function withinBudget(cost, spec) {
 }
 
 /**
- * The library/cost.md rows the run is compared with. Publications are keyed
+ * The budget rows the run is compared with. Publications are keyed
  * on incoming pins (a dependent's pins on its sources), as the enqueue
  * comparison is; the documented publication row covers both classes.
  */

@@ -599,7 +599,7 @@ describe('composition', () => {
       ],
     });
     expect(r.json.changeSet).toEqual(expect.any(Number));
-    // library/cost.md "POST …/candidates/compose (clean)": d1 ≤ 8, sub ≤ 3.
+    // Budget row "POST …/candidates/compose (clean)": d1 ≤ 8, sub ≤ 3.
     expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(8);
     expect(r.cost.sub).toBeLessThanOrEqual(3);
     expect(r.json.workspace).toMatchObject({ status: 'active', base: 'main', changeSet: r.json.changeSet });
