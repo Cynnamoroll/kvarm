@@ -51,6 +51,11 @@
       }
     ]
   },
+  // Outbound webhooks: every minute, enqueue due deliveries whose message was
+  // never sent or was lost, and prune the delivery log (services/webhooks.ts).
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
   // Workers Rate Limiting (per-colo counters). The RateLimiter Durable Object
   // stays exported for its migration but is no longer on any request path.
   "ratelimits": [

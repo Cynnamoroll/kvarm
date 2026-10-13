@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { GIT_PATH_RE, handleGitRequest } from './routes/git';
 import { authRoutes } from './routes/auth';
-import { api } from './routes/api';
+import { api, persistSessionCookies } from './routes/api';
 import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
 import { branchRulesApi } from './routes/api/branchRules';
@@ -20,12 +20,16 @@ import { checksApi } from './routes/api/checks';
 import { ciApi } from './routes/api/ci';
 import { containerRunnerApi } from './routes/api/containerRunner';
 import { fleetApi } from './routes/api/fleet';
+import { webhooksApi } from './routes/api/webhooks';
 import { handleEventBatch } from './services/events';
 import { handleFleetScheduled } from './services/sandboxes/sweeps';
+import { runWebhookCron } from './services/webhooks';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
 import { fleetPages, fleetRepoPages } from './routes/fleetPages';
+import { coordinationPages } from './routes/coordinationPages';
+import { comparePages } from './routes/comparePages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -64,6 +68,10 @@ app.use('/assets/*', async (c, next) => {
   return next();
 });
 
+// Refreshed or cleared session cookies reach every response, whichever
+// route resolved the session (routes/api.ts requestSession).
+app.use('*', persistSessionCookies);
+
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/api/v1', tenancyApi);
@@ -85,6 +93,7 @@ app.route('/api/v1', checksApi);
 app.route('/api/v1', ciApi);
 app.route('/api/v1', containerRunnerApi);
 app.route('/api/v1', fleetApi);
+app.route('/api/v1', webhooksApi);
 // MCP tool calls are dispatched back through this router to their REST routes.
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
 app.route('/fleet', fleetPages);
@@ -92,7 +101,12 @@ app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
 app.route('/:owner/:repo', fleetRepoPages);
+// The coordination and compare pages are further /:owner/:repo views; their
+// paths (/activity, /train, /arenas, /candidates, /compare) collide with none
+// of the pages above.
 app.route('/:owner/:repo', repoPages);
+app.route('/:owner/:repo', coordinationPages);
+app.route('/:owner/:repo', comparePages);
 
 // Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {
@@ -118,5 +132,8 @@ export default {
   // Artifacts push events, through the account-level event subscription
   // (services/events.ts).
   queue: (batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) => handleEventBatch(batch, env),
-  scheduled: (_controller: ScheduledController, env: Env, ctx: ExecutionContext) => handleFleetScheduled(env, ctx),
+  scheduled: (_controller: ScheduledController, env: Env, ctx: ExecutionContext) => {
+    void handleFleetScheduled(env, ctx);
+    ctx.waitUntil(runWebhookCron(env));
+  },
 } satisfies ExportedHandler<Env>;

@@ -18,8 +18,9 @@
 import { Hono, type Context } from 'hono';
 import { escapeHtml, formatBytes, html, raw, timeAgo } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
-import { clientIp, requestCredential, type ApiActor } from './api';
-import { layout } from '../web/render';
+import { clientIp, requestCredential, requestSession, type ApiActor, type App } from './api';
+import { csrfTokenValid } from '../auth/workos';
+import { csrfInput, layout } from '../web/render';
 import { repoPage } from '../render/repoShell';
 import {
   commitAt,
@@ -39,7 +40,6 @@ import type { RepoNeed, RepoRole } from '../services/authz';
 import { resolveRepoAccess } from '../services/access';
 import { repoViewGeneration } from '../services/pushFreshness';
 
-type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
 export const repoPages = new Hono<App>();
 
 const MAX_RENDER_LINES = 1500;
@@ -51,9 +51,8 @@ interface Resolved {
   role: RepoRole;
 }
 
-/** Persist refreshed session cookies (threaded by requestCredential) on responses. */
-function finish(c: Context<App>, res: Response): Response {
-  for (const cookie of c.get('refreshCookies') ?? []) res.headers.append('Set-Cookie', cookie);
+/** Pass-through kept for call sites; session cookies are persisted by persistSessionCookies (routes/api.ts). */
+function finish(_c: Context<App>, res: Response): Response {
   return res;
 }
 
@@ -86,6 +85,10 @@ async function resolveRepo(c: Context<App>, need: RepoNeed = 'read'): Promise<Re
   if (!access.ok) return null;
   return { repo: access.repo, viewer: access.actor, role: access.role };
 }
+
+/** The resolve/finish/not-found helpers, shared by the coordination and compare page routers. */
+export { finish, notFound, resolveRepo };
+export type { Resolved };
 
 /** Settings pages are concealed from viewers without admin on the repo. */
 function canAdminister(resolved: Resolved): resolved is Resolved & { viewer: ApiActor } {
@@ -565,11 +568,20 @@ repoPages.get('/branches', async (c) => {
     throw err;
   }
   const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  const defaultRef = resolved.repo.default_branch || 'main';
   const rows = refs.branches
     .map((b) => {
       const short = b.name.replace('refs/heads/', '');
       const href = `${base}/tree/${encodeURIComponent(short)}`;
-      return html`<div class="commit-row"><div><a href="${raw(href)}"><strong>${short}</strong></a></div></div>`;
+      const compareHref = short !== defaultRef ? `${base}/compare/${encodeURIComponent(`${defaultRef}...${short}`)}` : '';
+      return html`
+        <div class="commit-row">
+          <div>
+            <a href="${raw(href)}"><strong>${short}</strong></a>
+            ${short !== defaultRef ? raw(` <a class="muted" href="${compareHref}">compare with ${escapeHtml(defaultRef)}</a>`) : ''}
+          </div>
+        </div>
+      `;
     })
     .join('');
   const viewerLogin = resolved.viewer?.user.login ?? null;
@@ -603,10 +615,12 @@ repoPages.get('/settings', async (c) => {
   if (!canAdminister(resolved)) return notFound(c);
   const repo = resolved.repo;
   const viewerLogin = resolved.viewer.user.login;
+  const csrf = raw(csrfInput((await requestSession(c))?.csrfToken));
   const body = html`
     <div class="card">
       <div class="card-title">Repository settings</div>
       <form method="post" action="/${repo.owner_login}/${repo.name}/settings">
+        ${csrf}
         <label for="description">Description</label>
         <input id="description" name="description" type="text" value="${repo.description ?? ''}" />
         <label for="visibility">Visibility</label>
@@ -621,6 +635,7 @@ repoPages.get('/settings', async (c) => {
       <div class="card-title">Danger zone</div>
       <form method="post" action="/${repo.owner_login}/${repo.name}/delete"
             onsubmit="return confirm('Delete this repository permanently?')">
+        ${csrf}
         <button class="btn" type="submit">Delete repository</button>
       </form>
     </div>
@@ -634,11 +649,25 @@ repoPages.get('/settings', async (c) => {
   );
 });
 
+/**
+ * Form posts authenticated by the session cookie must carry its CSRF token;
+ * requestCredential has already refused cross-origin session posts. Bearer
+ * credentials are not ambient and need none.
+ */
+export async function sessionFormRefused(c: Context<App>, viewer: ApiActor, form: Record<string, unknown>): Promise<Response | null> {
+  if (viewer.via !== 'session') return null;
+  const session = await requestSession(c);
+  if (session && csrfTokenValid(session, form._csrf)) return null;
+  return c.text('invalid or missing CSRF token', 403);
+}
+
 repoPages.post('/settings', async (c) => {
   const resolved = await resolveRepo(c, 'admin');
   if (!resolved) return notFound(c);
   if (!canAdminister(resolved)) return notFound(c);
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, resolved.viewer, form);
+  if (refused) return refused;
   const updated = await svc.updateRepo(c.env, resolved.repo, {
     description: String(form.description ?? ''),
     visibility: form.visibility === 'public' ? 'public' : 'private',
@@ -650,6 +679,8 @@ repoPages.post('/delete', async (c) => {
   const resolved = await resolveRepo(c, 'admin');
   if (!resolved) return notFound(c);
   if (!canAdminister(resolved)) return notFound(c);
+  const refused = await sessionFormRefused(c, resolved.viewer, await c.req.parseBody());
+  if (refused) return refused;
   await svc.deleteRepo(c.env, resolved.repo);
   return finish(c, c.redirect('/'));
 });

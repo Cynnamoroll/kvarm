@@ -33,6 +33,7 @@ MCP client  --/mcp------->   MCP tools (thin) ----/                         \-> 
 Artifacts push event --> queue kvarm-events --> queue() consumer --> cache purge, snapshot build, kvarm/guard,
                                                                     CI dispatch, change head refresh, train kicks
 CI pipeline workflow --> ci_jobs (D1) <-- claim/report -- `kvarm runner` on the user's machine
+platform event --> events ledger + webhook_deliveries (D1 triggers) --> kvarm-events --> signed POST to the hook URL
 merge queue --> parallel preparation and checks --> short MergeLock publication lease --> receive-pack with expected old value
 ```
 
@@ -61,9 +62,9 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 **Review.** Changes (pull-request equivalents) have a contributor-chosen merge policy: `review` (merge on an explicit call), `auto` (merge when mergeable and every required check passes) or `draft` (never merges). Approvals bind to the exact head commit; a push stales them. Agents can review. A per-repository policy can require N approving reviews from principals other than the author, and reviewer assignment prefers a different model family than the author's. Reviewer disagreement, a request for changes, a protected path or a final arena selection opens an escalation that only a human can resolve. `kvarm/guard` screens every change head for leaked secrets (including Kvarm tokens), CI gaming (`|| true`, deleted tests) and suspicious new dependencies. A passing guard proves only that the content it read was clean: it reads at most 100 changed text files, 64 KiB per side and 4,096 characters per added line (lockfiles, submodules and binary files are outside its rules), and a scan that skipped anything concludes `neutral` with `complete: false`, the uninspected paths and an `incomplete:` title, and the commit status lists it under `incomplete`. Branch rules default to `guardCompleteness: "advisory"` (reported, not blocking); `"required"` refuses such a verdict on merge and in the queue with `GUARD_INCOMPLETE`. The risk rating tags CI config, test deletions, lockfiles, new dependencies and security-sensitive paths.
 
-**Coordination.** Agents work in workspaces: server-side refs under `refs/heads/agents/<workspaceId>/<slug>`. Each workspace can declare an intent (paths and prefixes); the Nexus forecast reports which other active workspaces overlap before anyone writes duplicate work. Candidates compare several attempts at the same task, arenas rank them, and composition merges compatible pieces from several attempts into one composed change, whose exact tree runs the required checks (a clean merge that fails a check is reported as a semantic conflict). A textual conflict becomes a `resolve-conflict` task that an agent claims under a generation-fenced lease, resolves in its own workspace and completes. Workspaces may pin to another workspace at an exact revision (chains of up to 4). Decisions (chosen and rejected candidates with reasons) are recorded and returned by `get_context`, and merge commits carry attribution notes on `refs/notes/kvarm-attribution`.
+**Coordination.** Agents work in workspaces: server-side refs under `refs/heads/agents/<workspaceId>/<slug>`. Each workspace can declare an intent (paths and prefixes); the Nexus forecast reports which other active workspaces overlap before anyone writes duplicate work. Beside path overlap, forecast and overlap carry an advisory `semantic` layer: when one workspace changes a module (or its exported names) and another edits a file that imports it, within two hops, in another directory, or both edit contract files of one API family (protos of a package, OpenAPI or GraphQL schemas, migrations of one sequence), the response names both with the import chain as evidence. It is a bounded TS/JS, Python and Go import heuristic read at push time, not a compiler or a model: it misses path aliases, package-name imports, reflection and generated code, reports `truncated` when its budgets bite, and gates nothing. An empty semantic result is not proof of compatibility; exact-tree checks decide (architecture §11.2). Candidates compare several attempts at the same task, arenas rank them, and composition merges compatible pieces from several attempts into one composed change, whose exact tree runs the required checks (a clean merge that fails a check is reported as a semantic conflict). A textual conflict becomes a `resolve-conflict` task that an agent claims under a generation-fenced lease, resolves in its own workspace and completes. Workspaces may pin to another workspace at an exact revision (chains of up to 4). Decisions (chosen and rejected candidates with reasons) are recorded and returned by `get_context`, and merge commits carry attribution notes on `refs/notes/kvarm-attribution`.
 
-**Merging and CI.** An explicit merge publishes inside the request. The merge queue runs a bounded integration train: candidates are prepared and checked in parallel against their exact composed tree, and only the final publication holds a short generation-fenced lease. CI is user-owned: a repository's `.kvarm/ci.json` creates check runs and jobs; `kvarm runner` claims them on the user's machine, runs them from a snapshot checkout in a warm working directory and reports back. A Container CI runner (Cloudflare Containers, public beta) is an opt-in showcase of the same claim, run and report loop.
+**Merging and CI.** An explicit merge publishes inside the request. The merge queue runs a bounded integration train: candidates are prepared and checked in parallel against their exact composed tree, and only the final publication holds a short generation-fenced lease. CI is user-owned: a repository's `.kvarm/ci.json` creates check runs and jobs; `kvarm runner` claims them on the user's machine, runs them from a snapshot checkout in a warm working directory and reports back. A repository admin can also enable the hosted container lane (`kvarm ci enable`): the platform's Container CI runner (Cloudflare Containers, public beta) drains every queued job in one container session, snapshotting the prepared workspace so the next drain resumes without setup or a checkout, while user-owned runners keep racing on the same queue. A failed required check gets exactly one automatic retry of the same tree before it blocks; a pass after the retry records a flake, and an admin can quarantine a chronically flaky check name so it still runs but never satisfies or blocks a gate.
 
 **Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), zstd-compressed snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
 
@@ -146,7 +147,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    curl -s https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # ok
    ```
 
-7. **Secrets.** None are required. WorkOS sign-in is deferred: without its secrets `/auth/*` answers 503 and personal access tokens are the way in. To enable it later:
+7. **Secrets.** None are required. Without the WorkOS secrets every `/auth/*` route answers `503`, session cookies are ignored and personal access tokens are the way in. To let people sign in to the web UI through WorkOS AuthKit:
 
    ```sh
    cd apps/platform
@@ -155,7 +156,30 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    npx wrangler secret put WORKOS_COOKIE_PASSWORD   # a random value of 32+ characters, e.g. openssl rand -hex 32
    ```
 
-   and set `vars.WORKOS_REDIRECT_URI` to `<APP_ORIGIN>/auth/callback`.
+   set `vars.WORKOS_REDIRECT_URI` to `<APP_ORIGIN>/auth/callback` (when empty, the callback is the origin that served `/auth/login`), and register that exact URI as a redirect URI (and the site origin as the sign-out return URL) for the AuthKit application in the WorkOS dashboard. A cookie password shorter than 32 characters counts as unset.
+
+   **How sign-in behaves.** `GET /auth/login` sends the browser to AuthKit with a random `state` and a PKCE (S256) challenge, both held in a sealed, 10-minute `kvarm-auth-state-…` cookie (one per pending sign-in, so two tabs do not collide). `GET /auth/callback` checks the state against that cookie, exchanges the code (with the verifier and the API key) and sets the `wos-session` cookie: AES-GCM sealed with a key derived from `WORKOS_COOKIE_PASSWORD`, `HttpOnly; Secure; SameSite=Lax`, valid for 7 days at most. The session names the Kvarm user; every request re-reads that user from D1 and authorizes exactly like a personal access token of the same user, so removing a grant, flipping visibility or deleting the user applies to the next request. Every 10 minutes the session redeems its WorkOS refresh token; if WorkOS refuses (session revoked or user removed there), the session ends. Parallel requests that race on that single-use token adopt the winner's rotated session instead of signing out; if WorkOS cannot be reached at all, the session continues on its D1-checked authority and retries a minute later. `GET /auth/logout` shows a sign-out form; `POST /auth/logout` (same-origin, with the session's CSRF token) clears the cookie, records the session as signed out (`session_revocations`, migration `0032`, so a copied cookie stops working too) and ends the WorkOS session. Rotating `WORKOS_COOKIE_PASSWORD` signs everyone out.
+
+   **Accounts.** A first sign-in creates a user whose login is the email's local-part, lowercased, with other characters turned into dashes and cut to 39 characters; a login taken by any user or organization, or a reserved word, gets a numeric suffix (`jane-doe-2`). Sign-in never makes anyone an instance admin. Existing PAT-only users (created by `mint-pat.mjs`, including the bootstrap admin) are **not** linked automatically, because a matching email alone does not prove it is the same person. Two explicit ways link one:
+
+   - An instance admin signed in through WorkOS opens `/settings/tokens` and links a login to a WorkOS user id (`user_…`, shown in the WorkOS dashboard). Only users without a WorkOS identity can be linked, and only to a WorkOS user that has no Kvarm account yet. The bootstrap admin has no session to do this from, so link it once from the command line before that person first signs in (create the user in the WorkOS dashboard to get the id):
+
+     ```sh
+     node scripts/wrangler-target.mjs d1 execute DB --remote \
+       --command "UPDATE users SET workos_user_id = '<user_…>' WHERE login = '<admin-login>' AND workos_user_id LIKE 'kvarm-ops:%'"
+     ```
+
+   - Or opt in to linking by verified email with `vars.WORKOS_LINK_VERIFIED_EMAIL = "true"`: a first sign-in then links to the one PAT-only user with the same email, if WorkOS reports the email as verified and exactly one such user exists.
+
+   The settings form and the email opt-in record a `user.identity.linked` event. Organizations are not mapped to WorkOS organizations.
+
+   Outbound webhooks need one more secret, from which the key that encrypts each hook's signing secret at rest is derived. Without it the webhooks API answers `503 WEBHOOKS_NOT_CONFIGURED`; changing it later makes existing hook secrets undecryptable (rotate each hook's secret afterwards).
+
+   ```sh
+   npx wrangler secret put WEBHOOK_SECRET_KEY        # a random value of 32+ characters, e.g. openssl rand -hex 32
+   ```
+
+   The deploy also registers the Worker's once-a-minute cron trigger, which enqueues webhook deliveries recorded on request paths and prunes the delivery log.
 
 8. **Bootstrap admin and token.** `scripts/mint-pat.mjs` creates the user (non-admin) if the login is new, inserts a `kvarm_pat_` token row into remote D1 and writes the plaintext token only to a gitignored env file (it refuses any other file and prints only the token prefix). The second command makes that user the instance admin (needed for the `?nocache=1` compare bypass and the Container CI runner).
 
@@ -167,7 +191,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    printf 'KVARM_BASE_URL=%s\nKVARM_USER=%s\n' https://kvarm-platform.<your-subdomain>.workers.dev <admin-login> >> .env.local
    ```
 
-   `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
+   `.env.local` at the repository root is gitignored; every token is one you mint for your own deployment. Load it with `set -a; . ./.env.local; set +a`. The live drivers in `scripts/` read `KVARM_BASE_URL`, `KVARM_USER` and `KVARM_PAT` from the environment (defaults: `http://localhost:8787` and `admin`). Further tokens: `mint-pat.mjs` with another `--login`/`--key`, or, once WorkOS sign-in is enabled, the `/settings/tokens` page or `POST /api/v1/user/tokens` from a signed-in web session (the token routes refuse PAT callers with `403`, so a PAT-only setup mints through `mint-pat.mjs`).
 
 9. **Smoke test.** Create a repository, push to it and read its events:
 
@@ -230,6 +254,8 @@ export KVARM_BASE_URL=https://kvarm-platform.<your-subdomain>.workers.dev
 export KVARM_PAT=kvarm_pat_...                        # or an agent token kvarm_agt_...
 npx kvarm checkout <owner>/<repo> main ./work         # snapshot checkout, git clone fallback
 npx kvarm runner --repo <owner>/<repo> --once         # claim and run one CI job (PAT with the ci scope)
+npx kvarm runner --repo <owner>/<repo> --drain        # claim until the queue is empty, then exit
+npx kvarm ci jobs <owner>/<repo>                      # the CI queue: queued, running and finished jobs
 npx kvarm status <owner>/<repo>                       # workspaces with their pins, the train, open tasks
 npx kvarm change merge <owner>/<repo> 3               # any registry operation: kvarm <group> <verb>
 npx kvarm help change merge                           # usage, REST endpoint and MCP tool name
@@ -247,7 +273,7 @@ Details (warm working directories, extraction safety, exit codes): [`apps/cli/RE
 
 `POST /mcp` is a stateless Streamable HTTP MCP server (`@modelcontextprotocol/sdk`). Authenticate with `Authorization: Bearer <token>`: a personal access token with the `api` scope or an agent token. Every tool runs the same service code and the same authorization as REST.
 
-The 99 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`record_decision`, `get_context`), `branch-rules`, `environments` and `sandboxes`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
+The 114 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`record_decision`, `get_context`), `branch-rules`, `environments`, `sandboxes`, `ci` (runner jobs, flakes, hosted CI) and `webhooks`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
 
 Setup guides for Claude Code, Codex CLI, Cursor and generic MCP clients, the agent workflow and an `AGENTS.md` template are in [`docs/agents/`](docs/agents/README.md).
 
@@ -259,7 +285,7 @@ claude mcp add --transport http kvarm "$KVARM_BASE_URL/mcp" --header "Authorizat
 
 ## API reference
 
-All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 UTC timestamps, and fail with `{"error": "...", "code": "..."}`. Authenticate with `Authorization: Bearer kvarm_pat_...` (the PAT needs the `api` scope) or an agent token. Git uses the token as the basic-auth password. Every response carries `x-kvarm-cost` (`d1`, `rr`, `rw`, `art`, `do`, `r2a`, `r2b`, `q`, `sub`, `cache`); compare responses also carry `x-kvarm-cache: hit|miss|bypass`.
+All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 UTC timestamps, and fail with `{"error": "...", "code": "..."}`. Authenticate with `Authorization: Bearer kvarm_pat_...` (the PAT needs the `api` scope) or an agent token; a browser signed in through WorkOS authenticates with its session cookie, and state-changing calls carrying that cookie count only when they come from the same origin. Git uses the token as the basic-auth password. Every response carries `x-kvarm-cost` (`d1`, `rr`, `rw`, `art`, `do`, `r2a`, `r2b`, `q`, `sub`, `cache`); compare responses also carry `x-kvarm-cache: hit|miss|bypass`.
 
 | area | endpoints (repository routes are under `/api/v1/repos/:owner/:repo`) |
 | --- | --- |
@@ -270,7 +296,7 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | snapshots | `GET/POST …/snapshots/:ref`, `GET …/snapshots/:sha/download` (zstd-compressed tar; `Accept: application/zstd` serves stored bytes, otherwise the Worker decompresses) |
 | changes | `POST/GET …/changes`, `GET/PATCH …/changes/:n`, `POST …/changes/:n/merge`, `GET …/changes/:n/mergeability`, `GET …/changes/:n/checks` |
 | merge queue | `POST/DELETE …/changes/:n/enqueue`, `GET …/queue`, `GET …/train` |
-| checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope) |
+| checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope), `GET …/ci/jobs` (queue view), `GET …/ci/flakes`, `POST …/ci/flakes/:check/quarantine`, `POST …/ci/flakes/:check/restore`, `GET …/ci/hosted`, `POST …/ci/hosted/enable`, `POST …/ci/hosted/disable` (repo admins) |
 | reviews | `GET/PUT …/review-policy`, `GET/POST …/changes/:n/reviews`, `POST …/changes/:n/approve`, `…/request-changes`, `…/reviewers/assign`, `…/escalations/:id/resolve`, `GET …/reviews/pending` |
 | workspaces and Nexus | `POST/GET …/workspaces`, `GET …/workspaces/:id`, `POST …/workspaces/:id/change-set`, `POST …/workspaces/:id/abandon`, `GET/POST …/workspaces/:id/intent`, `GET …/forecast`, `GET …/workspaces/overlap` |
 | environments and sandboxes | `GET/POST …/environments`, `GET/PATCH/DELETE …/environments/:id`, `GET …/environments/:id/builds`, `POST …/environments/:id/rebuild`, `GET/POST …/sandboxes`, `GET /sandboxes/mine`, `POST …/sandboxes/:id/exec|stop`, `GET/PUT …/sandboxes/:id/files` |
@@ -280,11 +306,43 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | attribution | `GET/POST …/commits/:sha/attribution`, `POST …/decisions`, `GET …/context?task=\|path=` |
 | organizations | `POST /orgs`, `GET /orgs/:org`, `GET /user/orgs`, `GET /orgs/:org/members`, `PUT/DELETE /orgs/:org/members/:login` (`owner`/`maintainer`/`member`), `GET/POST /orgs/:org/repos` |
 | access | `GET …/grants`, `PUT/DELETE …/grants/:login`, `POST/GET /agents`, `GET/DELETE /agents/:id`, `POST/GET /agents/:id/tokens`, `DELETE /agents/:id/tokens/:tokenId`, `GET/POST …/branch-rules`, `GET/PATCH/DELETE …/branch-rules/:id`, `GET …/branch-policy` |
+| webhooks | `GET/POST …/webhooks` `{url, events[]}`, `GET/PATCH/DELETE …/webhooks/:id`, `POST …/webhooks/:id/rotate-secret`, `POST …/webhooks/:id/ping`, `GET …/webhooks/:id/deliveries` (`state`, `limit` ≤ 50, `cursor`); human repo admins only |
 
 The exact path, parameters and reply of every registry operation are printed by `kvarm help <group> <verb>`, and its JSON schema is in `packages/ops/src/index.js`. Two behaviors worth knowing:
 
 - An explicit merge of a head whose required checks have not been recorded yet answers `409 REQUIRED_CHECKS_PENDING` and publishes nothing. This applies to a conflict task's resolution head right after `complete_task`: its `kvarm/guard` run arrives with the push event a few seconds later (completion records it directly only for `auto` changes). `enqueue_change` takes the queue path instead and publishes once the checks are recorded.
 - Merge, queue and validation answers are synchronous or recorded, never stale: an explicit merge publishes inside the request, and `kvarm/guard` and CI dispatch are recorded by the push-event consumer; until then the checks gate answers pending.
+
+### Outbound webhooks
+
+A repository admin subscribes an `https` URL to platform events: `kvarm.task.created`, `kvarm.change.merged`, `kvarm.change.ejected` (left the merge queue for good: `data.state` is `ejected` or `stale`), `kvarm.check_run.completed`, `kvarm.escalation.opened`, `kvarm.queue.publication_reconciled` (a crashed merge-queue publication whose outcome was decided from the actual ref) and `kvarm.webhook.disabled`. The signing secret is returned once, by create and by `rotate-secret`. Each delivery is a `POST` of one CloudEvents 1.0 JSON envelope (`content-type: application/cloudevents+json`) with these headers:
+
+| header | value |
+| --- | --- |
+| `x-kvarm-event` | the event type |
+| `x-kvarm-event-id`, `idempotency-key` | the envelope `id`; the same for every attempt and every hook, so deduplicate on it |
+| `x-kvarm-delivery`, `x-kvarm-attempt` | this hook's delivery id and the attempt number (1-6) |
+| `x-kvarm-timestamp` | Unix seconds when the attempt was signed |
+| `x-kvarm-signature` | `sha256=` + hex HMAC-SHA256, keyed by the hook secret, of `<x-kvarm-timestamp>.<raw body>` |
+
+Delivery is at least once and unordered (order by the envelope's `time`). Events recorded by the queue consumer (the merge train, push processing) are sent right after their batch; events recorded by an API request (an explicit merge, a check-run report, a review) wait for the once-a-minute cron, so they can take up to about a minute. Any 2xx answer within 10 s is success; anything else, a redirect (never followed) or a network error is a failed attempt, retried after 30 s, 2 min, 8 min, 32 min and 1 h. After 15 consecutive failed attempts the hook is disabled (a `kvarm.webhook.disabled` event goes to the repository's other hooks); `PATCH …/webhooks/:id {"active": true}` re-enables it. `GET …/webhooks/:id/deliveries` shows each delivery's state, attempts, response status, latency and the first 512 characters of the response; the log keeps 14 days. Targets must be `https` without credentials and may not be IP literals in private, loopback, link-local or reserved ranges or local names such as `localhost` or `*.internal`. The Worker cannot resolve DNS before sending, so a public name that resolves to a private address is not detected; subrequests leave from Cloudflare's network.
+
+Verifying Kvarm webhooks (Node):
+
+```js
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+// rawBody: the request body exactly as received (a string or Buffer, before JSON parsing).
+export function verifyKvarmWebhook(secret, headers, rawBody, toleranceSeconds = 300) {
+  const timestamp = headers['x-kvarm-timestamp'];
+  const signature = headers['x-kvarm-signature'] ?? '';
+  if (!/^\d+$/.test(timestamp ?? '') || Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false;
+  const expected = 'sha256=' + createHmac('sha256', secret).update(`${timestamp}.`).update(rawBody).digest('hex');
+  return signature.length === expected.length && timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+```
+
+Then drop any event whose `x-kvarm-event-id` you have already processed.
 
 ## Demo harness
 
@@ -334,8 +392,7 @@ Configured limits (constants in the code, documented with their behavior in the 
 Not built in this version, recorded for after the submission:
 
 - The collaborative UI pass (new pages and the visual direction); the existing pages are unchanged.
-- WorkOS sign-in (configured by the secrets above; personal access tokens are the supported path today).
-- Flaky-test retry and quarantine, revert change sets, inbound incident webhooks, outbound webhook delivery (the `kvarm.task.created` events are stored, not delivered), audit export and `get_audit`.
+- Revert change sets, inbound incident webhooks, audit export and `get_audit`.
 - Contract capsules, semantic packets, hotspot suggestions, priority credits and resource lifecycle.
 - Advisory low-signal test flags and an auto-updating repository wiki.
 - Adopting Effect TS across the codebase.

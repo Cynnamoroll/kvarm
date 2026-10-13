@@ -121,7 +121,7 @@ the commit tree. `scripts/cli-checkout-e2e.mjs` checks this recipe live,
 including the final push. When an agent needs history from the start, a clone
 is the better choice.
 
-## `kvarm runner --repo <owner/repo> [--once] [--fresh] [--workdir <dir>] [--trust …] [--executor …]`
+## `kvarm runner --repo <owner/repo> [--once] [--drain] [--fresh] [--workdir <dir>] [--trust …] [--executor …]`
 
 Starts a user-owned CI runner. It claims a queued `.kvarm/ci.json` job with a
 120-second generation-fenced lease, decides whether and where the job may run
@@ -129,7 +129,9 @@ Starts a user-owned CI runner. It claims a queued `.kvarm/ci.json` job with a
 through snapshot checkout (clone fallback), runs the configured command with
 its timeout on the host or in a container, heartbeats while it runs, and
 reports a bounded summary. `--once` exits after one job, or immediately when
-the queue is empty. The PAT must have `ci` scope. Repository commands run only
+the queue is empty; `--drain` keeps claiming until a claim finds the queue
+empty and then exits, for batch runners that should stop on their own. The
+PAT must have `ci` scope. Repository commands run only
 because the user explicitly starts this process.
 
 ### Execution trust

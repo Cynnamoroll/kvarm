@@ -12,7 +12,7 @@
  * tests drive this with a local stand-in for `ctx.container`.
  */
 
-import { GO_FILE, PREPARED_LINE, RUNNER_DIR, WRITE_FILES_SCRIPT, containerRunnerFiles, runnerExecEnv, type RunnerExecInput } from './runnerFiles';
+import { DRAIN_ENTRY_FILE, GO_FILE, PREPARED_LINE, RUNNER_DIR, WORK_ROOT, WRITE_FILES_SCRIPT, containerRunnerFiles, runnerExecEnv, type RunnerExecInput } from './runnerFiles';
 
 export interface ExecLike {
   readonly stdout: ReadableStream | null;
@@ -154,4 +154,128 @@ export async function prepareAndRunJob(container: ContainerLike, o: JobOptions):
   const [out, err, exitCode] = await Promise.all([stdout.rest(), stderr, proc.exitCode]);
   phases.run = Date.now() - t;
   return { phases, snapshot, runner: { exitCode, stdout: out, stderr: err } };
+}
+
+// ---------------------------------------------------------------------------
+// Hosted drain
+// ---------------------------------------------------------------------------
+
+export interface DrainOptions {
+  cold: boolean;
+  /** When start() was called. */
+  started: number;
+  /** Worker count: concurrent runner execs, each claiming until the queue is empty. */
+  workers: number;
+  exec: RunnerExecInput;
+  toolchain: string[];
+  snapshotName: string;
+  saveSnapshot?: (snapshot: SnapshotHandle) => Promise<void>;
+  runnerDir?: string;
+  goFile?: string;
+}
+
+export interface DrainWorkerResult {
+  runnerId: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface DrainPhases {
+  /** start() until the first exec() returned. */
+  boot: number;
+  /** Runner modules plus toolchain plus go-file reset (cold only). */
+  setup: number | null;
+  /** snapshotContainer() of the first prepared workspace (cold only). */
+  snapshot: number | null;
+  /** From the first worker exec start until the last worker exits. */
+  drain: number;
+}
+
+export interface DrainOutcome {
+  phases: DrainPhases;
+  workers: DrainWorkerResult[];
+  /** The snapshot this drain saved (cold), else null. */
+  snapshot: SnapshotHandle | null;
+}
+
+/**
+ * Drains the repository's queued jobs in one container session: one runner
+ * install and toolchain, then `workers` concurrent runner execs that each
+ * loop claim → snapshot checkout or warm sync → run → report until a claim
+ * comes back empty. The first prepared workspace is snapshotted (cold) so
+ * an interrupted drain resumes from it without the setup or a checkout, and
+ * the go file is released once for every worker. No outer wall-clock kill:
+ * the per-job timeout lives in the runner, and the credential's expiry ends
+ * a drain that lost its revocation path.
+ */
+export async function drainAndRunJobs(container: ContainerLike, o: DrainOptions): Promise<DrainOutcome> {
+  const runnerDir = o.runnerDir ?? RUNNER_DIR;
+  const goFile = o.goFile ?? GO_FILE;
+  const phases: DrainPhases = { boot: 0, setup: null, snapshot: null, drain: 0 };
+  // exec() waits for a container that is still starting: the first one is the readiness gate.
+  await mustExec(container, ['node', '--version'], {}, 'readiness probe');
+  phases.boot = Date.now() - o.started;
+  if (o.cold) {
+    const t = Date.now();
+    const files = JSON.stringify({ dir: runnerDir, files: containerRunnerFiles() });
+    await mustExec(container, ['node', '-e', WRITE_FILES_SCRIPT], { stdin: new Blob([files]).stream() }, 'writing the runner');
+    await mustExec(container, o.toolchain, { env: { HOME: '/root' } }, 'installing the toolchain');
+    await mustExec(container, ['rm', '-f', goFile], {}, 'clearing the prepared point');
+    phases.setup = Date.now() - t;
+  } else {
+    // A restored snapshot carries the go file and slot locks of the previous
+    // container; both are stale here. The go file is pre-created so no worker
+    // waits at the prepared point, and the slot locks are removed because a
+    // restored lock's recorded pid can coincide with a live process and would
+    // push the worker to a fresh slot (workdir.js steals only provably dead
+    // owners).
+    await mustExec(container, ['touch', goFile], {}, 'pre-releasing the prepared point');
+    const repoRoot = [o.exec.workRoot ?? WORK_ROOT, ...o.exec.repo.split('/')].join('/');
+    await mustExec(container, ['find', repoRoot, '-maxdepth', '1', '-name', '*.lock', '-delete'], {}, 'clearing stale slot locks');
+  }
+
+  const t = Date.now();
+  // exec() registers the process when it is called, so awaiting each handle
+  // in turn still starts every worker concurrently.
+  const started: Array<{ runnerId: string; proc: ExecLike; stdout: ReturnType<typeof textReader>; stderrDone: Promise<string> }> = [];
+  for (let i = 0; i < o.workers; i++) {
+    const runnerId = `${o.exec.runnerId}-w${i}`;
+    const proc = await container.exec(['node', `${runnerDir}/${DRAIN_ENTRY_FILE}`], {
+      cwd: runnerDir,
+      env: runnerExecEnv({ ...o.exec, runnerId, goFile }),
+    });
+    // Drained concurrently so a chatty runner never blocks on a full stderr pipe.
+    started.push({ runnerId, proc, stdout: textReader(proc.stdout), stderrDone: textReader(proc.stderr).rest() });
+  }
+  let snapshot: SnapshotHandle | null = null;
+  // Promise.any over "saw the prepared line": a worker that exits without a
+  // job rejects, so the race resolves only when one worker truly prepared.
+  const firstPrepared = Promise.any(
+    started.map((w) =>
+      w.stdout.until(PREPARED_LINE).then((saw) => {
+        if (!saw) throw new Error('no job claimed');
+        return true;
+      }),
+    ),
+  );
+  try {
+    if (await firstPrepared) {
+      if (o.cold) {
+        const s = Date.now();
+        snapshot = await container.snapshotContainer({ name: o.snapshotName });
+        await o.saveSnapshot?.(snapshot);
+        phases.snapshot = Date.now() - s;
+      }
+      await mustExec(container, ['touch', goFile], {}, 'releasing the prepared workers');
+    }
+  } catch {
+    // Every worker exited without claiming (another runner drained the
+    // queue first); the workers report empty on their own.
+  }
+  const workers = await Promise.all(
+    started.map(async (w) => ({ runnerId: w.runnerId, exitCode: await w.proc.exitCode, stdout: await w.stdout.rest(), stderr: await w.stderrDone })),
+  );
+  phases.drain = Date.now() - t;
+  return { phases, workers, snapshot };
 }

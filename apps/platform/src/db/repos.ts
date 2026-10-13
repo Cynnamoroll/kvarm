@@ -15,6 +15,8 @@ export interface RepoRow {
   stars: number;
   created_at: number;
   pushed_at: number | null;
+  /** Opt-in hosted CI execution (services/hostedCi.ts); 0 unless a repo admin enabled it. */
+  hosted_ci: number;
   /** Owning organization for org repos; null (or absent in older cached rows) for personal repos. */
   owner_org_id?: string | null;
 }
@@ -75,6 +77,7 @@ export async function createRepoRow(env: Env, data: NewRepo): Promise<RepoRow> {
     stars: 0,
     created_at: now,
     pushed_at: null,
+    hosted_ci: 0,
     owner_org_id: data.owner_org_id ?? null,
   };
 }

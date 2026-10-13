@@ -69,15 +69,16 @@ export async function mintPAT(
   userId: string,
   name: string,
   scopes: Scope[],
+  expiresAt: number | null = null,
 ): Promise<{ id: string; token: string; prefix: string }> {
   const token = `kvarm_pat_${randomHex(32)}`;
   const hash = await sha256Hex(token);
   const id = crypto.randomUUID();
   const prefix = token.slice(0, 18);
   await env.DB.prepare(
-    'INSERT INTO pat (id, user_id, name, prefix, hash, scopes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO pat (id, user_id, name, prefix, hash, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   )
-    .bind(id, userId, name, prefix, hash, JSON.stringify(scopes), Date.now())
+    .bind(id, userId, name, prefix, hash, JSON.stringify(scopes), Date.now(), expiresAt)
     .run();
   return { id, token, prefix };
 }
@@ -127,16 +128,20 @@ export type PatRow = Omit<UserRow, 'is_admin'> & {
   pat_last_used_at: number | null;
 };
 
+/** Stored scopes, keeping only known ones; malformed values grant nothing. */
+export function parseScopes(json: string): Scope[] {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.filter((s): s is Scope => SCOPES.includes(s as Scope)) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function patFromRow(row: PatRow | null | undefined, now: number): PATInfo | null {
   if (!row) return null;
   if (row.pat_expires_at !== null && row.pat_expires_at < now) return null;
-  let scopes: Scope[] = [];
-  try {
-    const parsed: unknown = JSON.parse(row.pat_scopes);
-    if (Array.isArray(parsed)) scopes = parsed.filter((s): s is Scope => SCOPES.includes(s as Scope));
-  } catch {
-    scopes = [];
-  }
+  const scopes = parseScopes(row.pat_scopes);
   const { pat_id, pat_scopes: _s, pat_expires_at, pat_last_used_at, ...user } = row;
   return {
     id: pat_id,

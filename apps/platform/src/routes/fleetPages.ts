@@ -8,7 +8,7 @@
 import { Hono, type Context } from 'hono';
 import { html, raw, timeAgo } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
-import { clientIp, requestCredential, type ApiActor } from './api';
+import { clientIp, requestCredential, type ApiActor, type App as ApiApp } from './api';
 import { layout } from '../web/render';
 import { repoPage } from '../render/repoShell';
 import { resolveRepoAccess } from '../services/access';
@@ -18,7 +18,7 @@ import * as sandboxes from '../services/sandboxes';
 import type { EnvironmentBuildView, EnvironmentView } from '../services/environments';
 import type { SandboxApprovalView, SandboxCommandView, SandboxView } from '../services/sandboxes';
 
-type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
+type App = ApiApp;
 
 /** Mounted at `/:owner/:repo`, ahead of the repo page router. */
 export const fleetRepoPages = new Hono<App>();
