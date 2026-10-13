@@ -31,6 +31,7 @@ import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
 import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
 import { continueDependencySettlement } from './dependencies';
+import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
 
 export interface PushEvent {
   namespace: string;
@@ -372,7 +373,7 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect,
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle';
+export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'webhook';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
 export function retryDelaySeconds(attempts: number): number {
@@ -386,6 +387,7 @@ interface MessageResult {
   error?: string;
   train?: TrainRunResult & { reason: string };
   settle?: SettleContinuationResult;
+  webhook?: AttemptResult;
 }
 
 async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
@@ -395,6 +397,10 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
   }
   if (isSettleMessage(msg.body)) {
     return { outcome: 'settle', settle: await continueDependencySettlement(env, msg.body) };
+  }
+  // An endpoint failure is a recorded attempt with its own delayed retry, never a queue retry.
+  if (isWebhookDeliveryMessage(msg.body)) {
+    return { outcome: 'webhook', webhook: await deliverWebhook(env, msg.body.deliveryId) };
   }
   const event = parsePushEvent(msg.body);
   if (!event) return { outcome: 'ignored' };
@@ -489,9 +495,26 @@ export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): 
         ...(result.effects ? { effects: result.effects } : {}),
         ...(result.train ? { train: result.train } : {}),
         ...(result.settle ? { settle: result.settle } : {}),
+        ...(result.webhook ? { webhook: result.webhook } : {}),
         ...(result.error ? { error: result.error } : {}),
       }),
     );
+  }
+  await pumpWebhooks(env, batch.queue);
+}
+
+/**
+ * Enqueues webhook deliveries recorded by this batch's effects (merges and
+ * ejections of a train run, for example), so they do not wait for the cron.
+ * One indexed D1 statement; a failure is logged and left to the cron.
+ */
+async function pumpWebhooks(env: Env, queue: string): Promise<void> {
+  const meter = new CostMeter();
+  try {
+    const r = await runWithMeter(meter, () => pumpWebhookDeliveries(meter.wrapEnv(env)));
+    if (r.enqueued > 0) console.log(JSON.stringify({ cost: meter.snapshot(), queue, webhooksEnqueued: r.enqueued }));
+  } catch (err) {
+    console.log(JSON.stringify({ cost: meter.snapshot(), queue, webhookPumpError: String(err).slice(0, 200) }));
   }
 }
 

@@ -135,8 +135,9 @@ export const TASK_CREATED_EVENT = 'kvarm.task.created';
 
 /**
  * The outbound `kvarm.task.created` event (a CloudEvents 1.0 envelope in the
- * events ledger, `processed_at` NULL until a delivery picks it up) for the
- * task the following upsert creates. It must run before that upsert: it is
+ * events ledger, `processed_at` NULL, which migration 0028's trigger fans out
+ * to subscribed webhooks, services/webhooks.ts) for the task the following
+ * upsert creates. It must run before that upsert: it is
  * written only while the change has no live task of the kind yet, so a
  * refresh of an existing task records nothing.
  */
