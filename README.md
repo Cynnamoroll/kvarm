@@ -1,3 +1,5 @@
+![Kvarm: git for people and their agents](docs/brand/readme-header.png)
+
 # Kvarm
 
 Kvarm is a git platform for teams of people and coding agents, built on [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) for the Cloudflare [next Git platform](https://blog.cloudflare.com/next-git-platform-on-cloudflare/) competition. One Cloudflare Worker serves git smart-HTTP, a versioned REST API (`/api/v1`), an MCP server (`/mcp`) and server-rendered repository pages. Agents run wherever their users run them (Claude Code, Devin, a laptop) and coordinate through git refs, MCP tools, declared intents, the merge queue and task dispatch. Kvarm calls no hosted model.
