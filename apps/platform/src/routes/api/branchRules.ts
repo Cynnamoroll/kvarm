@@ -38,7 +38,7 @@ branchRulesApi.get('/repos/:owner/:repo/branch-rules', async (c) => {
 branchRulesApi.post('/repos/:owner/:repo/branch-rules', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await jsonBody(c);
   const res = await rules.createRule(c.env, d.repo, d.actor, {
     pattern: body.pattern,
@@ -61,7 +61,7 @@ branchRulesApi.get('/repos/:owner/:repo/branch-rules/:id', async (c) => {
 branchRulesApi.patch('/repos/:owner/:repo/branch-rules/:id', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await jsonBody(c);
   if (body.pattern !== undefined) {
     return c.json({ error: 'pattern cannot be changed; delete the rule and create a new one', code: 'INVALID_PATTERN' }, 400);
@@ -78,7 +78,7 @@ branchRulesApi.patch('/repos/:owner/:repo/branch-rules/:id', async (c) => {
 branchRulesApi.delete('/repos/:owner/:repo/branch-rules/:id', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const res = await rules.deleteRule(c.env, d.repo, d.actor, c.req.param('id'));
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { deleted: true, rule: ruleJson(res.value.rule) });
