@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { branchIssueNumber, checkFingerprint, ISSUE_REF_LIMITS, issueRefsIn, mergeIssueRefs, normalizeFingerprint } from '../src/index';
+import { branchIssueNumber, checkFingerprint, guardFingerprint, ISSUE_REF_LIMITS, issueRefsIn, mergeIssueRefs, normalizeFingerprint } from '../src/index';
 
 describe('issueRefsIn', () => {
   it('reads closing keywords in every tense, with or without a colon', () => {
@@ -115,5 +115,10 @@ describe('fingerprints', () => {
   it('gives each check name one stable fingerprint across failures, flakes and quarantine', () => {
     expect(checkFingerprint('test')).toBe('check:test');
     expect(checkFingerprint('  Lint ')).toBe('check:lint');
+  });
+
+  it('gives each guard rule and path one stable fingerprint across pushes', () => {
+    expect(guardFingerprint('ci-gaming/exit-zero', '.kvarm/ci.json')).toBe('guard:ci-gaming/exit-zero:.kvarm/ci.json');
+    expect(guardFingerprint('secret/kvarm-token', 'Docs/Setup.md')).toBe('guard:secret/kvarm-token:docs/setup.md');
   });
 });

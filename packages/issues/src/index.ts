@@ -135,3 +135,13 @@ export function normalizeFingerprint(v: unknown): string | null {
 export function checkFingerprint(name: string): string {
   return normalizeFingerprint(`check:${name.trim()}`) ?? 'check:';
 }
+
+/**
+ * The one fingerprint of a guard finding: one rule on one path. A later
+ * push that changes the path and no longer triggers the rule closes the
+ * issue it filed as verified; one that triggers it again counts one more
+ * occurrence there.
+ */
+export function guardFingerprint(rule: string, path: string): string {
+  return normalizeFingerprint(`guard:${rule}:${path}`) ?? 'guard:';
+}

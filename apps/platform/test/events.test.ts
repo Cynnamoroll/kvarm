@@ -280,6 +280,7 @@ describe('queue dispatcher', () => {
       'intent-index': expect.objectContaining({ state: 'skipped' }) as unknown,
       'change-hooks': { state: 'skipped', detail: 'no open changes' },
       'issue-commits': { state: 'done', detail: 'no closing references in 0 commits; scanned 0 commits, older ones not read' },
+      'issue-guard': { state: 'done', detail: 'the previous or the new tip could not be read' },
     });
     const gen = await refGeneration(repo.id);
 
@@ -546,7 +547,7 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     expect(list[2]!.eventAt).toBe(iso(T0 + 1000));
     expect(list[0]!.id).not.toBe(list[2]!.id);
     expect(list[0]!.completedAt).toMatch(/Z$/);
-    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['change-hooks', 'intent-index', 'issue-commits', 'purge', 'snapshot']);
+    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['change-hooks', 'intent-index', 'issue-commits', 'issue-guard', 'purge', 'snapshot']);
     expect(r.body.nextCursor).toBeNull();
     expect(r.cost.d1).toBeLessThanOrEqual(2);
     expect(r.cost.art).toBe(0);

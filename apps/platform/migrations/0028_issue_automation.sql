@@ -1,8 +1,9 @@
 -- Issue automation (services/issues.ts). Additive only.
 --
 -- Issues are filed by people, by agents (create_issue) and by platform
--- signals (a failing default-branch check, a flake, a quarantine). A signal
--- names a fingerprint; while an issue with that fingerprint is open, the same
+-- signals (a flake, a quarantine, a guard finding on a push to the default
+-- branch that did not come from the publication path). A signal names a
+-- fingerprint; while an issue with that fingerprint is open, the same
 -- signal counts another occurrence on it instead of filing a duplicate.
 
 -- human | agent | ci | flake | guard

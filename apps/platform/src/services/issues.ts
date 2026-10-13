@@ -21,15 +21,24 @@
  * train), under the same guard. Only a merge into the repository's default
  * branch closes; links to other bases stay visible but inert.
  *
+ * The guard as a producer (guardScanStatements, the events.ts issue-guard
+ * effect): a push that moves the default branch outside the publication
+ * path gets the same kvarm/guard evaluation a change gets, over the push's
+ * whole tree diff. A failing finding files one fingerprinted issue
+ * (guardFingerprint) or counts one more occurrence while one is open, and
+ * the push that clears one on a path it changes closes it as verified.
+ *
  * Callers authorize first through the shared authority lookup; nothing here
  * checks access.
  */
 
 import { mergeBase, type CommitReader } from '@kvarm/gitops';
-import { branchIssueNumber, checkFingerprint, issueRefsIn, normalizeFingerprint, type IssueRef } from '@kvarm/issues';
+import { branchIssueNumber, checkFingerprint, guardFingerprint, issueRefsIn, normalizeFingerprint, type IssueRef } from '@kvarm/issues';
+import type { GuardFinding } from '@kvarm/review';
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
-import { changedPaths } from './compare';
+import { evaluateGuard } from './checks';
+import { changedPaths, treePairBody } from './compare';
 import { lsRefs, readCommitInfo, resolveCommitish, type ResolveContext } from './refs';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
@@ -370,7 +379,9 @@ export function issueSignalStatements(db: D1Database, repoId: string, s: IssueSi
  * Closes the open issue with a fingerprint: `verified` when the signal that
  * filed it has passed again, `restored` when the signal's owner returned it
  * to normal handling (a quarantined check restored). A fingerprint with no
- * open issue changes nothing; a later recurrence files a new issue.
+ * open issue changes nothing; a later recurrence files a new issue. A
+ * caller that resolves many fingerprints in one batch passes `retireTasks:
+ * false` and retires the fix-issue tasks itself, once.
  */
 export function resolveSignalStatements(
   db: D1Database,
@@ -378,6 +389,7 @@ export function resolveSignalStatements(
   fingerprint: string,
   verified: { commit?: string | null; evidence?: IssueEvidence | null; reason?: 'verified' | 'restored' },
   now: number,
+  { retireTasks = true }: { retireTasks?: boolean } = {},
 ): D1PreparedStatement[] {
   const close = db
     .prepare(
@@ -393,7 +405,7 @@ export function resolveSignalStatements(
       verified.evidence ? JSON.stringify(verified.evidence) : null,
       verified.reason ?? 'verified',
     );
-  return [close, retireIssueTasksStatement(db, repoId, now)];
+  return retireTasks ? [close, retireIssueTasksStatement(db, repoId, now)] : [close];
 }
 
 /**
@@ -1082,6 +1094,101 @@ export function commitCloseStatement(db: D1Database, repoId: string, closes: rea
         WHERE repo_id = ?1 AND state = 'open' AND ${closer} IS NOT NULL`,
     )
     .bind(repoId, JSON.stringify(closes), now);
+}
+
+// ---------------------------------------------------------------------------
+// The guard as an issue producer
+// ---------------------------------------------------------------------------
+
+/** Bounds of the default-branch guard scan (guardScanStatements). */
+export const GUARD_SCAN = {
+  /** Failing findings filed per push; further ones only widen the detail. */
+  findingsMax: 10,
+  /** Open guard issues read for verified-closing, newest first. */
+  openMax: 100,
+} as const;
+
+export interface GuardScanResult {
+  statements: D1PreparedStatement[];
+  /** One line for the effect's completion record. */
+  detail: string;
+}
+
+/**
+ * The `kvarm/guard` evaluation of one push to the default branch, as issue
+ * statements for the push effect's completion batch (services/events.ts).
+ * The publication path is recognized by the merge commit recorded on the
+ * change it already gated and skipped; what is left is a push that bypassed
+ * every gate, so its whole tree diff gets the scan a change gets. Each
+ * failing finding files one fingerprinted issue (guardFingerprint), or
+ * counts one more occurrence while one is open; a later push that changes
+ * that path without triggering the rule again closes the issue as
+ * verified, attributed to the new tip — and only from a complete scan, so
+ * a path the budgets stopped the guard from reading can never read as
+ * fixed. Neutral findings never failed a gate and open no issues.
+ */
+export async function guardScanStatements(env: Env, repo: RepoRow, before: string, after: string, now: number): Promise<GuardScanResult> {
+  const db = env.DB;
+  if (await db.prepare(`SELECT 1 FROM change_sets WHERE repo_id = ?1 AND state = 'merged' AND merge_commit = ?2 LIMIT 1`).bind(repo.id, after).first()) {
+    return { statements: [], detail: 'published change; kvarm/guard already gated it' };
+  }
+  const pending: Promise<unknown>[] = [];
+  try {
+    return await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+      const ctx: ResolveContext = { env, repo, artifacts, bypass: false, waitUntil: (p) => pending.push(p) };
+      const [base, head] = await Promise.all([readCommitInfo(ctx, before), readCommitInfo(ctx, after)]);
+      if (!base || !head) return { statements: [], detail: 'the previous or the new tip could not be read' };
+      if (base.tree === head.tree) return { statements: [], detail: 'no tree change' };
+      const { body } = await treePairBody(ctx, base.tree, head.tree);
+      if (body.files.length === 0) return { statements: [], detail: 'no changed files' };
+      const summary = await evaluateGuard(ctx, base.tree, head.tree, body);
+      const filed = new Map<string, GuardFinding>();
+      for (const f of summary.findings) {
+        if (f.severity === 'failure') filed.set(guardFingerprint(f.rule, f.path), f);
+      }
+      const open = (
+        await db
+          .prepare(`SELECT number, fingerprint, paths FROM issues WHERE repo_id = ?1 AND source = 'guard' AND state = 'open' ORDER BY number DESC LIMIT ?2`)
+          .bind(repo.id, GUARD_SCAN.openMax)
+          .all<{ number: number; fingerprint: string; paths: string | null }>()
+      ).results;
+      const changed = new Set(body.files.map((f) => f.path.toLowerCase()));
+      const cleared = summary.complete
+        ? open
+            .filter((o) => !filed.has(o.fingerprint) && parseJson<string[]>(o.paths, []).some((p) => changed.has(p.toLowerCase())))
+            .map((o) => o.fingerprint)
+        : [];
+      const statements: D1PreparedStatement[] = [];
+      const filedList = [...filed.entries()].slice(0, GUARD_SCAN.findingsMax);
+      for (const [fingerprint, f] of filedList) {
+        statements.push(
+          ...issueSignalStatements(db, repo.id, {
+            source: 'guard',
+            fingerprint,
+            title: `${f.rule} in ${f.path}`,
+            body: `${f.message}${f.line !== undefined ? ` (line ${f.line})` : ''}.\n\nFiled automatically by the kvarm/guard scan of the push \`${after.slice(0, 10)}\` to the default branch. A push that changes \`${f.path}\` without triggering this rule again closes this issue as verified; one that triggers it again counts one more occurrence here.`,
+            paths: [f.path],
+            evidence: { sha: after },
+          }, now),
+        );
+      }
+      for (const fingerprint of cleared) {
+        statements.push(...resolveSignalStatements(db, repo.id, fingerprint, { commit: after, evidence: { sha: after }, reason: 'verified' }, now, { retireTasks: false }));
+      }
+      if (statements.length > 0) statements.push(retireIssueTasksStatement(db, repo.id, now));
+      const held = filed.size - filedList.length;
+      const openFingerprints = new Set(open.map((o) => o.fingerprint));
+      const fresh = filedList.filter(([fingerprint]) => !openFingerprints.has(fingerprint)).length;
+      const counted = filedList.length - fresh;
+      const detail =
+        filedList.length === 0 && cleared.length === 0
+          ? `no failing guard findings in ${body.files.length} changed file(s)`
+          : `filed ${fresh}, counted ${counted}, verified-closed ${cleared.length}${held > 0 ? `, ${held} beyond the cap` : ''}`;
+      return { statements, detail: detail + (summary.complete ? '' : '; scan incomplete, no issues verified-closed') };
+    });
+  } finally {
+    await Promise.allSettled(pending);
+  }
 }
 
 // ---------------------------------------------------------------------------
