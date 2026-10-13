@@ -43,8 +43,22 @@ export interface PageOptions {
   script?: string;
 }
 
+function publicOrigin(env: Env): string | null {
+  const configured = env.APP_ORIGIN?.trim();
+  if (!configured) return null;
+  try {
+    const url = new URL(configured);
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 export function layout(env: Env, opts: PageOptions, body: string): string {
   const name = siteName(env);
+  const origin = publicOrigin(env);
+  const previewImage = origin ? `${origin}/assets/brand/og.png` : null;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -53,6 +67,13 @@ export function layout(env: Env, opts: PageOptions, body: string): string {
 <title>${escapeHtml(opts.title ? `${opts.title} · ${name}` : name)}</title>
 <style>${CRITICAL_CSS.value}</style>
 <link rel="stylesheet" href="/assets/app.css">
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/brand/apple-touch-icon.png">
+<link rel="manifest" href="/assets/brand/site.webmanifest">
+<meta name="theme-color" content="#050608">
+${previewImage ? `<meta property="og:image" content="${escapeHtml(previewImage)}">
+` : ''}
 ${opts.head ?? ''}
 ${opts.script ? `<script type="module" defer>${opts.script}</script>` : ''}
 </head>
