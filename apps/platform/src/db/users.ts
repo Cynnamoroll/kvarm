@@ -1,6 +1,13 @@
-/** Platform users, provisioned lazily on first WorkOS sign-in. */
+/**
+ * Platform users. Ops scripts create PAT-only users; WorkOS sign-in
+ * provisions or links them (services/identity.ts).
+ */
 
-import type { SessionUser } from '../auth/workos';
+/**
+ * workos_user_id prefix of users created by scripts/mint-pat.mjs, which have
+ * no WorkOS identity yet. Only such rows can be linked to one.
+ */
+export const UNLINKED_WORKOS_PREFIX = 'kvarm-ops:';
 
 export interface UserRow {
   id: string;
@@ -18,10 +25,24 @@ export function toUserRow(raw: Omit<UserRow, 'is_admin'> & { is_admin: unknown }
   return { ...raw, is_admin: raw.is_admin === true || raw.is_admin === 1 || raw.is_admin === '1' };
 }
 
+/**
+ * The login base for an email: the lowercased local-part with every run of
+ * characters outside [a-z0-9-] turned into one dash, trimmed of dashes and
+ * cut to the 39-character login limit. Reserved words and collisions are
+ * handled by the caller (services/identity.ts).
+ */
 export function loginFromEmail(email: string): string {
-  const raw = (email.split('@')[0] ?? 'user').toLowerCase();
-  const sanitized = raw.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
-  return sanitized.length === 0 ? 'user' : sanitized.slice(0, 39);
+  const raw = (email.split('@')[0] ?? '').toLowerCase();
+  const sanitized = raw.replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '');
+  const cut = sanitized.slice(0, 39).replace(/-+$/, '');
+  return cut.length === 0 ? 'user' : cut;
+}
+
+/** The n-th login candidate for a base (n = 0 is the base itself), always within 39 characters. */
+export function loginCandidate(base: string, n: number): string {
+  if (n === 0) return base;
+  const suffix = `-${n + 1}`;
+  return `${base.slice(0, 39 - suffix.length).replace(/-+$/, '')}${suffix}`;
 }
 
 export async function getUserById(db: D1Database, id: string): Promise<UserRow | null> {
@@ -35,66 +56,4 @@ export async function getUserByLogin(db: D1Database, login: string): Promise<Use
     .bind(login)
     .first<UserRow>();
   return row ? toUserRow(row) : null;
-}
-
-/**
- * Find-or-create the platform user for a WorkOS identity. Login collisions get
- * a numeric suffix. The first ever user becomes admin (bootstrap owner).
- */
-export async function findOrCreateUser(env: Env, session: SessionUser): Promise<UserRow> {
-  const raw = await env.DB.prepare('SELECT * FROM users WHERE workos_user_id = ?')
-    .bind(session.workosUserId)
-    .first<UserRow>();
-  if (raw) {
-    const existing = toUserRow(raw);
-    // Keep display fields fresh from WorkOS.
-    if (existing.email !== session.email || existing.name !== session.name) {
-      await env.DB.prepare('UPDATE users SET email = ?, name = ?, avatar_url = ? WHERE id = ?')
-        .bind(session.email, session.name, session.avatarUrl, existing.id)
-        .run();
-      existing.email = session.email;
-      existing.name = session.name;
-      existing.avatar_url = session.avatarUrl;
-    }
-    return existing;
-  }
-
-  const base = loginFromEmail(session.email);
-  const now = Date.now();
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const login = attempt === 0 ? base : `${base}-${attempt + 1}`;
-    try {
-      const id = crypto.randomUUID();
-      const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>();
-      const isAdmin = (count?.n ?? 0) === 0;
-      await env.DB.prepare(
-        'INSERT INTO users (id, workos_user_id, login, email, name, avatar_url, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?',
-      )
-        .bind(
-          id,
-          session.workosUserId,
-          login,
-          session.email,
-          session.name,
-          session.avatarUrl,
-          isAdmin ? 1 : 0,
-          now,
-        )
-        .run();
-      return {
-        id,
-        workos_user_id: session.workosUserId,
-        login,
-        email: session.email,
-        name: session.name,
-        avatar_url: session.avatarUrl,
-        is_admin: isAdmin,
-        created_at: now,
-      };
-    } catch (err) {
-      if (String(err).includes('UNIQUE')) continue; // login taken; try suffix
-      throw err;
-    }
-  }
-  throw new Error('could not allocate a login for this user');
 }
