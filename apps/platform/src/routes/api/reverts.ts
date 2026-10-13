@@ -10,6 +10,7 @@
  *                                     → 201 opened | 200 duplicate event id | 401 unverified (nothing written)
  */
 
+import { concat } from '@kvarm/gitops';
 import { Hono, type Context } from 'hono';
 import { actorJson, authorizeRoute, clientIp, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
@@ -83,13 +84,7 @@ async function readBounded(req: Request, max: number): Promise<Uint8Array | null
     }
     chunks.push(value);
   }
-  const out = new Uint8Array(size);
-  let off = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, off);
-    off += chunk.length;
-  }
-  return out;
+  return concat(...chunks);
 }
 
 revertsApi.post('/repos/:owner/:repo/incidents', async (c) => {

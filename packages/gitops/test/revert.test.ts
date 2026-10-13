@@ -229,6 +229,9 @@ describe('revertTree parity with git revert', () => {
     expect(await revertTree(reader, { commit: 'f'.repeat(40), target: tip })).toMatchObject({ status: 'missing', missing: 'commit', treeHash: null });
     expect(await revertTree(reader, { commit: bad, target: 'e'.repeat(40) })).toMatchObject({ status: 'missing', missing: 'target' });
     expect(await revertTree(reader, { commit: bad, target: tip, mainline: 2 })).toMatchObject({ status: 'missing', missing: 'mainline' });
+    const parent = r.git('rev-parse', `${bad}^`);
+    const noParent = { ...reader, readCommit: (sha: string) => (sha === parent ? Promise.resolve(null) : reader.readCommit(sha)) };
+    expect(await revertTree(noParent, { commit: bad, target: tip })).toMatchObject({ status: 'missing', missing: 'parent', parent });
   });
 
   it('stops on a spent budget with no tree', async () => {

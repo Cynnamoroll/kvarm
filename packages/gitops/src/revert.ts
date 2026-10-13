@@ -47,7 +47,7 @@ export interface RevertResult {
   objects: GitObject[];
   conflicts: MergeConflict[];
   /** For `missing`: which input could not be read; `mainline` names a parent the commit does not have. */
-  missing?: 'commit' | 'target' | 'against' | 'mainline';
+  missing?: 'commit' | 'target' | 'against' | 'parent' | 'mainline';
   /** For `unknown`: the budget or read failure that stopped the merge. */
   truncatedReason?: Merge3Truncation;
   treeReads: number;
@@ -84,7 +84,7 @@ export async function revertTree(reader: CommitReader & MergeReader, input: Reve
     parent = Number.isInteger(n) && n >= 1 ? (commit.parents[n - 1] ?? null) : null;
     if (parent === null) return { status: 'missing', missing: 'mainline', parent: null, merge, ...none };
     const p = await reader.readCommit(parent);
-    if (!p) return { status: 'missing', missing: 'against', parent, merge, ...none };
+    if (!p) return { status: 'missing', missing: 'parent', parent, merge, ...none };
     parentTree = p.treeHash;
   }
 

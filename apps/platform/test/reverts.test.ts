@@ -13,7 +13,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import type { RepoRow } from '../src/db/repos';
 import worker from '../src/index';
+import type { ChangeContext } from '../src/services/changes';
+import { createRevert, defaultRevertDeps, revertBranch } from '../src/services/reverts';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -484,17 +487,43 @@ describe('incident webhooks', () => {
     expect(adopted.json).toMatchObject({ duplicate: true, change: { number: first.json.change.number } });
     expect(await counts('takeover', repo)).toMatchObject({ changes: before.changes, refs: before.refs });
 
-    // A delivery that pushed its branch and died before the change existed: the retry opens the change on that branch.
+    // The same source and id naming another commit is refused, never answered with the other commit's change.
+    const reused = await deliver('takeover', event('7', first.json.revert.commit), { secret });
+    expect([reused.status, reused.json.code]).toEqual([409, 'EVENT_ID_REUSED']);
+
+    // A delivery that pushed its branch and died before the change existed: the retry replaces the orphan
+    // branch with a revert planned on the current tip and opens its change.
     const key = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('https://pager.example/alerts\u00009')))]
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('')
       .slice(0, 8);
     const branch = `kvarm-revert/${bad.sha.slice(0, 7)}-${key}`;
-    repo.refs.set(`refs/heads/${branch}`, first.json.revert.commit);
+    const orphan = (await commit(repo, { 'stale.txt': 'orphan\n' })).sha;
+    repo.refs.set(`refs/heads/${branch}`, orphan);
     const recovered = await deliver('takeover', event('9', bad.sha), { secret });
     expect(recovered.status, recovered.text).toBe(201);
-    expect(recovered.json).toMatchObject({ duplicate: false, recovered: true, change: { kind: 'revert', head: branch, mergePolicy: 'draft' } });
+    expect(recovered.json).toMatchObject({ duplicate: false, revert: { branch, sha: bad.sha }, change: { kind: 'revert', head: branch, mergePolicy: 'draft' } });
+    expect(repo.refs.get(`refs/heads/${branch}`)).toBe(recovered.json.revert.commit);
+    expect(recovered.json.revert.commit).not.toBe(orphan);
     expect((await deliver('takeover', event('9', bad.sha), { secret })).json).toMatchObject({ duplicate: true, change: { number: recovered.json.change.number } });
+  });
+
+  it('opens at most one change per revert branch when two requests race past the branch check', async () => {
+    const repo = await seedRepo('race');
+    const { bad } = await history(repo);
+    const repoRow = await env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repoIds.race).first<RepoRow>();
+    const cx: ChangeContext = { env, repo: repoRow!, actor: null, branchRules: [], waitUntil: () => undefined };
+    const first = await createRevert(cx, { sha: bad.sha }, defaultRevertDeps, { branchKey: 'feedbeef' });
+    expect(first.ok).toBe(true);
+    const branch = revertBranch(bad.sha, 'feedbeef');
+    // The second request finds no branch (as if it read before the first pushed) and pushes its own.
+    repo.refs.delete(`refs/heads/${branch}`);
+    const second = await createRevert(cx, { sha: bad.sha }, defaultRevertDeps, { branchKey: 'feedbeef' });
+    expect(second).toMatchObject({ ok: false, status: 409, code: 'REVERT_BRANCH_EXISTS' });
+    const changes = await env.DB.prepare(`SELECT COUNT(*) AS n FROM change_sets WHERE repo_id = ? AND head_ref = ?`).bind(repoIds.race, branch).first<{ n: number }>();
+    expect(changes?.n).toBe(1);
+    // The loser leaves the branch to the change that owns it.
+    expect(repo.refs.has(`refs/heads/${branch}`)).toBe(true);
   });
 
   it('refuses a body over 64 KiB without buffering it, whether or not its length is declared', async () => {

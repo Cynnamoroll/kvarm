@@ -30,3 +30,8 @@ export function gitRateLimit(env: Env, op: 'read' | 'write', identity: string): 
 export function preauthAllowed(env: Env, clientIp: string | null): Promise<boolean> {
   return allowed(env.WRITE_LIMITER, `preauth:${clientIp ?? 'unknown'}`);
 }
+
+/** Incident webhook deliveries (services/incidents.ts) per repository and client IP, checked before the webhook lookup. */
+export function incidentDeliveryAllowed(env: Env, repo: string, clientIp: string | null): Promise<boolean> {
+  return allowed(env.WRITE_LIMITER, `incident:${repo}:${clientIp ?? 'unknown'}`);
+}

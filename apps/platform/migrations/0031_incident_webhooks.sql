@@ -39,3 +39,8 @@ CREATE TABLE incident_events (
   opened_at INTEGER,
   PRIMARY KEY (repo_id, event_source, event_id)
 );
+
+-- One change set per revert branch. A revert branch is written once by the
+-- platform and opened once; two deliveries of one incident event that race
+-- (one taking over the other's claim) cannot both open a change on it.
+CREATE UNIQUE INDEX idx_change_sets_revert_head ON change_sets(repo_id, head_ref) WHERE kind = 'revert';

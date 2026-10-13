@@ -22,7 +22,7 @@
  * partial commit, one that changes nothing is 409 NOTHING_TO_REVERT.
  */
 
-import { ZERO_OID, buildCommit, revertMessage, revertTree, type GitIdent, type MergeConflict } from '@kvarm/gitops';
+import { ZERO_OID, buildCommit, hex, revertMessage, revertTree, type GitIdent, type MergeConflict } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -143,7 +143,12 @@ export function parseRevertRequest(input: unknown): ServiceResult<RevertRequest>
 }
 
 function randomSuffix(): string {
-  return [...crypto.getRandomValues(new Uint8Array(4))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return hex(crypto.getRandomValues(new Uint8Array(4)));
+}
+
+/** The live value of one ref (one ls-refs round trip), or null when it does not exist. */
+export function liveRef(cx: Pick<ChangeContext, 'env' | 'repo' | 'waitUntil'>, ref: string): Promise<string | null> {
+  return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => (await lsRefs(resolveCtx(cx, artifacts), [ref])).get(ref) ?? null);
 }
 
 /** `kvarm-revert/<sha7>-<key>`: the key is random, or derived from an incident event so a repeated delivery names the same branch. */
@@ -239,9 +244,9 @@ export function createRevert(cx: ChangeContext, input: unknown, deps: RevertDeps
     if (pushed.status === 'stale') return fail(409, `the revert branch ${branch} already exists`, 'REVERT_BRANCH_EXISTS', { ref: branch });
     let created = pushed.status === 'ok';
     if (pushed.status === 'unknown') {
-      const live = await pusher.listRefs().catch(() => null);
-      created = live?.get(ref) === commit.hash;
-      if (!live) await removeBranch();
+      const live = await liveRef(cx, ref).catch(() => undefined);
+      created = live === commit.hash;
+      if (live === undefined) await removeBranch();
     }
     if (!created) {
       return fail(502, `the revert branch could not be created (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''})`, 'REF_CREATE_FAILED');
@@ -253,6 +258,8 @@ export function createRevert(cx: ChangeContext, input: unknown, deps: RevertDeps
     try {
       change = await createChange(cx, { title, body, base, head: branch, mergePolicy }, { kind: 'revert' });
     } catch (err) {
+      // Another request opened the change on this branch first (one change per revert branch, migration 0031); the branch is its head now.
+      if (String(err).includes('UNIQUE constraint failed')) return fail(409, `the revert branch ${branch} already has a change`, 'REVERT_BRANCH_EXISTS', { ref: branch });
       await removeBranch();
       throw err;
     }

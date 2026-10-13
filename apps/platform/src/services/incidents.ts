@@ -28,23 +28,13 @@
  * opened (200) instead of opening another.
  */
 
-import { encode, hex, sha256Hex } from '@kvarm/gitops';
+import { ZERO_OID, encode, hex, sha256Hex, unhex } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
-import { preauthAllowed } from '../ratelimit';
+import { incidentDeliveryAllowed } from '../ratelimit';
 import { repoBranchRulesSelect, ruleFromRow, type BranchRuleRow } from './branchRules';
-import {
-  CHANGE_LIMITS,
-  MERGE_POLICIES,
-  changeView,
-  createChange,
-  readChange,
-  type ChangeContext,
-  type ChangeDetail,
-  type ChangeView,
-  type MergePolicy,
-} from './changes';
-import { createRevert, defaultRevertDeps, revertBranch, type RevertCreated, type RevertDeps } from './reverts';
+import { MERGE_POLICIES, changeView, readChange, type ChangeContext, type ChangeView, type MergePolicy } from './changes';
+import { createRevert, defaultRevertDeps, liveRef, revertBranch, type RevertCreated, type RevertDeps } from './reverts';
 
 declare global {
   interface Env {
@@ -210,9 +200,7 @@ export interface IncidentDelivery {
 
 export type IncidentOutcome =
   | ({ duplicate: false; eventId: string } & RevertCreated)
-  | { duplicate: true; eventId: string; change: ChangeView | null }
-  // A delivery that took over an abandoned claim and opened the change on the branch the first one had pushed.
-  | { duplicate: false; eventId: string; recovered: true; change: ChangeView };
+  | { duplicate: true; eventId: string; change: ChangeView | null };
 
 const EVENT_ID_MAX = 256;
 
@@ -223,9 +211,7 @@ function signedParts(headers: Headers, now: number): { timestamp: string; signat
   if (Math.abs(now - Number(timestamp)) > INCIDENT_LIMITS.toleranceSeconds) return null;
   const m = /^sha256=([0-9a-f]{64})$/i.exec(headers.get(SIGNATURE_HEADER)?.trim() ?? '');
   if (!m) return null;
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) bytes[i] = parseInt(m[1]!.slice(i * 2, i * 2 + 2), 16);
-  return { timestamp, signature: bytes };
+  return { timestamp, signature: unhex(m[1]!.toLowerCase()) };
 }
 
 export function parseIncidentEvent(body: Uint8Array): ServiceResult<IncidentEvent> {
@@ -272,6 +258,7 @@ interface ClaimRow {
   state: 'pending' | 'opened';
   claim: string;
   change_number: number | null;
+  subject_sha: string;
 }
 
 type Found = RepoRow & { incident_key_nonce: string; incident_key_hash: string };
@@ -287,8 +274,8 @@ export async function receiveIncident(d: IncidentDelivery, env: Env, deps: Rever
   if (!signed) return UNVERIFIED;
   const master = masterKey(env);
   if (!master) return UNVERIFIED;
-  // Unverified deliveries reach D1 only through the per-IP throttle of other unauthenticated lookups.
-  if (!(await preauthAllowed(env, d.clientIp))) return refuse(429, 'too many requests', 'RATE_LIMITED');
+  // Bounds the D1 lookups unverified deliveries can cause, in a bucket of its own so other unauthenticated traffic from one IP does not delay incidents.
+  if (!(await incidentDeliveryAllowed(env, `${d.owner}/${d.name}`, d.clientIp))) return refuse(429, 'too many incident deliveries, retry shortly', 'RATE_LIMITED');
 
   const found = await env.DB.prepare(
     `SELECT r.*, w.key_nonce AS incident_key_nonce, w.key_hash AS incident_key_hash
@@ -323,43 +310,58 @@ export async function receiveIncident(d: IncidentDelivery, env: Env, deps: Rever
       `INSERT INTO incident_events (repo_id, event_source, event_id, subject_sha, state, claim, claimed_at)
        VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)
        ON CONFLICT(repo_id, event_source, event_id) DO UPDATE SET claim = ?5, claimed_at = ?6
-        WHERE incident_events.state = 'pending' AND incident_events.claimed_at < ?7`,
+        WHERE incident_events.state = 'pending' AND incident_events.claimed_at < ?7 AND incident_events.subject_sha = ?4`,
     ).bind(repo.id, ev.source, ev.id, ev.subject, claim, nowMs, nowMs - INCIDENT_LIMITS.claimTakeoverMs),
-    env.DB.prepare('SELECT state, claim, change_number FROM incident_events WHERE repo_id = ? AND event_source = ? AND event_id = ?').bind(repo.id, ev.source, ev.id),
+    env.DB.prepare('SELECT state, claim, change_number, subject_sha FROM incident_events WHERE repo_id = ? AND event_source = ? AND event_id = ?').bind(
+      repo.id,
+      ev.source,
+      ev.id,
+    ),
   ]);
   const row = (read?.results as ClaimRow[] | undefined)?.[0];
   if (!row) return refuse(500, 'the event could not be recorded', 'EVENT_RECORD_FAILED');
+  // An event is immutable: the same source and id naming another commit is a sender error, never another revert or someone else's change.
+  if (row.subject_sha !== ev.subject) return refuse(409, 'this event source and id were already delivered with another subject', 'EVENT_ID_REUSED');
   if (row.state === 'opened') return duplicate(env, repo.id, ev.id, row.change_number);
   if (row.claim !== claim) return refuse(409, 'another delivery of this event is being processed; retry shortly', 'EVENT_IN_PROGRESS');
 
   const rules = ((await repoBranchRulesSelect(env.DB, repo.id).all<BranchRuleRow>()).results ?? []).map(ruleFromRow);
   const cx: ChangeContext = { env, repo, actor: null, branchRules: rules, waitUntil: d.waitUntil };
-  const note = `Opened by incident event ${JSON.stringify(ev.id)} (type ${JSON.stringify(ev.type)}, source ${JSON.stringify(ev.source)}).`;
-  // The branch is named after the event: a delivery that took over an abandoned claim finds the first one's branch.
-  const branchKey = (await sha256Hex(`${ev.source}\0${ev.id}`)).slice(0, 8);
-  const mergePolicy = ev.mergePolicy ?? 'draft';
-  let opened: ServiceResult<RevertCreated | { change: ChangeDetail }>;
+  const request = { sha: ev.subject, mergePolicy: ev.mergePolicy ?? 'draft', ...(ev.reason !== undefined ? { reason: ev.reason } : {}), ...(ev.base !== undefined ? { base: ev.base } : {}) };
+  const origin = {
+    note: `Opened by incident event ${JSON.stringify(ev.id)} (type ${JSON.stringify(ev.type)}, source ${JSON.stringify(ev.source)}).`,
+    // Named after the event: a delivery that took over an abandoned claim meets the first one's branch instead of opening a second change.
+    branchKey: (await sha256Hex(`${ev.source}\0${ev.id}`)).slice(0, 8),
+  };
+  const ref = `refs/heads/${revertBranch(ev.subject, origin.branchKey)}`;
+  const adopt = async (): Promise<number | null> => {
+    const existing = await env.DB.prepare(`SELECT number FROM change_sets WHERE repo_id = ? AND head_ref = ? AND kind = 'revert'`)
+      .bind(repo.id, ref.slice('refs/heads/'.length))
+      .first<{ number: number }>();
+    return existing?.number ?? null;
+  };
+
+  let opened: ServiceResult<RevertCreated>;
   try {
-    opened = await createRevert(
-      cx,
-      { sha: ev.subject, mergePolicy, ...(ev.reason !== undefined ? { reason: ev.reason } : {}), ...(ev.base !== undefined ? { base: ev.base } : {}) },
-      deps,
-      { note, branchKey },
-    );
+    opened = await createRevert(cx, request, deps, origin);
     if (!opened.ok && opened.code === 'REVERT_BRANCH_EXISTS') {
-      const branch = revertBranch(ev.subject, branchKey);
-      const existing = await env.DB.prepare('SELECT number FROM change_sets WHERE repo_id = ? AND head_ref = ? ORDER BY number LIMIT 1')
-        .bind(repo.id, branch)
-        .first<{ number: number }>();
-      if (existing) {
-        await markOpened(env, key, claim, existing.number);
-        return duplicate(env, repo.id, ev.id, existing.number);
+      const number = await adopt();
+      if (number !== null) {
+        await markOpened(env, key, claim, number);
+        return duplicate(env, repo.id, ev.id, number);
       }
-      // The earlier delivery pushed the branch and died before its change existed: open it now.
-      const title = `Revert ${ev.subject} (incident ${ev.id})`.slice(0, CHANGE_LIMITS.titleMax);
-      const base = ev.base ?? repo.default_branch;
-      const c = await createChange(cx, { title, body: [ev.reason, note].filter(Boolean).join('\n\n'), base, head: branch, mergePolicy }, { kind: 'revert' });
-      opened = c.ok ? { ok: true, value: { change: c.value } } : c;
+      // The earlier delivery pushed the branch and died before its change existed. The orphan is
+      // removed (compare-and-swap on the value read) and the revert is planned again on the current tip.
+      const orphan = await liveRef(cx, ref);
+      if (orphan) await deps.pusher(env, repo).updateRef({ ref, oldOid: orphan, newOid: ZERO_OID });
+      opened = await createRevert(cx, request, deps, origin);
+      if (!opened.ok && opened.code === 'REVERT_BRANCH_EXISTS') {
+        const raced = await adopt();
+        if (raced !== null) {
+          await markOpened(env, key, claim, raced);
+          return duplicate(env, repo.id, ev.id, raced);
+        }
+      }
     }
   } catch (err) {
     await releaseClaim(env, key, claim);
@@ -369,16 +371,13 @@ export async function receiveIncident(d: IncidentDelivery, env: Env, deps: Rever
     await releaseClaim(env, key, claim);
     return opened;
   }
-  const recorded = await markOpened(env, key, claim, opened.value.change.number);
-  // A lost claim means another delivery took it over; the branch name kept it from opening a second change.
-  if (!recorded) console.warn(JSON.stringify({ incidentClaimLost: 1 }));
-  if (!('revert' in opened.value)) return duplicate(env, repo.id, ev.id, opened.value.change.number, false);
+  // A lost claim means another delivery took it over; one change per revert branch kept it from opening a second change.
+  if (!(await markOpened(env, key, claim, opened.value.change.number))) console.warn(JSON.stringify({ incidentClaimLost: 1 }));
   return { ok: true, value: { duplicate: false, eventId: ev.id, ...opened.value } };
 }
 
-async function duplicate(env: Env, repoId: string, eventId: string, number: number | null, isDuplicate = true): Promise<ServiceResult<IncidentOutcome>> {
+async function duplicate(env: Env, repoId: string, eventId: string, number: number | null): Promise<ServiceResult<IncidentOutcome>> {
   const change = number !== null ? await readChange(env, repoId, number) : null;
-  if (!isDuplicate && change) return { ok: true, value: { duplicate: false, eventId, recovered: true, change: changeView(change) } };
   return { ok: true, value: { duplicate: true, eventId, change: change ? changeView(change) : null } };
 }
 
