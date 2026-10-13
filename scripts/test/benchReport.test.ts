@@ -55,7 +55,10 @@ function sampleReport() {
       { metric: 'explicit merge (POST merge -> 200)', stats: stats(900), method: '5 fast-forward merges' },
       { metric: 'mergeability cold', stats: stats(400), method: 'first read of a new change' },
       { metric: 'mergeability warm', stats: stats(80), method: 'repeat read' },
+      { metric: 'push -> guard run started (head dispatch)', stats: stats(7000), method: 'push to the startedAt of the guard run at the pushed head' },
+      { metric: 'guard run started -> verdict recorded', stats: stats(1300), method: 'startedAt -> finishedAt of the same guard run' },
       { metric: 'push -> kvarm/guard recorded', stats: stats(8000), method: 'git push to first guard run at the new head' },
+      { metric: 'guard verdict -> CI check run created', stats: stats(400), method: 'guard finishedAt -> the CI check run createdAt' },
       { metric: 'push -> CI job claimable', stats: stats(6000), method: 'git push to a claim that returns the job' },
       { metric: 'runner claim -> report, cold install', stats: stats(20_000), method: 'runner-warm-bench' },
       { metric: 'runner claim -> report, warm workdir', stats: stats(6_000), method: 'runner-warm-bench' },
@@ -92,6 +95,13 @@ describe('renderBenchReadme', () => {
     expect(md).toMatch(/Container CI[\s\S]*\| run 1 cold \| 15\.0 s \| 16\.0 s \| 9\.0 s \|/);
     expect(md).toContain('| warm compare | 10 | 10 | 100% |');
     expect(md).toContain('| info/refs | 6 | 5 | 83% |');
+  });
+
+  it('renders the push pipeline per stage and names the stages', () => {
+    expect(md).toContain('| push -> guard run started (head dispatch) | 5 | 6990 ms | 7000 ms | 7020 ms |');
+    expect(md).toContain('| guard run started -> verdict recorded | 5 | 1290 ms | 1300 ms | 1320 ms |');
+    expect(md).toContain('| guard verdict -> CI check run created | 5 | 390 ms | 400 ms | 420 ms |');
+    expect(md).toContain('The push rows split the pipeline into stages');
   });
 
   it('names the burst population, then renders its window, throughput and server-clock latency', () => {

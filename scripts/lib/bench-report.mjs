@@ -130,7 +130,7 @@ export function renderBenchReadme(r) {
   push(
     `## ${BENCH_GROUPS[6]}`,
     '',
-    'Wall-clock turnaround of the developer and CI loop, from the client side.',
+    'Wall-clock turnaround of the developer and CI loop, from the client side. The push rows split the pipeline into stages — head dispatch (push -> guard run started), the verdict itself (guard started -> finished), and guard verdict -> CI check run created — so a regression names its stage instead of the whole span.',
     '',
     '| metric | n | min | p50 | max | methodology |',
     '| --- | ---: | ---: | ---: | ---: | --- |',

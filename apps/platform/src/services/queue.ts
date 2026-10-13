@@ -39,7 +39,7 @@ import { CostSpan, currentMeter, withCostSpan, type CostCounters } from '../cost
 import type { RepoRow } from '../db/repos';
 import { toUserRow, type UserRow } from '../db/users';
 import type { ServiceResult } from '../repos/service';
-import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
+import { attributeMerge, attributeMerges, mergeAttributionDefaults, parseAttributionInput, type AttributionInput, type MergeAttributionItem } from './attribution';
 import { credentialMayUpdateRef, isOrgRole, isRepoNeed, repoRole, type Actor } from './authz';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
@@ -106,12 +106,18 @@ import { hasCiJobs, queueExactTreeCi, type CiConfigMemo } from './ci';
  * and runner capacity directly); there is no request-time switch.
  */
 export const TRAIN_LIMITS = {
-  /** Default speculation window: entries prepared ahead of publication. */
-  window: 8,
+  /**
+   * Default speculation window: entries prepared ahead of publication. A pass
+   * composes up to this many stacked candidates and then publishes the ready
+   * run in one chain (one lease and one push), so a wider window both
+   * overlaps more composition work and lands more candidates per
+   * publication round trip.
+   */
+  window: 16,
   /** Prepared candidates whose checks may run at the same time. */
-  runnerCapacity: 4,
+  runnerCapacity: 8,
   /** Active entries per repository; the next enqueue gets 429 with Retry-After. */
-  admissionCapacity: 64,
+  admissionCapacity: 128,
   retryAfterSeconds: 30,
   /** Publication lease time-to-live. */
   leaseTtlMs: 30_000,
@@ -123,7 +129,7 @@ export const TRAIN_LIMITS = {
    * Entries a pass reads: the window plus room for entries that wait on a
    * pinned dependency (skipped without composing, never ejected).
    */
-  readAhead: 16,
+  readAhead: 24,
   backoffBaseSeconds: 5,
   backoffMaxSeconds: 300,
   /** Backoff kicks for an entry before the train stops retrying on its own (a later kick resumes it). */
@@ -1407,42 +1413,52 @@ async function trainPass(
     states: plans.map((p) => ({ number: p.e.change_number, state: p.next })),
   });
 
-  // Publish ready candidates from the head while each sits on the published tip.
+  // Publish ready candidates from the head while each sits on the published
+  // tip: the longest consecutive run is one publication chain (one lease and
+  // one push for every candidate in it). A candidate that cannot publish
+  // truncates the run; the rest wait for the next pass.
   let tip = target;
+  const publication: Plan[] = [];
   for (const plan of plans) {
     if (plan.next === 'ejected' || plan.next === 'stale' || plan.next === 'published' || plan.wait) continue;
     if (plan.next !== 'ready' || !plan.prepared || !plan.current || plan.prepared.targetSha !== tip) {
       if (plan.next === 'checking' || plan.next === 'preparing') out.waiting = true;
       break;
     }
+    publication.push(plan);
+    tip = plan.prepared.mergeCommit;
+  }
+  if (publication.length > 0) {
     const span = new CostSpan();
-    const r = await withCostSpan(span, () => publishCandidate(env, ctx, repo, rules, ref, plan, owner, deps, gate, span));
-    if (r.kind === 'published') {
-      out.published.push(plan.e.change_number);
-      out.progress = true;
-      // A publication reconciled under a later commit leaves the ref there: the next candidate recomposes on it.
-      tip = r.tip ?? plan.prepared.mergeCommit;
-      continue;
+    const chainResults = await withCostSpan(span, () => publishChain(env, ctx, repo, rules, ref, publication, owner, deps, gate, span));
+    for (let i = 0; i < publication.length; i++) {
+      const plan = publication[i]!;
+      const r = chainResults[i]?.result ?? { kind: 'pending' as const };
+      if (r.kind === 'published') {
+        out.published.push(plan.e.change_number);
+        out.progress = true;
+        continue;
+      }
+      if (r.kind === 'exited') {
+        out.ejected.push({ number: plan.e.change_number, code: r.code });
+        out.progress = true;
+      } else if (r.kind === 'busy') {
+        out.retryAfterSeconds = r.retryAfterSeconds;
+        out.backoffAttempts = plan.e.attempts;
+      } else if (r.kind === 'retry') {
+        out.retryAfterSeconds = backoffSeconds(plan.e.attempts);
+        out.backoffAttempts = plan.e.attempts;
+        if (plan.e.attempts < 1) out.progress = true;
+      } else if (r.kind === 'unresolved') {
+        // Not charged to the entry's attempts: this kick is what reconciles the pending intent.
+        out.retryAfterSeconds = Math.ceil((TRAIN_LIMITS.leaseTtlMs * 2) / 1000) + 1;
+      } else if (r.kind === 'pending') {
+        out.waiting = true;
+      } else {
+        out.progress = true;
+      }
+      break;
     }
-    if (r.kind === 'exited') {
-      out.ejected.push({ number: plan.e.change_number, code: r.code });
-      out.progress = true;
-    } else if (r.kind === 'busy') {
-      out.retryAfterSeconds = r.retryAfterSeconds;
-      out.backoffAttempts = plan.e.attempts;
-    } else if (r.kind === 'retry') {
-      out.retryAfterSeconds = backoffSeconds(plan.e.attempts);
-      out.backoffAttempts = plan.e.attempts;
-      if (plan.e.attempts < 1) out.progress = true;
-    } else if (r.kind === 'pending') {
-      out.waiting = true;
-    } else if (r.kind === 'unresolved') {
-      // Not charged to the entry's attempts: this kick is what reconciles the pending intent.
-      out.retryAfterSeconds = Math.ceil((TRAIN_LIMITS.leaseTtlMs * 2) / 1000) + 1;
-    } else {
-      out.progress = true;
-    }
-    break;
   }
   return out;
 }
@@ -1660,20 +1676,18 @@ async function enqueuerOf(db: D1Database, repo: RepoRow, e: EntryRow, now: numbe
 }
 
 /**
- * What follows a recorded publication, whoever recorded it: pin settlement
- * of the landing, the merge commit's attribution note, and removal of the
+ * The lease-free follow-ups of a recorded publication that need no
+ * attribution note: pin settlement of the landing and removal of the
  * temporary CI ref. Runs only for the writer that moved the entry to
  * `published`, so it runs once per publication, and never under the lease.
- * `actor` is asked for only when a merge commit is noted.
  */
-async function afterPublication(
+async function settlePublication(
   env: Env,
   ctx: ResolveContext,
   repo: RepoRow,
   e: EntryRow,
   i: IntentRow,
   rec: Recorded,
-  actor: () => Promise<Actor | null>,
   deps: TrainDeps,
 ): Promise<void> {
   await settleLanded(env.DB, artifactsMergeSources(ctx), repo.id, rec.landed, i.new_sha, {
@@ -1687,13 +1701,6 @@ async function afterPublication(
   if (!rec.changeWritten) {
     console.warn(JSON.stringify({ trainRecord: { repo: repo.id, number: e.change_number, mergeCommit: i.new_sha, entry: rec.entryWritten, change: rec.changeWritten } }));
   }
-  if (i.kind !== 'merge') return;
-  // A Kvarm merge commit carries the enqueuing principal; a fast-forward publishes the author's commit untouched.
-  await attributeMerge({ env, repo, actor: await actor(), waitUntil: ctx.waitUntil }, ctx.artifacts as LazyRepo, deps.pusher(env, repo), {
-    changeNumber: e.change_number,
-    mergeCommit: i.new_sha,
-    input: parseJson<AttributionInput>(e.attribution),
-  });
   if (i.ci_prepared === 1) {
     const checkRef = `refs/heads/kvarm-ci/${e.id}/${i.tree_sha}`;
     ctx.waitUntil(
@@ -1705,6 +1712,58 @@ async function afterPublication(
         })
         .catch((err) => console.warn(JSON.stringify({ ciPreparedRefCleanup: { repo: repo.id, ref: checkRef, error: String(err) } }))),
     );
+  }
+}
+
+/**
+ * What follows a recorded publication, whoever recorded it: the settlement
+ * above, plus the merge commit's attribution note. `actor` is asked for only
+ * when a merge commit is noted.
+ */
+async function afterPublication(
+  env: Env,
+  ctx: ResolveContext,
+  repo: RepoRow,
+  e: EntryRow,
+  i: IntentRow,
+  rec: Recorded,
+  actor: () => Promise<Actor | null>,
+  deps: TrainDeps,
+): Promise<void> {
+  await settlePublication(env, ctx, repo, e, i, rec, deps);
+  if (i.kind !== 'merge') return;
+  // A Kvarm merge commit carries the enqueuing principal; a fast-forward publishes the author's commit untouched.
+  await attributeMerge({ env, repo, actor: await actor(), waitUntil: ctx.waitUntil }, ctx.artifacts as LazyRepo, deps.pusher(env, repo), {
+    changeNumber: e.change_number,
+    mergeCommit: i.new_sha,
+    input: parseJson<AttributionInput>(e.attribution),
+  });
+}
+
+/**
+ * The follow-ups of a publication chain's recorded candidates: the settlement
+ * of each landing, then one attribution notes push covering every merge
+ * commit the chain created, so a chain costs one notes round trip however
+ * many merges it landed.
+ */
+async function afterPublications(
+  env: Env,
+  ctx: ResolveContext,
+  repo: RepoRow,
+  items: ReadonlyArray<{ e: EntryRow; intent: IntentRow; recorded: Recorded; actor: Actor | null }>,
+  deps: TrainDeps,
+): Promise<void> {
+  for (const { e, intent, recorded } of items) await settlePublication(env, ctx, repo, e, intent, recorded, deps);
+  const merges: MergeAttributionItem[] = items
+    .filter(({ intent }) => intent.kind === 'merge')
+    .map(({ e, intent, actor }) => ({
+      changeNumber: e.change_number,
+      mergeCommit: intent.new_sha,
+      input: parseJson<AttributionInput>(e.attribution),
+      actor,
+    }));
+  if (merges.length > 0) {
+    await attributeMerges({ env, repo, waitUntil: ctx.waitUntil }, ctx.artifacts as LazyRepo, deps.pusher(env, repo), merges);
   }
 }
 
@@ -1928,235 +1987,440 @@ function costDelta(a: CostCounters | null, b: CostCounters | null): Partial<Cost
  * records nothing. The lease covers the write credential, the pack, the
  * revalidation, the receive-pack exchange and the one record batch.
  */
-async function publishCandidate(
+/** One ready candidate of a publication chain, with its own claim, intent, record and result. */
+interface ChainEntry {
+  plan: Plan;
+  e: WindowRow;
+  pv: PreparedMerge;
+  checks: RequiredChecks;
+  claimedGen: number;
+  /** Before the claim: `ready` at the pass's generation; after it, `publishing` at the claimed one. */
+  fence: { generation: number; state: QueueState };
+  intent: IntentRow | null;
+  /** The change and its head workspace pins as read with the claim. */
+  change: (ChangeRow & ReviewFactsRow) | null;
+  linked: boolean;
+  who: { actor: Actor | null; denied: string | null };
+  recorded: Recorded | null;
+  reconciled: Reconciled | null;
+  result: PublishResult | null;
+}
+
+/** Splits a counter delta over `k` shares, remainder to the first shares; the sum and every key are preserved. */
+function splitCounters(cost: Partial<CostCounters>, k: number): Array<Partial<CostCounters>> {
+  const shares: Array<Partial<CostCounters>> = Array.from({ length: k }, () => ({}));
+  for (const key of ['d1', 'rr', 'rw', 'art', 'do', 'q', 'sub'] as const) {
+    const total = cost[key] ?? 0;
+    const base = Math.floor(total / k);
+    let rest = total - base * k;
+    for (let i = 0; i < k; i++) {
+      const extra = rest > 0 ? 1 : 0;
+      rest -= extra;
+      shares[i]![key] = base + extra;
+    }
+  }
+  return shares;
+}
+
+/**
+ * Publishes a chain of ready candidates: the longest consecutive run whose
+ * composed commits stack on the published tip (the pass collected it). The
+ * gate is asked about each candidate's exact tree before any lease is held;
+ * then one lease, one prepared push (the tip to the last candidate's merge
+ * commit, every candidate's objects) and one claim-and-revalidate batch for
+ * all of them — each candidate's claim, intent, change, head workspace,
+ * enqueuer facts and the current rules, every write fenced exactly as in a
+ * single publication. A candidate that cannot publish truncates the chain:
+ * it exits or goes back on its own, the already-claimed candidates behind it
+ * are backed out in one batch, and the candidates in front of it still
+ * publish. One send moves the ref across the whole prefix; each candidate
+ * records its own publication (resolving its intent) under the lease, and
+ * the follow-up — pin settlement per landing, one attribution notes push for
+ * the chain's merge commits, staged-CI ref cleanup — runs after the single
+ * release. A chain of one is exactly a single publication. Every result
+ * write is fenced by the claimed generation, so a publisher whose entry was
+ * reconciled meanwhile records nothing. A reply that is not ok, stale or
+ * rejected is never guessed at: the ref is read back and every intent is
+ * reconciled from it, or left pending for a later pass when even that read
+ * fails.
+ */
+async function publishChain(
   env: Env,
   ctx: ResolveContext,
   repo: RepoRow,
   rules: readonly BranchRule[],
   ref: string,
-  plan: Plan,
+  chain: readonly Plan[],
   owner: string,
   deps: TrainDeps,
   gate: ChecksGate,
   span: CostSpan,
-): Promise<PublishResult> {
+): Promise<Array<{ plan: Plan; result: PublishResult }>> {
   const db = env.DB;
-  const e = plan.e;
-  const pv = plan.prepared!;
   // The span, not the meter: an earlier publication's deferred wake may run on the same meter meanwhile.
   const start = spanSnapshot(span);
-  const claimedGen = plan.generation + 1;
-  // Before the claim the entry is `ready` at the pass's generation; after it, `publishing` at the claimed one.
-  let fence = { generation: plan.generation, state: 'ready' as QueueState };
-  // Written with the claim; any way out before the send withdraws it in the same batch as the entry's own write.
-  let intent: IntentRow | null = null;
   let sent = false;
-  const withdraw = (): D1PreparedStatement[] => (intent && !sent ? [intentResolveStatement(db, intent, 'withdrawn', null, deps.now())] : []);
-  const exit = async (code: string, message: string, extra: D1PreparedStatement[] = withdraw()): Promise<PublishResult> => {
+  const entries: ChainEntry[] = chain.map((plan) => ({
+    plan,
+    e: plan.e,
+    pv: plan.prepared!,
+    checks: null as unknown as RequiredChecks,
+    claimedGen: plan.generation + 1,
+    fence: { generation: plan.generation, state: 'ready' as QueueState },
+    intent: null,
+    change: null,
+    linked: true,
+    who: { actor: null, denied: null },
+    recorded: null,
+    reconciled: null,
+    result: null,
+  }));
+  const results = (): Array<{ plan: Plan; result: PublishResult }> =>
+    entries.map((c) => ({ plan: c.plan, result: c.result ?? { kind: 'pending' } }));
+
+  // Per-candidate fenced statements, as in a single publication.
+  const withdraw = (c: ChainEntry): D1PreparedStatement[] =>
+    c.intent && !sent ? [intentResolveStatement(db, c.intent, 'withdrawn', null, deps.now())] : [];
+  const exit = async (c: ChainEntry, code: string, message: string, extra: D1PreparedStatement[] = withdraw(c)): Promise<void> => {
     const to = EXIT_STATES[code] ?? 'ejected';
-    const out = exitStatement(db, { repoId: repo.id, id: e.id, generation: fence.generation }, to, code, message, deps.now(), [fence.state]);
-    const pins = EJECTS_PINS.has(code) ? [ejectedSourceStatement(db, repo.id, e.change_set_id, plan.headSha, code, deps.now(), { queueId: e.id, generation: fence.generation + 1 })] : [];
+    const out = exitStatement(db, { repoId: repo.id, id: c.e.id, generation: c.fence.generation }, to, code, message, deps.now(), [c.fence.state]);
+    const pins = EJECTS_PINS.has(code)
+      ? [ejectedSourceStatement(db, repo.id, c.e.change_set_id, c.plan.headSha, code, deps.now(), { queueId: c.e.id, generation: c.fence.generation + 1 })]
+      : [];
     if (extra.length + pins.length > 0) await db.batch([...extra, out, ...pins]);
     else await out.run();
-    deps.observe?.({ type: 'transition', number: e.change_number, to, code });
-    return { kind: 'exited', code };
+    deps.observe?.({ type: 'transition', number: c.e.change_number, to, code });
+    c.result = { kind: 'exited', code };
   };
-  const backStatement = (state: 'ready' | 'queued' | 'checking', attempts = 0) =>
+  const backStatement = (c: ChainEntry, state: 'ready' | 'queued' | 'checking', attempts = 0) =>
     db
       .prepare(
         `UPDATE merge_queue SET state = ?3, attempts = attempts + ?4, updated_at = ?5
           WHERE repo_id = ?6 AND id = ?1 AND generation = ?2 AND state = ?7`,
       )
-      .bind(e.id, fence.generation, state, attempts, deps.now(), repo.id, fence.state);
-  const back = async (state: 'ready' | 'queued' | 'checking', attempts = 0): Promise<void> => {
-    const extra = withdraw();
-    if (extra.length > 0) await db.batch([...extra, backStatement(state, attempts)]);
-    else await backStatement(state, attempts).run();
+      .bind(c.e.id, c.fence.generation, state, attempts, deps.now(), repo.id, c.fence.state);
+  const back = async (c: ChainEntry, state: 'ready' | 'queued' | 'checking', attempts = 0): Promise<void> => {
+    const extra = withdraw(c);
+    if (extra.length > 0) await db.batch([...extra, backStatement(c, state, attempts)]);
+    else await backStatement(c, state, attempts).run();
   };
-
-  const guardBase = await artifactsMergeSources(ctx).readCommit(pv.mergeBase);
-  if (!guardBase) throw new RefStoreUnavailable(`merge base ${pv.mergeBase} could not be read`);
-  const checks = await gate.requiredChecksFor(
-    { id: repo.id },
-    pv.treeSha,
-    null,
-    { changeId: e.change_set_id, headSha: pv.headSha, guardBaseTree: guardBase.treeHash },
-  );
-  deps.observe?.({ type: 'checks', number: e.change_number, treeSha: pv.treeSha, baseSha: pv.targetSha, state: checks.state, leaseHeld: false, phase: 'publish' });
-  const checksVerdict = async (policy: BranchPolicy): Promise<PublishResult | null> => {
-    const block = branchPolicyBlock(policy, checks);
-    if (block?.code === 'GUARD_INCOMPLETE' && checks.state !== 'failure') return exit('GUARD_INCOMPLETE', block.error);
-    if (checks.state === 'failure' || block?.code === 'REQUIRED_CHECKS_FAILED') return exit('CHECKS_FAILED', block?.error ?? 'a required check failed on the composed tree');
-    if (checks.state === 'pending' || block) {
-      await back('checking');
-      return { kind: 'pending' };
+  /** Backs the claimed candidates from `from` out to `queued` in one batch (a candidate ahead of them stopped the chain). */
+  const backOut = async (from: number): Promise<void> => {
+    const stmts: D1PreparedStatement[] = [];
+    for (const c of claiming.slice(from)) {
+      stmts.push(...withdraw(c));
+      stmts.push(backStatement(c, 'queued', 0));
+      c.result = { kind: 'pending' };
     }
-    return null;
+    if (stmts.length > 0) await db.batch(stmts);
   };
-  const early = await checksVerdict(effectivePolicy(rules, ref));
-  if (early) return early;
 
+  // 1. The checks-gate answer per candidate, before any lease is held.
+  const passPolicy = effectivePolicy(rules, ref);
+  let live = 0;
+  for (const c of entries) {
+    const guardBase = await artifactsMergeSources(ctx).readCommit(c.pv.mergeBase);
+    if (!guardBase) throw new RefStoreUnavailable(`merge base ${c.pv.mergeBase} could not be read`);
+    c.checks = await gate.requiredChecksFor(
+      { id: repo.id },
+      c.pv.treeSha,
+      null,
+      { changeId: c.e.change_set_id, headSha: c.pv.headSha, guardBaseTree: guardBase.treeHash },
+    );
+    deps.observe?.({ type: 'checks', number: c.e.change_number, treeSha: c.pv.treeSha, baseSha: c.pv.targetSha, state: c.checks.state, leaseHeld: false, phase: 'publish' });
+    const block = branchPolicyBlock(passPolicy, c.checks);
+    if (block?.code === 'GUARD_INCOMPLETE' && c.checks.state !== 'failure') {
+      await exit(c, 'GUARD_INCOMPLETE', block.error);
+      break;
+    }
+    if (c.checks.state === 'failure' || block?.code === 'REQUIRED_CHECKS_FAILED') {
+      await exit(c, 'CHECKS_FAILED', block?.error ?? 'a required check failed on the composed tree');
+      break;
+    }
+    if (c.checks.state === 'pending' || block) {
+      await back(c, 'checking');
+      c.result = { kind: 'pending' };
+      break;
+    }
+    live += 1;
+  }
+  if (live === 0) return results();
+  const claiming: readonly ChainEntry[] = entries.slice(0, live);
+
+  // 2. One lease for the whole chain.
   const lease = deps.lease(env, repo.id, ref);
   const acq = await lease.acquire(owner, TRAIN_LIMITS.leaseTtlMs);
-  deps.observe?.({ type: 'lease', op: 'acquire', number: e.change_number, ok: acq.acquired, generation: acq.acquired ? acq.generation : (acq.holder?.generation ?? null) });
+  deps.observe?.({
+    type: 'lease',
+    op: 'acquire',
+    number: claiming[0]!.e.change_number,
+    ok: acq.acquired,
+    generation: acq.acquired ? acq.generation : (acq.holder?.generation ?? null),
+  });
   if (!acq.acquired) {
-    await back('ready', 1);
-    return { kind: 'busy', retryAfterSeconds: Math.max(1, Math.ceil(acq.retryAfterMs / 1000)) };
+    await db.batch(claiming.map((c) => backStatement(c, 'ready', 1)));
+    for (const c of claiming) c.result = { kind: 'busy', retryAfterSeconds: Math.max(1, Math.ceil(acq.retryAfterMs / 1000)) };
+    return results();
   }
   let released = false;
   const release = async () => {
     if (released) return;
     released = true;
     const rel = await lease.release(owner, acq.generation).catch(() => ({ released: false }));
-    deps.observe?.({ type: 'lease', op: 'release', number: e.change_number, ok: rel.released, generation: acq.generation });
+    deps.observe?.({ type: 'lease', op: 'release', number: claiming[0]!.e.change_number, ok: rel.released, generation: acq.generation });
   };
 
   let status = 'unavailable';
-  let who: { actor: Actor | null; denied: string | null } = { actor: null, denied: null };
-  let linked = true;
   /** The ref read back after an inconclusive reply (undefined: not read, or the read failed). */
   let observed: string | null | undefined;
-  let recorded: Recorded | null = null;
-  let reconciled: Reconciled | null = null;
+  let publishing: readonly ChainEntry[] = [];
+  const prepare = async (forEntries: readonly ChainEntry[]) =>
+    deps
+      .pusher(env, repo)
+      .prepareUpdate(
+        { ref, oldOid: forEntries[0]!.pv.targetSha, newOid: forEntries[forEntries.length - 1]!.pv.mergeCommit },
+        [...new Map(forEntries.flatMap((c) => c.pv.objects).map((o) => [o.hash, o])).values()],
+      )
+      .catch((err: unknown) => {
+        if (!(err instanceof RefStoreUnavailable)) throw err;
+        return null;
+      });
+
   try {
-    let update: Awaited<ReturnType<GitPusher['prepareUpdate']>> | null = null;
-    try {
-      update = await deps.pusher(env, repo).prepareUpdate({ ref, oldOid: pv.targetSha, newOid: pv.mergeCommit }, pv.objects);
-    } catch (err) {
-      if (!(err instanceof RefStoreUnavailable)) throw err;
-    }
+    // 3. One prepared push for the candidates that passed the gate: the write
+    // credential and the pack, before anything is claimed (revalidation reads
+    // what a concurrent writer may have changed while the pack was built).
+    let update: Awaited<ReturnType<typeof prepare>> = await prepare(claiming);
     if (!update) {
       await release();
-      await back('queued', 1);
-      return { kind: 'retry' };
+      await db.batch(claiming.map((c) => backStatement(c, 'queued', 1)));
+      for (const c of claiming) c.result = { kind: 'retry' };
+      return results();
     }
 
-    // Everything above may have taken a while: the claim and every publication fact are read now.
-    // The change row carries its review facts, and the head workspace read carries its pins: each row is read once.
-    // The publication intent is durable from the claim on, so a crash from here on is reconciled, never guessed at.
-    const candidate: IntentRow = {
-      repo_id: repo.id,
-      queue_id: e.id,
-      generation: claimedGen,
-      target_ref: ref,
-      old_sha: pv.targetSha,
-      new_sha: pv.mergeCommit,
-      head_sha: plan.headSha,
-      tree_sha: pv.treeSha,
-      kind: pv.kind,
-      attempt: e.attempts,
-      lease_generation: acq.generation,
-      ci_prepared: plan.ciPrepared ? 1 : 0,
-      state: 'pending',
-      observed_sha: null,
-      created_at: deps.now(),
-      resolved_at: null,
-    };
-    const [claim, written, change, wsPins, facts, agentRes, rulesRes] = await db.batch([
-      db
-        .prepare(
-          `UPDATE merge_queue SET state = 'publishing', generation = generation + 1, updated_at = ?3
-            WHERE repo_id = ?4 AND id = ?1 AND generation = ?2 AND state = 'ready' AND active = 1 RETURNING generation`,
-        )
-        .bind(e.id, plan.generation, deps.now(), repo.id),
-      intentInsertStatement(db, candidate),
-      db
-        .prepare(`SELECT c.id, c.number, c.state, c.merge_policy, c.head_sha, c.base_ref, ${reviewFactsColumns('c')} FROM change_sets c WHERE c.id = ?1`)
-        .bind(e.change_set_id),
-      // A change's head ref never changes, so the pass's read of it names the same workspace.
-      headWorkspacePinsStatement(db, repo.id, branchRef(e.c_head_ref)),
-      ...enqueuerFactsStatements(db, repo, e),
+    // 4. One claim-and-revalidate batch: every candidate's claim, intent,
+    // change, head workspace and enqueuer facts, then the current rules. The
+    // intent is durable from its claim on, so a crash from here on is
+    // reconciled, never guessed at. Each intent follows its own claim, so its
+    // `changes()` guard names exactly that claim; each candidate's change and
+    // pins are read once, right here.
+    const statements: D1PreparedStatement[] = [];
+    for (const c of claiming) {
+      const candidate: IntentRow = {
+        repo_id: repo.id,
+        queue_id: c.e.id,
+        generation: c.claimedGen,
+        target_ref: ref,
+        old_sha: c.pv.targetSha,
+        new_sha: c.pv.mergeCommit,
+        head_sha: c.plan.headSha,
+        tree_sha: c.pv.treeSha,
+        kind: c.pv.kind,
+        attempt: c.e.attempts,
+        lease_generation: acq.generation,
+        ci_prepared: c.plan.ciPrepared ? 1 : 0,
+        state: 'pending',
+        observed_sha: null,
+        created_at: deps.now(),
+        resolved_at: null,
+      };
+      c.intent = candidate;
+      statements.push(
+        db
+          .prepare(
+            `UPDATE merge_queue SET state = 'publishing', generation = generation + 1, updated_at = ?3
+              WHERE repo_id = ?4 AND id = ?1 AND generation = ?2 AND state = 'ready' AND active = 1 RETURNING generation`,
+          )
+          .bind(c.e.id, c.plan.generation, deps.now(), repo.id),
+        intentInsertStatement(db, candidate),
+        db
+          .prepare(`SELECT c.id, c.number, c.state, c.merge_policy, c.head_sha, c.base_ref, ${reviewFactsColumns('c')} FROM change_sets c WHERE c.id = ?1`)
+          .bind(c.e.change_set_id),
+        headWorkspacePinsStatement(db, repo.id, branchRef(c.e.c_head_ref)),
+        ...enqueuerFactsStatements(db, repo, c.e),
+      );
+    }
+    statements.push(
       db
         .prepare(
           `SELECT ${BRANCH_RULE_COLUMNS}
              FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
         )
         .bind(repo.id),
-    ]);
-    if ((claim?.results?.length ?? 0) === 0) {
-      await release();
-      return { kind: 'lost' };
-    }
-    fence = { generation: claimedGen, state: 'publishing' };
-    if (!written?.meta.changes) {
-      // Never send without a durable intent: the entry waits for the next pass instead.
-      await release();
-      await back('queued');
-      return { kind: 'lost' };
-    }
-    intent = candidate;
-
-    const row = (change?.results as Array<ChangeRow & ReviewFactsRow> | undefined)?.[0] ?? null;
-    const { workspace: headWs, pins } = headWorkspacePins(wsPins?.results as HeadWorkspacePinRow[] | undefined);
-    const refused = mergeRefusal(row, 'explicit', plan.headSha) ?? workspaceAdmissionRefusal(row!, headWs);
-    if (refused) {
-      await release();
-      return exit(refused.code ?? 'REFUSED', refused.error);
-    }
-    // Pins sit on workspaces, and a workspace is only ever linked to a change opened from its own ref (neither a
-    // workspace's ref nor a change's head ref ever changes). No workspace at the head ref: none is or can become linked,
-    // so the landing has no pins to settle. A linked change keeps every pin statement: a pin can be written until the record.
-    linked = headWs !== null;
-    who = enqueuerActor(repo, ref, (facts?.results as FactsRow[] | undefined)?.[0], (agentRes?.results as AgentRow[] | undefined)?.[0], e, deps.now());
-    if (who.denied) {
-      await release();
-      return exit('AUTHORIZATION_REVOKED', who.denied);
-    }
+    );
+    const claimed = await db.batch(statements);
     // Rules may have been raised or added since the pass: approvals and required checks are judged by the current ones.
-    const policy = effectivePolicy(((rulesRes?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow), ref);
-    const review = reviewGate(parseReviewFacts(row), policy);
-    if (review.block) {
-      await release();
-      if (review.missing.length > 0) await db.batch(review.missing.map((reason) => recordMissingEscalation(db, e.change_set_id, reason, deps.now())));
-      return exit(review.block.code, review.block.error);
+    const freshPolicy = effectivePolicy(
+      ((claimed[6 * claiming.length]?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow),
+      ref,
+    );
+    // Every candidate whose claim applied is `publishing` at its claimed
+    // generation from here on, whatever happens to the chain later: a
+    // candidate backed out after a truncation is unwritten with this fence,
+    // never with the pre-claim one it no longer has.
+    const claimApplied: boolean[] = [];
+    const intentWritten: boolean[] = [];
+    const claimedEntries: ChainEntry[] = [];
+    let brokenAt = -1;
+    for (const [i, c] of claiming.entries()) {
+      const base = 6 * i;
+      claimApplied[i] = ((claimed[base]?.results as Array<{ generation: number }> | undefined)?.length ?? 0) > 0;
+      intentWritten[i] = claimed[base + 1]?.meta.changes === 1;
+      if (claimApplied[i]) c.fence = { generation: c.claimedGen, state: 'publishing' };
+      if (brokenAt === -1 && (!claimApplied[i] || !intentWritten[i])) brokenAt = i;
+      else if (brokenAt === -1) claimedEntries.push(c);
     }
-    // Publication waits on any pin that is not satisfied, whatever its source's state.
-    if (pins.some((p) => !p.satisfied_commit) || !pinsVerified(pins, plan.verifiedPins ?? new Set())) {
-      // A pin turned unresolved (or was repinned) since the pass: back to waiting in place (the next pass records why).
-      await release();
-      await back('queued');
-      return { kind: 'lost' };
+    if (brokenAt !== -1) {
+      const c = claiming[brokenAt]!;
+      if (!claimApplied[brokenAt]!) {
+        // Another writer holds the candidate: nothing of it moved here, and the candidates stacked on it cannot publish.
+        c.intent = null;
+        c.result = { kind: 'lost' };
+      } else {
+        // Never send without a durable intent: the candidate waits for the next pass instead.
+        c.intent = null;
+        await back(c, 'queued');
+        c.result = { kind: 'lost' };
+      }
+      await backOut(brokenAt + 1);
     }
-    const late = await checksVerdict(policy);
-    if (late) {
-      await release();
-      return late;
+    const accepted: ChainEntry[] = [];
+    for (const c of claimedEntries) {
+      const i = claiming.indexOf(c);
+      const base = 6 * i;
+      c.change = (claimed[base + 2]?.results as Array<ChangeRow & ReviewFactsRow> | undefined)?.[0] ?? null;
+      const { workspace: headWs, pins } = headWorkspacePins(claimed[base + 3]?.results as HeadWorkspacePinRow[] | undefined);
+      // Pins sit on workspaces, and a workspace is only ever linked to a change opened from its own ref (neither a
+      // workspace's ref nor a change's head ref ever changes). No workspace at the head ref: none is or can become
+      // linked, so the landing has no pins to settle. A linked change keeps every pin statement: a pin can be
+      // written until the record.
+      c.linked = headWs !== null;
+      c.who = enqueuerActor(repo, ref, (claimed[base + 4]?.results as FactsRow[] | undefined)?.[0], (claimed[base + 5]?.results as AgentRow[] | undefined)?.[0], c.e, deps.now());
+      const refused = mergeRefusal(c.change, 'explicit', c.plan.headSha) ?? (c.change ? workspaceAdmissionRefusal(c.change, headWs) : null);
+      if (refused) {
+        await exit(c, refused.code ?? 'REFUSED', refused.error);
+        await backOut(i + 1);
+        break;
+      }
+      if (c.who.denied) {
+        await exit(c, 'AUTHORIZATION_REVOKED', c.who.denied);
+        await backOut(i + 1);
+        break;
+      }
+      const review = reviewGate(parseReviewFacts(c.change), freshPolicy);
+      if (review.block) {
+        if (review.missing.length > 0) await db.batch(review.missing.map((reason) => recordMissingEscalation(db, c.e.change_set_id, reason, deps.now())));
+        await exit(c, review.block.code, review.block.error);
+        await backOut(i + 1);
+        break;
+      }
+      if (pins.some((p) => !p.satisfied_commit) || !pinsVerified(pins, c.plan.verifiedPins ?? new Set())) {
+        // A pin turned unresolved (or was repinned) since the pass: back to waiting in place (the next pass records why).
+        await back(c, 'queued');
+        c.result = { kind: 'lost' };
+        await backOut(i + 1);
+        break;
+      }
+      const block = branchPolicyBlock(freshPolicy, c.checks);
+      if (block?.code === 'GUARD_INCOMPLETE' && c.checks.state !== 'failure') {
+        await exit(c, 'GUARD_INCOMPLETE', block.error);
+        await backOut(i + 1);
+        break;
+      }
+      if (c.checks.state === 'failure' || block?.code === 'REQUIRED_CHECKS_FAILED') {
+        await exit(c, 'CHECKS_FAILED', block?.error ?? 'a required check failed on the composed tree');
+        await backOut(i + 1);
+        break;
+      }
+      if (c.checks.state === 'pending' || block) {
+        await back(c, 'checking');
+        c.result = { kind: 'pending' };
+        await backOut(i + 1);
+        break;
+      }
+      accepted.push(c);
     }
+    claimedEntries.length = 0;
+    claimedEntries.push(...accepted);
+    if (claimedEntries.length === 0) {
+      await release();
+      return results();
+    }
+    if (claimedEntries.length < claiming.length) {
+      // The prepared push named the full chain's last commit: re-aim it at the truncation's last candidate.
+      update = await prepare(claimedEntries);
+      if (!update) {
+        await release();
+        await db.batch(claimedEntries.map((c) => backStatement(c, 'queued', 1)));
+        for (const c of claimedEntries) c.result = { kind: 'retry' };
+        return results();
+      }
+    }
+    const first = claimedEntries[0]!;
 
-    const headRef = branchRef(e.c_head_ref);
+    // 5. One ls-refs confirms the target tip and every candidate's live head branch.
     let tips: Map<string, string | null> | null = null;
     try {
-      tips = await lsRefs(ctx, [ref, headRef]);
+      tips = await lsRefs(ctx, [ref, ...new Set(claimedEntries.map((c) => branchRef(c.e.c_head_ref)))]);
     } catch (err) {
       if (!(err instanceof RefStoreUnavailable)) throw err;
     }
-    const moved = tips ? liveHeadRefusal(headRef, plan.headSha, tips.get(headRef)) : null;
-    if (moved) {
-      await release();
-      if (row!.merge_policy !== 'auto') return exit('HEAD_MOVED', `${headRef} moved from the approved ${plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
-      // The auto change follows its new head once its push event records it (that event kicks the train).
-      await back('queued');
-      return { kind: 'pending' };
+    const publishingEntries: ChainEntry[] = [];
+    for (const c of claimedEntries) {
+      const headRef = branchRef(c.e.c_head_ref);
+      const moved = tips ? liveHeadRefusal(headRef, c.plan.headSha, tips.get(headRef)) : null;
+      if (!moved) {
+        publishingEntries.push(c);
+        continue;
+      }
+      // The candidate's approved head moved: it exits (enqueue again to approve
+      // the new head) or, as an auto change, follows its new head once its push
+      // event records it (that event kicks the train). The candidates stacked
+      // on it wait for the next pass.
+      if (c.change?.merge_policy !== 'auto') {
+        await exit(c, 'HEAD_MOVED', `${headRef} moved from the approved ${c.plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
+      } else {
+        await back(c, 'queued');
+        c.result = { kind: 'pending' };
+      }
+      await backOut(claiming.indexOf(c) + 1);
+      break;
     }
+    publishing = publishingEntries;
+    if (publishing.length === 0) {
+      await release();
+      return results();
+    }
+    if (publishing.length < claimedEntries.length) {
+      update = await prepare(publishing);
+      if (!update) {
+        await release();
+        await db.batch(publishing.map((c) => backStatement(c, 'queued', 1)));
+        for (const c of publishing) c.result = { kind: 'retry' };
+        return results();
+      }
+    }
+
+    // 6. The one send, guarded by the lease's remaining time.
     if (!tips) {
       status = 'unavailable';
-    } else if (tips.get(ref) !== pv.targetSha) {
+    } else if (tips.get(ref) !== first.pv.targetSha) {
       status = 'stale';
     } else if (Date.now() >= acq.expiresAt - Math.min(RECONCILE_LIMITS.sendMarginMs, TRAIN_LIMITS.leaseTtlMs / 2)) {
       // Too little lease left to send: a push should not outlive the lease that fences it. Nothing was sent, and
-      // the slow preparation is not the entry's failure, so it costs no attempt.
+      // the slow preparation is not the candidates' failure, so it costs no attempt.
       status = 'expiring';
     } else {
-      await deps.checkpoint?.('intent-recorded', e.change_number);
+      for (const c of publishing) await deps.checkpoint?.('intent-recorded', c.e.change_number);
       sent = true;
       try {
         status = (await update.send()).status;
       } catch (err) {
         // Whatever failed, the request may have reached the store: the ref decides.
         status = 'unknown';
-        console.warn(JSON.stringify({ trainSendFailed: { repo: repo.id, number: e.change_number, error: String(err).slice(0, 200) } }));
+        console.warn(JSON.stringify({ trainSendFailed: { repo: repo.id, number: publishing[0]!.e.change_number, error: String(err).slice(0, 200) } }));
       }
-      await deps.checkpoint?.('pushed', e.change_number);
+      for (const c of publishing) await deps.checkpoint?.('pushed', c.e.change_number);
       if (status !== 'ok' && status !== 'stale' && status !== 'rejected') {
         status = 'unknown';
         try {
@@ -2166,20 +2430,36 @@ async function publishCandidate(
         }
       }
     }
-    deps.observe?.({ type: 'publish', number: e.change_number, status, mergeCommit: pv.mergeCommit, previous: pv.targetSha });
+    for (const c of publishing) {
+      deps.observe?.({ type: 'publish', number: c.e.change_number, status, mergeCommit: c.pv.mergeCommit, previous: c.pv.targetSha });
+    }
 
-    if (status === 'ok' && intent) {
+    if (status === 'ok') {
+      // The record batches and the one release belong to the chain's work:
+      // each candidate's share adds its own record batch (d1) and carries the
+      // release (do) in the split, so a chain of one records today's counters.
       const cost = costDelta(start, spanSnapshot(span));
-      // The record batch and the lease release that follows it belong to the publication's work.
-      const recordCost = cost ? { ...cost, d1: (cost.d1 ?? 0) + 1, do: (cost.do ?? 0) + 1 } : null;
-      recorded = await recordPublication(db, e, intent, fence, { kind: 'push', cost: recordCost }, deps.now(), linked);
-      if (recorded.entryWritten) {
-        await deps.checkpoint?.('recorded', e.change_number);
-        deps.observe?.({ type: 'publish', number: e.change_number, status: 'recorded', mergeCommit: pv.mergeCommit, previous: pv.targetSha, ...(recordCost ? { cost: recordCost } : {}) });
+      const shares = cost
+        ? splitCounters({ ...cost, d1: (cost.d1 ?? 0) + publishing.length, do: (cost.do ?? 0) + 1 }, publishing.length)
+        : null;
+      for (const [i, c] of publishing.entries()) {
+        const recordCost = shares ? shares[i]! : null;
+        c.recorded = await recordPublication(db, c.e, c.intent!, c.fence, { kind: 'push', cost: recordCost }, deps.now(), c.linked);
+        if (c.recorded.entryWritten) {
+          await deps.checkpoint?.('recorded', c.e.change_number);
+          deps.observe?.({
+            type: 'publish',
+            number: c.e.change_number,
+            status: 'recorded',
+            mergeCommit: c.pv.mergeCommit,
+            previous: c.pv.targetSha,
+            ...(recordCost ? { cost: recordCost } : {}),
+          });
+        }
       }
-    } else if (status === 'unknown' && intent && observed !== undefined) {
-      // One D1 batch (and at most one bounded walk) under the lease; its follow-up runs after the release.
-      reconciled = await reconcileIntent(env, artifactsMergeSources(ctx), e, intent, observed, deps);
+    } else if (status === 'unknown' && observed !== undefined) {
+      // D1 batches (and at most one bounded walk each) under the lease; the follow-ups run after the release.
+      for (const c of publishing) c.reconciled = await reconcileIntent(env, artifactsMergeSources(ctx), c.e, c.intent!, observed, deps);
     }
   } catch (err) {
     if (!(err instanceof RefStoreUnavailable)) throw err;
@@ -2189,44 +2469,96 @@ async function publishCandidate(
     await release();
   }
 
-  if (reconciled) {
-    if (reconciled.outcome === 'completed') {
-      if (!reconciled.recorded.entryWritten) return { kind: 'lost' };
-      await afterReconciled(env, ctx, repo, e, intent!, reconciled.recorded, deps, false, who.actor);
-      return { kind: 'published', ...(observed ? { tip: observed } : {}) };
+  // 7. After the lease: the candidates a stranded read left claimed but unsent
+  // go back to the train with one more attempt, like a single publication
+  // that could not be read.
+  for (const c of claiming) {
+    if (c.result === null && !publishing.includes(c)) {
+      await back(c, 'queued', 1);
+      c.result = { kind: 'retry' };
     }
-    if (reconciled.exited) return { kind: 'exited', code: reconciled.exited };
-    // Not applied or moved: the entry is back in the train with one more attempt (or another writer resolved it first).
-    return { kind: 'retry' };
-  }
-  if (sent && status === 'unknown') {
-    // The ref could not be read back: the entry keeps its claim with the intent pending, and a later pass reconciles it.
-    return { kind: 'unresolved' };
-  }
-  if (recorded) {
-    if (!recorded.entryWritten) {
-      // The entry was reconciled by another pass while this publisher waited: its fenced record wrote nothing, so it reports nothing.
-      console.warn(JSON.stringify({ trainLateResult: { repo: repo.id, number: e.change_number, mergeCommit: pv.mergeCommit, generation: claimedGen } }));
-      return { kind: 'lost' };
-    }
-    console.log(JSON.stringify({ trainPublished: { repo: repo.id, ref, number: e.change_number, kind: pv.kind, mergeCommit: pv.mergeCommit, leaseGeneration: acq.generation, cost: costDelta(start, spanSnapshot(span)) } }));
-    // After the recorded publication cost above: a settlement intent (exceptional path only) is not publication work.
-    await afterPublication(env, ctx, repo, e, intent!, recorded, async () => who.actor, deps);
-    return { kind: 'published' };
   }
 
-  // Nothing sent, or a definite answer from the store that the update did not apply: the intent resolves with the entry's own write.
-  const settle = !sent ? withdraw() : [intentResolveStatement(db, intent!, status === 'stale' ? 'moved' : 'not_applied', null, deps.now())];
-  if (status === 'stale') {
-    if (e.attempts + 1 >= TRAIN_LIMITS.maxAttempts) return exit('BASE_KEPT_MOVING', `${ref} kept moving during ${TRAIN_LIMITS.maxAttempts} publication attempts`, settle);
-    await db.batch([...settle, backStatement('queued', 1)]);
-    return { kind: 'retry' };
+  // 8. Each sent candidate's result, then the follow-ups of what published.
+  const recorded: ChainEntry[] = [];
+  for (const c of publishing) {
+    if (c.reconciled) {
+      if (c.reconciled.outcome === 'completed') {
+        if (!c.reconciled.recorded.entryWritten) {
+          c.result = { kind: 'lost' };
+          continue;
+        }
+        await afterReconciled(env, ctx, repo, c.e, c.intent!, c.reconciled.recorded, deps, false, c.who.actor);
+        c.result = { kind: 'published', ...(observed ? { tip: observed } : {}) };
+      } else if (c.reconciled.exited) {
+        c.result = { kind: 'exited', code: c.reconciled.exited };
+      } else {
+        // Not applied or moved: the candidate is back in the train with one more attempt (or another writer resolved it first).
+        c.result = { kind: 'retry' };
+      }
+      continue;
+    }
+    if (sent && status === 'unknown') {
+      // The ref could not be read back: the candidate keeps its claim with the intent pending, and a later pass reconciles it.
+      c.result = { kind: 'unresolved' };
+      continue;
+    }
+    if (c.recorded) {
+      if (!c.recorded.entryWritten) {
+        // The candidate was reconciled by another pass while this publisher waited: its fenced record wrote nothing.
+        console.warn(JSON.stringify({ trainLateResult: { repo: repo.id, number: c.e.change_number, mergeCommit: c.pv.mergeCommit, generation: c.claimedGen } }));
+        c.result = { kind: 'lost' };
+        continue;
+      }
+      console.log(
+        JSON.stringify({
+          trainPublished: {
+            repo: repo.id,
+            ref,
+            number: c.e.change_number,
+            kind: c.pv.kind,
+            mergeCommit: c.pv.mergeCommit,
+            leaseGeneration: acq.generation,
+            chain: publishing.length,
+          },
+        }),
+      );
+      recorded.push(c);
+      c.result = { kind: 'published' };
+      continue;
+    }
+    // Nothing sent, or a definite answer from the store that the update did not apply: the intent resolves with the entry's own write.
+    const settle = !sent ? withdraw(c) : [intentResolveStatement(db, c.intent!, status === 'stale' ? 'moved' : 'not_applied', null, deps.now())];
+    if (status === 'stale') {
+      if (c.e.attempts + 1 >= TRAIN_LIMITS.maxAttempts) {
+        await exit(c, 'BASE_KEPT_MOVING', `${ref} kept moving during ${TRAIN_LIMITS.maxAttempts} publication attempts`, settle);
+        continue;
+      }
+      await db.batch([...settle, backStatement(c, 'queued', 1)]);
+      c.result = { kind: 'retry' };
+      continue;
+    }
+    if (status === 'rejected') {
+      await exit(c, 'PUBLISH_REJECTED', 'the git store rejected the update', settle);
+      continue;
+    }
+    await db.batch([...settle, backStatement(c, 'queued', status === 'expiring' ? 0 : 1)]);
+    c.result = { kind: 'retry' };
   }
-  if (status === 'rejected') return exit('PUBLISH_REJECTED', 'the git store rejected the update', settle);
-  await db.batch([...settle, backStatement('queued', status === 'expiring' ? 0 : 1)]);
-  return { kind: 'retry' };
+  if (recorded.length > 0) {
+    // Pin settlement per landing and one attribution notes push for the
+    // chain's merge commits, after the release (a settlement intent, the
+    // exceptional path only, is not publication work).
+    await afterPublications(
+      env,
+      ctx,
+      repo,
+      recorded.map((c) => ({ e: c.e, intent: c.intent!, recorded: c.recorded!, actor: c.who.actor })),
+      deps,
+    );
+  }
+  return results();
 }
-
 /**
  * One train run for a repository + target-ref partition (the queue consumer
  * calls this for each kick). Bounded: at most `maxPasses` passes of at most
