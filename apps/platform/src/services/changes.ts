@@ -92,6 +92,7 @@ import {
 import type { ChangeRating } from './risk';
 import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
+import { actorName, changeLinkStatements, mergeCloseStatement, refreshPathLinks, retireIssueTasksStatement } from './issues';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -754,10 +755,11 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       // The guard judges the change's own edits (merge base -> head) before the row exists, so its run lands in the same batch.
       const guardStarted = Date.now();
       const guard = await guardFor(ctx, { baseSha, baseTree: base.tree, headTree: head.tree, mergeBase: m.mergeBase, body: pair.body });
-      return { ok: true as const, value: { baseSha, headSha, headTree: head.tree, rating: pair.body.rating, m, guard, guardStarted } };
+      const changed = pair.body.files.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path]));
+      return { ok: true as const, value: { baseSha, headSha, headTree: head.tree, rating: pair.body.rating, m, guard, guardStarted, changed } };
     });
     if (!resolved.ok) return resolved;
-    const { baseSha, headSha, headTree, rating, m, guard, guardStarted } = resolved.value;
+    const { baseSha, headSha, headTree, rating, m, guard, guardStarted, changed } = resolved.value;
     const ciConfig = await hasCiJobs(cx.env, cx.repo.artifacts_name, headSha);
     if (!ciConfig.ok) return ciConfig;
 
@@ -798,6 +800,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
         branchRef(p.head),
         observedAt,
       ),
+      ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now, changed),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
       ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
       // A change into a ref covered by a branch rule asks a human from the start.
@@ -950,6 +953,9 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (row.state === 'merged') return fail(409, 'a merged change cannot be updated', 'CHANGE_MERGED');
+    if (p.title !== undefined || p.body !== undefined) {
+      await cx.env.DB.batch(changeLinkStatements(cx.env.DB, cx.repo, row.id, { title: row.title, body: row.body, head: row.head_ref }, actorName(cx.actor), now));
+    }
     if (p.state === 'open' && row.head_sha !== null && current !== null && row.head_sha !== current.head_sha) {
       // The adopted head needs the same effects a push would have run for it:
       // the guard verdict and the change-level CI dispatch. They are
@@ -1170,6 +1176,8 @@ export function mergedRecordStatements(
       .bind(repoId, row.id, mergedAt, pub.headSha, pub.mergeCommit),
     changeSignalCleanup(db, repoId, row.id),
     retireConflictTaskStatement(db, repoId, row.number, mergedAt),
+    mergeCloseStatement(db, repoId, row.id, pub.mergeCommit, mergedAt),
+    retireIssueTasksStatement(db, repoId, mergedAt),
     // Pins of the landed head are satisfied with the merge (each with its dependent's wake mark, written first under the
     // same predicate); the last statement finds the rest and the marks.
     ...(opts.dependents === false
@@ -1560,6 +1568,10 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
   async (e) => {
     const repo = await e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId).first<RepoRow>();
     if (repo) await queueChangeCi(e.env, repo, e.change.id, e.headSha);
+  },
+  // Issue proposals from paths follow the new head (advice only; never fails the push).
+  async (e) => {
+    await refreshPathLinks(e.env, e.repoId, e.change.id, e.headSha);
   },
 ];
 

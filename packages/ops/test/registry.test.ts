@@ -56,6 +56,13 @@ describe('operation registry', () => {
     for (const f of ['repos', 'content', 'compare', 'workspaces', 'changes', 'nexus', 'candidates', 'orgs', 'agents', 'branch-rules', 'attribution', 'provenance', 'queue', 'tasks', 'reviews', 'dependencies', 'webhooks']) {
       expect(families, f).toContain(f);
     }
+    expect(families).toContain('issues');
+    expect(findOperation('create_issue')).toMatchObject({ command: ['issue', 'create'], method: 'POST', path: '/repos/{repo}/issues', readOnly: false });
+    expect(findOperation('link_issue')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'issue', 'kind', 'state']);
+    expect(findOperation('create_workspace')?.params.map((p) => p.name)).toContain('issue');
+    expect(findOperation('dispatch_issue')).toMatchObject({ command: ['issue', 'dispatch'], method: 'POST', path: '/repos/{repo}/issues/{number}/dispatch' });
+    expect(findOperation('comment_issue')).toMatchObject({ command: ['issue', 'comment'], method: 'POST', path: '/repos/{repo}/issues/{number}/comments' });
+    expect(findOperation('comment_issue')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'body']);
     expect(findOperation('list_tasks')).toMatchObject({ command: ['task', 'list'], method: 'GET', path: '/repos/{repo}/tasks', readOnly: true });
     expect(findOperation('list_tasks')?.params.map((p) => p.name)).toEqual(['repo', 'status', 'kind', 'limit', 'cursor']);
     expect(findOperation('claim_task')).toMatchObject({ command: ['task', 'claim'], method: 'POST', path: '/repos/{repo}/tasks/{task}/claim', readOnly: false });

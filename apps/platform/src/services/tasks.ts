@@ -1,7 +1,11 @@
 /**
- * Agent tasks (`agent_tasks`): work Kvarm dispatches to agents. Today the
- * only kind is `resolve-conflict` (services/conflicts.ts), created when a
- * change's conflicts survive the deterministic resolution stage.
+ * Agent tasks (`agent_tasks`): work Kvarm dispatches to agents. Two kinds:
+ * `resolve-conflict` (services/conflicts.ts), created when a change's
+ * conflicts survive the deterministic resolution stage, and `fix-issue`
+ * (services/issues.ts dispatchIssue), an issue handed to whichever agent
+ * claims it. A fix-issue claim creates a workspace at the default branch
+ * linked to the issue; the claimant opens a change from it and completes
+ * the task, and the change closes the issue when it merges.
  *
  *   GET  tasks?status=open|claimed|completed|obsolete|all&kind=&limit=&cursor=
  *   GET  tasks/:id
@@ -53,6 +57,9 @@ import {
 } from './changes';
 import { queueChangeCi } from './ci';
 import { conflictViews, type ConflictView } from './conflicts';
+import { FIX_ISSUE, workspaceIssueStatement } from './issues';
+import { normalizeDeclaration } from './intents/paths';
+import { declaredInsertStatement } from './intents/store';
 import { claimFenced, releaseFenced, renewFenced } from './fencing';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { MERGE_BUDGETS, artifactsMergeSources } from './merge';
@@ -149,6 +156,8 @@ export interface TaskView {
   baseSha: string | null;
   conflicts?: ConflictView[];
   conflictsTruncated?: true;
+  /** The issue a fix-issue task is for. */
+  issue?: { number: number; title: string };
   claimedBy: string | null;
   generation: number;
   /** The current (or lapsed) claim; null when unclaimed or completed. */
@@ -167,11 +176,15 @@ export interface TaskPage {
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
 
-function payloadOf(json: string | null): { conflicts?: ConflictView[]; truncated?: boolean } {
+function payloadOf(json: string | null): { conflicts?: ConflictView[]; truncated?: boolean; issue?: { number: number; title: string } } {
   if (!json) return {};
   try {
-    const v = JSON.parse(json) as { conflicts?: unknown; truncated?: unknown };
-    return { ...(Array.isArray(v.conflicts) ? { conflicts: v.conflicts as ConflictView[] } : {}), ...(v.truncated === true ? { truncated: true } : {}) };
+    const v = JSON.parse(json) as { conflicts?: unknown; truncated?: unknown; issue?: unknown; title?: unknown };
+    return {
+      ...(Array.isArray(v.conflicts) ? { conflicts: v.conflicts as ConflictView[] } : {}),
+      ...(v.truncated === true ? { truncated: true } : {}),
+      ...(typeof v.issue === 'number' ? { issue: { number: v.issue, title: typeof v.title === 'string' ? v.title : '' } } : {}),
+    };
   } catch {
     return {};
   }
@@ -196,6 +209,7 @@ function taskView(r: TaskRow, now = Date.now()): TaskView {
     baseSha: r.base_sha,
     ...(payload.conflicts ? { conflicts: payload.conflicts } : {}),
     ...(payload.truncated ? { conflictsTruncated: true as const } : {}),
+    ...(payload.issue ? { issue: payload.issue } : {}),
     claimedBy: r.claimed_by,
     generation: r.generation,
     lease,
@@ -390,7 +404,8 @@ function lifecycleRefusal(row: TaskRow): Fail | null {
     });
   }
   if (row.status === 'obsolete') {
-    return fail(409, `task ${row.id} is obsolete: its change is no longer conflicted (resolved, closed or merged)`, 'TASK_OBSOLETE');
+    const why = row.kind === FIX_ISSUE ? 'its issue was closed' : 'its change is no longer conflicted (resolved, closed or merged)';
+    return fail(409, `task ${row.id} is obsolete: ${why}`, 'TASK_OBSOLETE');
   }
   return null;
 }
@@ -435,6 +450,7 @@ export function claimTask(cx: TaskContext, id: string, input: unknown, deps: Tas
     if (!row) return fail(404, 'task not found', 'TASK_NOT_FOUND');
     const refused = lifecycleRefusal(row);
     if (refused) return refused;
+    if (row.kind === FIX_ISSUE) return claimIssueTask(cx, row, first<WorkspaceRow>(wsRead), who.value, ttl.value, deps);
     if (row.change_state !== 'conflicted' || !row.head_sha || !row.change_base_ref) {
       return fail(409, `task ${id}'s change is not conflicted`, 'CHANGE_NOT_CONFLICTED');
     }
@@ -578,8 +594,8 @@ export function heartbeatTask(cx: TaskContext, id: string, input: unknown): Prom
 export interface CompleteOutcome {
   task: TaskView;
   change: ChangeView;
-  /** The fast-forward of the change's head branch to the resolution. */
-  headBranch: { ref: string; updated: boolean; reason?: string };
+  /** The fast-forward of the change's head branch to the resolution (resolve-conflict tasks only). */
+  headBranch?: { ref: string; updated: boolean; reason?: string };
 }
 
 /** POST tasks/:id/complete */
@@ -611,6 +627,7 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
     const refused = lifecycleRefusal(row) ?? fenceRefusal(row, first<FenceRow>(fenceRead), generation.value, who.value);
     if (refused) return refused;
     const ws = first<WorkspaceRow>(wsRead);
+    if (row.kind === FIX_ISSUE) return completeIssueTask(cx, row, ws, generation.value, who.value);
     if (!ws || ws.status !== 'active' || !ws.ref) return fail(409, `task ${id} has no active workspace; claim it again`, 'WORKSPACE_NOT_ACTIVE');
     if (row.change_state !== 'conflicted' || !row.change_id || !row.change_head_sha || !row.change_head_ref || !row.change_base_ref) {
       return fail(409, `task ${id}'s change is not conflicted`, 'CHANGE_NOT_CONFLICTED');
@@ -798,4 +815,178 @@ export function completeTask(cx: TaskContext, id: string, input: unknown, deps: 
     }
     return { ok: true, value: { task: taskView(after, now), change: changeView(change), headBranch } };
   });
+}
+
+// ---------------------------------------------------------------------------
+// fix-issue tasks
+// ---------------------------------------------------------------------------
+
+const issueOf = (row: TaskRow): number | null => payloadOf(row.payload).issue?.number ?? null;
+
+/**
+ * Claims a fix-issue task: the fenced claim first, then (new claims) a
+ * workspace ref at the default branch tip, then one batch that records the
+ * claim while the fence is held and the issue is open, inserts the
+ * workspace and links it to the issue, so the change it opens closes the
+ * issue on merge. A reclaim reuses an active workspace the claimant may act on.
+ */
+async function claimIssueTask(
+  cx: TaskContext,
+  row: TaskDetailRow,
+  existing: WorkspaceRow | null,
+  who: Claimant,
+  ttl: number,
+  deps: TaskDeps,
+): Promise<ServiceResult<ClaimOutcome>> {
+  const id = row.id;
+  const issue = issueOf(row);
+  if (issue === null) return fail(409, `task ${id} names no issue`, 'TASK_INVALID');
+  const db = cx.env.DB;
+  const baseRef = branchRef(cx.repo.default_branch);
+  const reuse = existing && existing.status === 'active' && existing.ref && agentOwnershipDenial(cx.actor, existing) === null ? existing : null;
+  const wsId = reuse?.id ?? newId();
+  const ref = reuse?.ref ?? workspaceRef(wsId, `fix-issue ${issue}`);
+  if (!reuse && cx.actor?.agent && !credentialMayUpdateRef(cx.actor, ref)) {
+    return fail(403, 'this agent token may not create refs/heads/agents/<id>/ refs', 'AGENT_REF_FORBIDDEN');
+  }
+  const issueRow = await db.prepare('SELECT state, paths FROM issues WHERE repo_id = ? AND number = ?').bind(cx.repo.id, issue).first<{ state: string; paths: string | null }>();
+  if (!issueRow || issueRow.state !== 'open') return fail(409, `issue #${issue} is closed; the task is obsolete`, 'ISSUE_CLOSED');
+  const tip = reuse ? null : ((await liveRefs(cx, [baseRef])).get(baseRef) ?? null);
+  if (!reuse && !tip) return fail(409, `the default branch ${cx.repo.default_branch} does not exist`, 'BASE_NOT_FOUND');
+  // The claim workspace declares the issue's paths as its Nexus intent, so overlap forecasts show who is fixing what.
+  let intent: string | null = null;
+  try {
+    const declared = normalizeDeclaration({ paths: JSON.parse(issueRow.paths ?? '[]') as unknown });
+    if (declared.ok) intent = JSON.stringify(declared.value.paths);
+  } catch {
+    // stored paths are informational
+  }
+
+  const now = Date.now();
+  const won = await claimFenced(db, { kind: FENCE_KIND, subject: id, owner: who.owner, identity: `issue:${issue}`, ttlMs: ttl * 1000, now });
+  if (!won.ok) {
+    if (won.code === 'CLAIM_DONE') return fail(409, `task ${id} was already completed`, 'TASK_COMPLETED');
+    const cur = won.current;
+    const lease = cur?.expiresAt ? { until: iso(cur.expiresAt)!, generation: cur.generation, holder: row.claimed_by, expired: false } : null;
+    return fail(
+      409,
+      `task ${id} is claimed by ${row.claimed_by ?? 'another agent'}${lease ? ` until ${lease.until} (generation ${lease.generation})` : ''}; it can be claimed again once that lease expires`,
+      'CLAIMED',
+      { claimedBy: row.claimed_by, lease, retryAfterMs: won.retryAfterMs ?? 0 },
+    );
+  }
+  const generation = won.value.generation;
+  const until = won.value.expiresAt!;
+
+  if (!reuse) {
+    const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref, oldOid: ZERO_SHA, newOid: tip! });
+    let created = pushed.status === 'ok';
+    if (pushed.status === 'unknown') created = (await liveRefs(cx, [ref])).get(ref) === tip;
+    if (!created) {
+      await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.owner });
+      return fail(502, `the task workspace ref could not be created (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''})`, 'REF_CREATE_FAILED');
+    }
+  }
+
+  const landed = `EXISTS (SELECT 1 FROM agent_tasks t WHERE t.id = ?17 AND t.status = 'claimed' AND t.generation = ?18 AND t.claim_workspace_id = ?19)`;
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE agent_tasks SET status = 'claimed', claimed_by = ?3, generation = ?4, lease_expires_at = ?5, claim_workspace_id = ?6, updated_at = ?7,
+                base_sha = COALESCE(?9, base_sha)
+          WHERE repo_id = ?1 AND id = ?2 AND kind = '${FIX_ISSUE}' AND status IN ('open', 'claimed') AND generation < ?4
+            AND EXISTS (SELECT 1 FROM fenced_claims f WHERE f.kind = '${FENCE_KIND}' AND f.subject = ?2 AND f.generation = ?4 AND f.owner = ?8 AND f.state = 'claimed')
+            AND EXISTS (SELECT 1 FROM issues i WHERE i.repo_id = ?1 AND i.number = ?10 AND i.state = 'open')`,
+      )
+      .bind(cx.repo.id, id, who.agent, generation, until, wsId, now, who.owner, tip, issue),
+    reuse
+      ? db
+          .prepare(
+            `UPDATE workspaces SET agent = ?3, updated_at = ?4 WHERE repo_id = ?1 AND id = ?2 AND agent_id IS NULL
+               AND ${landed.replace('?17', '?5').replace('?18', '?6').replace('?19', '?2')}`,
+          )
+          .bind(cx.repo.id, wsId, who.agent, now, id, generation)
+      : workspaceInsertStatement(
+          cx,
+          { id: wsId, ref, task: `fix-issue #${issue} (task ${id})`, agent: who.agent, base: cx.repo.default_branch, baseSha: tip!, headSha: tip! },
+          now,
+          intent,
+          null,
+          { where: landed, params: [id, generation, wsId] },
+        ),
+    workspaceIssueStatement(db, cx.repo.id, wsId, issue, who.agent, now),
+    ...(intent && !reuse ? [declaredInsertStatement(db, cx.repo.id, wsId, intent)] : []),
+    detailSelect(db, cx.repo.id, id),
+    db.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, wsId),
+  ]);
+  const after = first<TaskDetailRow>(results[results.length - 2]);
+  const ws = first<WorkspaceRow>(results[results.length - 1]);
+  if (!results[0]?.meta.changes || !after || !ws) {
+    await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.owner });
+    if (!reuse) {
+      const removed = await deps
+        .pusher(cx.env, cx.repo)
+        .updateRef({ ref, oldOid: tip!, newOid: ZERO_SHA })
+        .catch((err: unknown) => ({ status: 'unknown' as const, reason: String(err).slice(0, 200) }));
+      if (removed.status !== 'ok') console.warn(JSON.stringify({ taskClaimRefLeft: { repo: cx.repo.id, task: id, ref, status: removed.status } }));
+    }
+    return (
+      (after && lifecycleRefusal(after)) ??
+      fail(409, `task ${id} was claimed again, completed or its issue closed while this claim was being set up`, 'CLAIM_LOST', {
+        currentGeneration: after?.generation ?? null,
+      })
+    );
+  }
+  const task = taskView(after, now);
+  return { ok: true, value: { task, workspace: workspaceView(ws, cx.repo, cx.origin, reuse ? undefined : tip!), lease: task.lease! } };
+}
+
+/**
+ * Completes a fix-issue task once the claimant has opened a change from the
+ * claim workspace (create_change_set): the task records the change's head
+ * and closes its fence. The issue itself closes when that change merges.
+ */
+async function completeIssueTask(
+  cx: TaskContext,
+  row: TaskDetailRow,
+  ws: WorkspaceRow | null,
+  generation: number,
+  who: Claimant,
+): Promise<ServiceResult<CompleteOutcome>> {
+  const id = row.id;
+  if (!ws || ws.status === 'abandoned') return fail(409, `task ${id} has no workspace; claim it again`, 'WORKSPACE_NOT_ACTIVE');
+  if (!ws.change_set_id || ws.change_number === null) {
+    return fail(409, `open a change from workspace ${ws.id} (create_change_set) before completing task ${id}`, 'NO_CHANGE_OPENED');
+  }
+  const db = cx.env.DB;
+  const now = Date.now();
+  const landed = `EXISTS (SELECT 1 FROM agent_tasks t WHERE t.id = ?2 AND t.status = 'completed' AND t.completed_at = ?4)`;
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE agent_tasks SET status = 'completed', completed_by = ?3, completed_at = ?4, updated_at = ?4, lease_expires_at = NULL,
+                resolution_sha = (SELECT c.head_sha FROM change_sets c WHERE c.id = ?7)
+          WHERE repo_id = ?1 AND id = ?2 AND kind = '${FIX_ISSUE}' AND status = 'claimed' AND generation = ?5
+            AND EXISTS (SELECT 1 FROM fenced_claims f WHERE f.kind = '${FENCE_KIND}' AND f.subject = ?2 AND f.generation = ?5 AND f.owner = ?6 AND f.state = 'claimed')`,
+      )
+      .bind(cx.repo.id, id, who.agent, now, generation, who.owner, ws.change_set_id),
+    db
+      .prepare(
+        `UPDATE fenced_claims SET state = 'done', result = ?3, updated_at = ?4
+          WHERE kind = '${FENCE_KIND}' AND subject = ?2 AND generation = ?1 AND owner = ?5 AND state = 'claimed' AND ${landed}`,
+      )
+      .bind(generation, id, JSON.stringify({ change: ws.change_number }), now, who.owner),
+    detailSelect(db, cx.repo.id, id),
+    changeSelect(db, cx.repo.id, ws.change_number),
+  ]);
+  const after = first<TaskDetailRow>(results[2]);
+  const change = first<ChangeRow>(results[3]);
+  if (!results[0]?.meta.changes || !after || !change) {
+    if (after) {
+      const lifecycle = lifecycleRefusal(after);
+      if (lifecycle) return lifecycle;
+    }
+    return fail(409, `generation ${generation} of task ${id} is no longer current; claim the task again`, 'STALE_GENERATION');
+  }
+  return { ok: true, value: { task: taskView(after, now), change: changeView(change) } };
 }

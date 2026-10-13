@@ -31,7 +31,9 @@ import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
 import { isSettleMessage, type SettleContinuationResult } from './dependencyGate';
 import { continueDependencySettlement } from './dependencies';
+import { commitCloseStatement, commitClosingRefs, guardScanStatements, pushedCommits, retireIssueTasksStatement } from './issues';
 import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
+import type { RepoRow } from '../db/repos';
 
 export interface PushEvent {
   namespace: string;
@@ -367,7 +369,65 @@ const changeHooksEffect: PushEffect = {
   },
 };
 
-export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect, changeHooksEffect];
+/**
+ * Issues closed by commits pushed to the default branch (services/issues.ts):
+ * the bounded set of commits the push brought in (the first-parent line down
+ * to the previous tip and the side branches its merges brought in, see
+ * pushedCommits), read for closing keywords; the closes join the completion batch. A merged
+ * change's own links are closed by its merge record, not here. Creating the
+ * branch closes nothing, so an imported history never sweeps issues shut.
+ */
+const issueCommitsEffect: PushEffect = {
+  name: 'issue-commits',
+  async run(ctx) {
+    const { event } = ctx;
+    if (event.ref !== `refs/heads/${ctx.defaultBranch}`) return { state: 'skipped', detail: 'not the default branch' };
+    if (event.after === ZERO_OID) return { state: 'skipped', detail: 'ref deleted' };
+    if (event.before === ZERO_OID) return { state: 'skipped', detail: 'branch created' };
+    if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
+    const repo = await ctx.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(ctx.repoId).first<RepoRow>();
+    if (!repo) return { state: 'skipped', detail: 'repo gone' };
+    const scan = await pushedCommits(ctx.env, repo, event.before, event.after);
+    const commits = scan.commits;
+    const truncated =
+      (scan.mainlineTruncated ? `; scanned ${commits.length} commits, older ones not read` : '') +
+      (scan.sidesSkipped > 0 ? `; ${scan.sidesSkipped} merged branch(es) not read` : '');
+    const closes = commitClosingRefs(commits);
+    if (closes.length === 0) return { state: 'done', detail: `no closing references in ${commits.length} commits${truncated}` };
+    return {
+      state: 'done',
+      detail: `closes ${closes.map((c) => `${c.repo ?? ''}#${c.number}`).join(', ')}${truncated}`,
+      statements: [commitCloseStatement(ctx.env.DB, ctx.repoId, closes, Date.now()), retireIssueTasksStatement(ctx.env.DB, ctx.repoId, Date.now())],
+    };
+  },
+};
+
+/**
+ * Guard findings on the default branch (services/issues.ts): a push that
+ * moved it outside the publication path — recognized by the merge commit
+ * recorded on the change it already gated — is scanned with the same
+ * `kvarm/guard` evaluation a change gets, over the push's whole tree diff.
+ * A failing finding files a fingerprinted issue (or counts one more
+ * occurrence while one is open); the push that clears one on a path it
+ * changes closes it as verified. The statements join the completion batch;
+ * the reads are bounded by the guard's own budgets.
+ */
+const issueGuardEffect: PushEffect = {
+  name: 'issue-guard',
+  async run(ctx) {
+    const { event } = ctx;
+    if (event.ref !== `refs/heads/${ctx.defaultBranch}`) return { state: 'skipped', detail: 'not the default branch' };
+    if (event.after === ZERO_OID) return { state: 'skipped', detail: 'ref deleted' };
+    if (event.before === ZERO_OID) return { state: 'skipped', detail: 'branch created' };
+    if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
+    const repo = await ctx.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(ctx.repoId).first<RepoRow>();
+    if (!repo) return { state: 'skipped', detail: 'repo gone' };
+    const scan = await guardScanStatements(ctx.env, repo, event.before, event.after, Date.now());
+    return { state: 'done', detail: scan.detail, statements: scan.statements };
+  },
+};
+
+export const PUSH_EFFECTS: readonly PushEffect[] = [purgeEffect, snapshotEffect, intentIndexEffect, changeHooksEffect, issueCommitsEffect, issueGuardEffect];
 
 // ---------------------------------------------------------------------------
 // Dispatcher

@@ -17,6 +17,7 @@ import { refGeneration } from '../src/cache/compare';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import { eventIdentity, parsePushEvent, snapshotInstanceId } from '../src/services/events';
 import worker from '../src/index';
+import { FakeRepo, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -50,7 +51,7 @@ class FakeWorkflow {
 }
 
 function envWith(wf: FakeWorkflow): Env {
-  return { ...baseEnv, SNAPSHOT_BUILDER: wf as unknown as Env['SNAPSHOT_BUILDER'] } as Env;
+  return { ...baseEnv, ARTIFACTS: fakeArtifacts, SNAPSHOT_BUILDER: wf as unknown as Env['SNAPSHOT_BUILDER'] } as Env;
 }
 
 let seq = 0;
@@ -105,6 +106,8 @@ async function seedRepo(name: string, visibility: 'public' | 'private' = 'public
   )
     .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, defaultBranch, Date.now())
     .run();
+  // An empty repository: the pushed SHAs are synthetic, so effects that read history find none.
+  fakeRepos.set(artifactsName, new FakeRepo());
   return { id, artifactsName };
 }
 
@@ -276,6 +279,8 @@ describe('queue dispatcher', () => {
       purge: { state: 'done', detail: null },
       'intent-index': expect.objectContaining({ state: 'skipped' }) as unknown,
       'change-hooks': { state: 'skipped', detail: 'no open changes' },
+      'issue-commits': { state: 'done', detail: 'no closing references in 0 commits; scanned 0 commits, older ones not read' },
+      'issue-guard': { state: 'done', detail: 'the previous or the new tip could not be read' },
     });
     const gen = await refGeneration(repo.id);
 
@@ -542,7 +547,7 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     expect(list[2]!.eventAt).toBe(iso(T0 + 1000));
     expect(list[0]!.id).not.toBe(list[2]!.id);
     expect(list[0]!.completedAt).toMatch(/Z$/);
-    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['change-hooks', 'intent-index', 'purge', 'snapshot']);
+    expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual(['change-hooks', 'intent-index', 'issue-commits', 'issue-guard', 'purge', 'snapshot']);
     expect(r.body.nextCursor).toBeNull();
     expect(r.cost.d1).toBeLessThanOrEqual(2);
     expect(r.cost.art).toBe(0);

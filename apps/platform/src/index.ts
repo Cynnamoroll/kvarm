@@ -16,6 +16,7 @@ import { candidatesApi } from './routes/api/candidates';
 import { workspacesApi } from './routes/api/workspaces';
 import { dependenciesApi } from './routes/api/dependencies';
 import { attributionApi } from './routes/api/attribution';
+import { issuesApi } from './routes/api/issues';
 import { checksApi } from './routes/api/checks';
 import { ciApi } from './routes/api/ci';
 import { containerRunnerApi } from './routes/api/containerRunner';
@@ -25,6 +26,7 @@ import { runWebhookCron } from './services/webhooks';
 import { handleMcp } from './mcp/server';
 import { web } from './routes/web';
 import { repoPages } from './routes/repoPages';
+import { issuePages } from './routes/issuePages';
 import { coordinationPages } from './routes/coordinationPages';
 import { comparePages } from './routes/comparePages';
 import { installFetchMeter, serveMetered } from './cost/meter';
@@ -82,6 +84,7 @@ app.route('/api/v1', dependenciesApi);
 app.route('/api/v1', workspacesApi);
 app.route('/api/v1', candidatesApi);
 app.route('/api/v1', attributionApi);
+app.route('/api/v1', issuesApi);
 app.route('/api/v1', checksApi);
 app.route('/api/v1', ciApi);
 app.route('/api/v1', containerRunnerApi);
@@ -91,9 +94,10 @@ app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req,
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
-// The coordination and compare pages are further /:owner/:repo views; their
-// paths (/activity, /train, /arenas, /candidates, /compare) collide with none
-// of the pages above.
+// The issues, coordination and compare pages are further /:owner/:repo views;
+// their paths (/issues, /activity, /train, /arenas, /candidates, /compare)
+// collide with none of the pages above.
+app.route('/:owner/:repo', issuePages);
 app.route('/:owner/:repo', repoPages);
 app.route('/:owner/:repo', coordinationPages);
 app.route('/:owner/:repo', comparePages);

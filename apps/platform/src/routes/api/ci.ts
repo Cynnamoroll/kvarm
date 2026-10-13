@@ -79,7 +79,7 @@ ciApi.get('/repos/:owner/:repo/ci/flakes', async (c) => {
 ciApi.post('/repos/:owner/:repo/ci/flakes/:check/quarantine', async (c) => {
   const x = await adminContext(c);
   if ('denied' in x) return x.denied;
-  const r = await flakes.quarantineCheck(c.env, x.d.repo, x.d.actor?.user.id ?? null, c.req.param('check'));
+  const r = await flakes.quarantineCheck(c.env, x.d.repo, x.d.actor?.user.id ?? null, c.req.param('check'), x.d.actor?.user.login ?? null);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });
