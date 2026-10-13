@@ -6,6 +6,7 @@
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { refMatchesAny } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import { CHECK_RUN_COLUMNS, checkRunView, type CheckRunRow, type CheckRunView } from './checks';
 import { CI_CONFIG_PATH, CI_LIMITS, parseCiConfig, type CiConfig } from './ciConfig';
@@ -168,8 +169,9 @@ interface JobRow {
 /**
  * What the platform knows about whose code a claimed job runs, so a runner
  * can decide before executing it whether to trust it (apps/cli runner trust
- * policy). The pusher of the head commit is not recorded anywhere, so this is
- * the change's author and head ref, not the identity that pushed `sha`.
+ * policy, architecture §0.5). The pusher of a head commit is not recorded,
+ * so this names the change's author and whether any agent credential could
+ * have written its head ref, not the identity that pushed `sha`.
  */
 export interface JobProvenance {
   /** The change the job belongs to, or null for a job without one. */
@@ -184,6 +186,13 @@ export interface JobProvenance {
   agent: { id: string; name: string } | null;
   /** The head ref is in the agent workspace namespace, which only agents may push. */
   agentWorkspaceRef: boolean;
+  /**
+   * Some write agent token of the repository (revoked and expired ones
+   * included: the head may predate the revocation) was granted a pattern
+   * matching the head ref, so an agent may have pushed the head. True when
+   * the grants could not all be read within budget.
+   */
+  agentWritableRef: boolean;
 }
 
 export interface ClaimedJob {
@@ -208,23 +217,53 @@ interface ProvenanceRow {
   change_head_sha: string | null;
   change_agent_meta: string | null;
   change_author_login: string | null;
+  /** JSON array of the `refs` JSON of up to AGENT_GRANT_BUDGET + 1 write agent tokens. */
+  agent_grants: string | null;
 }
 
-const WORKSPACE_HEAD_PREFIX = 'agents/';
+// Same namespace as services/workspaces.ts, which reaches this module
+// through changes.ts, so importing it here would be a cycle.
+const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
+/** Agent token grants read per claim; past it every head counts as agent-writable. */
+export const AGENT_GRANT_BUDGET = 200;
 
+// The same reading of change_sets.agent_meta as changes.ts parseAgent (a
+// cycle again keeps it local).
 function agentOf(meta: string | null): { id: string; name: string } | null {
   if (!meta) return null;
   try {
     const v = JSON.parse(meta) as { agentId?: unknown; agentName?: unknown };
-    return typeof v.agentId === 'string' ? { id: v.agentId, name: typeof v.agentName === 'string' ? v.agentName : v.agentId } : null;
+    return typeof v.agentId === 'string' && typeof v.agentName === 'string' ? { id: v.agentId, name: v.agentName } : null;
   } catch {
     return null;
   }
 }
 
+function agentWritable(grants: string | null, ref: string): boolean {
+  let tokens: unknown;
+  try {
+    tokens = JSON.parse(grants ?? '[]');
+  } catch {
+    return true;
+  }
+  if (!Array.isArray(tokens) || tokens.length > AGENT_GRANT_BUDGET) return true;
+  for (const refs of tokens) {
+    let patterns: unknown;
+    try {
+      patterns = typeof refs === 'string' ? JSON.parse(refs) : refs;
+    } catch {
+      return true;
+    }
+    if (!Array.isArray(patterns)) return true;
+    if (refMatchesAny(patterns.filter((p): p is string => typeof p === 'string'), ref)) return true;
+  }
+  return false;
+}
+
 function provenanceOf(r: JobRow & ProvenanceRow): JobProvenance {
   const headRef = r.change_head_ref;
-  const agentWorkspaceRef = headRef !== null && (headRef.startsWith(WORKSPACE_HEAD_PREFIX) || headRef.startsWith(`refs/heads/${WORKSPACE_HEAD_PREFIX}`));
+  const fullRef = headRef === null ? null : headRef.startsWith('refs/') ? headRef : `refs/heads/${headRef}`;
+  const agentWorkspaceRef = fullRef !== null && fullRef.startsWith(WORKSPACE_REF_PREFIX);
   const agent = agentOf(r.change_agent_meta);
   // Unparseable agent metadata still means an agent opened the change.
   const authorKind = r.change_number === null ? 'unknown' : agent || r.change_agent_meta || agentWorkspaceRef ? 'agent' : r.change_author_login ? 'human' : 'unknown';
@@ -236,6 +275,7 @@ function provenanceOf(r: JobRow & ProvenanceRow): JobProvenance {
     authorLogin: r.change_author_login,
     agent,
     agentWorkspaceRef,
+    agentWritableRef: fullRef === null || agentWorkspaceRef || agentWritable(r.agent_grants, fullRef),
   };
 }
 
@@ -292,7 +332,9 @@ export async function claimJob(env: Env, repo: RepoRow, input: unknown): Promise
     env.DB.prepare(
       `SELECT j.id, j.name, j.command, j.head_sha, j.tree_sha, j.generation, j.claimed_by, j.lease_until, j.timeout_seconds, j.required, j.status,
               c.number AS change_number, c.head_ref AS change_head_ref, c.head_sha AS change_head_sha, c.agent_meta AS change_agent_meta,
-              u.login AS change_author_login
+              u.login AS change_author_login,
+              (SELECT json_group_array(t.refs)
+                 FROM (SELECT refs FROM agent_tokens WHERE repo_id = ?1 AND role = 'write' LIMIT ${AGENT_GRANT_BUDGET + 1}) t) AS agent_grants
          FROM ci_jobs j
          LEFT JOIN change_sets c ON c.id = j.change_set_id
          LEFT JOIN users u ON u.id = c.author_id
