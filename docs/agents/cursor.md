@@ -1,6 +1,6 @@
 # Cursor
 
-Status: the `mcp.json` format below follows the Cursor MCP documentation for remote servers (`url` plus `headers`, with `${env:NAME}` interpolation). Fields marked *uncertain* depend on your Cursor version. Against a Kvarm instance, only the MCP protocol path was exercised with a generic client (see [generic.md](generic.md)); Cursor itself was not run against it.
+Status: verified with the Cursor agent CLI 2026.10.01 (`cursor-agent`, the agent bundled with Cursor 3.21) against a local Kvarm instance (`wrangler dev -c wrangler.dev.jsonc`) and an agent token: the `mcp.json` below, including `${env:KVARM_AGENT_TOKEN}` interpolation in `headers`, sends `Authorization: Bearer <token>`, and `cursor-agent mcp list-tools kvarm` lists the registry's tools. Older agent CLIs (2025.09 builds) do not send `headers` for URL servers at all and fall back to OAuth discovery, which Kvarm does not offer; update with Cursor's installer if you see `Invalid OAuth error response` or a 401. Fields marked *uncertain* were not exercised.
 
 ## Prerequisites
 
@@ -29,14 +29,18 @@ Create `.cursor/mcp.json` in the project (or `~/.cursor/mcp.json` for all projec
 }
 ```
 
-If your Cursor version does not interpolate `${env:...}` in `headers`, write the literal header value instead and keep the file out of version control (add it to `.gitignore`). Never commit a file that contains a real token.
+Cursor asks you to approve a project MCP server before it loads it, and again whenever the server's entry changes: accept the prompt in the editor, or run `cursor-agent mcp enable kvarm` in the project (`--approve-mcps` approves for a single `cursor-agent` run).
+
+If you must write the literal header value instead of `${env:...}`, keep the file out of version control (add it to `.gitignore`). Never commit a file that contains a real token.
 
 ## Verify
 
-Open Cursor Settings, then the MCP section: `kvarm` should show a green status and list the registry's tools. In the agent chat ask: "Call the kvarm `get_repo` tool for `<owner>/<repo>`." Expect a `repo` object. A personal access token can call `list_repos`; an agent token cannot (`AGENT_FORBIDDEN`).
+From a terminal in the project: `cursor-agent mcp list-tools kvarm` lists the tools (for example `- get_repo (repo)`). In the editor, open Cursor Settings, then the MCP section: `kvarm` should show a green status and list the registry's tools. In the agent chat ask: "Call the kvarm `get_repo` tool for `<owner>/<repo>`." Expect a `repo` object. A personal access token can call `list_repos`; an agent token cannot (`AGENT_FORBIDDEN`).
 
 ## Troubleshooting
 
+- `MCP server "kvarm" has not been approved`: approve it (see Configure); editing the entry requires approving it again.
+- `Invalid OAuth error response` or a 401 with a fresh token: your agent CLI predates header support for URL servers; update it.
 - Red status or "no tools": toggle the server off and on after fixing the file; Cursor reads the config on change but not the environment after launch.
 - 401: the token or variable is wrong, or the token expired or was revoked.
 - 403 `INSUFFICIENT_SCOPE`: a personal access token without `api`.

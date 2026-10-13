@@ -1,6 +1,6 @@
 # OpenAI Codex CLI
 
-Status: the `config.toml` keys below follow the Codex CLI MCP documentation for Streamable HTTP servers (`url`, `bearer_token_env_var`). Fields marked *uncertain* depend on your Codex version; check the Codex documentation for the version you run. Against a Kvarm instance, only the MCP protocol path was exercised with a generic client (see [generic.md](generic.md)); the `codex` binary itself was not run against it.
+Status: verified with Codex CLI 0.154.0 against a local Kvarm instance (`wrangler dev -c wrangler.dev.jsonc`) and an agent token: `codex mcp list` shows `kvarm` as a Streamable HTTP server with bearer-token auth, and `codex exec` called `get_repo` successfully (`mcp: kvarm/get_repo (completed)`). Fields still marked *uncertain* were not exercised.
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ url = "<KVARM_ORIGIN>/mcp"
 bearer_token_env_var = "KVARM_AGENT_TOKEN"
 ```
 
-`bearer_token_env_var` names the environment variable whose value Codex sends as `Authorization: Bearer <value>`, so the token never appears in the file. If your version has no `bearer_token_env_var`, use the static or env-backed header tables instead (*uncertain*, check the key names in your version's documentation):
+`bearer_token_env_var` names the environment variable whose value Codex sends as `Authorization: Bearer <value>`, so the token never appears in the file. Codex 0.154 also supports an env-backed header table, if you prefer to keep the full header value in the environment (the key exists in 0.154; the verified path is `bearer_token_env_var`):
 
 ```toml
 [mcp_servers.kvarm]
@@ -30,14 +30,17 @@ url = "<KVARM_ORIGIN>/mcp"
 env_http_headers = { "Authorization" = "KVARM_AUTHORIZATION" }   # env var holds the full value: Bearer <AGENT_TOKEN>
 ```
 
-Some older Codex versions gate Streamable HTTP servers behind an experimental flag (*uncertain*); if `codex mcp list` shows no `kvarm` entry or the server fails to start, check the release notes for your version.
+Codex 0.154 needs no experimental flag for Streamable HTTP servers. Older versions may (*uncertain*); if `codex mcp list` shows no `kvarm` entry or the server fails to start, check the release notes for your version.
+
+To try the server without editing `config.toml`, pass the same keys as overrides: `codex -c 'mcp_servers.kvarm.url="<KVARM_ORIGIN>/mcp"' -c 'mcp_servers.kvarm.bearer_token_env_var="KVARM_AGENT_TOKEN"' mcp list`.
 
 Restart Codex after editing the file.
 
 ## Verify
 
 ```sh
-codex mcp list           # kvarm should be listed
+codex mcp list           # kvarm: Status enabled, Auth Bearer token
+codex mcp get kvarm      # transport: streamable_http, bearer_token_env_var: KVARM_AGENT_TOKEN
 ```
 
 In a Codex session, ask it to call the `kvarm` `get_repo` tool for `<owner>/<repo>` and expect a `repo` object. A personal access token can call `list_repos`; an agent token cannot (`AGENT_FORBIDDEN`, account-level).
