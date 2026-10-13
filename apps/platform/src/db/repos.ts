@@ -33,9 +33,23 @@ export interface NewRepo {
   owner_org_id?: string | null;
 }
 
-/** Artifacts namespace is flat; owner/name is encoded deterministically. */
+/**
+ * Artifacts namespace is flat; owner/name is encoded deterministically. The
+ * encoding is injective: each component is sanitized, its dash runs collapsed
+ * and its edge dashes stripped, so no component contains `--` or an edge
+ * dash and the `--` separator splits the name in exactly one place. Without
+ * this, owner `a--b` with repo `c` and owner `a` with repo `b--c` would share
+ * one Artifacts repository (and deleting either would delete the other's
+ * objects).
+ */
 export function artifactsRepoName(owner: string, name: string): string {
-  return `${owner.toLowerCase()}--${name.toLowerCase()}`.replace(/[^a-z0-9._-]+/g, '-');
+  const part = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  return `${part(owner)}--${part(name)}`;
 }
 
 export function isValidRepoName(name: string): boolean {
