@@ -14,9 +14,12 @@
  *                  naming themself), so Kvarm proves WHO submitted it, not
  *                  which model ran or what the prompt was.
  *   verified       additionally, a trusted execution service signed evidence
- *                  linking run id, model, input (prompt) hash and the
- *                  produced commit, checked on write with Ed25519 against a
- *                  repository key or an instance key.
+ *                  linking the repository, the submitting principal, the run
+ *                  id, model, input (prompt) hash and the produced commit,
+ *                  checked on write with Ed25519 against a repository key or
+ *                  an instance key. Binding the repository and the submitting
+ *                  principal is what stops one principal's signature from
+ *                  being replayed by another or against another repository.
  *
  * Evidence that fails verification never raises the level; the reason codes
  * say why a record is not higher.
@@ -70,20 +73,50 @@ export const PROVENANCE_LIMITS = {
 } as const;
 
 /** Version line of the canonical payload; a new format gets a new line. */
-export const PROVENANCE_PAYLOAD_VERSION = 'kvarm-provenance-v1';
+export const PROVENANCE_PAYLOAD_VERSION = 'kvarm-provenance-v2';
 
 /**
- * The exact bytes a trusted execution service signs (UTF-8): five
+ * The retired payload (five lines, no repository or principal). It is kept
+ * byte-for-byte only to recognize a signature made under it: because it binds
+ * neither the repository nor the submitting principal, one principal's
+ * signature could be replayed by another principal or against another
+ * repository, so a signature over these bytes never verifies.
+ */
+export const LEGACY_PROVENANCE_PAYLOAD_VERSION = 'kvarm-provenance-v1';
+
+export interface CanonicalPayloadFields {
+  /** The target repository's id: a signature is valid for exactly one repository. */
+  repoId: string;
+  /** `user:<id>` or `agent:<id>` of the authenticated submitter. */
+  principal: string;
+  runId: string;
+  model: string;
+  promptHash: string;
+  commit: string;
+}
+
+/**
+ * The exact bytes a trusted execution service signs (UTF-8): seven
  * newline-terminated lines, no other whitespace.
  *
- *   kvarm-provenance-v1
+ *   kvarm-provenance-v2
+ *   repo:<repo id>
+ *   principal:<user:<id> or agent:<id>>
  *   run:<runId>
  *   model:<model>
  *   input:<promptHash>
  *   commit:<40-hex commit sha>
+ *
+ * The repository and the submitting principal are part of the signed bytes,
+ * so a valid signature is bound to one repository and one submitter.
  */
-export function canonicalPayload(p: { runId: string; model: string; promptHash: string; commit: string }): string {
-  return `${PROVENANCE_PAYLOAD_VERSION}\nrun:${p.runId}\nmodel:${p.model}\ninput:${p.promptHash}\ncommit:${p.commit}\n`;
+export function canonicalPayload(p: CanonicalPayloadFields): string {
+  return `${PROVENANCE_PAYLOAD_VERSION}\nrepo:${p.repoId}\nprincipal:${p.principal}\nrun:${p.runId}\nmodel:${p.model}\ninput:${p.promptHash}\ncommit:${p.commit}\n`;
+}
+
+/** The retired payload's bytes, to recognize (never to verify) a legacy signature. */
+export function legacyCanonicalPayload(p: { runId: string; model: string; promptHash: string; commit: string }): string {
+  return `${LEGACY_PROVENANCE_PAYLOAD_VERSION}\nrun:${p.runId}\nmodel:${p.model}\ninput:${p.promptHash}\ncommit:${p.commit}\n`;
 }
 
 type Fail = Extract<ServiceResult<never>, { ok: false }>;
@@ -195,23 +228,36 @@ async function ed25519Verify(raw: Uint8Array, signature: Uint8Array, data: Uint8
   }
 }
 
-/** Null when the signed evidence verifies for exactly these fields, else the reason. */
+/**
+ * Null when the signed evidence verifies for exactly these fields, else the
+ * reason. The payload is built from the server-side target (the authenticated
+ * submitter's principal id and the repository the write targets), so a
+ * signature replayed by another principal or against another repository fails
+ * here; a signature over the retired payload is reported as `legacy-payload`
+ * and never verifies.
+ */
 async function verificationReason(
   env: Env,
   repo: RepoRow,
   commit: string,
   record: { model?: string; promptHash: string | null },
+  submitter: Submitter,
   ev: SignedEvidence,
 ): Promise<string | null> {
   if (record.model === undefined) return 'evidence-without-model';
   if (record.promptHash === null) return 'evidence-without-prompt-hash';
   if (!lineSafe(record.model) || !lineSafe(record.promptHash)) return 'unsignable-field';
+  if (submitter.principal === null) return 'no-credential';
   const sig = base64urlDecode(ev.signature);
   if (!sig || sig.length !== 64) return 'malformed-signature';
   const raw = (await instanceKey(env, ev.keyId)) ?? (await repoKey(env, repo, ev.keyId));
   if (!raw) return 'unknown-key';
-  const payload = new TextEncoder().encode(canonicalPayload({ runId: ev.runId, model: record.model, promptHash: record.promptHash, commit }));
-  return (await ed25519Verify(raw, sig, payload)) ? null : 'bad-signature';
+  const fields = { runId: ev.runId, model: record.model, promptHash: record.promptHash, commit };
+  const payload = new TextEncoder().encode(canonicalPayload({ ...fields, repoId: repo.id, principal: submitter.principal }));
+  if (await ed25519Verify(raw, sig, payload)) return null;
+  // Recognize the retired payload so an old signature reads as legacy, not as a plain bad signature.
+  const legacy = new TextEncoder().encode(legacyCanonicalPayload(fields));
+  return (await ed25519Verify(raw, sig, legacy)) ? 'legacy-payload' : 'bad-signature';
 }
 
 /**
@@ -228,15 +274,18 @@ export async function assessEvidence(
 ): Promise<{ evidence: Evidence; submitter: Submitter }> {
   const submitter = submitterOf(actor);
   const reasons: string[] = [];
+  const push = (reason: string) => {
+    if (!reasons.includes(reason)) reasons.push(reason);
+  };
   const who = principalReason(actor, record.agent);
-  if (who) reasons.push(who);
+  if (who) push(who);
   let verified = false;
   if (signed) {
-    const why = await verificationReason(env, repo, commit, record, signed);
-    if (why) reasons.push(why);
+    const why = await verificationReason(env, repo, commit, record, submitter, signed);
+    if (why) push(why);
     else verified = true;
   } else {
-    reasons.push('no-signed-evidence');
+    push('no-signed-evidence');
   }
   // A ladder: a valid signature over a record its submitter cannot claim stays declared.
   const level: EvidenceLevel = who ? 'declared' : verified ? 'verified' : 'authenticated';

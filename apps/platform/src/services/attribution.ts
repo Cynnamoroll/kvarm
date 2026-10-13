@@ -410,6 +410,16 @@ export function evidenceFromRow(row: Omit<EvidenceRow, 'note_digest'>): Evidence
   };
 }
 
+/**
+ * The evidence as a reader at `role` may see it. The submitting principal id
+ * and the credential's public prefix are admin-only: an attribution note can
+ * be read by anyone with read access, including anonymous visitors on a
+ * public repo, and the note already carries the agent/actor display name.
+ */
+export function evidenceForReader(evidence: Evidence, admin: boolean): Evidence {
+  return admin ? evidence : { ...evidence, principal: null, tokenPrefix: null };
+}
+
 /** GET commits/:sha/attribution: the note with its evidence, or 404 when the commit has none. */
 export function getAttribution(cx: AttributionContext, sha: string, opts: { evidence?: boolean } = {}): Promise<ServiceResult<AttributionView>> {
   const bad = checkSha(sha);
