@@ -225,10 +225,14 @@ async function* zstdDecodeAll(wire) {
     return d;
   };
   let z = newDecoder();
+  // Whether the current decoder received input: end() on an empty decoder
+  // is a zstd error, and every complete frame is already ended in the loop.
+  let fed = false;
   // A decode failure can stall the write/end callback itself, so every wait
   // races the decoder's own 'error' event.
   /** @param {Uint8Array} piece */
   const write = async (piece) => {
+    fed = true;
     await Promise.race([
       /** @type {Promise<void>} */ (
         new Promise((resolve) => {
@@ -260,11 +264,12 @@ async function* zstdDecodeAll(wire) {
           await end();
           while (out.length > 0) yield /** @type {Uint8Array} */ (out.shift());
           z = newDecoder();
+          fed = false;
         }
       }
     }
     if (framer.inFrame) throw new Error('truncated zstd snapshot download');
-    await end();
+    if (fed) await end();
     while (out.length > 0) yield /** @type {Uint8Array} */ (out.shift());
   } finally {
     z.destroy();
