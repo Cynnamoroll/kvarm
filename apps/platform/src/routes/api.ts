@@ -4,10 +4,15 @@
  * Repo lifecycle goes through src/repos/service.ts.
  */
 
-import { Hono, type Context } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { listReposForOwner, type RepoRow } from '../db/repos';
-import { findOrCreateUser } from '../db/users';
-import { getSessionInfo, type SessionInfo } from '../auth/workos';
+import {
+  getSessionInfo,
+  isSameOriginRequest,
+  isUnsafeMethod,
+  type SessionInfo,
+  type SessionLookup,
+} from '../auth/workos';
 import { mintPAT, revokePAT, scopesAllow, SCOPES, type Scope } from '../auth/pat';
 import * as svc from '../repos/service';
 import { patActor, type Actor, type RepoNeed } from '../services/authz';
@@ -20,7 +25,10 @@ import {
   type RepoAccess,
 } from '../services/access';
 
-export type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
+export type App = {
+  Bindings: Env;
+  Variables: { refreshCookies: string[]; sessionLookup: SessionLookup };
+};
 export const api = new Hono<App>();
 
 export type ApiActor = Actor;
@@ -30,17 +38,50 @@ export function clientIp(c: Context<App>): string | null {
 }
 
 /**
- * The presented credential, unverified: session cookie first (resolved to its
- * user), then Bearer PAT. PATs are verified by services/access.ts.
+ * The browser session for this request, resolved once: a WorkOS refresh
+ * rotates the refresh token, so a second lookup in the same request would
+ * redeem a spent one. Cookies it sets are persisted by persistSessionCookies.
+ */
+export async function requestSession(c: Context<App>): Promise<SessionInfo | null> {
+  let lookup = c.get('sessionLookup');
+  if (!lookup) {
+    lookup = await getSessionInfo(c.req.raw, c.env);
+    c.set('sessionLookup', lookup);
+    if (lookup.setCookies.length > 0) c.set('refreshCookies', lookup.setCookies);
+  }
+  return lookup.session;
+}
+
+/** Appends the session's Set-Cookie values to whatever response the route produced. */
+export const persistSessionCookies: MiddlewareHandler = async (c, next) => {
+  await next();
+  // Routes that still append the cookies themselves are not doubled.
+  const present = new Set(c.res.headers.getSetCookie());
+  const cookies = ((c.get('refreshCookies') as string[] | undefined) ?? []).filter((cookie) => !present.has(cookie));
+  if (cookies.length === 0) return;
+  try {
+    for (const cookie of cookies) c.res.headers.append('Set-Cookie', cookie);
+  } catch {
+    const res = new Response(c.res.body, c.res);
+    for (const cookie of cookies) res.headers.append('Set-Cookie', cookie);
+    // Hono's res setter merges the previous response's Set-Cookie headers
+    // over the new one; clearing first keeps the appended cookies.
+    c.res = undefined as unknown as Response;
+    c.res = res;
+  }
+};
+
+/**
+ * The presented credential, unverified: session cookie first (its user row is
+ * read fresh from D1), then Bearer PAT. A session never authorizes a
+ * state-changing request from another origin; such a request falls through
+ * to its Bearer token or acts anonymously. PATs are verified by
+ * services/access.ts.
  */
 export async function requestCredential(c: Context<App>): Promise<Credential> {
-  const session: SessionInfo | null = await getSessionInfo(c.req.raw, c.env);
-  if (session) {
-    const user = await findOrCreateUser(c.env, session.user);
-    if (session.refreshCookies.length > 0) {
-      c.set('refreshCookies', session.refreshCookies);
-    }
-    return { kind: 'session', actor: { user, via: 'session', scopes: null } };
+  const session = await requestSession(c);
+  if (session && (!isUnsafeMethod(c.req.method) || isSameOriginRequest(c.req.raw, c.env))) {
+    return { kind: 'session', actor: { user: session.user, via: 'session', scopes: null } };
   }
   const header = c.req.header('Authorization');
   if (header?.startsWith('Bearer ')) {
@@ -68,13 +109,9 @@ export async function apiActor(c: Context<App>): Promise<ActorResult> {
   return { ok: true, actor: scopesAllow(res.pat.scopes, 'api') ? patActor(res.pat) : null };
 }
 
-/** JSON response that persists refreshed session cookies when present. */
+/** JSON response; refreshed session cookies are added by persistSessionCookies. */
 export function actorJson(c: Context<App>, data: unknown, status = 200): Response {
-  const res = c.json(data, status as never);
-  for (const cookie of c.get('refreshCookies') ?? []) {
-    res.headers.append('Set-Cookie', cookie);
-  }
-  return res;
+  return c.json(data, status as never);
 }
 
 /** Resolves the caller and :owner/:repo, then applies the shared repository policy. */

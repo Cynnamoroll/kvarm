@@ -14,6 +14,8 @@ import { FLUSH_PKT, buildBlob, buildCommit, buildTree, concat, decode, pktLine, 
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
+import { newSessionPayload, sessionCookie } from '../src/auth/workos';
+import { toUserRow } from '../src/db/users';
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -571,6 +573,46 @@ describe('arena pages', () => {
     expect(r.text).toContain('normal merge policy');
     // Anonymous sees no select buttons.
     expect(r.text).not.toContain('Select winner');
+  });
+
+  it('requires the session CSRF token and the same origin for a signed-in browser selection', async () => {
+    const authEnv = {
+      ...env,
+      WORKOS_CLIENT_ID: 'client_fake',
+      WORKOS_API_KEY: 'sk_fake_not_a_real_key',
+      WORKOS_COOKIE_PASSWORD: 'test-cookie-password-0123456789abcdef',
+    } as Env;
+    const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(ids.owner).first<Parameters<typeof toUserRow>[0]>();
+    const payload = newSessionPayload(toUserRow(row!), {
+      user: { id: row!.workos_user_id, email: row!.email, emailVerified: true, name: null, avatarUrl: null },
+      refreshToken: 'rt_unused',
+      sessionId: null,
+    });
+    const cookie = (await sessionCookie(authEnv, payload)).split(';')[0]!;
+    const browser = async (path: string, init: RequestInit = {}) => {
+      const ctx = createExecutionContext();
+      const headers = { cookie, ...(init.headers as Record<string, string>) };
+      const req = new Request(`${ORIGIN}${path}`, { ...init, headers, redirect: 'manual' });
+      const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, authEnv, ctx);
+      await waitOnExecutionContext(ctx);
+      return { status: res.status, text: await res.text() };
+    };
+    const form = { 'content-type': 'application/x-www-form-urlencoded' };
+
+    const page = await browser(p('coord', 'arenas/ar1'));
+    expect(page.status).toBe(200);
+    expect(page.text).toContain(`name="_csrf" value="${payload.csrf}"`);
+    const missing = await browser(p('coord', 'arenas/ar1/select'), { method: 'POST', headers: { ...form, origin: ORIGIN }, body: 'workspace=wsatlas' });
+    expect(missing.status).toBe(403);
+    // Cross-origin: the session does not count, so the browser is anonymous and sees nothing.
+    const cross = await browser(p('coord', 'arenas/ar1/select'), {
+      method: 'POST',
+      headers: { ...form, origin: 'https://evil.test' },
+      body: `_csrf=${payload.csrf}&workspace=wsatlas`,
+    });
+    expect(cross.status).toBe(404);
+    // Nothing was selected; the PAT test below records the selection.
+    expect((await call(p('coord', 'arenas/ar1'))).text).not.toContain('the winner merges through its own change set');
   });
 
   it('shows the select control to a write viewer and records the selection on POST', async () => {

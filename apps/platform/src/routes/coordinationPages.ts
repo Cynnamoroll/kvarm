@@ -20,7 +20,8 @@
 import { Hono, type Context } from 'hono';
 import { escapeHtml as escape, html, raw, timeAgo } from '@kvarm/ui';
 import { repoPage } from '../render/repoShell';
-import { finish, notFound, resolveRepo, type Resolved } from './repoPages';
+import { finish, notFound, resolveRepo, sessionFormRefused, type Resolved } from './repoPages';
+import { csrfInput } from '../web/render';
 import * as activity from '../services/activity';
 import * as candidates from '../services/candidates';
 import type { ArenaView } from '../services/candidates';
@@ -29,7 +30,7 @@ import { TRAIN_VIEW_LIMITS, trainView } from '../services/trainView';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 
-type App = { Bindings: Env; Variables: { refreshCookies: string[] } };
+import { requestSession, type App } from './api';
 export const coordinationPages = new Hono<App>();
 
 const HTML = { 'content-type': 'text/html; charset=utf-8' };
@@ -297,6 +298,8 @@ interface ComparisonOptions {
   repo: RepoRow;
   canSelect: boolean;
   arenaId: string;
+  /** Session CSRF token for the select form (architecture §11.1). */
+  csrf?: string | null;
 }
 
 function candidateCards(res: candidates.CandidatesResponse | candidates.ArenaCandidatesResponse, opts: ComparisonOptions): string {
@@ -316,6 +319,7 @@ function candidateCards(res: candidates.CandidatesResponse | candidates.ArenaCan
       const failing = rank && rank.factors.failingChecks.length > 0 ? `<div class="muted">failing: ${chips(rank.factors.failingChecks, 4)}</div>` : '';
       const select = opts.canSelect
         ? `<form method="post" action="/${opts.repo.owner_login}/${opts.repo.name}/arenas/${opts.arenaId}/select">
+             ${csrfInput(opts.csrf)}
              <input type="hidden" name="workspace" value="${escape(cand.workspace)}" />
              <button class="btn" type="submit">Select winner</button>
            </form>`
@@ -562,7 +566,12 @@ async function arenaPage(c: PageContext, resolved: Resolved, flash: string | nul
   if (!res.ok) return errorCard(c, resolved, 'activity', 'Candidates unavailable', res);
   const flashCard = flash ? raw(`<div class="flash err">${escape(flash)}</div>`) : '';
   const body = html`${flashCard}${raw(
-    arenaBody(arena.value, res.value, { repo, canSelect: arena.value.state === 'open' && canWrite(resolved), arenaId: id }),
+    arenaBody(arena.value, res.value, {
+      repo,
+      canSelect: arena.value.state === 'open' && canWrite(resolved),
+      arenaId: id,
+      csrf: (await requestSession(c))?.csrfToken,
+    }),
   )}`;
   return respond(
     c,
@@ -586,6 +595,8 @@ coordinationPages.post('/arenas/:id/select', async (c) => {
   if (!resolved) return notFound(c);
   if (!canWrite(resolved)) return notFound(c);
   const form = await c.req.parseBody();
+  const refused = await sessionFormRefused(c, resolved.viewer, form);
+  if (refused) return refused;
   const workspace = String(form.workspace ?? '');
   const id = c.req.param('id') ?? '';
   const r = await candidates.selectArena(candidatesCx(c, resolved), id, { workspace });
