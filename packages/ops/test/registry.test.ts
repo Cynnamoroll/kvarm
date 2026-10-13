@@ -308,3 +308,16 @@ describe('buildRequest', () => {
     expect(fail('forecast', { repo: 'o/r', paths: 'a' })).toMatch(/paths.*list/);
   });
 });
+
+describe('reverts and incident webhooks (issue #14)', () => {
+  it('registers create_revert and the incident secret operations, not the signed delivery', () => {
+    expect(findOperation('create_revert')).toMatchObject({ command: ['revert', 'create'], method: 'POST', path: '/repos/{repo}/reverts', family: 'reverts', readOnly: false });
+    expect(findOperation('create_revert')?.params.map((p) => p.name)).toEqual(['repo', 'sha', 'changeNumber', 'reason', 'base', 'title', 'mergePolicy']);
+    expect(findOperation('get_incident_webhook')).toMatchObject({ command: ['incident', 'webhook'], method: 'GET', path: '/repos/{repo}/incidents/webhook', readOnly: true });
+    expect(findOperation('rotate_incident_secret')).toMatchObject({ command: ['incident', 'rotate'], method: 'POST', path: '/repos/{repo}/incidents/webhook/rotate' });
+    expect(findOperation('delete_incident_webhook')).toMatchObject({ command: ['incident', 'delete'], method: 'DELETE', destructive: true });
+    expect(OPERATIONS.some((o) => o.path === '/repos/{repo}/incidents')).toBe(false);
+    const req = buildRequest(findOperation('create_revert')!, { repo: 'o/r', changeNumber: 7, reason: 'p99' });
+    expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/reverts', { changeNumber: 7, reason: 'p99' }]);
+  });
+});
