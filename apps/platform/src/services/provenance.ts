@@ -117,7 +117,10 @@ export function parseSignedEvidence(v: unknown): ServiceResult<SignedEvidence | 
 export function submitterOf(actor: Actor | null): Submitter {
   if (!actor) return { principal: null, tokenKind: null, tokenId: null };
   if (actor.agent) return { principal: `agent:${actor.agent.agentId}`, tokenKind: 'agent', tokenId: actor.agent.tokenId };
-  if (actor.via === 'pat') return { principal: `user:${actor.user.id}`, tokenKind: 'pat', tokenId: actor.patId ?? null };
+  if (actor.via === 'pat') {
+    // An actor rebuilt from a stored principal (the merge train's enqueuer) names no credential.
+    return { principal: `user:${actor.user.id}`, tokenKind: actor.patId ? 'pat' : null, tokenId: actor.patId ?? null };
+  }
   return { principal: `user:${actor.user.id}`, tokenKind: 'session', tokenId: null };
 }
 
@@ -202,6 +205,7 @@ async function verificationReason(
 ): Promise<string | null> {
   if (record.model === undefined) return 'evidence-without-model';
   if (record.promptHash === null) return 'evidence-without-prompt-hash';
+  if (!lineSafe(record.model) || !lineSafe(record.promptHash)) return 'unsignable-field';
   const sig = base64urlDecode(ev.signature);
   if (!sig || sig.length !== 64) return 'malformed-signature';
   const raw = (await instanceKey(env, ev.keyId)) ?? (await repoKey(env, repo, ev.keyId));

@@ -1356,9 +1356,12 @@ async function performMerge(
       const pv = prepared.value;
       const mergedAt = Date.now();
       const record = mergedRecordStatements(cx.env.DB, cx.repo.id, row, { mergeCommit: pv.mergeCommit, targetSha: pv.targetSha, headSha }, mergedAt);
-      const recorded = await cx.env.DB.batch([...record, changeSelect(cx.env.DB, cx.repo.id, row.number)]);
-      // The ref moved whether or not the change row records it, so the audit ledger notes the publication either way.
-      await recordMergeAudit(cx.env, cx.repo.id, cx.actor, { ref: targetRef, previous: pv.targetSha, mergeCommit: pv.mergeCommit, change: row.number }, mergedAt);
+      // The ref moved whether or not the change row records it, so the audit ledger (best effort, never throws) notes
+      // the publication either way, concurrently with the record batch.
+      const [recorded] = await Promise.all([
+        cx.env.DB.batch([...record, changeSelect(cx.env.DB, cx.repo.id, row.number)]),
+        recordMergeAudit(cx.env, cx.repo.id, cx.actor, { ref: targetRef, previous: pv.targetSha, mergeCommit: pv.mergeCommit, change: row.number }, mergedAt),
+      ]);
       const update = recorded[0];
       const read = recorded[recorded.length - 1];
       await settleLanded(

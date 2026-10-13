@@ -58,9 +58,10 @@ CREATE INDEX idx_ref_updates_commit ON ref_updates(repo_id, new_sha, at, id);
 
 -- One row per commit the audit knows about. `seq` is the per-repo insertion
 -- order (D1 serializes writes, so MAX + 1 inside the inserting statement is
--- strictly increasing): the export pages by it, so a commit recorded after a
--- page was read always sorts after that page. `first_at` is the database
--- clock at insertion, which `since`/`until` filter on.
+-- strictly increasing). `first_at` is the database clock at insertion, raised
+-- to the repo's latest first_at so it never decreases along `seq`: the export
+-- pages by (first_at, seq), so a commit recorded after a page was read always
+-- sorts after that page, and `since`/`until` select a contiguous range.
 CREATE TABLE audit_commits (
   repo_id TEXT NOT NULL,
   commit_sha TEXT NOT NULL,
@@ -76,7 +77,8 @@ BEGIN
   INSERT OR IGNORE INTO audit_commits (repo_id, commit_sha, seq, first_at)
   VALUES (NEW.repo_id, NEW.commit_sha,
           (SELECT COALESCE(MAX(seq), 0) + 1 FROM audit_commits WHERE repo_id = NEW.repo_id),
-          CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER));
+          MAX(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),
+              COALESCE((SELECT MAX(first_at) FROM audit_commits WHERE repo_id = NEW.repo_id), 0)));
 END;
 
 -- Ref deletions name no commit.
@@ -86,7 +88,8 @@ BEGIN
   INSERT OR IGNORE INTO audit_commits (repo_id, commit_sha, seq, first_at)
   VALUES (NEW.repo_id, NEW.new_sha,
           (SELECT COALESCE(MAX(seq), 0) + 1 FROM audit_commits WHERE repo_id = NEW.repo_id),
-          CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER));
+          MAX(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),
+              COALESCE((SELECT MAX(first_at) FROM audit_commits WHERE repo_id = NEW.repo_id), 0)));
 END;
 
 -- A train publication is recorded from the queue's own published transition,

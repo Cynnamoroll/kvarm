@@ -168,14 +168,14 @@ function parseTime(raw: string | undefined, name: string): number | null | Fail 
 
 const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as Fail).ok === false;
 
-function encodeCursor(seq: number): string {
-  return btoa(JSON.stringify(['a', seq])).replace(/=+$/, '');
+function encodeCursor(at: number, seq: number): string {
+  return btoa(JSON.stringify([at, seq])).replace(/=+$/, '');
 }
 
-function decodeCursor(raw: string): number | null {
+function decodeCursor(raw: string): { at: number; seq: number } | null {
   try {
     const v: unknown = JSON.parse(atob(raw));
-    if (Array.isArray(v) && v.length === 2 && v[0] === 'a' && Number.isSafeInteger(v[1]) && (v[1] as number) >= 0) return v[1] as number;
+    if (Array.isArray(v) && v.length === 2 && Number.isSafeInteger(v[0]) && Number.isSafeInteger(v[1])) return { at: v[0] as number, seq: v[1] as number };
   } catch {
     // not one of ours
   }
@@ -276,17 +276,16 @@ export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise
     if (!Number.isInteger(n) || n < 1 || n > AUDIT_LIMITS.pageMax) return fail(400, 'INVALID_LIMIT', `limit must be an integer from 1 to ${AUDIT_LIMITS.pageMax}`);
     limit = n;
   }
-  let after = 0;
+  let after = { at: -1, seq: 0 };
   if (q.cursor) {
-    const seq = decodeCursor(q.cursor);
-    if (seq === null) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this endpoint');
-    after = seq;
+    const c = decodeCursor(q.cursor);
+    if (c === null) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this endpoint');
+    after = c;
   }
 
-  // One statement. Pages follow the insertion sequence, so a commit recorded after a page was read sorts after
-  // it. The time window becomes a sequence range by one seek at each end of the (repo_id, first_at, seq) index;
-  // first_at is filtered again because the database clock is only nearly monotonic. Each page row then reads
-  // the commit's newest evidence row and its first updates + 1 by index.
+  // One statement: a seek on (repo_id, first_at, seq) that stops after one page plus one. first_at never
+  // decreases along the insertion sequence (migration 0025), so a commit recorded after a page was read sorts
+  // after it. Each page row then reads the commit's newest evidence row and its first updates + 1 by index.
   const { results } = await env.DB.prepare(
     `SELECT a.commit_sha, a.seq, a.first_at,
             e.agent, e.session, e.prompt_hash, e.model, e.actor, e.at, e.source, e.level, e.reasons, e.principal,
@@ -297,16 +296,14 @@ export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise
                FROM (SELECT * FROM ref_updates u WHERE u.repo_id = a.repo_id AND u.new_sha = a.commit_sha
                       ORDER BY u.at, u.id LIMIT ${AUDIT_LIMITS.updatesPerCommit + 1}) u) AS updates
        FROM (SELECT repo_id, commit_sha, seq, first_at FROM audit_commits
-              WHERE repo_id = ?1 AND first_at >= ?2 AND first_at < ?3 AND seq > ?4
-                AND seq >= COALESCE((SELECT seq FROM audit_commits WHERE repo_id = ?1 AND first_at >= ?2 ORDER BY first_at, seq LIMIT 1), 0)
-                AND seq <= COALESCE((SELECT seq FROM audit_commits WHERE repo_id = ?1 AND first_at < ?3 ORDER BY first_at DESC, seq DESC LIMIT 1), 0)
-              ORDER BY seq LIMIT ?5) a
+              WHERE repo_id = ?1 AND first_at >= ?2 AND first_at < ?3 AND (first_at, seq) > (?4, ?5)
+              ORDER BY first_at, seq LIMIT ?6) a
        LEFT JOIN attribution_evidence e ON e.repo_id = a.repo_id AND e.commit_sha = a.commit_sha
              AND e.note_digest = (SELECT x.note_digest FROM attribution_evidence x WHERE x.repo_id = a.repo_id AND x.commit_sha = a.commit_sha
                                    ORDER BY x.recorded_at DESC, x.note_digest DESC LIMIT 1)
-      ORDER BY a.seq`,
+      ORDER BY a.first_at, a.seq`,
   )
-    .bind(repo.id, since ?? 0, until ?? Number.MAX_SAFE_INTEGER, after, limit + 1)
+    .bind(repo.id, since ?? 0, until ?? Number.MAX_SAFE_INTEGER, after.at, after.seq, limit + 1)
     .all<AuditRow>();
   const truncated = results.length > limit;
   const kept = results.slice(0, limit);
@@ -318,7 +315,7 @@ export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise
       until: until === null ? null : iso(until),
       records: kept.map(toRecord),
       truncated,
-      nextCursor: truncated && last ? encodeCursor(last.seq) : null,
+      nextCursor: truncated && last ? encodeCursor(last.first_at, last.seq) : null,
     },
   };
 }

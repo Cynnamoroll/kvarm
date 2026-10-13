@@ -358,8 +358,8 @@ async function noteEvidence(env: Env, repoId: string, sha: string, bytes: Uint8A
     .all<EvidenceRow>();
   const row = results[0];
   if (!row) return undeclaredEvidence('no-evidence-record');
-  // The notes ref is an ordinary ref: a note pushed around Kvarm carries none of the stored evidence.
-  if (row.note_digest !== digest) return undeclaredEvidence('note-written-outside-kvarm');
+  // The notes ref is an ordinary ref: a note pushed around Kvarm (or one whose evidence write failed) has no row.
+  if (row.note_digest !== digest) return undeclaredEvidence('note-without-evidence');
   return evidenceFromRow(row);
 }
 
@@ -382,7 +382,7 @@ export function evidenceFromRow(row: Omit<EvidenceRow, 'note_digest'>): Evidence
 }
 
 /** GET commits/:sha/attribution: the note with its evidence, or 404 when the commit has none. */
-export function getAttribution(cx: AttributionContext, sha: string): Promise<ServiceResult<AttributionView>> {
+export function getAttribution(cx: AttributionContext, sha: string, opts: { evidence?: boolean } = {}): Promise<ServiceResult<AttributionView>> {
   const bad = checkSha(sha);
   if (bad) return Promise.resolve(bad);
   const none = fail(404, 'ATTRIBUTION_NOT_FOUND', `commit ${sha} has no attribution`);
@@ -413,7 +413,8 @@ export function getAttribution(cx: AttributionContext, sha: string): Promise<Ser
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         return fail(422, 'ATTRIBUTION_NOT_JSON', `the note on ${sha} is not a JSON attribution record`);
       }
-      const evidence = await noteEvidence(cx.env, cx.repo.id, sha, bytes);
+      // Existence checks skip the evidence read.
+      const evidence = opts.evidence === false ? undeclaredEvidence('not-read') : await noteEvidence(cx.env, cx.repo.id, sha, bytes);
       return { ok: true, value: { ...(parsed as AttributionRecord), evidence } };
     }),
   );
@@ -460,7 +461,7 @@ export async function attributeCommit(
 ): Promise<boolean> {
   try {
     if (!opts.replace) {
-      const existing = await getAttribution(cx, sha);
+      const existing = await getAttribution(cx, sha, { evidence: false });
       if (existing.ok || existing.code !== 'ATTRIBUTION_NOT_FOUND') return false;
     }
     const assessed = await assessEvidence(cx.env, cx.repo, cx.actor, sha, input, null);

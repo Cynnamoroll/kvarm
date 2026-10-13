@@ -244,8 +244,11 @@ describe('attribution evidence levels', () => {
     cases.push(['other commit', { ...fields, evidence: { keyId: key.id, runId: 'run-7', signature } }, 'bad-signature', 'authenticated']);
     cases.push(['unknown key', { ...fields, evidence: { keyId: stranger.id, runId: 'run-7', signature: await stranger.sign(canonicalPayload({ runId: 'run-7', model: 'claude-x', promptHash: HASH, commit: c2.sha })) } }, 'unknown-key', 'authenticated']);
     cases.push(['no model', { agent: 'ver-agent-a', session: 's', promptHash: HASH, evidence: { keyId: key.id, runId: 'run-7', signature } }, 'evidence-without-model', 'authenticated']);
+    // A newline in a signed field would shift the payload's lines, so such a record is never verified.
+    const forgedLines = await key.sign(canonicalPayload({ runId: 'run-7', model: 'claude-x\ninput:x', promptHash: HASH, commit: c2.sha }));
+    cases.push(['line in model', { ...fields, model: 'claude-x\ninput:x', evidence: { keyId: key.id, runId: 'run-7', signature: forgedLines } }, 'unsignable-field', 'authenticated']);
     for (const [label, body, reason, level] of cases) {
-      const target = label === 'other commit' || label === 'unknown key' || label === 'no model' ? c2.sha : c1.sha;
+      const target = label === 'other commit' || label === 'unknown key' || label === 'no model' || label === 'line in model' ? c2.sha : c1.sha;
       const r = await setAttr('lvl-ver', target, body, a.token);
       expect(r.status, label).toBeLessThan(300);
       expect(r.json.evidence.level, label).toBe(level);
@@ -332,7 +335,7 @@ describe('attribution evidence levels', () => {
     for (const o of forged.objects) repo.objects.set(o.hash, { type: o.type as 'blob' | 'tree' | 'commit', content: o.raw.subarray(o.raw.indexOf(0) + 1) });
     repo.refs.set(KVARM_NOTES_REF, forged.commit);
     const g = await getAttr('lvl-outside', c1.sha);
-    expect(g.json).toMatchObject({ model: 'forged', evidence: { level: 'declared', reasons: ['note-written-outside-kvarm'], principal: null, tokenPrefix: null } });
+    expect(g.json).toMatchObject({ model: 'forged', evidence: { level: 'declared', reasons: ['note-without-evidence'], principal: null, tokenPrefix: null } });
   });
 });
 
@@ -518,6 +521,24 @@ describe('audit export', () => {
     const third = await audit('aud-time', `limit=10&cursor=${encodeURIComponent(second.json.nextCursor)}`);
     expect(third.json.records.map((r: any) => r.commit)).toEqual([shas[4], late.sha]);
     expect(third.json.nextCursor).toBeNull();
+  });
+
+  it('never lets first-seen time go backwards, so a clock step back cannot hide a later commit behind a cursor', async () => {
+    const repo = await seedRepo('aud-clock');
+    const c1 = await commit(repo, { 'a.txt': 'a\n' });
+    const c2 = await commit(repo, { 'b.txt': 'b\n' }, [c1.sha]);
+    await setAttr('aud-clock', c1.sha, { agent: OWNER, session: 's', promptHash: HASH }, tok.owner);
+    // The first commit was stamped by a clock an hour ahead of the one that records the next.
+    const ahead = Date.now() + 3_600_000;
+    await env.DB.prepare('UPDATE audit_commits SET first_at = ?1 WHERE repo_id = ?2').bind(ahead, repoIds['aud-clock']).run();
+    await setAttr('aud-clock', c2.sha, { agent: OWNER, session: 's', promptHash: HASH }, tok.owner);
+    const first = await audit('aud-clock', 'limit=1');
+    expect(first.json.records.map((r: any) => r.commit)).toEqual([c1.sha]);
+    const next = await audit('aud-clock', `limit=1&cursor=${encodeURIComponent(first.json.nextCursor)}`);
+    expect(next.json.records.map((r: any) => r.commit)).toEqual([c2.sha]);
+    expect(Date.parse(next.json.records[0].firstSeenAt)).toBeGreaterThanOrEqual(ahead);
+    // A window starting at the step still contains the later commit.
+    expect((await audit('aud-clock', `since=${new Date(ahead).toISOString()}`)).json.records.map((r: any) => r.commit)).toEqual([c1.sha, c2.sha]);
   });
 
   it('never fails a queue publication over malformed agent metadata', async () => {

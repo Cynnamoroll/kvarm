@@ -280,9 +280,11 @@ export async function handleGitRequest(
     // The client's push completes only after a confirmed update has moved the
     // view generation, so the next read cannot be served a pre-push entry.
     const body = relayReceivePackReply(upstreamRes.body, {
-      // The audit ledger records who moved which confirmed refs (services/audit.ts), apart from the freshness write.
-      onConfirmed: async (refs) => {
-        await Promise.all([recordConfirmedPush(env, repo.id), recordPushAudit(env, repo.id, actor, pushCommands, refs)]);
+      // The audit ledger records who moved which confirmed refs (services/audit.ts) in the background: the reply
+      // waits only for the freshness writes.
+      onConfirmed: (refs) => {
+        c.executionCtx.waitUntil(recordPushAudit(env, repo.id, actor, pushCommands, refs));
+        return recordConfirmedPush(env, repo.id);
       },
       waitUntil: (p) => c.executionCtx.waitUntil(p),
     });
