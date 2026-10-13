@@ -368,3 +368,7 @@ details.diff-file .diff-stat .muted { color: var(--fg-muted); }
 .rv-finding p { margin: 4px 0; }
 .rv-decision textarea { width: 100%; background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--radius); color: var(--fg); padding: 6px 10px; font: inherit; }
 @media (max-width: 760px) { .rv-layout { grid-template-columns: 1fr; } .rv-rail { position: static; } }
+.chip.ok { color: var(--accent); border-color: #238636; }
+.chip.warn { color: #d29922; border-color: #9e6a03; }
+.rv-sub { margin-top: 10px; }
+.rv-evidence { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }

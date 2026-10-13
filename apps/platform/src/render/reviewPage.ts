@@ -118,6 +118,7 @@ function unitBlock(u: Unit, chapterTier: Unit['tier'], findings: Finding[], ctx:
     `<span class="chip tier-${u.tier}">${u.tier}</span>`,
     raised ? `<span class="chip signal" title="Kvarm raised this above the chapter's tier">raised from ${chapterTier}</span>` : '',
     u.contract ? '<span class="chip signal">contract</span>' : '',
+    u.moved ? `<span class="chip" title="every changed line is a move">moved from ${esc(u.moved.from)}</span>` : '',
     u.ackCount > 0 ? `<span class="chip" title="reviewers who acknowledged this unit">${u.ackCount} ack</span>` : '',
   ].join('');
   const body = u.receipt
@@ -204,6 +205,10 @@ export function reviewPageBody(input: ReviewPageInput): string {
     .join('');
 
   const g = view.guide;
+  const EVIDENCE_CLASS: Record<string, string> = { verified: 'ok', failed: 'err', missing: 'warn', unverifiable: '' };
+  const evidence = ((g.evidence ?? []) as Array<{ kind: string; ref: string; status?: string }>).map(
+    (e) => `<span class="chip ${EVIDENCE_CLASS[e.status ?? ''] ?? ''}" title="${esc(e.kind)}">${esc(e.ref)} · ${esc(e.status ?? 'unchecked')}</span>`,
+  );
   const overview = html`
     <div class="card rv-overview">
       <div class="card-title">Intent <span class="chip">${g.source}</span></div>
@@ -218,6 +223,7 @@ export function reviewPageBody(input: ReviewPageInput): string {
             )
           : ''
       }
+      ${evidence.length ? raw(`<div class="rv-evidence"><span class="muted">Evidence</span> ${evidence.join(' ')}</div>`) : ''}
       <p class="muted">${sourceNote[g.source] ?? ''}</p>
     </div>`;
 
@@ -246,6 +252,19 @@ export function reviewPageBody(input: ReviewPageInput): string {
             )
           : ''
       }
+      ${
+        contracts.breaks.length
+          ? raw(
+              `<div class="card-title rv-sub">Export changes</div><table class="rv-contracts">${contracts.breaks
+                .map(
+                  (b) =>
+                    `<tr><td><code>${esc(b.path)}</code></td><td><code>${esc(b.name)}</code> ${esc(b.change)}</td><td class="muted"><code>${esc(b.before ?? '')}</code>${b.before && b.after ? ' → ' : ''}<code>${esc(b.after ?? '')}</code></td><td>${b.change === 'added' ? '' : b.declared ? '<span class="chip signal">declared breaking</span>' : '<span class="chip err">undeclared break</span>'}</td></tr>`,
+                )
+                .join('')}</table>`,
+            )
+          : ''
+      }
+      <p class="muted">Downstream importers and tests: <a href="/api/v1/repos${raw(base)}/changes/${view.number}/review/impact">impact report</a>${view.impact.cached ? '' : ' (computed on first request)'} · <code>kvarm review impact</code></p>
       ${g.unchanged && g.unchanged.length ? raw(`<p class="muted">Author says unchanged: ${g.unchanged.map((x) => esc(x)).join(' · ')}</p>`) : ''}
       ${view.configError ? raw(`<div class="flash warn">.kvarm/review.json on the base is invalid: ${esc(view.configError)}</div>`) : ''}
     </div>`;
