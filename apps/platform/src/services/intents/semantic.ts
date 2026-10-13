@@ -16,6 +16,7 @@
 import { analyzeDependencies, contractFamily, type DependencyAnalysis, type SemanticBlob, type SemanticTreeSource } from '@kvarm/review';
 import type { LazyRepo } from '../../artifacts/repo';
 import { readBlobBytes } from '../compare';
+import { EMPTY_TREE } from '../refs';
 import { isPrefix, prefixUpper } from './paths';
 
 export const SEMANTIC_READ_LIMITS = {
@@ -26,8 +27,10 @@ export const SEMANTIC_READ_LIMITS = {
   /** Import rows scanned per overlap request (in key order) and pair hits kept from them. */
   overlapScanMax: 2_000,
   overlapHitMax: 500,
-  /** Contract families read per overlap request. */
+  /** Contract families read per overlap request, workspaces taken per family (by id) and family pairs visited. */
   overlapFamilyMax: 200,
+  familyMembersMax: 40,
+  familyPairVisitMax: 4_000,
   pairMax: 200,
   evidenceMax: 20,
   /** Names kept per stored import edge. */
@@ -50,6 +53,7 @@ class ArtifactsSemanticSource implements SemanticTreeSource {
   constructor(private readonly artifacts: LazyRepo) {}
 
   async readTree(hash: string) {
+    if (hash === EMPTY_TREE) return [];
     const entries = await (await this.artifacts.get()).readTree(hash);
     return entries ? entries.map((e) => ({ name: e.name, mode: e.mode, hash: e.hash })) : null;
   }
@@ -83,17 +87,22 @@ export function semanticRows(a: DependencyAnalysis): Array<[string, string, stri
 /**
  * The semantic record of one reconciliation. Never throws: a failed analysis
  * is recorded as the truncation reason with no rows, and the observed set it
- * rides with still lands.
+ * rides with still lands. `observed` says how the observed set it rides with
+ * lost precision: an incomplete diff, or a collapse into directory prefixes,
+ * which other workspaces' import edges cannot be matched against.
  */
 export async function analyzeSemantic(
   artifacts: LazyRepo,
   trees: { base: string; head: string },
   changed: readonly string[],
-  changedIncomplete: string | null,
+  observed: { incomplete: string | null; collapsed: boolean },
 ): Promise<SemanticRecord> {
+  const notes: string[] = [];
+  if (observed.incomplete) notes.push(`changed paths incomplete: ${observed.incomplete}`);
+  if (observed.collapsed) notes.push("the observed set is collapsed into directory prefixes, so other workspaces' imports of these changes are not matched");
   try {
     const a = await analyzeDependencies(new ArtifactsSemanticSource(artifacts), { headTree: trees.head, baseTree: trees.base, changed });
-    const reasons = [...(changedIncomplete ? [`changed paths incomplete: ${changedIncomplete}`] : []), ...a.reasons];
+    const reasons = [...notes, ...a.reasons];
     return {
       rows: semanticRows(a),
       truncated: reasons.length > 0 ? reasons.join('; ') : null,
@@ -101,7 +110,7 @@ export async function analyzeSemantic(
     };
   } catch (err) {
     const reason = `semantic analysis failed: ${String(err instanceof Error ? err.message : err).slice(0, 200)}`;
-    return { rows: [], truncated: reason, detail: reason };
+    return { rows: [], truncated: [...notes, reason].join('; '), detail: reason };
   }
 }
 
@@ -261,9 +270,15 @@ function importEvidence(
   exportJson: string | null,
 ): SemanticEvidence {
   const exportChange = parseDetail<{ added: string[]; removed: string[] }>(exportJson);
+  // Only a removed (or renamed) export can break a consumer: one it imports by name, or any when its names are unknown or `*`.
+  const names = detail.names;
+  const breaks =
+    exportChange !== null &&
+    exportChange.removed.length > 0 &&
+    (!names || names.includes('*') || names.some((n) => exportChange.removed.includes(n)));
   const ev: SemanticEvidence = {
     kind: 'import',
-    confidence: exportChange ? 'semantic:export' : 'semantic:import',
+    confidence: breaks ? 'semantic:export' : 'semantic:import',
     chain: detail.chain,
     depth: detail.depth,
     changed,
@@ -321,9 +336,10 @@ function incompleteOf(result: D1Result | undefined, reasons: string[]): Semantic
 
 /**
  * Rows of another workspace's observed entries that an import key of `m`
- * names: the path itself, a file directly in a Go package directory (files
- * in its subdirectories belong to other packages), or a collapsed prefix
- * above it.
+ * names: the path itself, or a file directly in a Go package directory
+ * (files in its subdirectories belong to other packages). A collapsed
+ * observed prefix names no module, so it is not matched; the collapsing
+ * workspace's own semantic record says so instead (see `analyzeSemantic`).
  */
 const OBSERVED_FOR_KEY = (m: string) => `
   SELECT ${m}.key AS key, ${m}.detail AS detail, ${m}.workspace_id AS consumer, p.path AS path, p.workspace_id AS changer
@@ -333,22 +349,7 @@ const OBSERVED_FOR_KEY = (m: string) => `
     FROM M ${m} CROSS JOIN workspace_paths p ON p.repo_id = ?1 AND p.kind = 'observed' AND p.workspace_id != ${m}.workspace_id
          AND p.path > ${m}.key AND p.path < substr(${m}.key, 1, length(${m}.key) - 1) || '0'
          AND instr(substr(p.path, length(${m}.key) + 1), '/') = 0
-   WHERE substr(${m}.key, -1) = '/'
-  UNION ALL
-  SELECT a.key, a.detail, a.workspace_id, p.path, p.workspace_id
-    FROM A a CROSS JOIN workspace_paths p ON p.repo_id = ?1 AND p.kind = 'observed' AND p.path = a.pre AND p.workspace_id != a.workspace_id
-   WHERE a.pre != '' AND a.pre != a.key`;
-
-/**
- * The ancestor prefixes of every key in M (`a/b/c.ts` → `a/`, `a/b/`), so a
- * collapsed observed prefix above a key is found by exact index probes that
- * read nothing when no workspace holds one.
- */
-const ANCESTORS = `A(key, detail, workspace_id, rest, pre) AS (
-    SELECT key, detail, workspace_id, key, '' FROM M
-    UNION ALL
-    SELECT key, detail, workspace_id, substr(rest, instr(rest, '/') + 1), pre || substr(rest, 1, instr(rest, '/')) FROM A WHERE instr(rest, '/') > 0
-  )`;
+   WHERE substr(${m}.key, -1) = '/'`;
 
 export interface SemanticForecastPlan {
   statements: D1PreparedStatement[];
@@ -435,7 +436,6 @@ export function forecastSemanticPlan(
         stmt: db
           .prepare(
             `WITH M AS (SELECT key, detail, workspace_id FROM workspace_semantic WHERE repo_id = ?1 AND workspace_id = ?4 AND kind = 'import'),
-                  ${ANCESTORS},
                   H AS (${OBSERVED_FOR_KEY('m')})
              SELECT h.key, h.detail, h.path, e.detail AS export, ${WS_JSON('w')} AS wj
                FROM H h CROSS JOIN workspaces w ON w.id = h.changer
@@ -590,7 +590,6 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
                        CROSS JOIN workspaces w ON w.id = s.workspace_id AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
                       WHERE s.repo_id = ?1 AND s.kind = 'import' ORDER BY s.key, s.workspace_id LIMIT ${L.overlapScanMax + 1}),
               M AS (SELECT * FROM M0 LIMIT ${L.overlapScanMax}),
-              ${ANCESTORS},
               H AS (${OBSERVED_FOR_KEY('m')})
          SELECT * FROM (
            SELECT h.key, h.detail, h.path, e.detail AS export, ${WS_JSON('wc')} AS consumer, ${WS_JSON('wx')} AS changer, NULL AS scanned
@@ -605,10 +604,16 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
       .bind(repoId, base),
     db
       .prepare(
-        `SELECT s.key, json_group_array(json_array(s.detail, json(${WS_JSON('w')}))) AS members
-           FROM workspace_semantic s CROSS JOIN workspaces w ON w.id = s.workspace_id AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
-          WHERE s.repo_id = ?1 AND s.kind = 'contract'
-          GROUP BY s.key HAVING COUNT(*) > 1 ORDER BY s.key LIMIT ${L.overlapFamilyMax + 1}`,
+        // Each shared family reads its members in id order and one past the per-family cap, so the reader can say it was cut.
+        `SELECT f.key, (SELECT json_group_array(json(x)) FROM (
+             SELECT json_array(s.detail, json(${WS_JSON('w')})) AS x
+               FROM workspace_semantic s CROSS JOIN workspaces w ON w.id = s.workspace_id AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
+              WHERE s.repo_id = ?1 AND s.kind = 'contract' AND s.key = f.key
+              ORDER BY s.workspace_id LIMIT ${L.familyMembersMax + 1})) AS members
+           FROM (SELECT s.key FROM workspace_semantic s
+                   CROSS JOIN workspaces w ON w.id = s.workspace_id AND w.repo_id = ?1 AND w.status = 'active' AND w.base_ref = ?2
+                  WHERE s.repo_id = ?1 AND s.kind = 'contract'
+                  GROUP BY s.key HAVING COUNT(*) > 1 ORDER BY s.key LIMIT ${L.overlapFamilyMax + 1}) f`,
       )
       .bind(repoId, base),
     incompleteStatement(db, repoId, base, null),
@@ -645,13 +650,21 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
       }
       const fams = (results[1]?.results as Array<{ key: string; members: string }> | undefined) ?? [];
       if (fams.length > L.overlapFamilyMax) reasons.push(`more than ${L.overlapFamilyMax} shared contract families; the rest are not reported`);
-      for (const f of fams.slice(0, L.overlapFamilyMax)) {
-        const members = (JSON.parse(f.members) as Array<[string, WsTuple]>).map(([d, t]) => ({
+      const wide: string[] = [];
+      let visits = 0;
+      families: for (const f of fams.slice(0, L.overlapFamilyMax)) {
+        const all = (JSON.parse(f.members) as Array<[string, WsTuple]>).map(([d, t]) => ({
           paths: parseDetail<{ paths: string[] }>(d)?.paths ?? [],
           w: wsOf(JSON.stringify(t)),
         }));
+        if (all.length > L.familyMembersMax) wide.push(f.key);
+        const members = all.slice(0, L.familyMembersMax);
         for (let i = 0; i < members.length; i++) {
           for (let j = i + 1; j < members.length; j++) {
+            if (++visits > L.familyPairVisitMax) {
+              reasons.push(`the contract-family pair budget of ${L.familyPairVisitMax} was spent; pairs beyond it are not reported`);
+              break families;
+            }
             const [x, y] = [members[i]!, members[j]!];
             add(x.w, y.w, {
               kind: 'contract',
@@ -664,6 +677,11 @@ export function overlapSemanticPlan(db: D1Database, repoId: string, base: string
             });
           }
         }
+      }
+      if (wide.length > 0) {
+        reasons.push(
+          `more than ${L.familyMembersMax} workspaces change contract family ${wide[0]}${wide.length > 1 ? ` and ${wide.length - 1} more` : ''}; only pairs among the first ${L.familyMembersMax} of each, by id, are reported`,
+        );
       }
       const incomplete = incompleteOf(results[2], reasons);
       const keys = [...pairs.keys()].sort();

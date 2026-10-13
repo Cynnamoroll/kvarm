@@ -255,7 +255,10 @@ export async function reconcileObserved(env: Env, t: ObservedTarget): Promise<{ 
         prefixes: c.paths.filter(isPrefix).length,
       });
       // The semantic rows describe the same head and land under the same guard (architecture §11.2).
-      const semantic = await analyzeSemantic(artifacts, { base: base.tree, head: head.tree }, diff.paths, diff.truncated ? (diff.truncatedReason ?? 'budget exhausted') : null);
+      const semantic = await analyzeSemantic(artifacts, { base: base.tree, head: head.tree }, diff.paths, {
+        incomplete: diff.truncated ? (diff.truncatedReason ?? 'budget exhausted') : null,
+        collapsed: c.collapsed,
+      });
       const statements = [
         ...observed,
         ...semanticWriteStatements(env.DB, { repoId: t.repoId, workspaceId: t.workspaceId, eventAt: t.event?.at ?? 0, headSha: t.headSha, now, record: semantic }),

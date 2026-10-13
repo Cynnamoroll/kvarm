@@ -94,6 +94,12 @@ module.exports.legacy = 1;
   it('names a const enum by its name, not the enum keyword', () => {
     expect(extractExports('export const enum Direction { Up }\nexport declare const enum Mode { A }\n')).toEqual(['Direction', 'Mode']);
   });
+
+  it('names generator exports and masks a regex literal after a keyword', () => {
+    expect(extractExports('export function *gen() {}\nexport async function* agen() {}\n')).toEqual(['agen', 'gen']);
+    const text = "function f(s) {\n  return /`/.test(s);\n}\nconst lazy = import('./after');\nconst q = a / b / c;\nrequire('./also');\n";
+    expect(extractImports('src/x.ts', text).specs.map((s) => s.spec)).toEqual(['./after', './also']);
+  });
 });
 
 describe('import extraction (Python, Go)', () => {
@@ -137,6 +143,11 @@ describe('resolution and contract families', () => {
     expect(resolveCandidates('src/a/b.ts', './dir', 'js')).toContain('src/a/dir/index.ts');
     expect(resolveCandidates('src/a.ts', 'react', 'js')).toEqual([]);
     expect(resolveCandidates('a.ts', '../../escape', 'js')).toEqual([]);
+    // Climbing to the root is allowed; climbing above it is not.
+    expect(resolveCandidates('lib/a.ts', '..', 'js')).toContain('index.ts');
+    expect(resolveCandidates('lib/a.ts', '../root', 'js')[0]).toBe('root');
+    expect(resolveCandidates('pkg/mod.py', '..', 'py', ['shared'])).toEqual(['shared.py', 'shared/__init__.py', '__init__.py']);
+    expect(resolveCandidates('pkg/mod.py', '...', 'py', ['x'])).toEqual([]);
   });
 
   it('resolves Python relative and absolute modules', () => {
@@ -220,6 +231,28 @@ describe('analyzeDependencies (bounded walk)', () => {
       { path: 'packages/api/src/client.ts', added: ['fetchUserById'], removed: ['fetchUser'] },
       { path: 'packages/api/src/index.ts', added: [], removed: ['fetchUser'] },
     ]);
+  });
+
+  it('compares export surfaces before the import walk can spend the shared budget', async () => {
+    const files: Record<string, string> = { 'src/api.ts': 'export function a() {}\n' };
+    for (let i = 0; i < 10; i++) files[`src/use${i}.ts`] = `import { a } from './api';\nimport { d } from './dep${i}';\n`;
+    for (let i = 0; i < 10; i++) files[`src/dep${i}.ts`] = `export const d = 1;\n`;
+    const base = memoryTree(files, 'base|');
+    const h = memoryTree({ ...files, 'src/api.ts': 'export function b() {}\n' });
+    const changed = ['src/api.ts', ...Array.from({ length: 10 }, (_, i) => `src/use${i}.ts`)];
+    const r = await analyzeDependencies(
+      { readTree: (x) => (x.startsWith('base|') ? base.source.readTree(x) : h.source.readTree(x)), readBlob: (x, m) => (x.startsWith('base|') ? base.source.readBlob(x, m) : h.source.readBlob(x, m)) },
+      { headTree: h.root, baseTree: base.root, changed, limits: { blobReadsMax: 6 } },
+    );
+    expect(r.truncated).toBe(true);
+    expect(r.exportChanges).toEqual([{ path: 'src/api.ts', added: ['b'], removed: ['a'] }]);
+  });
+
+  it('a too-large imported module shortens a chain without marking the record incomplete', async () => {
+    const t = memoryTree({ 'src/a.ts': "import './big';\n", 'src/big.ts': `${'//'.padEnd(SEMANTIC_LIMITS.fileBytesMax + 10, 'x')}\n` });
+    const r = await analyzeDependencies(t.source, { headTree: t.root, changed: ['src/a.ts'] });
+    expect(r.edges.map((e) => e.target)).toEqual(['src/big.ts']);
+    expect(r.truncated).toBe(false);
   });
 
   it('reports truncation with reasons instead of going silent when budgets bite', async () => {

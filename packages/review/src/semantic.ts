@@ -76,6 +76,8 @@ export function languageOf(path: string): SourceLanguage | null {
 
 /** Characters after which a `/` in JS starts a regex literal rather than a division. */
 const REGEX_PRECEDERS = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^']);
+/** Keywords after which a `/` starts a regex literal (`return /x/`), unlike an identifier (`a / b`). */
+const REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'yield', 'await']);
 
 function blank(ch: string): string {
   return ch === '\n' ? '\n' : ' ';
@@ -91,6 +93,7 @@ function maskSource(text: string, lang: SourceLanguage): string {
   const n = text.length;
   let i = 0;
   let last = '';
+  let word = '';
   const hash = lang === 'py';
   const slashes = lang !== 'py';
   while (i < n) {
@@ -132,7 +135,7 @@ function maskSource(text: string, lang: SourceLanguage): string {
       last = c;
       continue;
     }
-    const isRegex = lang === 'js' && c === '/' && REGEX_PRECEDERS.has(last);
+    const isRegex = lang === 'js' && c === '/' && (REGEX_PRECEDERS.has(last) || (last === 'x' && REGEX_KEYWORDS.has(word)));
     if (c === '"' || c === "'" || c === '`' || isRegex) {
       const close = c;
       const multiline = c === '`';
@@ -161,7 +164,13 @@ function maskSource(text: string, lang: SourceLanguage): string {
       continue;
     }
     out.push(c);
-    if (!/\s/.test(c)) last = /[\w$]/.test(c) ? 'x' : c;
+    if (/[\w$]/.test(c)) {
+      word = last === 'x' ? word + c : c;
+      last = 'x';
+    } else if (!/\s/.test(c)) {
+      last = c;
+      word = '';
+    }
     i++;
   }
   return out.join('');
@@ -276,7 +285,7 @@ export function extractImports(path: string, text: string): { specs: ImportSpec[
 }
 
 const JS_EXPORT_DECL = new RegExp(
-  `${NOT_MEMBER}export\\s+(?:declare\\s+)?(default\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:function\\s*\\*?|class|const\\s+enum|const|let|var|interface|type|enum|namespace|module)\\s+([A-Za-z_$][\\w$]*)`,
+  `${NOT_MEMBER}export\\s+(?:declare\\s+)?(default\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:function\\s*\\*\\s*|(?:function|class|const\\s+enum|const|let|var|interface|type|enum|namespace|module)\\s+)([A-Za-z_$][\\w$]*)`,
   'g',
 );
 const JS_EXPORT_DEFAULT = new RegExp(`${NOT_MEMBER}export\\s+(?:default\\b|=)`, 'g');
@@ -310,7 +319,7 @@ export function extractExports(text: string): string[] {
 // Resolution
 // ---------------------------------------------------------------------------
 
-/** Joins `rel` onto directory `dir` (`''` or ending in `/`); null when it climbs above the root. */
+/** Joins `rel` onto directory `dir` (`''` or ending in `/`); `''` is the root, null climbs above it. */
 function joinPath(dir: string, rel: string): string | null {
   const segs = dir.split('/').filter((s) => s !== '');
   for (const s of rel.split('/')) {
@@ -320,7 +329,7 @@ function joinPath(dir: string, rel: string): string | null {
       segs.pop();
     } else segs.push(s);
   }
-  return segs.length === 0 ? null : segs.join('/');
+  return segs.join('/');
 }
 
 const JS_SWAPS: Record<string, string[]> = { js: ['ts', 'tsx', 'mts', 'cts'], jsx: ['tsx'], mjs: ['mts'], cjs: ['cts'] };
@@ -339,7 +348,7 @@ export function resolveCandidates(from: string, spec: string, lang: SourceLangua
     if (!(spec === '.' || spec === '..' || spec.startsWith('./') || spec.startsWith('../'))) return [];
     const p = joinPath(dir, spec);
     if (p === null) return [];
-    if (spec.endsWith('/') || spec === '.' || spec === '..') return JS_INDEX.map((i) => `${p}/${i}`);
+    if (spec.endsWith('/') || spec === '.' || spec === '..' || p === '') return JS_INDEX.map((i) => (p === '' ? i : `${p}/${i}`));
     const name = basename(p);
     const dot = name.lastIndexOf('.');
     const ext = dot > 0 ? name.slice(dot + 1) : '';
@@ -356,7 +365,7 @@ export function resolveCandidates(from: string, spec: string, lang: SourceLangua
       for (let i = 1; i < dots; i++) {
         const parent = joinPath(up, '..');
         if (parent === null) return [];
-        up = `${parent}/`;
+        up = parent === '' ? '' : `${parent}/`;
       }
       if (mod) return forms(`${up}${mod}`);
       return [...names.filter((n) => n !== '*').flatMap((n) => forms(`${up}${n}`)), `${up}__init__.py`];
@@ -471,6 +480,7 @@ class Walk {
     private readonly source: SemanticTreeSource,
     readonly limits: SemanticLimits,
     private readonly clock: () => number,
+    private readonly changed: ReadonlySet<string>,
   ) {
     this.started = clock();
   }
@@ -555,7 +565,8 @@ class Walk {
     const blob = await this.source.readBlob(e.hash, this.limits.fileBytesMax);
     if (!blob) return null;
     if ('tooLarge' in blob) {
-      this.note(`${path} is larger than ${this.limits.fileBytesMax} bytes; it is not parsed`);
+      // Only a changed file's size hides part of the workspace's own change; an imported module that is too large only shortens a chain.
+      if (this.changed.has(path)) this.note(`${path} is larger than ${this.limits.fileBytesMax} bytes; it is not parsed`);
       return null;
     }
     this.reads.bytes += blob.bytes.length;
@@ -572,8 +583,8 @@ class Walk {
  */
 export async function analyzeDependencies(source: SemanticTreeSource, input: DependencyInput): Promise<DependencyAnalysis> {
   const limits: SemanticLimits = { ...SEMANTIC_LIMITS, ...input.limits };
-  const w = new Walk(source, limits, input.clock ?? Date.now);
   const changed = [...new Set(input.changed)].sort();
+  const w = new Walk(source, limits, input.clock ?? Date.now, new Set(changed));
 
   const contracts: DependencyAnalysis['contracts'] = [];
   for (const path of changed) {
@@ -643,6 +654,32 @@ export async function analyzeDependencies(source: SemanticTreeSource, input: Dep
     return out;
   };
 
+  // Export surfaces first: they are the strongest signal, so the import walk cannot spend their budget.
+  const exportChanges: ExportChange[] = [];
+  if (input.baseTree) {
+    let compared = 0;
+    for (const path of sources) {
+      if (languageOf(path) !== 'js' || w.stopped) continue;
+      if (compared >= limits.exportsCompareMax) {
+        w.note(`more than ${limits.exportsCompareMax} changed modules; export surfaces beyond the first ${limits.exportsCompareMax} are not compared`);
+        break;
+      }
+      const baseText = await w.text(input.baseTree, path);
+      if (baseText === null) continue;
+      compared++;
+      // A module deleted at head removed every export; one present but unreadable is not compared.
+      const present = await w.file(input.headTree, path);
+      const headText = present ? await w.text(input.headTree, path) : '';
+      if (w.stopped) break;
+      if (headText === null) continue;
+      const before = new Set(extractExports(baseText));
+      const after = new Set(extractExports(headText));
+      const added = [...after].filter((n) => !before.has(n)).slice(0, limits.exportNamesMax);
+      const removed = [...before].filter((n) => !after.has(n)).slice(0, limits.exportNamesMax);
+      if (added.length > 0 || removed.length > 0) exportChanges.push({ path, added, removed });
+    }
+  }
+
   const edges = new Map<string, DependencyEdge>();
   let edgesFull = false;
   let frontier: Array<{ path: string; chain: string[] }> = sources.map((p) => ({ path: p, chain: [p] }));
@@ -668,31 +705,6 @@ export async function analyzeDependencies(source: SemanticTreeSource, input: Dep
     frontier = next;
   }
   if (edgesFull) w.note(`more than ${limits.edgesMax} dependency edges; the rest are not recorded`);
-
-  const exportChanges: ExportChange[] = [];
-  if (input.baseTree) {
-    let compared = 0;
-    for (const path of sources) {
-      if (languageOf(path) !== 'js' || w.stopped) continue;
-      if (compared >= limits.exportsCompareMax) {
-        w.note(`more than ${limits.exportsCompareMax} changed modules; export surfaces beyond the first ${limits.exportsCompareMax} are not compared`);
-        break;
-      }
-      const baseText = await w.text(input.baseTree, path);
-      if (baseText === null) continue;
-      compared++;
-      // A module deleted at head removed every export; one present but unreadable is not compared.
-      const present = await w.file(input.headTree, path);
-      const headText = present ? await w.text(input.headTree, path) : '';
-      if (w.stopped) break;
-      if (headText === null) continue;
-      const before = new Set(extractExports(baseText));
-      const after = new Set(extractExports(headText));
-      const added = [...after].filter((n) => !before.has(n)).slice(0, limits.exportNamesMax);
-      const removed = [...before].filter((n) => !after.has(n)).slice(0, limits.exportNamesMax);
-      if (added.length > 0 || removed.length > 0) exportChanges.push({ path, added, removed });
-    }
-  }
 
   const reasons = w.allReasons();
   return {

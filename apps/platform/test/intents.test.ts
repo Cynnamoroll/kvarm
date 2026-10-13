@@ -1173,6 +1173,55 @@ describe('semantic dependency signal (advisory)', () => {
     expect((await forecast('sem-go', 'paths=internal/store/sub/sub.go')).json.semantic.matches).toEqual([]);
   });
 
+  it('ranks an added-only export change as semantic:import, a removed name the consumer imports as semantic:export', async () => {
+    const repo = await seedRepo('sem-added');
+    const main = await based(repo, SEM_FILES);
+    const adds = (await createWs('sem-added', { task: 'add helper', agent: 'a' })).json;
+    const page = (await createWs('sem-added', { task: 'edit page', agent: 'b' })).json;
+    await push('sem-added', repo, adds, main.sha, { ...SEM_FILES, [API]: `${SEM_FILES[API]}export function extra() {}\n` });
+    await push('sem-added', repo, page, main.sha, { ...SEM_FILES, 'apps/web/src/page.ts': `${SEM_FILES['apps/web/src/page.ts']}// tweak\n` });
+    const pair = (await overlap('sem-added')).json.semantic.pairs[0];
+    expect(pair).toMatchObject({ confidence: 'semantic:import', evidence: [{ exportChange: { added: ['extra'], removed: [] } }] });
+  });
+
+  it('a workspace whose observed set collapsed into prefixes is disclosed as semantically incomplete', async () => {
+    const repo = await seedRepo('sem-collapsed');
+    const main = await based(repo, SEM_FILES);
+    const wide = (await createWs('sem-collapsed', { task: 'wide', agent: 'w' })).json;
+    const files: Files = { ...SEM_FILES };
+    for (let i = 0; i < INTENT_LIMITS.observedMax + 10; i++) files[`gen/part${i % 3}/f${i}.txt`] = `${i}\n`;
+    await push('sem-collapsed', repo, wide, main.sha, files);
+    const f = (await forecast('sem-collapsed', 'paths=README.md')).json.semantic;
+    expect(f.incomplete).toEqual([{ workspace: wide.id, reason: expect.stringMatching(/collapsed into directory prefixes/) }]);
+  });
+
+  it('bounds the pairs of a widely shared contract family and says so', async () => {
+    const repo = await seedRepo('sem-family');
+    await based(repo, SEM_FILES);
+    const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('sem-family').first<{ id: string }>())!.id;
+    const now = Date.now();
+    const n = SEMANTIC_READ_LIMITS.familyMembersMax + 5;
+    const ids = Array.from({ length: n }, (_, i) => `semfam${String(i).padStart(3, '0')}`);
+    await env.DB.batch(
+      ids.flatMap((id) => [
+        env.DB.prepare(
+          `INSERT INTO workspaces (id, repo_id, artifacts_name, task, agent, status, ref, base_ref, base_sha, created_at, updated_at)
+           VALUES (?1, ?2, 'x', ?1, 'a', 'active', 'refs/heads/agents/' || ?1 || '/t', 'main', ?3, ?4, ?4)`,
+        ).bind(id, repoId, '1'.repeat(40), now),
+        env.DB.prepare(`INSERT INTO workspace_semantic (repo_id, kind, key, workspace_id, detail) VALUES (?1, 'contract', 'migrations:db/migrations/', ?2, ?3)`).bind(
+          repoId,
+          id,
+          JSON.stringify({ paths: [`db/migrations/${id}.sql`] }),
+        ),
+      ]),
+    );
+    const o = await overlap('sem-family');
+    const m = SEMANTIC_READ_LIMITS.familyMembersMax;
+    expect(o.json.semantic.pairs).toHaveLength(Math.min(SEMANTIC_READ_LIMITS.pairMax, (m * (m - 1)) / 2));
+    expect(o.json.semantic.truncatedReason).toMatch(/more than 40 workspaces change contract family migrations:db\/migrations\//);
+    expect(o.cost).toMatchObject({ d1: 2, art: 0 });
+  });
+
   it("the overlap scan budget counts only the requested base's import rows", async () => {
     const { a, b } = await apiAndConsumer('sem-scan');
     const repoId = (await env.DB.prepare('SELECT id FROM repos WHERE name = ?').bind('sem-scan').first<{ id: string }>())!.id;
