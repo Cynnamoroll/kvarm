@@ -61,6 +61,14 @@ describe('extractTar', () => {
     expect(result).toEqual({ files: 1, dirs: 0, symlinks: 0, bytes: padded.length });
   });
 
+  it('enforces total-byte, entry-count and extended-header budgets', async () => {
+    const tar = archive(file('a.txt', 'a\n'));
+    await expect(extractTar(chunked(tar), join(root, 'x-byte-budget'), { maxBytes: tar.length - 1 })).rejects.toThrow(/byte budget/);
+    await expect(extractTar(chunked(tar), join(root, 'x-entry-budget'), { maxEntries: 0 })).rejects.toThrow(/entry budget/);
+    const longPath = file('a'.repeat(300), 'a');
+    await expect(extractTar(chunked(archive(longPath)), join(root, 'x-header-budget'), { maxHeaderBytes: 1 })).rejects.toThrow(/header budget/);
+  });
+
   it('rejects parent-directory and absolute paths without writing outside the destination', async () => {
     const dest = join(root, 'x-evil', 'inner');
     await expect(extractTar(chunked(archive(file('../escape.txt', 'x'))), dest)).rejects.toBeInstanceOf(TarError);

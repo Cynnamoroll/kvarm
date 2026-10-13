@@ -20,6 +20,9 @@ const REWRITE_OWN = constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLL
 
 const BLOCK = 512;
 const decoder = new TextDecoder();
+export const DEFAULT_MAX_TAR_BYTES = 1024 * 1024 * 1024;
+const DEFAULT_MAX_ENTRIES = 250_000;
+const DEFAULT_MAX_HEADER_BYTES = 1024 * 1024;
 
 export class TarError extends Error {}
 
@@ -27,9 +30,13 @@ export class TarError extends Error {}
  * Reads exact byte counts from an async iterable of chunks.
  */
 class ByteReader {
-  /** @param {AsyncIterable<Uint8Array>} source */
-  constructor(source) {
+  /**
+   * @param {AsyncIterable<Uint8Array>} source
+   * @param {number} maxBytes
+   */
+  constructor(source, maxBytes) {
     this.it = source[Symbol.asyncIterator]();
+    this.maxBytes = maxBytes;
     /** @type {Uint8Array} */
     this.buf = new Uint8Array(0);
     this.off = 0;
@@ -42,6 +49,7 @@ class ByteReader {
     if (r.done) return false;
     const chunk = r.value instanceof Uint8Array ? r.value : new Uint8Array(r.value);
     this.total += chunk.length;
+    if (this.total > this.maxBytes) throw new TarError(`archive exceeds the ${this.maxBytes}-byte byte budget`);
     const rest = this.buf.length - this.off;
     if (rest === 0) {
       this.buf = chunk;
@@ -184,13 +192,20 @@ export function archiveTarget(raw, root, p = nodePath) {
  *
  * @param {AsyncIterable<Uint8Array>} source
  * @param {string} dest
+ * @param {{ maxBytes?: number, maxEntries?: number, maxHeaderBytes?: number }} [budgets]
  * @returns {Promise<{files: number, dirs: number, symlinks: number, bytes: number}>}
  *   entry counts and the total number of archive bytes read
  */
-export async function extractTar(source, dest) {
+export async function extractTar(source, dest, budgets = {}) {
+  const maxBytes = budgets.maxBytes ?? DEFAULT_MAX_TAR_BYTES;
+  const maxEntries = budgets.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  const maxHeaderBytes = budgets.maxHeaderBytes ?? DEFAULT_MAX_HEADER_BYTES;
+  for (const [name, value] of Object.entries({ maxBytes, maxEntries, maxHeaderBytes })) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`${name} must be a non-negative safe integer`);
+  }
   mkdirSync(dest, { recursive: true });
   const root = realpathSync(dest);
-  const reader = new ByteReader(source);
+  const reader = new ByteReader(source, maxBytes);
   /** @type {Set<string>} */
   const madeDirs = new Set([root]);
   /** @type {Array<{path: string, target: string}>} */
@@ -200,6 +215,8 @@ export async function extractTar(source, dest) {
   let pax = null;
   /** @type {string | null} */
   let longName = null;
+  let entries = 0;
+  let headerBytes = 0;
 
   /** Inodes of files this extraction created; only these may be rewritten. */
   /** @type {Set<string>} */
@@ -255,6 +272,7 @@ export async function extractTar(source, dest) {
   for (;;) {
     const h = await reader.read(BLOCK);
     if (h.every((b) => b === 0)) break;
+    if (++entries > maxEntries) throw new TarError(`archive exceeds the ${maxEntries}-entry entry budget`);
     if (!checksumOk(h)) throw new TarError('bad header checksum');
 
     const type = String.fromCharCode(/** @type {number} */ (h[156]));
@@ -262,8 +280,11 @@ export async function extractTar(source, dest) {
     if (pax?.has('size')) size = Number(pax.get('size'));
     if (!Number.isSafeInteger(size) || size < 0) throw new TarError('bad entry size');
     const padded = size + ((BLOCK - (size % BLOCK)) % BLOCK);
+    if (!Number.isSafeInteger(padded)) throw new TarError('bad entry size');
 
     if (type === 'x' || type === 'g' || type === 'L') {
+      headerBytes += padded;
+      if (headerBytes > maxHeaderBytes) throw new TarError(`archive exceeds the ${maxHeaderBytes}-byte extended-header budget`);
       const data = await reader.read(padded);
       if (type === 'x') pax = parsePax(data.subarray(0, size));
       if (type === 'L') longName = cstr(data, 0, size);

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { executeShell, runRunner } from '../src/runner.js';
+import { budgetDeltaReader, executeShell, runRunner } from '../src/runner.js';
 import { tempDir } from './helpers';
 
 /** These tests exercise host execution mechanics; the trust policy has its own tests. */
@@ -12,6 +12,17 @@ const root = tempDir('kvarm-cli-runner-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe('kvarm runner', () => {
+  it('caps the aggregate content fetched by one warm delta', async () => {
+    let reads = 0;
+    const read = budgetDeltaReader(async () => {
+      reads++;
+      return new Uint8Array(2);
+    }, 3);
+    await expect(read('first')).resolves.toHaveLength(2);
+    await expect(read('second')).rejects.toThrow(/warm read budget of 3 bytes/);
+    expect(reads).toBe(2);
+  });
+
   it('kills a timed-out command and its descendant process group', async () => {
     const command = `${JSON.stringify(process.execPath)} -e "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});setInterval(()=>{},1000)"`;
     const result = await executeShell(command, root, 0.1);
@@ -132,6 +143,35 @@ describe('kvarm runner', () => {
     });
     expect(stdout.join('\n')).toMatch(/claimed build.*reported success/s);
     expect(stderr).toEqual([]);
+  });
+
+  it('uses the normalized encoded repository path for every runner API request', async () => {
+    const paths: string[] = [];
+    const apiFetch = async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      if (path.endsWith('/claim')) return new Response(null, { status: 204 });
+      return Response.json({});
+    };
+    await runRunner({
+      ...HOST_TRUSTED,
+      baseUrl: 'https://kvarm.test',
+      pat: 'p',
+      repo: 'alice/demo.git',
+      once: true,
+      apiFetch,
+      checkoutFn: async () => {
+        throw new Error('never claimed');
+      },
+      execute: async () => {
+        throw new Error('never ran');
+      },
+      stdout: () => {},
+      stderr: () => {},
+      tempRoot: root,
+      workRoot: join(root, 'repo-path-work'),
+    });
+    expect(paths).toEqual(['/api/v1/repos/alice/demo/ci/jobs/claim']);
   });
 
   it('reports a failed or timed-out command as failure and exits cleanly when no job is queued', async () => {
@@ -620,7 +660,9 @@ describe('kvarm runner', () => {
       const replies = [
         { job: { id: 'm1', name: 'build', command: 'true', sha: 'a'.repeat(40), timeoutSeconds: 30, generation: 0 } },
         { job: { id: 'm2', name: 'build', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 } },
-        { job: { id: 'm3', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
+        { job: { id: '../m3', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
+        { job: { id: 'm4', name: 'build', command: 'true', sha: '../bad', generation: 2, timeoutSeconds: 30 } },
+        { job: { id: 'm5', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
       ];
       const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
         const path = new URL(String(input)).pathname;
@@ -650,11 +692,11 @@ describe('kvarm runner', () => {
         tempRoot: root,
         workRoot: join(root, 'claim-malformed-work'),
       });
-      await vi.advanceTimersByTimeAsync(8_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       const result = await run;
       expect(result).toEqual({ claimed: 1, reported: 1 });
-      expect(claims).toEqual(['m1', 'm2', 'm3']);
-      expect(stderr.filter((l) => l.startsWith('claim failed:'))).toHaveLength(2);
+      expect(claims).toEqual(['m1', 'm2', '../m3', 'm4', 'm5']);
+      expect(stderr.filter((l) => l.startsWith('claim failed:'))).toHaveLength(4);
       expect(stderr[0]).toMatch(/^claim failed: claim returned an invalid job; retrying in (1\.\d|2\.0) s$/);
       expect(stderr[1]).toMatch(/^claim failed: claim returned an invalid job; retrying in ([23]\.\d|4\.0) s$/);
     } finally {
@@ -695,6 +737,37 @@ describe('kvarm runner', () => {
     });
     expect(result).toEqual({ claimed: 1, reported: 1 });
     expect(timeouts).toEqual([900]);
+  });
+
+  it('refuses a repo that could retarget its authenticated requests, before any fetch', async () => {
+    const calls: string[] = [];
+    const apiFetch = async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response(null, { status: 204 });
+    };
+    for (const repo of ['../demo', 'a%b/c', 'a#b/c', 'a?b/c', 'owner/..', 'owner/./demo']) {
+      await expect(
+        runRunner({
+          ...HOST_TRUSTED,
+          baseUrl: 'https://kvarm.test',
+          pat: 'p',
+          repo,
+          once: true,
+          apiFetch,
+          checkoutFn: async () => {
+            throw new Error('never claimed');
+          },
+          execute: async () => {
+            throw new Error('never ran');
+          },
+          stdout: () => {},
+          stderr: () => {},
+          tempRoot: root,
+          workRoot: join(root, 'repo-guard-work'),
+        }),
+      ).rejects.toThrow(/invalid repository/);
+    }
+    expect(calls).toEqual([]);
   });
 
   it('derives the claim retry delay from Retry-After, else a doubling ramp to a 60 s cap', async () => {

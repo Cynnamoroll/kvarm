@@ -13,8 +13,7 @@
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkout } from './checkout.js';
-import { CliError } from './checkout.js';
+import { checkout, CliError, parseRepo } from './checkout.js';
 import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution } from './executor.js';
 import { text } from './http.js';
 import { materialize, openWorkdir } from './workdir.js';
@@ -33,6 +32,8 @@ const CLAIM_RETRY_MIN_MS = 2_000;
 const CLAIM_RETRY_MAX_MS = 60_000;
 /** Past this many changed paths a whole-tree checkout is cheaper than the delta. */
 const MAX_DELTA_CHANGES = 1_000;
+/** Total decoded file content fetched by one warm delta before falling back. */
+const MAX_DELTA_READ_BYTES = 64 * 1024 * 1024;
 /** The platform's own CI bounds (services/ciConfig.ts) that a claimed job's fields are held to. */
 const JOB_TIMEOUT_MAX_SECONDS = 3_600;
 const JOB_TIMEOUT_DEFAULT_SECONDS = 900;
@@ -140,6 +141,7 @@ function parseClaim(body) {
   if (!job || typeof job !== 'object' || typeof job.id !== 'string' || typeof job.sha !== 'string' || typeof job.command !== 'string') {
     throw new CliError('claim returned an invalid job');
   }
+  if (!/^[A-Za-z0-9_-]+$/.test(job.id) || !/^[0-9a-f]{40}$/.test(job.sha)) throw new CliError('claim returned an invalid job');
   if (!Number.isInteger(job.generation) || job.generation < 1) throw new CliError('claim returned an invalid job');
   const timeoutSeconds =
     Number.isInteger(job.timeoutSeconds) && job.timeoutSeconds >= 1 && job.timeoutSeconds <= JOB_TIMEOUT_MAX_SECONDS
@@ -185,15 +187,30 @@ export function claimRetryMs(retryAfter, fails) {
 const jittered = (ms) => Math.floor(ms * (0.5 + Math.random() / 2));
 
 /**
- * @param {string} baseUrl
+ * `/api/v1/repos/<owner>/<name>` for the runner's repository, validated and
+ * encoded once: a repo that does not parse is a usage error, and rejecting
+ * (rather than interpolating) `..`, `%`, `#` and `?` keeps a hostile value
+ * from retargeting the runner's authenticated requests after URL
+ * normalization.
  * @param {string} repo
+ */
+function repoApiPath(repo) {
+  const { owner, name } = parseRepo(repo);
+  // Like workdir.js slotPaths: a `.`/`..` name would resolve outside the repo.
+  if (name === '.' || name === '..') throw new CliError(`invalid repository "${repo}", expected <owner>/<repo>`, 2);
+  return `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+/**
+ * @param {string} baseUrl
+ * @param {string} reposUrl encoded `/api/v1/repos/<owner>/<name>` prefix
  * @param {string} pat
  * @param {string} path
  * @param {unknown} body
  * @param {typeof fetch} apiFetch
  */
-async function post(baseUrl, repo, pat, path, body, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}/api/v1/repos/${repo}/${path}`, {
+async function post(baseUrl, reposUrl, pat, path, body, apiFetch) {
+  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${pat}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -211,14 +228,14 @@ async function post(baseUrl, repo, pat, path, body, apiFetch) {
 
 /**
  * @param {string} baseUrl
- * @param {string} repo
+ * @param {string} reposUrl encoded `/api/v1/repos/<owner>/<name>` prefix
  * @param {string} pat
  * @param {string} path
  * @param {typeof fetch} apiFetch
  * @returns {Promise<Record<string, unknown>>}
  */
-async function getJson(baseUrl, repo, pat, path, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}/api/v1/repos/${repo}/${path}`, {
+async function getJson(baseUrl, reposUrl, pat, path, apiFetch) {
+  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
     headers: { Authorization: `Bearer ${pat}`, accept: 'application/json' },
   });
   let json;
@@ -283,6 +300,26 @@ function parseChange(value, what) {
   return change;
 }
 
+/**
+ * Wraps a lazy file reader in one aggregate byte budget. Per-response caps do
+ * not bound a delta that reads hundreds of individually valid files.
+ * @param {(path: string) => Promise<Uint8Array>} read
+ * @param {number} [maxBytes]
+ */
+export function budgetDeltaReader(read, maxBytes = MAX_DELTA_READ_BYTES) {
+  let total = 0;
+  /** @type {(path: string) => Promise<Uint8Array>} */
+  const budgetedRead = async (path) => {
+    const bytes = await read(path);
+    if (bytes.byteLength > maxBytes - total) {
+      throw new Error(`delta content exceeds the warm read budget of ${maxBytes} bytes`);
+    }
+    total += bytes.byteLength;
+    return bytes;
+  };
+  return budgetedRead;
+}
+
 /** Tree modes as the compare API reports them (raw git never pads). @param {string|null} mode */
 const isTreeMode = (mode) => mode === '40000' || mode === '040000';
 
@@ -290,7 +327,7 @@ const isTreeMode = (mode) => mode === '40000' || mode === '040000';
  * The changed paths between the recorded commit and the new head, fetched
  * through the content-addressed compare API, and a lazy reader for one
  * file's exact bytes at the new head.
- * @typedef {{ baseUrl: string, repo: string, pat: string, apiFetch: typeof fetch, previous: import('./workdir.js').RecordedState, sha: string }} DeltaFetch
+ * @typedef {{ baseUrl: string, reposUrl: string, pat: string, apiFetch: typeof fetch, previous: import('./workdir.js').RecordedState, sha: string }} DeltaFetch
  */
 
 /**
@@ -305,7 +342,7 @@ const isTreeMode = (mode) => mode === '40000' || mode === '040000';
  */
 async function collectTreeSide(o, ref, prefix, status, out) {
   if (out.length >= MAX_DELTA_CHANGES) throw new Error(`delta of ${JSON.stringify(prefix)} exceeds the changed-path budget`);
-  const body = expectObject(await getJson(o.baseUrl, o.repo, o.pat, `tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(prefix)}`, o.apiFetch), 'tree');
+  const body = expectObject(await getJson(o.baseUrl, o.reposUrl, o.pat, `tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(prefix)}`, o.apiFetch), 'tree');
   const entries = body.entries;
   if (!Array.isArray(entries)) throw new CliError('tree: malformed response');
   for (const entry of entries) {
@@ -332,13 +369,13 @@ async function collectTreeSide(o, ref, prefix, status, out) {
  * @param {DeltaFetch} o
  * @returns {Promise<import('./workdir.js').DeltaManifest>}
  */
-async function fetchDelta(o) {
+export async function fetchDelta(o) {
   /** @type {import('./workdir.js').DeltaChange[]} */
   const changes = [];
   let cursor;
   for (;;) {
     const path = `compare/${o.previous.sha}...${o.sha}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
-    const body = expectObject(await getJson(o.baseUrl, o.repo, o.pat, path, o.apiFetch), 'compare');
+    const body = expectObject(await getJson(o.baseUrl, o.reposUrl, o.pat, path, o.apiFetch), 'compare');
     if (body.truncated === true) {
       throw new Error(`compare is truncated (${typeof body.truncatedReason === 'string' ? body.truncatedReason : 'budget'}); the delta would be incomplete`);
     }
@@ -364,18 +401,19 @@ async function fetchDelta(o) {
   if (expanded.length > MAX_DELTA_CHANGES) {
     throw new Error(`delta of ${expanded.length} changed paths exceeds the warm budget of ${MAX_DELTA_CHANGES}`);
   }
+  const read = budgetDeltaReader(async (path) => {
+    const body = expectObject(
+      await getJson(o.baseUrl, o.reposUrl, o.pat, `contents?path=${encodeURIComponent(path)}&ref=${encodeURIComponent(o.sha)}`, o.apiFetch),
+      'contents',
+    );
+    if (typeof body.content !== 'string' || (body.encoding !== 'utf-8' && body.encoding !== 'base64')) throw new CliError('contents: malformed response');
+    return body.encoding === 'base64' ? new Uint8Array(Buffer.from(body.content, 'base64')) : utf8.encode(body.content);
+  });
   return {
     sha: o.sha,
     source: 'delta',
     changes: expanded,
-    read: async (path) => {
-      const body = expectObject(
-        await getJson(o.baseUrl, o.repo, o.pat, `contents?path=${encodeURIComponent(path)}&ref=${encodeURIComponent(o.sha)}`, o.apiFetch),
-        'contents',
-      );
-      if (typeof body.content !== 'string' || (body.encoding !== 'utf-8' && body.encoding !== 'base64')) throw new CliError('contents: malformed response');
-      return body.encoding === 'base64' ? new Uint8Array(Buffer.from(body.content, 'base64')) : utf8.encode(body.content);
-    },
+    read,
   };
 }
 
@@ -414,6 +452,7 @@ async function fetchDelta(o) {
 export async function runRunner(options) {
   const apiFetch = options.apiFetch ?? fetch;
   const checkoutFn = options.checkoutFn ?? checkout;
+  const reposUrl = repoApiPath(options.repo);
   const execute = options.execute ?? executeShell;
   const trust = options.trust ?? 'humans';
   const executorMode = options.executor ?? 'auto';
@@ -437,7 +476,7 @@ export async function runRunner(options) {
     return runtimeProbe;
   };
   const deltaFn =
-    options.deltaFn ?? ((previous, sha) => fetchDelta({ baseUrl: options.baseUrl, repo: options.repo, pat: options.pat, apiFetch, previous, sha }));
+    options.deltaFn ?? ((previous, sha) => fetchDelta({ baseUrl: options.baseUrl, reposUrl, pat: options.pat, apiFetch, previous, sha }));
   const runnerId = options.runnerId ?? `kvarm-runner-${crypto.randomUUID()}`;
   const tempRoot = options.tempRoot ?? tmpdir();
   const workRoot = options.workRoot ?? join(tempRoot, 'kvarm-runner');
@@ -463,7 +502,7 @@ export async function runRunner(options) {
   const nextClaim = async () => {
     for (;;) {
       try {
-        const got = await post(options.baseUrl, options.repo, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
+        const got = await post(options.baseUrl, reposUrl, options.pat, 'ci/jobs/claim', { runnerId }, apiFetch);
         const job = got.status === 204 ? null : parseClaim(got.body);
         claimFails = 0;
         return job;
@@ -500,7 +539,7 @@ export async function runRunner(options) {
         if (plan.run === null) throw new JobRefused(plan.reason);
         const every = Math.max(10_000, Math.floor(120_000 / 3));
         heartbeat = setInterval(() => {
-          void post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
+          void post(options.baseUrl, reposUrl, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
             options.stderr(`heartbeat: ${err instanceof Error ? err.message : String(err)}`),
           );
         }, every);
@@ -575,7 +614,7 @@ export async function runRunner(options) {
         let reportError;
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            await post(options.baseUrl, options.repo, options.pat, `ci/jobs/${job.id}/report`, reportBody, apiFetch);
+            await post(options.baseUrl, reposUrl, options.pat, `ci/jobs/${job.id}/report`, reportBody, apiFetch);
             reportError = undefined;
             break;
           } catch (err) {

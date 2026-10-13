@@ -514,6 +514,9 @@ describe('kvarm runner flags', () => {
       expect(await main(['runner', '--repo', 'alice/demo', ...args], x)).toBe(2);
       expect(err.join('\n')).toMatch(/kvarm runner: /);
     }
+    const { err, io: x } = io();
+    expect(await main(['runner', '--repo', 'a%b/c'], x)).toBe(2);
+    expect(err.join('\n')).toMatch(/kvarm runner: invalid repository/);
   });
 
   it('documents the trust modes and the container executor in its help', async () => {

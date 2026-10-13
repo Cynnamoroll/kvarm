@@ -20,7 +20,7 @@ import { join, resolve } from 'node:path';
 import * as zlib from 'node:zlib';
 import { gitEnv, runGit } from './git.js';
 import { nodeFetch } from './http.js';
-import { extractTar } from './untar.js';
+import { DEFAULT_MAX_TAR_BYTES, extractTar } from './untar.js';
 
 export class CliError extends Error {
   /**
@@ -67,6 +67,8 @@ export function parseRepo(repo) {
 /** zstd snapshot encoding: zlib exposes it on Node >= 22.15; older runtimes get plain tar. */
 const ZSTD = typeof zlib.createZstdDecompress === 'function';
 const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
+const SNAPSHOT_SIZE_SLACK_BYTES = 1024 * 1024;
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 /** @param {Uint8Array} head */
 function isZstdMagic(head) {
@@ -278,7 +280,11 @@ async function* zstdDecodeAll(wire) {
 
 /** @param {string} ref */
 function encodeRef(ref) {
-  return ref.split('/').map(encodeURIComponent).join('/');
+  const parts = ref.split('/');
+  if (!ref || parts.some((part) => part === '' || part === '.' || part === '..')) {
+    throw new CliError('invalid ref: path segments must be non-empty and cannot be "." or ".."', 2);
+  }
+  return parts.map(encodeURIComponent).join('/');
 }
 
 /**
@@ -376,10 +382,16 @@ async function downloadSnapshot(o, path, meta, dir) {
     discard(res.body);
     throw new Error('snapshot download is zstd-compressed but this Node has no zstd support (need >= 22.15)');
   }
+  const declaredSize = typeof meta.size === 'number' && Number.isSafeInteger(meta.size) && meta.size >= 0 ? meta.size : DEFAULT_MAX_TAR_BYTES;
+  const maxBytes = Math.min(DEFAULT_MAX_TAR_BYTES, declaredSize + SNAPSHOT_SIZE_SLACK_BYTES);
+  const declaredTransferSize =
+    typeof meta.encodedSize === 'number' && Number.isSafeInteger(meta.encodedSize) && meta.encodedSize >= 0 ? meta.encodedSize : maxBytes;
+  const maxTransferBytes = Math.min(DEFAULT_MAX_TAR_BYTES, declaredTransferSize + SNAPSHOT_SIZE_SLACK_BYTES);
   let transferBytes = 0;
   const wire = (async function* () {
     if (head !== null) {
       transferBytes += head.length;
+      if (transferBytes > maxTransferBytes) throw new Error(`snapshot download exceeds the ${maxTransferBytes}-byte transfer budget`);
       yield head;
     }
     for (;;) {
@@ -387,11 +399,12 @@ async function downloadSnapshot(o, path, meta, dir) {
       if (r.done) return;
       const chunk = r.value instanceof Uint8Array ? r.value : new Uint8Array(r.value);
       transferBytes += chunk.length;
+      if (transferBytes > maxTransferBytes) throw new Error(`snapshot download exceeds the ${maxTransferBytes}-byte transfer budget`);
       yield chunk;
     }
   })();
   const tar = zstd ? zstdDecodeAll(wire) : wire;
-  const result = await extractTar(tar, dir);
+  const result = await extractTar(tar, dir, { maxBytes });
   if (typeof meta.size === 'number' && result.bytes !== meta.size) {
     throw new Error(`downloaded ${result.bytes} bytes, metadata size is ${meta.size}`);
   }
@@ -458,20 +471,24 @@ export async function checkout(options) {
   const meta = await requestSnapshot(o, path);
   if ('error' in meta) {
     reason = `snapshot API unreachable: ${meta.error}`;
-  } else if (meta.status === 200 && meta.body?.state === 'ready' && typeof meta.body.sha === 'string') {
-    try {
-      const got = await downloadSnapshot(o, `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/snapshots/${meta.body.sha}`, meta.body, dir);
-      o.stdout('source: snapshot');
-      o.stdout(`sha: ${meta.body.sha}`);
-      o.stdout(`files: ${got.files}`);
-      o.stdout(`bytes: ${got.bytes}`);
-      o.stdout(`transfer: ${got.transferBytes}`);
-      o.stdout(`encoding: ${got.encoding}`);
-      o.stderr(`note: ${o.dir} holds the tree only (no .git); see "kvarm help checkout" before committing or pushing`);
-      return { source: 'snapshot', sha: meta.body.sha, bytes: got.bytes, files: got.files, transferBytes: got.transferBytes, encoding: got.encoding };
-    } catch (err) {
-      reason = `snapshot download failed: ${err instanceof Error ? err.message : String(err)}`;
-      resetDir(dir, existed);
+  } else if (meta.status === 200 && meta.body?.state === 'ready') {
+    if (typeof meta.body.sha !== 'string' || !COMMIT_SHA.test(meta.body.sha)) {
+      reason = 'snapshot metadata contains an invalid commit sha';
+    } else {
+      try {
+        const got = await downloadSnapshot(o, `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/snapshots/${meta.body.sha}`, meta.body, dir);
+        o.stdout('source: snapshot');
+        o.stdout(`sha: ${meta.body.sha}`);
+        o.stdout(`files: ${got.files}`);
+        o.stdout(`bytes: ${got.bytes}`);
+        o.stdout(`transfer: ${got.transferBytes}`);
+        o.stdout(`encoding: ${got.encoding}`);
+        o.stderr(`note: ${o.dir} holds the tree only (no .git); see "kvarm help checkout" before committing or pushing`);
+        return { source: 'snapshot', sha: meta.body.sha, bytes: got.bytes, files: got.files, transferBytes: got.transferBytes, encoding: got.encoding };
+      } catch (err) {
+        reason = `snapshot download failed: ${err instanceof Error ? err.message : String(err)}`;
+        resetDir(dir, existed);
+      }
     }
   } else if (meta.status === 200 || meta.status === 202 || meta.status === 409) {
     reason = describeNotReady(meta.body, meta.demanded);
