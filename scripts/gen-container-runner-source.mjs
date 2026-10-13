@@ -8,7 +8,7 @@
  *   node scripts/gen-container-runner-source.mjs          write the module
  *   node scripts/gen-container-runner-source.mjs --check  exit 1 when stale
  *
- * scripts/test/container-runner-source.test.ts fails when the committed
+ * scripts/test/containerRunner.test.ts fails when the committed
  * module drifts from apps/cli/src.
  */
 
