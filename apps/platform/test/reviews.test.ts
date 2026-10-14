@@ -737,4 +737,17 @@ describe('pending reviews and budgets', () => {
     expect((await call('GET', api('readiness', '/reviews/pending?ready=yes'), tok.owner)).json.code).toBe('INVALID_READY');
     expect(repo.refs.get(MAIN)).toBeTruthy();
   });
+
+  it('keeps default pending readiness read-only for three rows apart from PAT-use stamping', async () => {
+    await setup('pending-default-cost', 3);
+    await setPolicy('pending-default-cost', 1);
+    for (let n = 1; n <= 3; n++) await createChange('pending-default-cost', `b${n}`);
+    const freshToken = (await mintPAT(env, userIds[OWNER]!, 'pending-default-cost', FULL)).token;
+    const first = await call('GET', api('pending-default-cost', '/reviews/pending'), freshToken);
+    const second = await call('GET', api('pending-default-cost', '/reviews/pending'), freshToken);
+    expect(first.json.changes).toHaveLength(3);
+    expect(first.cost.rw).toBe(1);
+    expect(second.json.changes).toHaveLength(3);
+    expect(second.cost.rw).toBe(0);
+  });
 });

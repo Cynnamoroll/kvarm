@@ -192,7 +192,8 @@ describe('change pages', () => {
     expect(page.text).toContain('Request changes');
     expect(page.text).toContain('Approve &amp; ship');
     expect(page.text).toContain('What’s left');
-    expect(page.text).toContain('Need 1 approving review(s); 0 recorded.');
+    expect(page.text).toContain('Need 1 approving review; 0 so far');
+    expect(page.text.match(/Need 1 approving review;/g)).toHaveLength(1);
     expect(page.text).toContain('class="tag signal-hi">You</span>');
   });
 

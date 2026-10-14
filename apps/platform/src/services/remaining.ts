@@ -17,6 +17,7 @@ export interface RemainingInput {
     conflicts: readonly { path: string }[];
   };
   blockers: readonly { code: string; error?: string }[];
+  approvals: { count: number; required: number; humans: number; humansRequired: number } | null;
   mergeability: {
     status: string;
     mergeable: boolean;
@@ -41,13 +42,20 @@ function samePrincipal(input: RemainingInput): boolean {
   return Boolean(author.login && input.viewer.login && author.login === input.viewer.login);
 }
 
-function reviewSummary(code: string, error: string | undefined): string {
+function reviewSummary(code: string, approvals: RemainingInput['approvals']): string {
   if (code === 'ESCALATION_OPEN') return 'A human must resolve the open escalation.';
-  const counts = error?.match(/requires (\d+) .*?; (\d+) so far/);
-  if (code === 'APPROVALS_REQUIRED') {
-    return counts ? `Need ${counts[1]} human approval(s); ${counts[2]} recorded.` : 'A human approval is required by branch policy.';
+  if (approvals) {
+    const count = code === 'APPROVALS_REQUIRED' ? approvals.humans : approvals.count;
+    const required = code === 'APPROVALS_REQUIRED' ? approvals.humansRequired : approvals.required;
+    const noun = code === 'APPROVALS_REQUIRED'
+      ? required === 1 ? 'human approval' : 'human approvals'
+      : required === 1 ? 'approving review' : 'approving reviews';
+    return `Need ${required} ${noun}; ${count} so far`;
   }
-  return counts ? `Need ${counts[1]} approving review(s); ${counts[2]} recorded.` : 'More distinct reviewers must approve this head.';
+  if (code === 'APPROVALS_REQUIRED') {
+    return 'A human approval is required by branch policy.';
+  }
+  return 'More distinct reviewers must approve this head.';
 }
 
 function dependencySummary(code: string): string {
@@ -108,7 +116,7 @@ export function remainingFor(input: RemainingInput): RemainingItem[] {
     items.push({
       code: 'ESCALATION_OPEN',
       who: 'human',
-      summary: reviewSummary(blocker.code, blocker.error),
+      summary: reviewSummary(blocker.code, input.approvals),
       you: viewer.kind === 'human' && viewer.writeAccess && !author,
     });
   }
@@ -116,7 +124,7 @@ export function remainingFor(input: RemainingInput): RemainingItem[] {
     items.push({
       code: 'APPROVALS_REQUIRED',
       who: 'human',
-      summary: reviewSummary(blocker.code, blocker.error),
+      summary: reviewSummary(blocker.code, input.approvals),
       you: viewer.kind === 'human' && viewer.writeAccess && !author,
     });
   }
@@ -124,7 +132,7 @@ export function remainingFor(input: RemainingInput): RemainingItem[] {
     items.push({
       code: 'REVIEWS_REQUIRED',
       who: 'reviewer',
-      summary: reviewSummary(blocker.code, blocker.error),
+      summary: reviewSummary(blocker.code, input.approvals),
       you: viewer.writeAccess && Boolean(viewer.principal) && !author,
     });
   }

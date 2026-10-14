@@ -10,6 +10,7 @@ const input = (overrides: Partial<RemainingInput> = {}): RemainingInput => ({
     conflicts: [],
   },
   blockers: [],
+  approvals: { count: 0, required: 0, humans: 0, humansRequired: 0 },
   mergeability: { status: 'clean', mergeable: true, checks: { state: 'success', required: [] } },
   dependency: null,
   resolveConflictTaskOpen: false,
@@ -39,6 +40,7 @@ describe('remainingFor', () => {
         { code: 'APPROVALS_REQUIRED', error: 'requires 1 approval; 0 so far' },
         { code: 'ESCALATION_OPEN', error: 'open escalation(s) need a human' },
       ],
+      approvals: { count: 0, required: 2, humans: 0, humansRequired: 1 },
       resolveConflictTaskOpen: true,
       viewer: { principal: 'user:author', login: 'author', kind: 'human', writeAccess: true },
     }));
@@ -60,6 +62,24 @@ describe('remainingFor', () => {
     expect(items[2]?.you).toBe(true);
     expect(items[5]?.who).toBe('human');
     expect(items.every((item) => item.summary.length <= 90)).toBe(true);
+  });
+
+  it('pluralizes structured review counts without parsing blocker errors', () => {
+    const items = remainingFor(input({
+      blockers: [{ code: 'REVIEWS_REQUIRED' }, { code: 'APPROVALS_REQUIRED' }],
+      approvals: { count: 0, required: 1, humans: 1, humansRequired: 2 },
+    }));
+    expect(items.map((item) => item.summary)).toEqual([
+      'Need 2 human approvals; 1 so far',
+      'Need 1 approving review; 0 so far',
+    ]);
+    expect(remainingFor(input({
+      blockers: [{ code: 'REVIEWS_REQUIRED' }, { code: 'APPROVALS_REQUIRED' }],
+      approvals: { count: 1, required: 2, humans: 0, humansRequired: 1 },
+    })).map((item) => item.summary)).toEqual([
+      'Need 1 human approval; 0 so far',
+      'Need 2 approving reviews; 1 so far',
+    ]);
   });
 
   it('marks review and human actions for eligible non-author viewers only', () => {

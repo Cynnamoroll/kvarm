@@ -318,6 +318,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
       conflicts: change.conflicts,
     },
     blockers: reviewPacket.blockers,
+    approvals: reviewPacket.approvals,
     mergeability: change.mergeability,
     dependency: aux.dependency,
     resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
@@ -424,7 +425,6 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
       : reviewPacket.author.agent
         ? html`agent <strong>${reviewPacket.author.agent.name}</strong>`
         : html`<strong>${reviewPacket.author.login ?? 'unknown'}</strong>`;
-  const blockers = reviewPacket.blockers.map((item) => `<li>${escapeHtml(item.error)}</li>`).join('');
   const reasons = change.rating?.reasons.map((reason) => html`<li>${reason}</li>`).join('') ?? '';
   const body = html`
     ${raw(queryFlash(c))}
@@ -474,7 +474,6 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
           <p>${change.mergeability ? raw(stateTag(change.mergeability.status)) : html`<span class="muted">Not available for this state.</span>`}</p>
           ${change.mergeability?.unknownReason ? raw(html`<p class="muted">${change.mergeability.unknownReason}</p>`) : ''}
           ${change.mergeability?.conflicts?.length ? raw(html`<ul>${raw(change.mergeability.conflicts.map((conflict) => `<li><code>${escapeHtml(conflict.path)}</code></li>`).join(''))}</ul>`) : ''}
-          ${blockers ? raw(html`<ul>${raw(blockers)}</ul>`) : ''}
         </section>
         <section class="card"><div class="card-title">Policy & reviewers</div>
           <p>${reviewPacket.policy.requiredReviews} required approval(s); ${reviewPacket.policy.humanApprovalsRequired} human approval(s).</p>

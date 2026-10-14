@@ -699,6 +699,7 @@ async function remainingForRow(cx: ChangeContext, row: ChangeRow, mergeability: 
       conflicts: storedConflicts(row).conflicts,
     },
     blockers: gate.blockers,
+    approvals: gate.block?.review.approvals ?? null,
     mergeability,
     dependency: aux.dependency,
     resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
