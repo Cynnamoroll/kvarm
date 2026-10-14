@@ -40,6 +40,8 @@ import * as svc from '../repos/service';
 import type { RepoNeed, RepoRole } from '../services/authz';
 import { resolveRepoAccess } from '../services/access';
 import { repoViewGeneration } from '../services/pushFreshness';
+import { commitProvenance } from '../services/provenancePanel';
+import { provenancePanel } from '../render/provenance';
 
 export const repoPages = new Hono<App>();
 
@@ -518,6 +520,11 @@ repoPages.get('/commit/:sha', async (c) => {
   const resolved = await resolveRepo(c);
   if (!resolved) return notFound(c);
   const sha = c.req.param('sha');
+  // Provenance and decisions (issue #8): a full SHA lets the D1 read overlap the Artifacts one.
+  const admin = resolved.role === 'admin';
+  const early = /^[0-9a-f]{40}$/.test(sha) ? commitProvenance(c.env, resolved.repo, sha, { admin }) : null;
+  // Paths that return before awaiting it (404, warming) must not leave a rejection unhandled.
+  early?.catch(() => undefined);
   let commit: ArtifactsCommitMetadata | null;
   try {
     commit = await readCommit(c.env, resolved.repo.artifacts_name, sha);
@@ -528,6 +535,11 @@ repoPages.get('/commit/:sha', async (c) => {
   if (!commit) return notFound(c);
   const viewerLogin = resolved.viewer?.user.login ?? null;
   const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  // The panel renders nothing when the commit has neither attribution nor decisions.
+  // An optional panel: a failed read leaves the commit page as it was rather than failing it.
+  const panel = provenancePanel(
+    (await (early ?? commitProvenance(c.env, resolved.repo, commit.hash, { admin })).catch(() => null)) ?? { attribution: null, decisions: [], decisionsTruncated: false },
+  );
   const body = html`
     <div class="card">
       <div class="card-title">
@@ -545,6 +557,7 @@ repoPages.get('/commit/:sha', async (c) => {
       </p>
       <p><a class="btn" href="${base}/tree/${commit.hash}">Browse tree at this commit</a></p>
     </div>
+    ${raw(panel)}
   `;
   return finish(
     c,
@@ -556,6 +569,8 @@ repoPages.get('/commit/:sha', async (c) => {
           ref: commit.hash.slice(0, 10),
           tab: 'commits',
           title: commit.message.split('\n')[0] ?? '',
+          // The panel is drawn from the brand tokens (docs/brand.md), which this older shell does not load.
+          head: panel ? '<link rel="stylesheet" href="/assets/tokens.css">' : undefined,
         },
         viewerLogin,
         body,
