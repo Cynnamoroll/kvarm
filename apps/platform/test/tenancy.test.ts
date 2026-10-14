@@ -127,8 +127,9 @@ describe('account namespace', () => {
   });
 
   it('refuses a new user whose login matches an org, even differing in case', async () => {
-    await expect(seedUser(ORG)).rejects.toThrow(/UNIQUE|constraint/i);
-    await expect(seedUser(ORG.toUpperCase())).rejects.toThrow(/UNIQUE|constraint/i);
+    // The users_claim_account_name trigger claims every login in account_names.
+    await expect(seedUser(ORG)).rejects.toThrow(/UNIQUE constraint failed: account_names\.login/);
+    await expect(seedUser(ORG.toUpperCase())).rejects.toThrow(/UNIQUE constraint failed: account_names\.login/);
     const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM users WHERE login = ? COLLATE NOCASE')
       .bind(ORG)
       .first<{ n: number }>();
