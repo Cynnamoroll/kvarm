@@ -13,7 +13,7 @@ import { callOperation, reportFailure } from './ops.js';
 /** @typedef {import('./ops.js').OpsIo} OpsIo */
 
 /** Active workspaces whose pins are read (one bounded read each, at most 4 in flight). */
-export const STATUS_LIMITS = { workspaces: 100, dependencyReads: 20, inFlight: 4 };
+export const STATUS_LIMITS = { workspaces: 100, train: 100, tasks: 100, dependencyReads: 20, inFlight: 4 };
 
 export const STATUS_HELP = `usage: kvarm status <repo> [--json]
 
@@ -122,8 +122,8 @@ export async function runStatus(argv, io) {
     // Settle every read before reporting, so no request is still in flight when the command exits.
     const settled = await Promise.allSettled([
       read('list_workspaces', { repo, status: 'active', limit: STATUS_LIMITS.workspaces }),
-      read('get_train', { repo, limit: 100 }),
-      read('list_tasks', { repo, status: 'open', limit: 100 }),
+      read('get_train', { repo, limit: STATUS_LIMITS.train }),
+      read('list_tasks', { repo, status: 'open', limit: STATUS_LIMITS.tasks }),
     ]);
     const failed = settled.find((s) => s.status === 'rejected');
     if (failed) throw failed.reason;
