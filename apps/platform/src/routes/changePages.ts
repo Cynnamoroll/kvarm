@@ -5,7 +5,7 @@
 
 import { Hono, type Context } from 'hono';
 import { escapeHtml, html, raw, timeAgo } from '@kvarm/ui';
-import { fallbackGuide, type CoverageMap, type ReviewTier } from '@kvarm/review';
+import { fallbackGuide, type CoverageMap, type ResolvedChapter, type ReviewTier } from '@kvarm/review';
 import type { RepoRow } from '../db/repos';
 import { repoPage } from '../render/repoShell';
 import { appLayoutCounts } from '../web/render';
@@ -23,6 +23,8 @@ import { remainingFor, type RemainingItem, type RemainingWho } from '../services
 import { DIFF_CLIENT_TAG, renderCompareFileRow } from './comparePages';
 import { commitProvenance } from '../services/provenancePanel';
 import { provenancePanel } from '../render/provenance';
+import * as reviewGuide from '../services/reviewGuide';
+import * as reviewImpact from '../services/reviewImpact';
 
 export const changePages = new Hono<App>();
 
@@ -61,6 +63,7 @@ function queryFlash(c: Context<App>): string {
   const notices: Record<string, string> = {
     approve: 'Review submitted.',
     'request-changes': 'Change request submitted.',
+    ack: 'Review acknowledged.',
     'review-requested': 'Reviewer requested.',
     'review-request-withdrawn': 'Reviewer request withdrawn.',
     resolve: 'Escalation resolved.',
@@ -211,25 +214,68 @@ function renderGuide(
   map: CoverageMap,
   configError: string | null,
   carry: CarryView | null,
+  pageGuide?: reviewGuide.ReviewGuideView,
+  options: {
+    path: string; headSha: string; csrf: string; writable: boolean;
+    view: 'guided' | 'tier' | 'file'; layerOnly: boolean; impact: reviewImpact.ReviewImpactView | null;
+  } = {
+    path: '',
+    headSha: '',
+    csrf: '',
+    writable: false,
+    view: 'guided',
+    layerOnly: false,
+    impact: null,
+  },
 ): string {
+  const selectedGuide = pageGuide?.guide ?? guide;
   const units = new Map(map.units.map((unit) => [unit.key, unit]));
   const files = new Map(result.files.map((file) => [file.path, file]));
-  const rows = guide.chapters.map((chapter) => {
+  const pageUnits = pageGuide?.units ?? map.units.map((unit) => ({
+    key: unit.key, path: unit.path, tier: selectedGuide.tiers[unit.key] ?? unit.defaultTier,
+    acked: false, ackCount: 0, inherited: undefined,
+  }));
+  const visiblePageUnits = pageUnits.filter((unit) => !options.layerOnly || !unit.inherited);
+  const visiblePageUnitsByKey = new Map(visiblePageUnits.map((unit) => [unit.key, unit]));
+  const chapters: ResolvedChapter[] = options.view === 'guided'
+    ? selectedGuide.chapters
+    : options.view === 'tier'
+      ? (['scrutinize', 'read', 'receipt'] as const).flatMap((tier) => {
+          const hunks = visiblePageUnits.filter((unit) => unit.tier === tier).map((unit) => unit.key);
+          return hunks.length ? [{ id: tier, title: `${tier} tier`, tier, hunks }] : [];
+        })
+      : [...new Set(visiblePageUnits.map((unit) => unit.path))].sort().map((path) => {
+          const fileUnits = visiblePageUnits.filter((unit) => unit.path === path);
+          return { id: path, title: path, tier: tierFor(selectedGuide, fileUnits.map((unit) => unit.key)), hunks: fileUnits.map((unit) => unit.key) };
+        });
+  const rows = chapters.map((chapter) => {
     const keysByPath = new Map<string, string[]>();
     for (const key of chapter.hunks) {
       const unit = units.get(key);
-      if (!unit) continue;
-      const keys = keysByPath.get(unit.path) ?? [];
+      const pageUnit = visiblePageUnitsByKey.get(key);
+      if (!unit || !pageUnit) continue;
+      const keys = keysByPath.get(pageUnit.path) ?? [];
       keys.push(key);
-      keysByPath.set(unit.path, keys);
+      keysByPath.set(pageUnit.path, keys);
     }
     const fileRows = [...keysByPath].map(([path, keys]) => {
       const file = files.get(path);
       if (!file) return '';
-      const tier = tierFor(guide, keys);
+      const tier = tierFor(selectedGuide, keys);
       const mark = carry?.unchangedPaths.includes(path) ? 'unchanged' : carry?.changedPaths.includes(path) ? 'changed' : null;
-      return html`<div class="carry-file-row ${mark ? `carry-${mark}` : ''}">
-        ${raw(renderCompareFileRow(repo, encRange, file, tier))}
+      const rowUnits = keys.map((key) => visiblePageUnitsByKey.get(key)).filter((unit) => unit !== undefined);
+      const reviewed = rowUnits.filter((unit) => unit.acked).length;
+      const from = rowUnits.find((unit) => unit.inherited)?.inherited?.change;
+      return html`<div class="carry-file-row ${mark ? `carry-${mark}` : ''}" data-review-file-row tabindex="0">
+        <div>${raw(renderCompareFileRow(repo, encRange, file, tier))}
+          ${rowUnits.length ? raw(html`<p class="muted">${reviewed}/${rowUnits.length} reviewed</p>`) : ''}
+          ${from ? raw(html`<span class="tag steel">from #${from}</span>`) : ''}
+        </div>
+        ${options.writable ? raw(html`<form method="post" action="${raw(`${options.path}/ack`)}" class="inline review-ack-form">
+          ${raw(options.csrf)}<input type="hidden" name="headSha" value="${options.headSha}" />
+          ${raw(keys.map((key) => html`<input type="hidden" name="keys" value="${key}" />`).join(''))}
+          <button class="btn" type="submit">Mark reviewed</button>
+        </form>`) : ''}
         ${mark ? raw(html`<span class="tag ${mark === 'changed' ? 'err' : 'steel'}">${mark}</span>`) : ''}
       </div>`;
     }).join('');
@@ -237,16 +283,25 @@ function renderGuide(
       <div class="card-title">${chapter.title} ${raw(tierTag(chapter.tier))}</div>
       ${chapter.why ? raw(html`<p class="muted">${chapter.why}</p>`) : ''}
       ${raw(chapter.notes?.map((note) => html`<p class="guide-note">${note.body}</p>`).join('') ?? '')}
+      ${options.writable ? raw(html`<form method="post" action="${raw(`${options.path}/ack`)}" class="inline review-ack-form">
+        ${raw(options.csrf)}<input type="hidden" name="headSha" value="${options.headSha}" />
+        ${raw(chapter.hunks.filter((key) => visiblePageUnitsByKey.has(key)).map((key) => html`<input type="hidden" name="keys" value="${key}" />`).join(''))}
+        <button class="btn" type="submit">Mark chapter reviewed</button>
+      </form>`) : ''}
       <div class="compare-list">${raw(fileRows || '<p class="muted">No diff rows in this chapter.</p>')}</div>
     </section>`;
   }).join('');
   const counts = { scrutinize: new Set<string>(), read: new Set<string>(), receipt: new Set<string>() };
   for (const unit of map.units) {
-    const tier = guide.tiers[unit.key] ?? unit.defaultTier;
+    const tier = selectedGuide.tiers[unit.key] ?? unit.defaultTier;
     counts[tier].add(unit.path);
   }
   const summary = html`<section class="card coverage-summary">
-    <div class="card-title">Coverage · ${guide.source === 'fallback' ? 'Generated guide' : 'Author guide'}</div>
+    <div class="card-title">Coverage · ${selectedGuide.source === 'fallback' ? 'Generated guide' : 'Author guide'}</div>
+    <nav class="tabs guide-views" aria-label="Review view">${raw((['guided', 'tier', 'file'] as const).map((item) =>
+      html`<a class="tab ${options.view === item ? 'active' : ''}" href="${raw(`${options.path}?view=${item}${options.layerOnly ? '&layer=only' : ''}`)}">${item}</a>`,
+    ).join(''))}</nav>
+    <p><a href="${raw(`${options.path}?view=${options.view}${options.layerOnly ? '' : '&layer=only'}`)}">${options.layerOnly ? 'Show full stack' : 'Only this layer'}</a></p>
     <div class="coverage-counts">
       <span>${raw(tierTag('scrutinize'))} ${counts.scrutinize.size} ${filesLabel(counts.scrutinize.size)}</span>
       <span>${raw(tierTag('read'))} ${counts.read.size} ${filesLabel(counts.read.size)}</span>
@@ -259,8 +314,41 @@ function renderGuide(
           <ul class="carry-agent-paths">${raw(carry.changedPaths.map((path) => `<li><code>${escapeHtml(path)}</code></li>`).join(''))}</ul></div>`)
       : ''}
   </section>`;
-  return html`<div class="compare-root review-guide-root" data-file-api="/api/v1/repos/${repo.owner_login}/${repo.name}/compare/${raw(encRange)}/file">
-    ${raw(summary)}
+  const stack = pageGuide?.stack;
+  const stackPanel = stack && (stack.parents.length || stack.children.length) ? html`<section class="card review-stack">
+    <div class="card-title">Stack · ${stack.inherited} inherited unit(s)</div>
+    ${raw([...stack.parents.map((item) => html`<a class="tag" href="${raw(`${base(repo)}/changes/${item.number}`)}">parent #${item.number}</a>`),
+      ...stack.children.map((item) => html`<a class="tag" href="${raw(`${base(repo)}/changes/${item.number}`)}">child #${item.number}</a>`)].join(' '))}
+  </section>` : '';
+  const findings = pageGuide?.findings.items.filter((item) => item.status === 'open') ?? [];
+  const findingPanel = pageGuide ? html`<section class="card"><div class="card-title">Open findings · ${findings.length}</div>
+    ${raw(findings.length ? html`<ul class="k-list">${raw(findings.map((item) => html`<li>
+      <span class="tag ${item.severity === 'high' ? 'err' : 'signal'}">${item.severity}</span>
+      <span class="tag">${item.confidence}</span> ${item.title}
+    </li>`).join(''))}</ul>` : html`<p class="muted">No open findings.</p>`)}
+  </section>` : '';
+  const contractsPanel = pageGuide ? html`<section class="card"><div class="card-title">Contracts & export breaks</div>
+    <p class="muted">${pageGuide.contracts.declared.length} declared · ${pageGuide.contracts.undeclared.length} undeclared</p>
+    ${raw(html`<ul class="k-list">${raw(pageGuide.contracts.breaks.map((item) => html`<li>
+      <code>${item.path}</code> · ${item.name} · ${item.change} · ${item.declared ? 'declared' : 'undeclared'}
+    </li>`).join(''))}</ul>`)}
+  </section>` : '';
+  const evidencePanel = pageGuide?.guide.evidence ? html`<section class="card"><div class="card-title">Guide evidence</div>
+    ${raw(html`<ul class="k-list">${raw(pageGuide.guide.evidence.map((item) => html`<li><span class="tag">${item.status}</span> ${item.kind}: ${item.ref}</li>`).join(''))}</ul>`)}
+  </section>` : '';
+  const moved = pageGuide?.units.filter((unit) => unit.moved) ?? [];
+  const movedPanel = moved.length ? html`<section class="card"><div class="card-title">Moved code</div>
+    ${raw(html`<ul class="k-list">${raw(moved.map((unit) => html`<li><code>${unit.path}</code> moved from <code>${unit.moved!.from}</code></li>`).join(''))}</ul>`)}
+  </section>` : '';
+  const impactPanel = !pageGuide ? '' : options.impact ? html`<section class="card"><div class="card-title">Downstream impact</div>
+    <p class="muted">${options.impact.files.reduce((n, item) => n + item.consumers.length, 0)} importers · ${new Set(options.impact.files.flatMap((item) => item.tests)).size} tests${options.impact.truncated ? ' · truncated' : ''}</p>
+    ${raw(html`<ul class="k-list">${raw(options.impact.files.filter((item) => item.consumers.length || item.tests.length).slice(0, 8).map((item) => html`<li>
+      <code>${item.path}</code> · ${item.consumers.length} importer(s) · ${item.tests.length} test(s)
+    </li>`).join(''))}</ul>`)}
+    ${options.impact.truncated ? raw(html`<p class="muted">Some downstream consumers were omitted by the analysis budget.</p>`) : ''}
+  </section>` : html`<section class="card"><div class="card-title">Downstream impact</div><p class="muted">Not computed yet.</p></section>`;
+  return html`<div id="review-guide" class="compare-root review-guide-root" data-file-api="/api/v1/repos/${repo.owner_login}/${repo.name}/compare/${raw(encRange)}/file">
+    ${raw(stackPanel)}${raw(summary)}${raw(findingPanel)}${raw(contractsPanel)}${raw(evidencePanel)}${raw(movedPanel)}${raw(impactPanel)}
     ${raw(rows || '<p class="muted">No reviewable files in this change.</p>')}
   </div>`;
 }
@@ -327,6 +415,14 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   if (change.headSha && coverage) {
     await recordHeadTier(c.env, resolved.repo, { id: row.id, base: change.base }, change.headSha, coverage, (promise) => c.executionCtx.waitUntil(promise));
   }
+  const guideResult = change.headSha ? await reviewGuide.getGuide(cx, number, {}, undefined, coverage ?? undefined) : null;
+  const pageGuide = guideResult?.ok ? guideResult.value : null;
+  let impact: reviewImpact.ReviewImpactView | null = null;
+  if (pageGuide?.impact.cached && coverage) {
+    impact = await reviewImpact.getCachedReviewImpact(coverage);
+  } else if (change.headSha) {
+    c.executionCtx.waitUntil(reviewImpact.getReviewImpact(cx, number).catch(() => undefined));
+  }
   const [packet, aux] = await Promise.all([
     reviews.getReviewPacket(c.env, resolved.repo, number),
     change.state === 'open' || change.state === 'conflicted'
@@ -335,18 +431,16 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   ]);
   if (!packet.ok) return notFound(c);
   const reviewPacket = packet.value;
-  const [requestedReviewers, suggestedReviewers] = await Promise.all([
-    reviews.listReviewRequests(c.env, row.id),
-    reviews.suggestedReviewers(
-      c.env,
-      resolved.repo,
-      row.id,
-      coverage?.map?.units.map((unit) => unit.path) ?? [],
-      reviewPacket.author.principal,
-      reviewPacket.headSha,
-    ),
-  ]);
-  reviewPacket.suggestedReviewers = suggestedReviewers;
+  const reviewerData = await reviews.reviewPageReviewers(
+    c.env,
+    resolved.repo,
+    row.id,
+    coverage?.map?.units.map((unit) => unit.path) ?? [],
+    reviewPacket.author.principal,
+    reviewPacket.headSha,
+  );
+  const requestedReviewers = reviewerData.requested;
+  reviewPacket.suggestedReviewers = reviewerData.suggested;
   const approvalNoteRequired = approvalNeedsDecisionNote(reviewPacket);
   const provenance = await commitProvenance(c.env, resolved.repo, reviewPacket.headSha, {
     admin: resolved.role === 'admin',
@@ -380,6 +474,9 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
     },
   });
   const path = `${base(resolved.repo)}/changes/${change.number}`;
+  const requestedView = c.req.query('view');
+  const view = requestedView === 'tier' || requestedView === 'file' ? requestedView : 'guided';
+  const layerOnly = c.req.query('layer') === 'only';
   const encRange = encodeURIComponent(`${change.base}...${change.headSha ?? change.head}`);
   let coverageBody = html`<div class="flash warn">The base or head commit is unavailable for a bounded diff.</div>`;
   const configError = coverage?.configError ?? null;
@@ -391,7 +488,27 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
           : `user:${resolved.viewer.user.id}`
         : null;
       const carry = reviewPacket.carry.find((item) => item.principal === principal && item.changedPaths.length > 0) ?? null;
-      coverageBody = renderGuide(resolved.repo, encRange, coverage.response, coverage.guide, coverage.map, configError, carry);
+      coverageBody = renderGuide(
+        resolved.repo,
+        encRange,
+        coverage.response,
+        coverage.guide,
+        coverage.map,
+        configError,
+        carry,
+        pageGuide ?? undefined,
+        {
+          path,
+          headSha: change.headSha ?? '',
+          csrf: resolved.viewer !== null && (resolved.role === 'write' || resolved.role === 'admin')
+            ? csrfInput((await requestSession(c))?.csrfToken)
+            : '',
+          writable: resolved.viewer !== null && (resolved.role === 'write' || resolved.role === 'admin'),
+          view,
+          layerOnly,
+          impact,
+        },
+      );
     } else {
       coverageBody = html`<div class="flash warn">Diff coverage unavailable: ${coverage.error ?? 'the bounded comparison could not be read.'}</div>`;
     }
@@ -513,6 +630,30 @@ changePages.get('/changes/:number', async (c) => {
   const resolved = await resolveRepo(c);
   if (!resolved) return notFound(c);
   return renderDetail(c, resolved, c.req.param('number'));
+});
+
+changePages.post('/changes/:number/ack', async (c) => {
+  const number = c.req.param('number');
+  const url = `/${c.req.param('owner')}/${c.req.param('repo')}/changes/${number}`;
+  const auth = await authorizeRoute(c, 'write', { requireActor: true, allowAgent: true });
+  if (!auth.ok || !auth.actor) return notFound(c);
+  const form = await c.req.parseBody({ all: true });
+  const single = (value: unknown) => Array.isArray(value) ? value[value.length - 1] : value;
+  const keysValue = form.keys;
+  const keys = (Array.isArray(keysValue) ? keysValue : keysValue === undefined ? [] : [keysValue])
+    .filter((value): value is string => typeof value === 'string');
+  const cx: changes.ChangeContext = {
+    env: c.env,
+    repo: auth.repo,
+    actor: auth.actor,
+    writeAccess: true,
+    waitUntil: (promise) => c.executionCtx.waitUntil(promise),
+  };
+  const result = await reviewGuide.ackUnits(cx, number, {
+    headSha: single(form.headSha),
+    keys,
+  });
+  return c.redirect(`${url}?${result.ok ? 'done=ack' : `error=${encodeURIComponent(result.code ?? 'FAILED')}`}#review-guide`, 303);
 });
 
 changePages.post('/changes/:number/review', async (c) => {

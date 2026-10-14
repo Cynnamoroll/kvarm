@@ -1,20 +1,31 @@
 import {
   buildCoverage,
+  diffExports,
+  extractExportSignatures,
   fallbackGuide,
+  isCodePath,
+  isContractPath,
   parseReviewConfig,
   type CoverageFileInput,
   type CoverageMap,
+  type ExportBreak,
   type ResolvedGuide,
   type ReviewTier,
 } from '@kvarm/review';
+import { detectMoves } from '@kvarm/diffcore';
+import { sha256Hex } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
-import { readFileAt } from '../artifacts/repo';
+import { readFileAt, withLazyRepo } from '../artifacts/repo';
+import { compareKeys, readJson, writeJson } from '../cache/compare';
 import { compareChange } from './changeDiff';
 import * as compare from './compare';
+import type { ResolveContext } from './refs';
 
 const COVERAGE_FILES = 30;
 const COVERAGE_BYTES = 512 * 1024;
 const CONFIG_BYTES = 64 * 1024;
+const EXPORT_FILES = 50;
+const EXPORT_BYTES = 512 * 1024;
 
 export interface CoverageChange {
   id: string;
@@ -25,6 +36,9 @@ export interface HeadCoverage {
   response: compare.CompareResponse | null;
   map: CoverageMap | null;
   guide: ResolvedGuide | null;
+  configSha: string;
+  baseTree: string | null;
+  headTree: string | null;
   configError: string | null;
   invalidConfig: boolean;
   error: string | null;
@@ -36,6 +50,20 @@ export interface HeadTier {
   recorded: boolean;
 }
 
+interface CoverageCache {
+  baseSha: string;
+  headSha: string;
+  baseTree: string;
+  headTree: string;
+  configSha: string;
+  map: CoverageMap;
+  truncated: boolean;
+  invalidConfig?: boolean;
+  configError?: string;
+  tiers?: Record<string, ReviewTier>;
+  changedPaths?: string[];
+}
+
 export async function headCoverage(
   env: Env,
   repo: RepoRow,
@@ -45,8 +73,32 @@ export async function headCoverage(
 ): Promise<HeadCoverage> {
   try {
     const diff = await compareChange(env, repo, { base: change.base }, headSha, waitUntil);
-    if (!diff.ok) return { response: null, map: null, guide: null, configError: null, invalidConfig: false, error: diff.error };
+    if (!diff.ok) return {
+      response: null, map: null, guide: null, configSha: 'none', baseTree: null, headTree: null,
+      configError: null, invalidConfig: false, error: diff.error,
+    };
     const response = diff.value.response;
+    const cacheKey = compareKeys.reviewmapHead(change.id, change.base, headSha);
+    const cached = await readJson<CoverageCache>(cacheKey);
+    if (
+      cached?.baseSha === change.base &&
+      cached.headSha === headSha &&
+      Array.isArray(cached.map?.units) &&
+      cached.baseTree === response.base.tree &&
+      cached.headTree === response.head.tree
+    ) {
+      return {
+        response,
+        map: cached.map,
+        guide: fallbackGuide(cached.map),
+        configSha: cached.configSha,
+        baseTree: cached.baseTree,
+        headTree: cached.headTree,
+        configError: cached.configError ?? null,
+        invalidConfig: cached.invalidConfig === true,
+        error: null,
+      };
+    }
     const inputs: CoverageFileInput[] = [];
     let reads = 0;
     let usedBytes = 0;
@@ -99,14 +151,18 @@ export async function headCoverage(
     let config: Parameters<typeof buildCoverage>[1] = {};
     let configError: string | null = null;
     let invalidConfig = false;
+    let configSha = 'none';
     try {
       const blob = await readFileAt(env, repo.artifacts_name, headSha, '.kvarm/review.json');
       if (blob) {
         if (blob.size > CONFIG_BYTES) {
           configError = '.kvarm/review.json exceeds the 64 KiB config limit; default review tiers are used.';
           invalidConfig = true;
+          configSha = `oversize-${blob.size}`;
         } else {
-          const parsed = parseReviewConfig(await blob.text());
+          const text = await blob.text();
+          configSha = await sha256Hex(text);
+          const parsed = parseReviewConfig(text);
           if (parsed.ok) config = parsed.value;
           else {
             configError = `${parsed.error}; default review tiers are used.`;
@@ -118,11 +174,77 @@ export async function headCoverage(
       configError = 'Could not read .kvarm/review.json; default review tiers are used.';
       invalidConfig = true;
     }
-    const map = await buildCoverage(inputs, config);
-    if (response.truncated || response.nextCursor !== undefined) map.truncated = true;
-    return { response, map, guide: fallbackGuide(map), configError, invalidConfig, error: null };
+    const moves = detectMoves(inputs.flatMap((file) => file.hunks ? [{ path: file.path, hunks: file.hunks }] : []));
+    const filesWithMoves = inputs.map((file) => {
+      const fileMoves = moves.filter((move) => move.from.path === file.path || move.to.path === file.path);
+      return fileMoves.length ? { ...file, moves: fileMoves } : file;
+    });
+    const breaks: ExportBreak[] = [];
+    let exportFiles = 0;
+    let exportBytes = 0;
+    let exportTruncated = false;
+    await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+      const context: ResolveContext = { env, repo, artifacts, bypass: false, waitUntil };
+      for (const file of response.files) {
+        const exportSurface =
+          (isCodePath(file.path) && isContractPath(file.path, config.contracts)) ||
+          Boolean(file.oldPath && isCodePath(file.oldPath) && isContractPath(file.oldPath, config.contracts));
+        if (!exportSurface || file.binary || file.tooLarge) continue;
+        if (exportFiles >= EXPORT_FILES || exportBytes >= EXPORT_BYTES) {
+          exportTruncated = true;
+          continue;
+        }
+        exportFiles++;
+        const remaining = EXPORT_BYTES - exportBytes;
+        const material = await compare.cachedFileDiffWithTexts(context, file, Math.floor(remaining / 2));
+        if (material.oldText === undefined || material.newText === undefined || material.body.tooLarge) {
+          exportTruncated = true;
+          continue;
+        }
+        const size = new TextEncoder().encode(material.oldText).byteLength + new TextEncoder().encode(material.newText).byteLength;
+        if (size > remaining) {
+          exportTruncated = true;
+          continue;
+        }
+        exportBytes += size;
+        const before = extractExportSignatures(file.oldPath ?? file.path, material.oldText);
+        const after = extractExportSignatures(file.path, material.newText);
+        if (before.truncated || after.truncated) exportTruncated = true;
+        breaks.push(...diffExports(before, after).map((item) => ({ path: file.path, ...item })));
+      }
+    });
+    const map = await buildCoverage(filesWithMoves, config);
+    map.breaks = breaks.sort((a, b) => a.path.localeCompare(b.path) || a.name.localeCompare(b.name));
+    if (response.truncated || response.nextCursor !== undefined || exportTruncated) map.truncated = true;
+    const cache: CoverageCache = {
+      baseSha: change.base,
+      headSha,
+      baseTree: response.base.tree,
+      headTree: response.head.tree,
+      configSha,
+      map,
+      truncated: map.truncated,
+      invalidConfig,
+      ...(configError ? { configError } : {}),
+      changedPaths: response.files.flatMap((file) => file.oldPath ? [file.path, file.oldPath] : [file.path]),
+    };
+    waitUntil(writeJson(cacheKey, JSON.stringify(cache)));
+    return {
+      response,
+      map,
+      guide: fallbackGuide(map),
+      configSha,
+      baseTree: response.base.tree,
+      headTree: response.head.tree,
+      configError,
+      invalidConfig,
+      error: null,
+    };
   } catch (error) {
-    return { response: null, map: null, guide: null, configError: null, invalidConfig: false, error: String(error) };
+    return {
+      response: null, map: null, guide: null, configSha: 'none', baseTree: null, headTree: null,
+      configError: null, invalidConfig: false, error: String(error),
+    };
   }
 }
 

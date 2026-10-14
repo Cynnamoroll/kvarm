@@ -289,6 +289,10 @@ body.k-app:not(.k-landing) .approval-carry > p { margin: 0 0 var(--s2); }
 body.k-app:not(.k-landing) .carry-agent-paths { margin: 0; padding-left: var(--s4); color: var(--steel); }
 body.k-app:not(.k-landing) .carry-agent-paths code { overflow-wrap: anywhere; }
 body.k-app:not(.k-landing) .carry-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--s2); }
+body.k-app:not(.k-landing) .review-ack-form { align-self: center; }
+body.k-app:not(.k-landing) [data-review-file-row]:focus,
+body.k-app:not(.k-landing) [data-review-file-row].review-focus { outline: 1px solid var(--signal); outline-offset: 2px; }
+body.k-app:not(.k-landing) .guide-views { margin: var(--s3) 0; }
 body.k-app:not(.k-landing) .carry-file-row > details { min-width: 0; }
 body.k-app:not(.k-landing) .live-indicator { color: var(--steel); border: 1px solid var(--line); border-radius: 999px; padding: 2px 7px; font-size: 10px; letter-spacing: .08em; }
 body.k-app:not(.k-landing) .live-indicator[data-state="live"] { color: var(--signal-hi); border-color: var(--signal-hi); }

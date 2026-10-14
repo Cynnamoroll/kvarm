@@ -39,6 +39,7 @@ import { readCommitInfo, type ResolveContext } from './refs';
 import { requestEnvironmentBuild } from './environments';
 import { commitCloseStatement, commitClosingRefs, guardScanStatements, pushedCommits, retireIssueTasksStatement } from './issues';
 import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
+import { isNudgeMessage, processReviewNudge } from './reviewNudges';
 import type { RepoRow } from '../db/repos';
 import { WORKSPACE_REF_PREFIX } from './agentMeta';
 import { publishRepoEvent } from './live';
@@ -236,6 +237,7 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
         `SELECT r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,
            (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done,
            (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'state', c.state, 'policy', c.merge_policy, 'headSha', c.head_sha,
+                     'nudgeAfterMinutes', (SELECT n.nudge_after_minutes FROM review_policies n WHERE n.repo_id = c.repo_id),
                      'queuedHead', (SELECT q.head_sha FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)))
               FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state IN ('open', 'conflicted')) AS changes,
            (SELECT json_object('id', w.id, 'status', w.status, 'baseSha', w.base_sha)
@@ -510,7 +512,7 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [
 /** Webhook attempts one consumer invocation runs at once. */
 export const WEBHOOK_ATTEMPT_LANES = 3;
 
-export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'webhook';
+export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'nudge' | 'webhook';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
 export function retryDelaySeconds(attempts: number): number {
@@ -539,6 +541,10 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
   // An endpoint failure is a recorded attempt with its own delayed retry, never a queue retry.
   if (isWebhookDeliveryMessage(msg.body)) {
     return { outcome: 'webhook', webhook: await deliverWebhook(env, msg.body.deliveryId) };
+  }
+  if (isNudgeMessage(msg.body)) {
+    await processReviewNudge(env, msg.body);
+    return { outcome: 'nudge' };
   }
   const event = parsePushEvent(msg.body);
   if (!event) return { outcome: 'ignored' };

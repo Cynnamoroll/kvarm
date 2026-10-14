@@ -59,6 +59,7 @@ export const DECISION_ERROR_TEXT: Record<string, string> = {
   SHIP_REQUIRES_APPROVE: 'Approve & ship requires an approval.',
   CHANGE_DRAFT: 'Draft changes cannot be shipped until the merge policy changes.',
   AGENT_REF_FORBIDDEN: 'Agent refs cannot be reviewed from a page.',
+  DANGER_UNACKED: 'Acknowledge every scrutinize unit before approving this change.',
 };
 
 export function decisionErrorMessage(code: string): { text: string; fallback: boolean } {

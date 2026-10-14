@@ -84,3 +84,7 @@ When you chose between approaches (or the queue chose between candidates), leave
 ## Multi-attempt tasks (optional)
 
 For several attempts at one task, `list_candidates`, `compose_candidates`, `create_arena`, `rank_arena` and `select_arena_winner` compare and combine workspaces. Final arena selection opens an escalation that only a human resolves (`resolve_escalation`). These are covered by the registry descriptions (`kvarm help candidates`).
+
+## Review and author guides
+
+`get_review_guide` with `{"repo": "...", "number": 7}` returns the current coverage units, author or fallback guide, acknowledgements, findings, contracts, impact-cache state and `remaining` blockers. When authoring the guide, use `submit_review_guide` with the full current `headSha` and chapters built from returned unit keys; uncovered units remain in the `unguided` chapter. Use `ack_review_units` with that full head and the keys you reviewed (or a chapter id) to record content-keyed acknowledgements. Submit structured findings with `submit_findings`, then `list_findings` and `update_finding` to track their disposition. `get_review_impact` returns bounded downstream importer and test evidence; `get_review_analytics` returns bounded finding outcomes and guide coverage, with known agent model families labeled `declared`. Nudge suggestions carry the same `declared` evidence label for known agent families.

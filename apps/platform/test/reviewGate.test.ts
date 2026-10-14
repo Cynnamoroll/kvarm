@@ -62,3 +62,23 @@ describe('low-risk review gate', () => {
     expect(gate.missing).not.toContain('protected-path');
   });
 });
+
+describe('guided review gates', () => {
+  const noLegacyRequirements = { ...policy('never'), protected: false, requiredApprovals: 0 };
+
+  it('blocks findings, missing required guides, and undeclared guide contracts', () => {
+    expect(reviewGate(facts(null, { required: 0, blockingFindings: 1 }), noLegacyRequirements).block?.code).toBe('FINDINGS_OPEN');
+    expect(reviewGate(facts(null, { required: 0, guideRequired: true }), noLegacyRequirements).block?.code).toBe('GUIDE_REQUIRED');
+    expect(reviewGate(facts(null, {
+      required: 0,
+      guideRequired: true,
+      guidePresent: true,
+      undeclared: 2,
+    }), noLegacyRequirements).block?.code).toBe('CONTRACT_UNDECLARED');
+  });
+
+  it('does not require a guide or block undeclared surfaces when the repo policy is off', () => {
+    const gate = reviewGate(facts(null, { required: 0, guidePresent: true, undeclared: 1 }), noLegacyRequirements);
+    expect(gate.block).toBeNull();
+  });
+});

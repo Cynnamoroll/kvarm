@@ -9,7 +9,7 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import type { RepoRow } from '../src/db/repos';
 import worker from '../src/index';
@@ -290,7 +290,16 @@ describe('review policy', () => {
   it('is unset by default (review merges unchanged), admin-only to change and validated', async () => {
     const { repo } = await setup('policy-unset');
     const unset = await call('GET', api('policy-unset', '/review-policy'), tok.reader);
-    expect([unset.status, unset.json]).toEqual([200, { requiredReviews: 0, configured: false, updatedBy: null, updatedAt: null }]);
+    expect([unset.status, unset.json]).toEqual([200, {
+      requiredReviews: 0,
+      guideRequired: false,
+      blockingFindings: 'high-confirmed',
+      dangerAckRequired: false,
+      nudgeAfterMinutes: null,
+      configured: false,
+      updatedBy: null,
+      updatedAt: null,
+    }]);
     expect((await createChange('policy-unset', 'b1')).status).toBe(201);
     const p = await packet('policy-unset', 1);
     expect(p.json).toMatchObject({ satisfied: true, blockers: [], approvals: { count: 0, required: 0 }, escalations: [] });
@@ -301,7 +310,16 @@ describe('review policy', () => {
     expect((await setPolicy('policy-unset', 11)).json.code).toBe('INVALID_REQUIRED_REVIEWS');
     expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, { requiredReviews: 1.5 })).status).toBe(400);
     const set = await setPolicy('policy-unset', 2);
-    expect([set.status, set.json]).toEqual([200, { requiredReviews: 2, configured: true, updatedBy: OWNER, updatedAt: expect.any(String) }]);
+    expect([set.status, set.json]).toEqual([200, {
+      requiredReviews: 2,
+      guideRequired: false,
+      blockingFindings: 'high-confirmed',
+      dangerAckRequired: false,
+      nudgeAfterMinutes: null,
+      configured: true,
+      updatedBy: OWNER,
+      updatedAt: expect.any(String),
+    }]);
     const audit = await env.DB.prepare(`SELECT payload FROM events WHERE type = 'review_policy.updated' AND json_extract(payload, '$.repoId') = ?`)
       .bind(repoIds['policy-unset'])
       .first<{ payload: string }>();
@@ -369,6 +387,47 @@ describe('review policy', () => {
     expect([generic.status, generic.json.review.verdict]).toEqual([201, 'request-changes']);
     await call('PATCH', api('bad-review', '/changes/1'), tok.owner, { state: 'closed' });
     expect((await approve('bad-review', 1, tok.human3)).json.code).toBe('CHANGE_NOT_OPEN');
+  });
+});
+
+describe('review nudges', () => {
+  it('suggests a different-family reviewer and does not duplicate the event on redelivery', async () => {
+    await setup('nudge-idempotent');
+    await call('PUT', api('nudge-idempotent', '/review-policy'), tok.owner, { requiredReviews: 1, nudgeAfterMinutes: 15 });
+    await setBranchRule('nudge-idempotent', 'low-risk', 0);
+    const author = await agent('nudge-idempotent', 'nudge-author', 'claude');
+    const candidate = await agent('nudge-idempotent', 'nudge-reviewer', 'gpt');
+    expect((await createChange('nudge-idempotent', 'agents/b1', author.token)).status).toBe(201);
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = 1')
+      .bind(repoIds['nudge-idempotent']).first<{ id: string }>();
+    const first = sent.map((item) => item.body).find((item) => (item as { kind?: string }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id) as Record<string, unknown>;
+    expect(first).toMatchObject({ waitingOn: 'reviewers', seq: 1 });
+
+    const consume = async () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      await deliver({ ...first, notBefore: Date.now() - 1 });
+      log.mockRestore();
+    };
+    await consume();
+    const eventRows = () => env.DB.prepare(
+      `SELECT payload FROM events WHERE type = 'review.nudged' AND json_extract(payload, '$.changeId') = ?1`,
+    ).bind(change!.id).all<{ payload: string }>();
+    const events = (await eventRows()).results ?? [];
+    expect(events).toHaveLength(1);
+    const payload = JSON.parse(events[0]!.payload) as {
+      suggestedReviewer: { principal: string; modelFamily: string; modelFamilyEvidence: string; differentFamily: boolean; differentFamilyEvidence: string };
+    };
+    expect(payload.suggestedReviewer).toMatchObject({
+      principal: `agent:${candidate.id}`,
+      modelFamily: 'gpt',
+      modelFamilyEvidence: 'declared',
+      differentFamily: true,
+      differentFamilyEvidence: 'declared',
+    });
+
+    await consume();
+    expect((await eventRows()).results).toHaveLength(1);
   });
 });
 

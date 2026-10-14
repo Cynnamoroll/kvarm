@@ -39,7 +39,7 @@ export const comparePages = new Hono<App>();
 const HTML = { 'content-type': 'text/html; charset=utf-8' };
 /** Files per page; the service caps a page at 5,000, this stays lean. */
 const PAGE_LIMIT = 200;
-export const DIFF_CLIENT_TAG = '<script type="module" src="/assets/diffClient.js"></script>';
+export const DIFF_CLIENT_TAG = '<script type="module" src="/assets/diffClient.js"></script><script type="module" src="/assets/reviewClient.js"></script>';
 
 type PageContext = Context<App>;
 

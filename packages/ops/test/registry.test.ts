@@ -113,9 +113,17 @@ describe('operation registry', () => {
     expect(JSON.stringify(resolveEscalation ?? {})).not.toMatch(new RegExp(retiredAction, 'i'));
     expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
+    expect(findOperation('get_review_guide')).toMatchObject({ command: ['review', 'guide'], method: 'GET', path: '/repos/{repo}/changes/{number}/review-guide' });
+    expect(findOperation('ack_review_units')).toMatchObject({ command: ['review', 'ack'], method: 'POST', path: '/repos/{repo}/changes/{number}/review-acks' });
+    expect(findOperation('submit_findings')).toMatchObject({ command: ['finding', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/findings' });
+    expect(findOperation('get_review_analytics')).toMatchObject({ command: ['review', 'analytics'], method: 'GET', path: '/repos/{repo}/review/analytics' });
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
     const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40), ship: true });
     expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40), ship: true }]);
+    expect(buildRequest(findOperation('set_review_policy')!, { repo: 'o/r', guideRequired: true, nudgeAfterMinutes: null }).body)
+      .toEqual({ guideRequired: true, nudgeAfterMinutes: null });
+    expect(buildRequest(findOperation('ack_review_units')!, { repo: 'o/r', number: 3, headSha: 'b'.repeat(40), keys: ['unit-key'] }).body)
+      .toEqual({ headSha: 'b'.repeat(40), keys: ['unit-key'] });
   });
 
   it('round-trips the branch-rule agent approval option through the operation registry', () => {

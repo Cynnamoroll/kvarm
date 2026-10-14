@@ -109,6 +109,55 @@ describe('coverage map', () => {
     expect(map.units[0]?.floor).toBe('scrutinize');
     expect(map.truncated).toBe(true);
   });
+
+  it('lowers moved units to receipt without overriding a higher floor', async () => {
+    const move = {
+      from: { path: 'src/old.ts', start: 2, end: 4 },
+      to: { path: 'src/new.ts', start: 4, end: 6 },
+      lines: 3,
+    };
+    const moved = file('src/new.ts', {
+      additions: 3,
+      deletions: 0,
+      hunks: [hunk(0, 4, [
+        { type: 'ins', text: 'const a = 1;', newNo: 4 },
+        { type: 'ins', text: 'const b = 2;', newNo: 5 },
+        { type: 'ins', text: 'return a + b;', newNo: 6 },
+      ])],
+      moves: [move],
+    });
+    const higherFloor = file('src/new.ts', {
+      tags: tags('security-sensitive'),
+      additions: 3,
+      deletions: 0,
+      hunks: moved.hunks,
+      moves: [move],
+    });
+    const map = await buildCoverage([moved, higherFloor], {});
+    expect(map.units.map(({ moved: relation, defaultTier, floor }) => ({ relation, defaultTier, floor }))).toEqual([
+      { relation: { from: 'src/old.ts' }, defaultTier: 'receipt', floor: 'receipt' },
+      { relation: { from: 'src/old.ts' }, defaultTier: 'scrutinize', floor: 'scrutinize' },
+    ]);
+  });
+
+  it('requires breaking-impact declarations for removed or changed exports', async () => {
+    const base = await buildCoverage([file('src/public.ts')], { contracts: ['src/*.ts'] });
+    const map = {
+      ...base,
+      breaks: [{ path: 'src/public.ts', name: 'Widget', change: 'removed' as const, before: 'export interface Widget' }],
+    };
+    const guide = (impact: 'additive' | 'breaking') => ({
+      intent: 'change API',
+      chapters: [{ id: 'api', title: 'API', tier: 'scrutinize', hunks: map.units.map((unit) => unit.key) }],
+      contracts: [{ surface: 'src/*.ts', impact }],
+    });
+
+    expect(validateGuide(guide('additive'), map)).toMatchObject({
+      ok: true,
+      undeclared: ['src/public.ts#Widget'],
+    });
+    expect(validateGuide(guide('breaking'), map)).toMatchObject({ ok: true, undeclared: [] });
+  });
 });
 
 describe('guide validation and carry-forward', () => {

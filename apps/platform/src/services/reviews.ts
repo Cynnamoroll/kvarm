@@ -26,7 +26,7 @@ import type { ServiceResult } from '../repos/service';
 import { withLazyRepo } from '../artifacts/repo';
 import { patActor, type Actor } from './authz';
 import { resolveRepoAccessAs } from './access';
-import { modelFamilyEvidence, type EvidenceLevel } from './provenance';
+import { modelFamilyEvidence, weakerEvidence, type EvidenceLevel } from './provenance';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   agentMergeDenial,
@@ -45,7 +45,16 @@ import { objectBody } from './result';
 import { defaultChecksGate } from './checksGate';
 import { resolveCommitish } from './refs';
 import { carryView, storeReviewFingerprint, type CarryView, type CarryViewReview } from './approvalCarry';
+import { reviewMapAckKeys, reviewParentChangeIdsSql } from './reviewGuide';
+import { enqueueReviewNudge } from './reviewNudges';
 import { publishRepoEvent } from './live';
+import {
+  reviewAuthorSelection,
+  reviewerCandidates,
+  selectReviewer,
+  type ReviewerCandidate,
+  type ReviewerCandidateRow,
+} from './reviewerSelection';
 import {
   HUMAN_MODEL_FAMILY,
   parseReviewFacts,
@@ -253,15 +262,19 @@ function requestView(row: ReviewRequestRow): ReviewRequestView {
   };
 }
 
-export async function listReviewRequests(env: Env, changeSetId: string): Promise<ReviewRequestView[]> {
-  const rows = await env.DB.prepare(
+function reviewRequestsStatement(db: D1Database, changeSetId: string): D1PreparedStatement {
+  return db.prepare(
     `SELECT rr.principal, rr.requested_by, rr.requested_at, u.login AS user_login, a.name AS agent_name
        FROM change_review_requests rr
        LEFT JOIN users u ON rr.principal = 'user:' || u.id
        LEFT JOIN agents a ON rr.principal = 'agent:' || a.id
       WHERE rr.change_set_id = ?1
       ORDER BY rr.requested_at DESC, rr.principal`,
-  ).bind(changeSetId).all<ReviewRequestRow>();
+  ).bind(changeSetId);
+}
+
+export async function listReviewRequests(env: Env, changeSetId: string): Promise<ReviewRequestView[]> {
+  const rows = await reviewRequestsStatement(env.DB, changeSetId).all<ReviewRequestRow>();
   return (rows.results ?? []).map(requestView);
 }
 
@@ -301,7 +314,27 @@ export async function suggestedReviewers(
   currentHeadSha: string | null,
 ): Promise<SuggestedReviewer[]> {
   const paths = [...new Set(changedPaths)].slice(0, 2_000);
-  const rows = await env.DB.prepare(
+  const rows = await suggestedReviewerStatement(env.DB, changeSetId, paths, authorPrincipal, currentHeadSha).all<SuggestedReviewerRow>();
+  return eligibleSuggestedReviewers(env, repo, rows.results ?? []);
+}
+
+interface SuggestedReviewerRow {
+  principal: string;
+  user_login: string | null;
+  agent_name: string | null;
+  kind: 'user' | 'agent';
+  reason: SuggestedReviewer['reason'];
+  reviewed_paths: number;
+}
+
+function suggestedReviewerStatement(
+  db: D1Database,
+  changeSetId: string,
+  paths: readonly string[],
+  authorPrincipal: string | null,
+  currentHeadSha: string | null,
+): D1PreparedStatement {
+  return db.prepare(
     `WITH reviewed AS (
        SELECT r.principal, COUNT(DISTINCT f.path) AS reviewed_paths, MAX(r.updated_at) AS reviewed_at
          FROM change_review_files f
@@ -335,16 +368,16 @@ export async function suggestedReviewers(
       ORDER BY (q.principal IS NOT NULL) DESC, COALESCE(v.reviewed_paths, 0) DESC,
                MAX(COALESCE(q.requested_at, 0), COALESCE(v.reviewed_at, 0)) DESC
       LIMIT ${REVIEW_LIMITS.candidatesMax}`,
-  ).bind(changeSetId, JSON.stringify(paths), authorPrincipal, currentHeadSha).all<{
-    principal: string;
-    user_login: string | null;
-    agent_name: string | null;
-    kind: 'user' | 'agent';
-    reason: SuggestedReviewer['reason'];
-    reviewed_paths: number;
-  }>();
+  ).bind(changeSetId, JSON.stringify(paths), authorPrincipal, currentHeadSha);
+}
+
+async function eligibleSuggestedReviewers(
+  env: Env,
+  repo: RepoRow,
+  rows: SuggestedReviewerRow[],
+): Promise<SuggestedReviewer[]> {
   const out: SuggestedReviewer[] = [];
-  for (const row of rows.results ?? []) {
+  for (const row of rows) {
     if (!row.user_login && !row.agent_name) continue;
     if (!(await reviewerHasWriteAccess(env, repo, row.principal))) continue;
     out.push({
@@ -359,20 +392,31 @@ export async function suggestedReviewers(
   return out;
 }
 
+export async function reviewPageReviewers(
+  env: Env,
+  repo: RepoRow,
+  changeSetId: string,
+  changedPaths: readonly string[],
+  authorPrincipal: string | null,
+  currentHeadSha: string | null,
+): Promise<{ requested: ReviewRequestView[]; suggested: SuggestedReviewer[] }> {
+  const paths = [...new Set(changedPaths)].slice(0, 2_000);
+  const [requestRows, suggestionRows] = await env.DB.batch([
+    reviewRequestsStatement(env.DB, changeSetId),
+    suggestedReviewerStatement(env.DB, changeSetId, paths, authorPrincipal, currentHeadSha),
+  ]);
+  return {
+    requested: ((requestRows?.results ?? []) as ReviewRequestRow[]).map(requestView),
+    suggested: await eligibleSuggestedReviewers(env, repo, (suggestionRows?.results ?? []) as SuggestedReviewerRow[]),
+  };
+}
+
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function authorView(row: PacketChangeRow): AuthorView {
-  const agent = agentMetaOf(row.agent_meta);
-  if (agent) {
-    return { principal: `agent:${agent.id}`, kind: 'agent', login: row.author_login, agent, modelFamily: row.author_family, modelFamilyEvidence: modelFamilyEvidence(row.author_family, false) };
-  }
   return {
-    principal: row.author_id ? `user:${row.author_id}` : null,
-    kind: 'user',
+    ...reviewAuthorSelection(row.agent_meta, row.author_id, row.author_family),
     login: row.author_login,
-    agent: null,
-    modelFamily: HUMAN_MODEL_FAMILY,
-    modelFamilyEvidence: modelFamilyEvidence(HUMAN_MODEL_FAMILY, true),
   };
 }
 
@@ -386,14 +430,6 @@ export async function changeAuthorPrincipal(env: Env, repoId: string, number: nu
   return agent ? `agent:${agent.id}` : row.author_id ? `user:${row.author_id}` : null;
 }
 
-const LEVEL_RANK: Record<EvidenceLevel, number> = { declared: 0, authenticated: 1, verified: 2 };
-
-/** The weaker of two evidence levels; null when either side has no family. */
-function weaker(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
-  if (a === null || b === null) return null;
-  return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
-}
-
 function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorView, 'modelFamily' | 'modelFamilyEvidence'>): ReviewView {
   const evidence = modelFamilyEvidence(r.model_family, r.agent_id === null);
   return {
@@ -403,7 +439,7 @@ function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorVie
     modelFamily: r.model_family,
     modelFamilyEvidence: evidence,
     differentFamily: differentFamily(r.model_family, author.modelFamily),
-    differentFamilyEvidence: weaker(evidence, author.modelFamilyEvidence),
+    differentFamilyEvidence: weakerEvidence(evidence, author.modelFamilyEvidence),
     verdict: r.verdict,
     headSha: r.head_sha,
     current: r.head_sha === headSha,
@@ -444,8 +480,9 @@ function packetStatements(db: D1Database, repoId: string, number: number): D1Pre
       .prepare(
         `SELECT c.id, c.number, c.state, c.merge_policy, c.base_ref, c.head_sha, c.author_id, u.login AS author_login, c.agent_meta,
                 (SELECT a.model_family FROM agents a WHERE a.id = json_extract(c.agent_meta, '$.agentId')) AS author_family,
-                ${reviewFactsColumns('c')}
+                ${reviewFactsColumns('c', 'rp')}
            FROM change_sets c LEFT JOIN users u ON u.id = c.author_id
+           LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id
           WHERE c.repo_id = ?1 AND c.number = ?2`,
       )
       .bind(repoId, number),
@@ -579,6 +616,10 @@ export function getReviewPacket(env: Env, repo: RepoRow, rawNumber: string): Pro
 
 export interface ReviewPolicyView {
   requiredReviews: number;
+  guideRequired: boolean;
+  blockingFindings: 'none' | 'high-confirmed';
+  dangerAckRequired: boolean;
+  nudgeAfterMinutes: number | null;
   /** False while the repo has never set a policy (no review requirement). */
   configured: boolean;
   updatedBy: string | null;
@@ -587,16 +628,39 @@ export interface ReviewPolicyView {
 
 interface PolicyRow {
   required_reviews: number;
+  guide_required: number;
+  blocking_findings: string;
+  danger_ack_required: number;
+  nudge_after_minutes: number | null;
   updated_by_login: string | null;
   updated_at: number;
 }
 
-const POLICY_SELECT = `SELECT p.required_reviews, u.login AS updated_by_login, p.updated_at
+const POLICY_SELECT = `SELECT p.required_reviews, p.guide_required, p.blocking_findings,
+         p.danger_ack_required, p.nudge_after_minutes, u.login AS updated_by_login, p.updated_at
   FROM review_policies p LEFT JOIN users u ON u.id = p.updated_by WHERE p.repo_id = ?1`;
 
 function policyView(row: PolicyRow | null | undefined): ReviewPolicyView {
-  if (!row) return { requiredReviews: 0, configured: false, updatedBy: null, updatedAt: null };
-  return { requiredReviews: Number(row.required_reviews) || 0, configured: true, updatedBy: row.updated_by_login, updatedAt: iso(row.updated_at) };
+  if (!row) return {
+    requiredReviews: 0,
+    guideRequired: false,
+    blockingFindings: 'high-confirmed',
+    dangerAckRequired: false,
+    nudgeAfterMinutes: null,
+    configured: false,
+    updatedBy: null,
+    updatedAt: null,
+  };
+  return {
+    requiredReviews: Number(row.required_reviews) || 0,
+    guideRequired: Boolean(row.guide_required),
+    blockingFindings: row.blocking_findings === 'none' ? 'none' : 'high-confirmed',
+    dangerAckRequired: Boolean(row.danger_ack_required),
+    nudgeAfterMinutes: row.nudge_after_minutes,
+    configured: true,
+    updatedBy: row.updated_by_login,
+    updatedAt: iso(row.updated_at),
+  };
 }
 
 /** GET review-policy */
@@ -604,24 +668,49 @@ export async function getReviewPolicy(env: Env, repo: RepoRow): Promise<ServiceR
   return { ok: true, value: policyView(await env.DB.prepare(POLICY_SELECT).bind(repo.id).first<PolicyRow>()) };
 }
 
-/** PUT review-policy {requiredReviews} (repo admins). One batch: upsert, audit row, read-back. */
+/** PUT review-policy (repo admins). One batch: upsert, audit row, read-back. */
 export async function setReviewPolicy(env: Env, repo: RepoRow, actor: Actor, input: unknown): Promise<ServiceResult<ReviewPolicyView>> {
-  const parsed = objectBody(input, '{requiredReviews}');
+  const parsed = objectBody(input, 'a review policy object');
   if (!parsed.ok) return parsed;
-  const n = parsed.value.requiredReviews;
+  const body = parsed.value;
+  const allowed = ['requiredReviews', 'guideRequired', 'blockingFindings', 'dangerAckRequired', 'nudgeAfterMinutes'];
+  if (Object.keys(body).some((key) => !allowed.includes(key))) {
+    return fail(400, 'provide one or more of requiredReviews, guideRequired, blockingFindings, dangerAckRequired, nudgeAfterMinutes', 'INVALID_BODY');
+  }
+  if (Object.keys(body).length === 0) return fail(422, 'at least one review policy field is required', 'POLICY_FIELD_REQUIRED');
+  const old = await env.DB.prepare(POLICY_SELECT).bind(repo.id).first<PolicyRow>();
+  const n = body.requiredReviews === undefined ? old?.required_reviews ?? 0 : body.requiredReviews;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > REVIEW_LIMITS.requiredMax) {
     return fail(400, `requiredReviews must be an integer from 0 to ${REVIEW_LIMITS.requiredMax}`, 'INVALID_REQUIRED_REVIEWS');
+  }
+  const guideRequired = body.guideRequired === undefined ? Boolean(old?.guide_required) : body.guideRequired;
+  if (typeof guideRequired !== 'boolean') return fail(400, 'guideRequired must be a boolean', 'INVALID_GUIDE_REQUIRED');
+  const blockingFindings = body.blockingFindings === undefined ? old?.blocking_findings ?? 'high-confirmed' : body.blockingFindings;
+  if (blockingFindings !== 'none' && blockingFindings !== 'high-confirmed') {
+    return fail(400, 'blockingFindings must be "none" or "high-confirmed"', 'INVALID_BLOCKING_FINDINGS');
+  }
+  const dangerAckRequired = body.dangerAckRequired === undefined ? Boolean(old?.danger_ack_required) : body.dangerAckRequired;
+  if (typeof dangerAckRequired !== 'boolean') return fail(400, 'dangerAckRequired must be a boolean', 'INVALID_DANGER_ACK_REQUIRED');
+  const nudgeAfterMinutes = body.nudgeAfterMinutes === undefined ? old?.nudge_after_minutes ?? null : body.nudgeAfterMinutes;
+  if (nudgeAfterMinutes !== null &&
+      (typeof nudgeAfterMinutes !== 'number' || !Number.isInteger(nudgeAfterMinutes) || nudgeAfterMinutes < 15 || nudgeAfterMinutes > 10080)) {
+    return fail(400, 'nudgeAfterMinutes must be null or an integer from 15 to 10080', 'INVALID_NUDGE_AFTER_MINUTES');
   }
   const now = Date.now();
   const [, , read] = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO review_policies (repo_id, required_reviews, updated_by, updated_at) VALUES (?1, ?2, ?3, ?4)
-       ON CONFLICT (repo_id) DO UPDATE SET required_reviews = excluded.required_reviews, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
-    ).bind(repo.id, n, actor.user.id, now),
+      `INSERT INTO review_policies (repo_id, required_reviews, guide_required, blocking_findings, danger_ack_required, nudge_after_minutes, updated_by, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+       ON CONFLICT (repo_id) DO UPDATE SET required_reviews = excluded.required_reviews, guide_required = excluded.guide_required,
+         blocking_findings = excluded.blocking_findings, danger_ack_required = excluded.danger_ack_required,
+         nudge_after_minutes = excluded.nudge_after_minutes,
+         updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+    ).bind(repo.id, n, guideRequired ? 1 : 0, blockingFindings, dangerAckRequired ? 1 : 0, nudgeAfterMinutes, actor.user.id, now),
     env.DB.prepare(
       `INSERT INTO events (id, type, payload, processed_at, created_at)
-       VALUES (?1, 'review_policy.updated', json_object('repoId', ?2, 'repo', ?3, 'requiredReviews', ?4, 'actor', ?5), ?6, ?6)`,
-    ).bind(crypto.randomUUID(), repo.id, `${repo.owner_login}/${repo.name}`, n, actor.user.login, now),
+       VALUES (?1, 'review_policy.updated', json_object('repoId', ?2, 'repo', ?3, 'requiredReviews', ?4,
+         'guideRequired', ?5, 'blockingFindings', ?6, 'dangerAckRequired', ?7, 'nudgeAfterMinutes', ?8, 'actor', ?9), ?10, ?10)`,
+    ).bind(crypto.randomUUID(), repo.id, `${repo.owner_login}/${repo.name}`, n, guideRequired, blockingFindings, dangerAckRequired, nudgeAfterMinutes, actor.user.login, now),
     env.DB.prepare(POLICY_SELECT).bind(repo.id),
   ]);
   return { ok: true, value: policyView((read?.results as PolicyRow[] | undefined)?.[0]) };
@@ -666,12 +755,14 @@ interface ReviewTargetRow {
   id: string;
   number: number;
   state: string;
+  base_sha: string | null;
   head_sha: string | null;
   author_id: string | null;
   agent_meta: string | null;
   merge_policy: string;
   base_ref: string;
   reviewer_family: string | null;
+  nudge_after_minutes: number | null;
 }
 
 export interface ReviewOutcome {
@@ -699,9 +790,11 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     const db = cx.env.DB;
     const target = await db
       .prepare(
-        `SELECT c.id, c.number, c.state, c.head_sha, c.author_id, c.agent_meta, c.merge_policy, c.base_ref,
+        `SELECT c.id, c.number, c.state, c.base_sha, c.head_sha, c.author_id, c.agent_meta, c.merge_policy, c.base_ref,
+                p.nudge_after_minutes,
                 (SELECT a.model_family FROM agents a WHERE a.id = ?3) AS reviewer_family
-           FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2`,
+           FROM change_sets c LEFT JOIN review_policies p ON p.repo_id = c.repo_id
+          WHERE c.repo_id = ?1 AND c.number = ?2`,
       )
       .bind(cx.repo.id, number, me.agentId)
       .first<ReviewTargetRow>();
@@ -722,6 +815,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
       return fail(409, 'self-review: the author of a change cannot review it; another principal must review', 'SELF_REVIEW');
     }
     const headSha = target.head_sha;
+    const coverageKeys = await reviewMapAckKeys(target.id, target.base_sha, headSha);
     const family = me.kind === 'agent' ? target.reviewer_family : HUMAN_MODEL_FAMILY;
     // A human other than the author answers for every open escalation by approving the current head.
     const humanResolves = p.verdict === 'approve' && me.kind === 'user' && me.userId !== target.author_id;
@@ -752,19 +846,70 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     } else {
       effects.push(escalation(`'reviewer-disagreement'`, otherVerdict('request-changes')));
     }
+    const packetQueries = packetStatements(db, cx.repo.id, number);
+    const dangerQueries = [
+      db.prepare('SELECT danger_ack_required FROM review_policies WHERE repo_id = ?1').bind(cx.repo.id),
+      db
+        .prepare(
+          `SELECT unit_key FROM review_acks
+            WHERE (change_set_id = ?1 OR change_set_id IN (${reviewParentChangeIdsSql('?1')}))
+              AND principal = ?2 AND unit_key IN (SELECT value FROM json_each(?3))`,
+        )
+        .bind(target.id, me.id, JSON.stringify(coverageKeys?.scrutinize ?? [])),
+    ];
     const results = await db.batch([
       db
         .prepare(
           `INSERT INTO change_reviews (id, repo_id, change_set_id, head_sha, principal, user_id, user_login, agent_id, agent_name, token_id,
-                                       model_family, verdict, body, created_at, updated_at)
-           SELECT ?1, c.repo_id, c.id, c.head_sha, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13
+                                       model_family, verdict, body, coverage, created_at, updated_at)
+           SELECT ?1, c.repo_id, c.id, c.head_sha, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                  CASE WHEN ?13 = 1 THEN json_object(
+                    'units', ?14,
+                    'acked', (SELECT COUNT(DISTINCT a.unit_key) FROM review_acks a
+                      WHERE (a.change_set_id = c.id OR a.change_set_id IN (${reviewParentChangeIdsSql('c.id')}))
+                        AND a.principal = ?4 AND a.unit_key IN (SELECT value FROM json_each(?15))),
+                    'scrutinizeUnacked', (SELECT COUNT(*) FROM json_each(?16) units
+                      WHERE NOT EXISTS (SELECT 1 FROM review_acks a
+                        WHERE (a.change_set_id = c.id OR a.change_set_id IN (${reviewParentChangeIdsSql('c.id')}))
+                          AND a.principal = ?4 AND a.unit_key = units.value))
+                  ) ELSE NULL END, ?17, ?17
              FROM change_sets c WHERE c.id = ?2 AND c.head_sha = ?3 AND c.state IN ('open', 'conflicted')
+               AND NOT EXISTS (
+                 SELECT 1 FROM review_policies policy
+                  WHERE policy.repo_id = c.repo_id AND policy.danger_ack_required = 1 AND ?11 = 'approve'
+                    AND (?13 = 0 OR EXISTS (
+                      SELECT 1 FROM json_each(?16) units
+                       WHERE NOT EXISTS (
+                         SELECT 1 FROM review_acks a
+                          WHERE (a.change_set_id = c.id OR a.change_set_id IN (${reviewParentChangeIdsSql('c.id')}))
+                            AND a.principal = ?4 AND a.unit_key = units.value
+                       )
+                    ))
+               )
            ON CONFLICT (change_set_id, head_sha, principal) DO UPDATE SET
              verdict = excluded.verdict, body = excluded.body, model_family = excluded.model_family, token_id = excluded.token_id,
-             user_login = excluded.user_login, agent_name = excluded.agent_name, updated_at = excluded.updated_at,
+             user_login = excluded.user_login, agent_name = excluded.agent_name, coverage = excluded.coverage, updated_at = excluded.updated_at,
              carried_from_head = NULL, carried_from_review = NULL`,
         )
-        .bind(crypto.randomUUID(), target.id, headSha, me.id, me.userId, me.login, me.agentId, me.agentName, me.tokenId, family, p.verdict, p.body, now),
+        .bind(
+          crypto.randomUUID(),
+          target.id,
+          headSha,
+          me.id,
+          me.userId,
+          me.login,
+          me.agentId,
+          me.agentName,
+          me.tokenId,
+          family,
+          p.verdict,
+          p.body,
+          coverageKeys ? 1 : 0,
+          coverageKeys?.units.length ?? 0,
+          JSON.stringify(coverageKeys?.units ?? []),
+          JSON.stringify(coverageKeys?.scrutinize ?? []),
+          now,
+        ),
       ...(p.ship
         ? [
             db
@@ -776,16 +921,36 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
           ]
         : []),
       ...effects,
-      ...packetStatements(db, cx.repo.id, number),
+      ...packetQueries,
+      ...dangerQueries,
     ]);
-    const read = packetRead(results, 1 + (p.ship ? 1 : 0) + effects.length);
+    const packetOffset = 1 + (p.ship ? 1 : 0) + effects.length;
+    const read = packetRead(results, packetOffset);
     const mine = read?.reviews.find((r) => r.principal === me.id && r.head_sha === headSha && r.updated_at === now);
     if (!read || !mine) {
+      if (read?.change.head_sha === headSha && p.verdict === 'approve') {
+        const dangerOffset = packetOffset + packetQueries.length;
+        const dangerRequired = Boolean((results[dangerOffset]?.results?.[0] as { danger_ack_required?: number } | undefined)?.danger_ack_required);
+        if (dangerRequired) {
+          const acked = new Set((results[dangerOffset + 1]?.results ?? []).map((row) => (row as { unit_key: string }).unit_key));
+          const unacked = coverageKeys?.scrutinize.filter((key) => !acked.has(key)).slice(0, 50) ?? [];
+          if (!coverageKeys || unacked.length > 0) {
+            return {
+              ok: false,
+              status: 409,
+              error: 'Fetch the review guide and acknowledge all scrutinize units before approving.',
+              code: 'DANGER_UNACKED',
+              details: { unacked },
+            };
+          }
+        }
+      }
       return fail(409, "the change's head moved or the change closed while the review was recorded; review the current head", 'HEAD_MOVED');
     }
     if (p.verdict === 'approve') await storeReviewFingerprint(cx.env, cx.repo, { base: target.base_ref }, headSha, mine.id);
     let packet = buildPacket(await withRecordedEscalations(cx.env, cx.repo.id, read));
     packet = await proceedPerPolicy(cx, number, packet);
+    if (target.nudge_after_minutes !== null) await enqueueReviewNudge(cx.env, cx.repo.id, target.id, headSha);
     publishRepoEvent(cx.env, cx.repo.id, { type: 'review.submitted', changeNumber: number }, cx.waitUntil);
     return { ok: true, value: { created: mine.created_at === now, review: reviewView(mine, headSha, packet.author), packet } };
   });
@@ -933,25 +1098,6 @@ export function resolveEscalation(cx: ChangeContext, rawNumber: string, id: stri
 // Assignment
 // ---------------------------------------------------------------------------
 
-interface CandidateRow {
-  id: string;
-  name: string;
-  owner_login: string;
-  model_family: string | null;
-  reviewed: number;
-}
-
-export interface ReviewerCandidate {
-  principal: string;
-  agent: { id: string; name: string; owner: string };
-  modelFamily: string | null;
-  modelFamilyEvidence: EvidenceLevel | null;
-  differentFamily: boolean;
-  differentFamilyEvidence: EvidenceLevel | null;
-  eligible: boolean;
-  ineligibleReason?: 'author' | 'already-reviewed';
-}
-
 export interface Assignment {
   number: number;
   headSha: string | null;
@@ -1004,22 +1150,8 @@ export function assignReviewer(cx: ChangeContext, rawNumber: string, input: unkn
     const change = (changeRes?.results as PacketChangeRow[] | undefined)?.[0];
     if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const author = authorView(change);
-    const candidates: ReviewerCandidate[] = ((candRes?.results as CandidateRow[] | undefined) ?? []).map((a) => {
-      const principal = `agent:${a.id}`;
-      const ineligible = principal === author.principal ? 'author' : a.reviewed ? 'already-reviewed' : null;
-      return {
-        principal,
-        agent: { id: a.id, name: a.name, owner: a.owner_login },
-        modelFamily: a.model_family,
-        modelFamilyEvidence: modelFamilyEvidence(a.model_family, false),
-        differentFamily: differentFamily(a.model_family, author.modelFamily),
-        differentFamilyEvidence: weaker(modelFamilyEvidence(a.model_family, false), author.modelFamilyEvidence),
-        eligible: ineligible === null,
-        ...(ineligible ? { ineligibleReason: ineligible } : {}),
-      };
-    });
-    const eligible = candidates.filter((c) => c.eligible);
-    const assigned = eligible.find((c) => c.differentFamily) ?? eligible[0] ?? null;
+    const candidates = reviewerCandidates(author, (candRes?.results as ReviewerCandidateRow[] | undefined) ?? []);
+    const assigned = selectReviewer(candidates);
     return {
       ok: true,
       value: {
@@ -1145,8 +1277,8 @@ export async function pendingReviews(
     return fail(400, 'ready must be true or false', 'INVALID_READY');
   }
   const { results } = await env.DB.prepare(
-    `SELECT c.id, c.number, c.title, c.state, c.base_ref, c.head_sha, c.merge_policy, ${reviewFactsColumns('c')}
-       FROM change_sets c
+    `SELECT c.id, c.number, c.title, c.state, c.base_ref, c.head_sha, c.merge_policy, ${reviewFactsColumns('c', 'rp')}
+       FROM change_sets c LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id
       WHERE c.repo_id = ?1 AND c.number < ?2 AND ${pendingCondition('c')}
       ORDER BY c.number DESC LIMIT ?3`,
   )
@@ -1283,8 +1415,9 @@ export async function pendingAcross(
                   SELECT 1 FROM change_review_requests rr WHERE rr.change_set_id = c.id AND rr.principal = ?5
                 ) THEN 1 ELSE 0 END AS requested_for_viewer,
                 (SELECT a.model_family FROM agents a WHERE a.id = json_extract(c.agent_meta, '$.agentId')) AS author_family,
-                ${reviewFactsColumns('c')}
+                ${reviewFactsColumns('c', 'rp')}
            FROM change_sets c LEFT JOIN users u ON u.id = c.author_id
+           LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id
           WHERE c.id IN (SELECT x.id FROM json_each(?1) j
                            JOIN change_sets x ON x.id IN (SELECT y.id FROM change_sets y
                                                            WHERE y.repo_id = j.value AND ${LIVE_FOR_REVIEW('y')} ${after}

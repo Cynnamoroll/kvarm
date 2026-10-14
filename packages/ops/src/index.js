@@ -22,6 +22,7 @@
  * @property {'path' | 'query' | 'body'} in
  * @property {string} description
  * @property {boolean} [required]
+ * @property {boolean} [nullable]
  * @property {boolean} [positional] CLI positional argument (in declaration order) instead of a --flag
  * @property {readonly string[]} [enum]
  * @property {'repo'} [format] `owner/name`, expanded to two encoded path segments
@@ -710,9 +711,87 @@ export const OPERATIONS = Object.freeze([
     description: 'Set how many approving reviews of the current head (humans or agents, distinct, not the author) a change needs (repo admins only).',
     method: 'PUT',
     path: '/repos/{repo}/review-policy',
-    params: [REPO, body('requiredReviews', 'integer', 'Required approving reviews (0-10)', { required: true, positional: true })],
+    params: [
+      REPO,
+      body('requiredReviews', 'integer', 'Required approving reviews (0-10)', { positional: true }),
+      body('guideRequired', 'boolean', 'Require a guide for the current head'),
+      body('blockingFindings', 'string', 'Which open findings block publication', { enum: ['none', 'high-confirmed'] }),
+      body('dangerAckRequired', 'boolean', 'Require acknowledgements for scrutinize coverage before approval'),
+      body('nudgeAfterMinutes', 'integer', 'Delay before review reminders (15-10080 minutes); null disables reminders', { nullable: true }),
+    ],
   }),
-
+  define({
+    name: 'get_review_analytics',
+    command: ['review', 'analytics'],
+    family: 'reviews',
+    description: 'Finding outcomes grouped by filer model family and its evidence level (known agent families are declared), plus review timing and guide-coverage medians for recent changes.',
+    method: 'GET',
+    path: '/repos/{repo}/review/analytics',
+    params: [REPO, query('days', 'integer', 'Window of change updates to include (1-180 days; default 30)')],
+  }),
+  define({
+    name: 'get_review_guide',
+    command: ['review', 'guide'],
+    family: 'reviews',
+    description: 'Get deterministic change coverage, the guide and acknowledgements; include hunks only when requested.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/review-guide',
+    params: [REPO, CHANGE, query('since', 'string', 'Only include units added since this commit SHA, or use parent for the focused diff'), query('unacked', 'boolean', 'Only return units not acknowledged by you'), query('include', 'string', 'Include inline hunk details', { enum: ['hunks'] })],
+  }),
+  define({
+    name: 'get_review_impact',
+    command: ['review', 'impact'],
+    family: 'reviews',
+    description: 'Show changed-file consumers, test consumers and import evidence for this change.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/review/impact',
+    params: [REPO, CHANGE],
+  }),
+  define({
+    name: 'submit_review_guide',
+    command: ['review', 'submit-guide'],
+    family: 'reviews',
+    description: 'Submit or replace a guide validated against the current coverage map.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/review-guide',
+    params: [REPO, CHANGE, body('headSha', 'string', 'Current 40-character head SHA', { required: true, positional: true }), body('guide', 'json', 'Guide chapters, tiers and contracts', { required: true })],
+  }),
+  define({
+    name: 'ack_review_units',
+    command: ['review', 'ack'],
+    family: 'reviews',
+    description: 'Acknowledge or unacknowledge up to 500 coverage keys or one guide chapter.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/review-acks',
+    params: [REPO, CHANGE, body('headSha', 'string', 'Current 40-character head SHA', { required: true, positional: true }), body('keys', 'json', 'Coverage unit keys to acknowledge'), body('chapter', 'string', 'A chapter id to acknowledge'), body('unack', 'boolean', 'Remove acknowledgements instead of adding them')],
+  }),
+  define({
+    name: 'submit_findings',
+    command: ['finding', 'submit'],
+    family: 'reviews',
+    description: 'Submit up to 50 findings tied to the current head and coverage units.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/findings',
+    params: [REPO, CHANGE, body('headSha', 'string', 'Current 40-character head SHA', { required: true, positional: true }), body('findings', 'json', 'Findings with path, line, category, severity, confidence and title', { required: true })],
+  }),
+  define({
+    name: 'list_findings',
+    command: ['finding', 'list'],
+    family: 'reviews',
+    description: 'List findings for a change, with outdated and blocking state.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/findings',
+    params: [REPO, CHANGE, query('status', 'string', 'Filter by finding status', { enum: ['all', 'open', 'resolved', 'irrelevant', 'wont-fix'] }), LIMIT(100), CURSOR],
+  }),
+  define({
+    name: 'update_finding',
+    command: ['finding', 'update'],
+    family: 'reviews',
+    description: 'Resolve, reopen, dismiss or mark a finding as wont-fix.',
+    method: 'PATCH',
+    path: '/repos/{repo}/changes/{number}/findings/{id}',
+    params: [REPO, CHANGE, pathArg('id', 'Finding id'), body('status', 'string', 'New finding status', { required: true, positional: true, enum: ['open', 'resolved', 'irrelevant', 'wont-fix'] }), body('note', 'string', 'Resolution note')],
+  }),
   // --- tasks: work Kvarm dispatches to agents --------------------------------
   define({
     name: 'list_tasks',
@@ -1778,6 +1857,7 @@ function checkValue(p, v) {
   const fail = (/** @type {string} */ what) => {
     throw new OperationInputError(`argument "${p.name}" must be ${what}`, p.name);
   };
+  if (v === null && p.nullable) return null;
   switch (p.type) {
     case 'string':
       if (typeof v !== 'string') fail('a string');
@@ -1819,7 +1899,7 @@ export function buildRequest(op, args) {
   let hasBody = false;
   for (const p of op.params) {
     const raw = args[p.name];
-    if (raw === undefined || raw === null) {
+    if (raw === undefined || (raw === null && !p.nullable)) {
       if (p.required) throw new OperationInputError(`argument "${p.name}" is required (${p.description})`, p.name);
       continue;
     }

@@ -513,10 +513,11 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
       db
         .prepare(
           `SELECT c.id AS c_id, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.base_ref AS c_base,
-                  a.active AS a_active, ${ENTRY_COLUMNS}, ${reviewFactsColumns('c')}
+                  a.active AS a_active, ${ENTRY_COLUMNS}, ${reviewFactsColumns('c', 'rp')}
              FROM change_sets c
              LEFT JOIN merge_queue q ON q.change_set_id = c.id AND q.active = 1
              LEFT JOIN merge_admission a ON a.repo_id = c.repo_id
+             LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id
             WHERE c.repo_id = ?1 AND c.number = ?2`,
         )
         .bind(cx.repo.id, number),
@@ -924,12 +925,13 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
       .prepare(
         `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title,
                 c.head_ref AS c_head_ref, c.base_ref AS c_base_ref,
-                ${reviewFactsColumns('c')},
+                ${reviewFactsColumns('c', 'rp')},
                 CASE WHEN q.tree_sha IS NOT NULL THEN
                   (SELECT head_sha FROM (SELECT j.head_sha, MIN(j.created_at) FROM ci_jobs j INDEXED BY idx_ci_jobs_tree
                     WHERE j.repo_id = q.repo_id AND j.tree_sha = q.tree_sha AND j.change_set_id = q.change_set_id))
                 END AS ci_staged
            FROM merge_queue q JOIN change_sets c ON c.id = q.change_set_id
+           LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id
           WHERE q.id IN (${WINDOW_IDS})
           ORDER BY q.seq`,
       )
@@ -2267,7 +2269,8 @@ async function publishChain(
           .bind(c.e.id, c.plan.generation, deps.now(), repo.id),
         intentInsertStatement(db, candidate),
         db
-          .prepare(`SELECT c.id, c.number, c.state, c.merge_policy, c.head_sha, c.base_ref, ${reviewFactsColumns('c')} FROM change_sets c WHERE c.id = ?1`)
+          .prepare(`SELECT c.id, c.number, c.state, c.merge_policy, c.head_sha, c.base_ref, ${reviewFactsColumns('c', 'rp')}
+            FROM change_sets c LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id WHERE c.id = ?1`)
           .bind(c.e.change_set_id),
         headWorkspacePinsStatement(db, repo.id, branchRef(c.e.c_head_ref)),
         ...enqueuerFactsStatements(db, repo, c.e),
