@@ -107,14 +107,17 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
     <ul>${raw(branchList || '<li class="muted">loading…</li>')}</ul>
   </details>
 </nav>
-${raw(crumbs)}
-${raw(body)}
+<div class="k-repo-content">
+  ${raw(crumbs)}
+  ${raw(body)}
+</div>
 `;
   return layout(
     env,
     {
       title: opts.title ?? `${repo.owner_login}/${repo.name}`,
       userLogin,
+      contentInset: false,
       script: COPY_JS,
       head: opts.head,
       repos: [{ ownerLogin: repo.owner_login, name: repo.name }],

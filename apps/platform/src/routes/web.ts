@@ -150,7 +150,7 @@ web.get('/', async (c) => {
   const mcpUrl = `${origin}/mcp`;
   const approvalRows = approvals?.map(
     (approval) => html`<a class="k-approval-row" href="/fleet#approvals">
-      <span class="k-mono">${approval.repo}</span><span>${approval.command}</span>
+      <span class="k-approval-repo hud">${approval.repo}</span><span class="k-approval-command">${approval.command}</span>
     </a>`,
   );
   const repoRows = repos
@@ -193,7 +193,7 @@ web.get('/', async (c) => {
         <div class="k-col">
           <section class="panel">
             <div class="panel-head hud"><b>Needs you</b><span>${pendingCount ?? 'Unavailable'}</span></div>
-            <div class="k-panel-body">${raw(needsPanel)}</div>
+            <div class="k-panel-body k-approval-list">${raw(needsPanel)}</div>
           </section>
           <section class="panel">
             <div class="panel-head hud"><b>Your repositories</b><span>${repos.length}</span></div>

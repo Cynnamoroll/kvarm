@@ -20,6 +20,7 @@ export interface PageOptions {
   stylesheets?: string[];
   bodyClass?: string;
   landing?: boolean;
+  contentInset?: boolean;
   active?: 'home' | 'fleet' | 'tokens';
   needsYouCount?: number;
   runningCount?: number;
@@ -44,7 +45,7 @@ export function csrfInput(token: string | null | undefined): string {
 }
 
 export function layout(env: Env, opts: PageOptions, body: string): string {
-  return renderShell(env, opts, body);
+  return renderShell(env, { ...opts, contentInset: opts.contentInset ?? (opts.active !== 'home' && !opts.landing) }, body);
 }
 
 export interface AppLayoutOptions extends PageOptions {
@@ -88,8 +89,8 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
   const needsYou = opts.needsYouCount === undefined ? '' : html`<b>${opts.needsYouCount}</b>`;
   const running = opts.runningCount === undefined ? '' : html`<span class="n">${opts.runningCount}</span>`;
   const landingNav = opts.landing
-    ? html`<nav class="k-landing-nav" aria-label="On this page">
-        <a href="#how">How it works</a><a href="#product">Product</a><a href="#agents">Agents</a>
+    ? html`<nav class="nav hud" aria-label="Primary">
+        <a href="#how">How it works</a><a href="#product">Product</a><a href="#agents">Any agent</a>
       </nav>`
     : '';
   const mode = opts.landing
@@ -120,10 +121,21 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
           <a class="k-me" href="/auth/logout" aria-label="Sign out">${initial}</a>
         </div>
       </header>`
-    : html`<header class="k-top k-top-slim">
-        <a class="brand" href="/" aria-label="${name} home"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><img class="wordmark-sm" src="/assets/brand/wordmark.svg" alt="" /></a>
-        ${raw(landingNav)}<div class="k-right">${raw(mode)}<a class="btn btn-primary k-signin" href="/auth/login">Sign in</a></div>
-      </header>`;
+    : opts.landing
+      ? html`<header class="topbar">
+          <div class="wrap topbar-in">
+            <a class="brand" href="#top" aria-label="${name} home"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><span class="wordmark-sm">KVARM</span></a>
+            ${raw(landingNav)}
+            ${raw(mode)}
+            <a class="btn btn-primary btn-sm m-human" href="/auth/login">Sign in</a>
+            <a class="btn btn-hatch btn-sm m-agent" href="#connect">Connect</a>
+          </div>
+        </header>`
+      : html`<header class="k-top k-top-slim">
+          <a class="brand" href="/" aria-label="${name} home"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><img class="wordmark-sm" src="/assets/brand/wordmark.svg" alt="" /></a>
+          <div class="k-right"><a class="btn btn-primary k-signin" href="/auth/login">Sign in</a></div>
+        </header>`;
+  const pageBody = opts.contentInset ? html`<div class="k-legacy-content">${raw(body)}</div>` : body;
   const content = signedIn
     ? html`<div class="k-shell">
         <aside class="k-rail" aria-label="App">
@@ -135,9 +147,11 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
           ${repoLinks ? raw(html`<div class="k-repos"><h4 class="hud">Repos</h4>${raw(repoLinks)}</div>`) : ''}
           <div class="k-foot"><p class="hud">Signed in via WorkOS</p></div>
         </aside>
-        <main class="k-main" id="main">${raw(body)}</main>
+        <main class="k-main" id="main">${raw(pageBody)}</main>
       </div>`
-    : html`<main class="k-main" id="main">${raw(body)}</main>`;
+    : opts.landing
+      ? body
+      : html`<main class="k-main" id="main">${raw(pageBody)}</main>`;
   const bodyClass = ['k-app', opts.bodyClass].filter(Boolean).join(' ');
 
   return html`<!DOCTYPE html>
@@ -156,7 +170,7 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
 <link rel="apple-touch-icon" href="/assets/brand/apple-touch-icon.png">
 <link rel="manifest" href="/assets/brand/site.webmanifest">
 <meta name="theme-color" content="#050608">
-${previewImage ? html`<meta property="og:image" content="${previewImage}">` : ''}
+${previewImage ? raw(`<meta property="og:image" content="${escapeHtml(previewImage)}">`) : ''}
 ${raw(headStyles)}
 ${raw(opts.head ?? '')}
 <script src="/assets/mode.js" type="module"></script>

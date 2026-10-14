@@ -77,8 +77,12 @@ body.k-app:not(.k-landing) .md h1, body.k-app:not(.k-landing) .md h2, body.k-app
 body.k-app:not(.k-landing) .md img { max-width: 100%; height: auto; }
 body.k-app:not(.k-landing) .md pre, body.k-app:not(.k-landing) .md table { display: block; max-width: 100%; overflow: auto; }
 body.k-app:not(.k-landing) .pager, body.k-app:not(.k-landing) .compare-form, body.k-app:not(.k-landing) .issue-filters, body.k-app:not(.k-landing) .ws-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
-body.k-app:not(.k-landing) .k-approval-row { display: grid; grid-template-columns: minmax(0, .6fr) minmax(0, 1fr); gap: var(--s3); padding: var(--s3) 0; border-bottom: 1px solid var(--hairline); }
-body.k-app:not(.k-landing) .k-approval-row:last-child { border-bottom: 0; }
+body.k-app:not(.k-landing) .k-approval-list { padding: 0; }
+body.k-app:not(.k-landing) .k-approval-list > p { margin: 0; padding: var(--s3); }
+body.k-app:not(.k-landing) .k-approval-row { display: grid; grid-template-columns: minmax(0, .6fr) minmax(0, 1fr); align-items: center; gap: var(--s3); padding: 10px var(--s3); border-top: 1px solid var(--hairline); color: var(--silver); font-size: 13px; }
+body.k-app:not(.k-landing) .k-approval-row:first-child { border-top: 0; }
+body.k-app:not(.k-landing) .k-approval-repo { color: var(--steel); font: 400 var(--t-hud)/1.4 var(--f-hud); overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .k-approval-command { min-width: 0; color: var(--silver); font: 400 12px/1.5 var(--f-mono); overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   body.k-app:not(.k-landing) .repo-head { padding: var(--s4) 0; }
   body.k-app:not(.k-landing) .repo-row, body.k-app:not(.k-landing) .tree-row, body.k-app:not(.k-landing) .commit-row, body.k-app:not(.k-landing) .issue-row, body.k-app:not(.k-landing) .ws-row { align-items: flex-start; flex-direction: column; }

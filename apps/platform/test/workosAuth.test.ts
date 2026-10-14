@@ -722,11 +722,13 @@ describe('home dashboard', () => {
   });
 
   it('renders the signed-out flagship shell and login link without the prototype origin', async () => {
-    const res = await call('/');
+    const res = await call('/', { e: configured() });
     const text = await res.text();
     expect(res.status).toBe(200);
     expect(text).toContain('k-landing');
     expect(text).toContain('href="/auth/login"');
     expect(text).not.toContain('kvarm.dev');
+    expect(text).toContain(`<meta property="og:image" content="${ORIGIN}/assets/brand/og.png">`);
+    expect(text).not.toContain('&lt;meta');
   });
 });
