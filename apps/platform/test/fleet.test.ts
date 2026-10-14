@@ -27,18 +27,20 @@ import { promoteBuild } from '../src/workflows/environmentBuild';
 import { getRepoById } from '../src/db/repos';
 import worker from '../src/index';
 import { environmentBuildEffect } from '../src/services/events';
+import { FakeWorkflow, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = async (login: string): Promise<Actor['user']> => {
+  const id = await seedUserBase(env, login, { workosUserId: `fleet:${login}` });
+  return (await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first<Actor['user']>())!;
+};
+const seedRepo = async (name = 'fleet'): Promise<RepoRow> => {
+  const { id } = await seedRepoBase(env, name, { owner: OWNER, visibility: 'private', register: false });
+  return (await getRepoById(env.DB, id))!;
+};
 
 const baseEnv = cfEnv as unknown as Env;
 const OWNER = 'fleet-owner';
 const scopes: Scope[] = ['read', 'write', 'api'];
-
-class FakeWorkflow {
-  created: string[] = [];
-  async create(options: { id: string }) {
-    this.created.push(options.id);
-    return { id: options.id };
-  }
-}
 
 let env: Env;
 let owner: Actor;
@@ -52,28 +54,6 @@ const starts: Array<{ sandboxId: string; tokenId: string; refs: string[] }> = []
 let oldLinux: SandboxProvider;
 
 const human = (user: Actor['user']): Actor => ({ user, via: 'session', scopes: null });
-
-async function seedUser(login: string): Promise<Actor['user']> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `fleet:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return (await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first<Actor['user']>())!;
-}
-
-async function seedRepo(name = 'fleet'): Promise<RepoRow> {
-  const id = crypto.randomUUID();
-  const artifactsName = `${OWNER}--${name}`;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  return (await getRepoById(env.DB, id))!;
-}
 
 async function seedAgent(actor: Actor, name: string): Promise<string> {
   const id = crypto.randomUUID();

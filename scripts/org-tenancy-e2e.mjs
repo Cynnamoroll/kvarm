@@ -17,10 +17,12 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseCost } from './lib/fleet.mjs';
+import { writeAskpass } from './lib/live.mjs';
 
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const KEEP = process.argv.includes('--keep');
@@ -79,9 +81,7 @@ async function page(who, path) {
 }
 
 const work = mkdtempSync(join(tmpdir(), 'org-tenancy-'));
-const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
-chmodSync(askpass, 0o700);
+const askpass = writeAskpass(work);
 
 function git(who, args, cwd = work) {
   const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: who ? process.env[P[who]] : '' };
@@ -132,8 +132,8 @@ async function pushWithRetry(who, dir, refspec) {
 }
 
 function costField(cost, key) {
-  const m = cost?.match(new RegExp(`(?:^|;)${key}=([^;]+)`));
-  return m ? m[1] : null;
+  const v = parseCost(cost)[key];
+  return v === undefined ? null : String(v);
 }
 
 try {

@@ -6,26 +6,19 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import worker from '../src/index';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { commit, fakeArtifacts, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string) => (await seedRepoBase(env, name, { owner: OWNER, visibility: 'private', repoIds })).repo;
+const call = (method: string, path: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const OWNER = 'prov-owner';
 const MAIN = 'refs/heads/main';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
 
 const env = {
   ...baseEnv,
@@ -36,34 +29,6 @@ const env = {
 
 let token = '';
 const repoIds: Record<string, string> = {};
-
-async function seedRepo(name: string): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  return repo;
-}
-
-async function call(method: string, path: string, body?: unknown): Promise<{ status: number; json: Record<string, any>; cost: CostCounters }> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost).not.toBeNull();
-  return { status: res.status, json: text ? (JSON.parse(text) as Record<string, any>) : {}, cost: cost! };
-}
 
 const R = (repo: string) => `/api/v1/repos/${OWNER}/${repo}`;
 const CONFIG = JSON.stringify({ version: 1, jobs: [{ name: 'build', run: 'echo ok', required: true }] });
@@ -85,10 +50,7 @@ const claim = (name: string) => call('POST', `${R(name)}/ci/jobs/claim`, { runne
 
 beforeAll(async () => {
   installFakeGitRemote();
-  const ownerId = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(ownerId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
-    .run();
+  const ownerId = await seedUser(OWNER);
   token = (await mintPAT(env, ownerId, 'owner', ['read', 'write', 'api', 'ci'])).token;
 });
 

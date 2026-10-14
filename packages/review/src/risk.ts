@@ -76,6 +76,10 @@ export const MEDIUM_AT = 30;
 export const HIGH_AT = 60;
 /** Change-level floor when CI configuration and test deletions land together. */
 export const CI_GAMING_FLOOR = 75;
+/** Points per extra high-signal tag beyond the first present on a change. */
+export const HIGH_SIGNAL_BONUS = 5;
+/** Bonus when total churn across the change reaches LARGE_CHANGE_LINES. */
+export const LARGE_TOTAL_CHURN_BONUS = 5;
 
 export const TAG_WEIGHTS: Record<RiskTag, number> = {
   'test-deletion': 40,
@@ -222,6 +226,8 @@ export interface RateOptions {
 }
 
 const MAX_PATHS_PER_REASON = 3;
+/** Dependency names shown per file in the new-dependency reason. */
+const MAX_DEPS_PER_REASON = 5;
 
 function listPaths(paths: string[]): string {
   const shown = paths.slice(0, MAX_PATHS_PER_REASON).join(', ');
@@ -247,7 +253,7 @@ export function rateChange(input: RatedFile[], opts: RateOptions = {}): ChangeRa
   const max = Math.max(...files.map((f) => f.risk.score));
   const present = HIGH_SIGNAL.filter((t) => files.some((f) => f.risk.tags.includes(t)));
   const totalChurn = files.reduce((s, f) => s + (churnOf(f.change) ?? 0), 0);
-  let score = max + 5 * Math.max(0, present.length - 1) + (totalChurn >= LARGE_CHANGE_LINES ? 5 : 0);
+  let score = max + HIGH_SIGNAL_BONUS * Math.max(0, present.length - 1) + (totalChurn >= LARGE_CHANGE_LINES ? LARGE_TOTAL_CHURN_BONUS : 0);
   const ciGaming = present.includes('ci-config') && present.includes('test-deletion');
   if (ciGaming) score = Math.max(score, CI_GAMING_FLOOR);
   score = clamp(score);
@@ -262,7 +268,9 @@ export function rateChange(input: RatedFile[], opts: RateOptions = {}): ChangeRa
   if (deps.length) {
     const parts = deps.map((f) => {
       const names = f.risk.evidence?.newDependencies ?? [];
-      const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ` and ${names.length - 5} more` : '');
+      const shown =
+        names.slice(0, MAX_DEPS_PER_REASON).join(', ') +
+        (names.length > MAX_DEPS_PER_REASON ? ` and ${names.length - MAX_DEPS_PER_REASON} more` : '');
       return `${f.change.path} (${shown})`;
     });
     reasons.push(`New dependencies added: ${listPaths(parts)}`);

@@ -11,6 +11,7 @@
  */
 
 import type { ServiceResult } from '../repos/service';
+import { fail } from './result';
 
 export interface ClaimView {
   kind: string;
@@ -38,9 +39,6 @@ export const CLAIM_LIMITS = { minTtlMs: 1, maxTtlMs: 3_600_000, maxRetryAfterMs:
 
 type Fail = Extract<ServiceResult<never>, { ok: false }> & { current?: ClaimView | null; retryAfterMs?: number };
 
-function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 function view(r: ClaimRow | undefined | null): ClaimView | null {
   if (!r) return null;

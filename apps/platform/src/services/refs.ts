@@ -44,7 +44,8 @@ export interface ResolveContext {
 }
 
 /** The git endpoint behind ref resolution failed; callers answer 503. */
-export class RefStoreUnavailable extends Error {}
+import { RefStoreUnavailable } from './result';
+export { RefStoreUnavailable };
 
 export function isFullSha(ref: string): boolean {
   return SHA_RE.test(ref);

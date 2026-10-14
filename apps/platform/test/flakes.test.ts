@@ -9,60 +9,15 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import worker from '../src/index';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
-class FakeWorkflow {
-  created: Array<{ id?: string; params?: unknown }> = [];
-
-  async create(opts: { id?: string }) {
-    this.created.push(opts);
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
-const env = {
-  ...(cfEnv as unknown as Env),
-  ARTIFACTS: fakeArtifacts,
-  SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
-  CI_PIPELINE: new FakeWorkflow() as unknown as Env['CI_PIPELINE'],
-} as Env;
-
-const ORIGIN = 'https://kvarm.test';
-const OWNER = 'fl-owner';
-const MAIN = 'refs/heads/main';
-const FEATURE = 'refs/heads/feature';
-const BASE: Files = { 'README.md': '# App\n', 'src/app.js': 'module.exports = 1;\n' };
-const tok = { owner: '', reader: '', writeRole: '', outsider: '' };
-const userIds: Record<string, string> = {};
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  userIds[login] = id;
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+async function seedRepo(name: string) {
+  const { id, repo } = await seedRepoBase(env, name, { owner: OWNER, visibility: 'private' });
   const now = Date.now();
   const grant = (login: string, role: 'read' | 'write') =>
     env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)')
@@ -72,30 +27,21 @@ async function seedRepo(name: string): Promise<FakeRepo> {
   await grant('fl-writer', 'write');
   return repo;
 }
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
-interface Reply {
-  status: number;
-  text: string;
-  json: Record<string, any>;
-  cost: CostCounters;
-}
+const env = {
+  ...(cfEnv as unknown as Env),
+  ARTIFACTS: fakeArtifacts,
+  SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
+  CI_PIPELINE: new FakeWorkflow() as unknown as Env['CI_PIPELINE'],
+} as Env;
 
-async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {}
-  return { status: res.status, text, json, cost: cost! };
-}
+const OWNER = 'fl-owner';
+const MAIN = 'refs/heads/main';
+const FEATURE = 'refs/heads/feature';
+const BASE: Files = { 'README.md': '# App\n', 'src/app.js': 'module.exports = 1;\n' };
+const tok = { owner: '', reader: '', writeRole: '', outsider: '' };
+const userIds: Record<string, string> = {};
 
 const R = (repo: string) => `/api/v1/repos/${OWNER}/${repo}`;
 const create = (repo: string, body: Record<string, unknown> = {}) =>

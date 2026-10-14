@@ -37,6 +37,8 @@
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
+import { fail } from './result';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import {
   WEBHOOK_KEY_VERSION,
@@ -95,9 +97,6 @@ export function webhookRetryDelaySeconds(attempt: number): number {
   return Math.min(3600, 30 * 4 ** Math.max(0, attempt - 1));
 }
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -273,17 +272,17 @@ export async function updateWebhook(
 ): Promise<ServiceResult<WebhookView>> {
   const sets: string[] = [];
   const binds: unknown[] = [];
+  // ?1-?3 bind id, repo_id and updated_at below; each optional value takes the next ?4+.
+  const fixedBinds = 3;
   if (input.url !== undefined) {
     const url = checkWebhookUrl(input.url, selfHost(env));
     if (!url.ok) return fail(400, url.reason, 'INVALID_URL');
-    binds.push(url.url);
-    sets.push(`url = ?${binds.length + 3}`);
+    sets.push(`url = ?${binds.push(url.url) + fixedBinds}`);
   }
   if (input.events !== undefined) {
     const events = checkEvents(input.events);
     if (!events.ok) return fail(400, events.error, 'INVALID_EVENTS');
-    binds.push(JSON.stringify(events.events));
-    sets.push(`events = ?${binds.length + 3}`);
+    sets.push(`events = ?${binds.push(JSON.stringify(events.events)) + fixedBinds}`);
   }
   if (input.active !== undefined) {
     if (typeof input.active !== 'boolean') return fail(400, 'active must be a boolean', 'INVALID_ACTIVE');
@@ -454,16 +453,12 @@ function deliveryView(r: DeliveryRow): DeliveryView {
 }
 
 function encodeCursor(createdAt: number, id: string): string {
-  return btoa(`${createdAt}:${id}`).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return encodeCursorPayload(`${createdAt}:${id}`);
 }
 
 function decodeCursor(cursor: string): { createdAt: number; id: string } | null {
-  try {
-    const m = /^(\d{1,16}):([0-9a-f]{32})$/.exec(atob(cursor.replace(/-/g, '+').replace(/_/g, '/')));
-    return m ? { createdAt: Number(m[1]), id: m[2]! } : null;
-  } catch {
-    return null;
-  }
+  const m = /^(\d{1,16}):([0-9a-f]{32})$/.exec(decodeCursorPayload(cursor) ?? '');
+  return m ? { createdAt: Number(m[1]), id: m[2]! } : null;
 }
 
 const DELIVERY_STATES = ['pending', 'delivered', 'failed', 'cancelled'] as const;
@@ -490,12 +485,12 @@ export async function listDeliveries(
   const conds = ['d.webhook_id = ?1'];
   const binds: unknown[] = [id, limit + 1];
   if (after) {
-    binds.push(after.createdAt, after.id);
-    conds.push(`(d.created_at < ?${binds.length - 1} OR (d.created_at = ?${binds.length - 1} AND d.id < ?${binds.length}))`);
+    const createdPos = binds.push(after.createdAt);
+    const idPos = binds.push(after.id);
+    conds.push(`(d.created_at < ?${createdPos} OR (d.created_at = ?${createdPos} AND d.id < ?${idPos}))`);
   }
   if (page.state !== undefined) {
-    binds.push(page.state);
-    conds.push(`d.state = ?${binds.length}`);
+    conds.push(`d.state = ?${binds.push(page.state)}`);
   }
   const [hook, list] = await env.DB.batch([
     env.DB.prepare('SELECT 1 AS found FROM webhooks WHERE id = ? AND repo_id = ?').bind(id, repo.id),

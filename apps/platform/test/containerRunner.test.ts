@@ -7,56 +7,26 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
-import worker from '../src/index';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const OWNER = 'cr-owner';
 const REPO = 'container-runs';
 const R = `/api/v1/repos/${OWNER}/${REPO}/ci/container-runs`;
 const tok = { admin: '', adminNoCi: '', owner: '', outsider: '' };
 
-async function seedUser(login: string, admin = false): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, Date.now())
-    .run();
-  return id;
-}
-
-async function call(method: string, path: string, token?: string, body?: unknown) {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const res = await worker.fetch!(
-    new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }) as Request<unknown, IncomingRequestCfProperties>,
-    env,
-    ctx,
-  );
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text);
-  } catch {}
-  return { status: res.status, json, text, cost: parseCostHeader(res.headers.get(COST_HEADER)) };
-}
+const seedUser = (login: string, admin = false) => seedUserBase(env, login, { admin });
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 beforeAll(async () => {
   const all: Scope[] = ['read', 'write', 'api', 'ci'];
   const ownerId = await seedUser(OWNER);
   const adminId = await seedUser('cr-admin', true);
   const outsiderId = await seedUser('cr-outsider');
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, REPO, `${OWNER}--${REPO}`, `https://artifacts.invalid/git/default/${OWNER}--${REPO}.git`, Date.now())
-    .run();
+  await seedRepoBase(env, REPO, { owner: OWNER, visibility: 'private', register: false });
   tok.owner = (await mintPAT(env, ownerId, 'owner', all)).token;
   tok.admin = (await mintPAT(env, adminId, 'admin', all)).token;
   tok.adminNoCi = (await mintPAT(env, adminId, 'admin-no-ci', ['read', 'write', 'api'])).token;

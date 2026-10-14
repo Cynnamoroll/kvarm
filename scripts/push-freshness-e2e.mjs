@@ -55,14 +55,7 @@ function check(label, actual, expected) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function costOf(header) {
-  const out = {};
-  for (const part of (header ?? '').split(';')) {
-    const [k, v] = part.split('=');
-    if (k) out[k] = k === 'cache' ? v : Number(v);
-  }
-  return out;
-}
+import { parseCost } from './lib/fleet.mjs';
 
 async function http(path, { method = 'GET', headers = {}, body, auth } = {}) {
   const h = { ...headers };
@@ -73,7 +66,7 @@ async function http(path, { method = 'GET', headers = {}, body, auth } = {}) {
   const res = await fetch(`${BASE}${path}`, init);
   const buf = Buffer.from(await res.arrayBuffer());
   const header = res.headers.get('x-kvarm-cost');
-  return { status: res.status, buf, text: buf.toString('latin1'), header, cost: costOf(header) };
+  return { status: res.status, buf, text: buf.toString('latin1'), header, cost: parseCost(header) };
 }
 
 const anon = (path, v2 = false) => http(path, v2 ? { headers: { 'Git-Protocol': 'version=2' } } : {});

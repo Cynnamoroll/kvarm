@@ -58,6 +58,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { remoteD1Args } from './lib/wrangler-target.mjs';
+import { parseCost } from './lib/fleet.mjs';
+import { writeAskpass } from './lib/live.mjs';
 
 const { values: args } = parseArgs({
   options: { only: { type: 'string' }, keep: { type: 'boolean', default: false } },
@@ -103,18 +105,13 @@ async function http(path, { method = 'GET', as = 'owner', json, save } = {}) {
   return { status: res.status, body, bytes: bytes.length, cost: res.headers.get('x-kvarm-cost'), headers: res.headers };
 }
 const snapPath = (repo, ref) => `/api/v1/repos/${OWNER}/${repo}/snapshots/${ref}`;
-function costOf(header) {
-  return Object.fromEntries((header ?? '').split(';').map((kv) => kv.split('=')).map(([k, v]) => [k, /^\d+$/.test(v) ? Number(v) : v]));
-}
 const brief = (b) => JSON.stringify(b && { state: b.state, sha: b.sha?.slice(0, 12), size: b.size, files: b.files, builtAt: b.builtAt, reused: b.reused });
 
 const work = mkdtempSync(join(tmpdir(), 'snapshots-e2e-'));
-const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo kvarm ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
-chmodSync(askpass, 0o700);
+const askpass = writeAskpass(work);
 
 function git(dir, gitArgs) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', E2E_GIT_TOKEN: process.env.KVARM_PAT };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: process.env.KVARM_PAT };
   const r = spawnSync('git', ['-c', 'credential.helper=', '-c', 'core.quotepath=off', ...gitArgs], { cwd: dir, env, encoding: 'utf8', maxBuffer: 64 << 20 });
   return { code: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
 }
@@ -194,7 +191,7 @@ async function downloadAndDiff(label, repo, ref, sha, size, cloneUrl) {
   const tarFile = join(work, `${file}.tar`);
   const dl = await http(`${snapPath(repo, ref)}/download`, { save: tarFile });
   check(`${label} download 200 (${dl.cost})`, dl.status, 200);
-  const c = costOf(dl.cost);
+  const c = parseCost(dl.cost);
   check(`${label} download cost r2b=1 r2a=0 art=0 d1<=2`, `r2b=${c.r2b};r2a=${c.r2a};art=${c.art};d1=${c.d1}`, () => c.r2b === 1 && c.r2a === 0 && c.art === 0 && c.d1 <= 2);
   check(`${label} downloaded bytes ${statSync(tarFile).size} == metadata size ${size}`, statSync(tarFile).size, size);
   const out = join(work, `${file}-x`);
@@ -277,7 +274,7 @@ try {
     const warm = await http(snapPath(name, 'main'));
     console.log(`#   metadata cold x-kvarm-cost: ${cold.cost}`);
     console.log(`#   metadata warm x-kvarm-cost: ${warm.cost}`);
-    const w = costOf(warm.cost);
+    const w = parseCost(warm.cost);
     check('VAL-COST-009 warm metadata 200 with art=0 and d1<=2', `${warm.status} art=${w.art} d1=${w.d1}`, () => warm.status === 200 && w.art === 0 && w.d1 <= 2);
     await downloadAndDiff('VAL-SNAP-004/VAL-COST-010', name, 'main', sha, ready.body?.size, `${BASE}/${OWNER}/${name}.git`);
   }
@@ -411,7 +408,7 @@ try {
         const m = await http(snapPath(name, 'main'), { as });
         const d = await http(`${snapPath(name, 'main')}/download`, { as });
         check(`${phase}: ${as ?? 'anonymous'} metadata denied without body (${m.cost})`, `${m.status} ${m.body?.size === undefined}`, '404 true');
-        check(`${phase}: ${as ?? 'anonymous'} download denied without tar bytes (${d.cost})`, `${d.status} ${costOf(d.cost).r2b}`, '404 0');
+        check(`${phase}: ${as ?? 'anonymous'} download denied without tar bytes (${d.cost})`, `${d.status} ${parseCost(d.cost).r2b}`, '404 0');
       }
       const om = await http(snapPath(name, 'main'));
       const od = await http(`${snapPath(name, 'main')}/download`);
@@ -482,7 +479,7 @@ try {
     await createRepo(emptyName, 'public');
     const del0 = await http(`/api/v1/repos/${OWNER}/${emptyName}`, { method: 'DELETE' });
     console.log(`#   DELETE (no snapshots) x-kvarm-cost: ${del0.cost}`);
-    const c0 = costOf(del0.cost);
+    const c0 = parseCost(del0.cost);
     check('DELETE repo without snapshots: 200, d1<=2, r2a=0, r2b=0', `${del0.status} d1=${c0.d1} r2a=${c0.r2a} r2b=${c0.r2b}`, () => del0.status === 200 && c0.d1 <= 2 && c0.r2a === 0 && c0.r2b === 0);
     if (del0.status === 200) created.splice(created.indexOf(emptyName), 1);
 
@@ -509,7 +506,7 @@ try {
     check('both tarballs exist in R2 before DELETE', keys.map(r2Exists), (v) => v.length === 2 && v.every((x) => x === true));
     const del = await http(`/api/v1/repos/${OWNER}/${name}`, { method: 'DELETE' });
     console.log(`#   DELETE (two snapshots) x-kvarm-cost: ${del.cost}`);
-    const c = costOf(del.cost);
+    const c = parseCost(del.cost);
     check('DELETE repo with snapshots: 200, d1<=2, r2a=0, r2b=0', `${del.status} d1=${c.d1} r2a=${c.r2a} r2b=${c.r2b}`, () => del.status === 200 && c.d1 <= 2 && c.r2a === 0 && c.r2b === 0);
     if (del.status === 200) created.splice(created.indexOf(name), 1);
     const left = d1Query(`SELECT (SELECT COUNT(*) FROM snapshot_trees WHERE repo_id = '${repoId}') AS trees, (SELECT COUNT(*) FROM snapshot_commits WHERE repo_id = '${repoId}') AS commits, (SELECT COUNT(*) FROM repos WHERE id = '${repoId}') AS repos`);
@@ -523,7 +520,7 @@ try {
     for (const name of created) {
       const r = await http(`/api/v1/repos/${OWNER}/${name}`, { method: 'DELETE' });
       console.log(`# cleanup DELETE ${OWNER}/${name} -> ${r.status} (${r.cost})`);
-      check(`cleanup DELETE ${name} d1<=2`, `${r.status} d1=${costOf(r.cost).d1}`, () => r.status === 200 && costOf(r.cost).d1 <= 2);
+      check(`cleanup DELETE ${name} d1<=2`, `${r.status} d1=${parseCost(r.cost).d1}`, () => r.status === 200 && parseCost(r.cost).d1 <= 2);
     }
   }
   rmSync(work, { recursive: true, force: true });

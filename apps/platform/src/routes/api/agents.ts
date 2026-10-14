@@ -4,21 +4,12 @@
  * tokens can never list, create or revoke agents or mint credentials.
  */
 
-import { Hono, type Context } from 'hono';
-import { actorJson, requireActor, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { Hono } from 'hono';
+import { actorJson, requireActor, type App, failJson,
+  jsonBody} from '../api';
 import * as agents from '../../services/agents';
 
 export const agentsApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
-
-async function jsonBody(c: Context<App>): Promise<Record<string, unknown>> {
-  const body: unknown = await c.req.json().catch(() => ({}));
-  return body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
-}
 
 function str(v: unknown): string | null {
   return typeof v === 'string' ? v : null;
@@ -28,6 +19,7 @@ agentsApi.post('/agents', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   const res = await agents.createAgent(c.env, actor, {
     owner: str(body.owner) ?? actor.user.login,
     name: str(body.name) ?? '',
@@ -70,6 +62,7 @@ agentsApi.post('/agents/:id/tokens', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   const res = await agents.mintAgentToken(c.env, actor, c.req.param('id'), {
     repo: str(body.repo) ?? '',
     role: str(body.role) ?? '',

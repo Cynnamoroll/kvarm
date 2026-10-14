@@ -12,6 +12,7 @@
  */
 
 import { zstdDecompressSync } from 'node:zlib';
+import { ZstdFramer, isSkippableZstdFrame } from '@kvarm/zstd';
 import { markCache } from '../cost/meter';
 
 const IMMUTABLE_TTL_SECONDS = 31536000;
@@ -62,122 +63,6 @@ export async function matchSnapshot(repoId: string, sha: string): Promise<Snapsh
 }
 
 /**
- * Frame boundaries in a stored object (RFC 8878 frame format): magic + frame header
- * + blocks + optional content checksum; skippable frames pass through.
- * Node's zlib stops decoding after the first frame, so callers feed each
- * frame to a fresh decompressor; `eat` reports how much of a chunk the
- * current frame used and whether it ended the frame.
- */
-class ZstdFramer {
-  private stage: 'magic' | 'skiplen' | 'skip' | 'fhd' | 'extra' | 'blockhead' | 'blockdata' | 'checksum' = 'magic';
-  private bytes: number[] = [];
-  private left = 0;
-  private lastBlock = false;
-  private checksum = false;
-
-  /** True while a frame is partially consumed. */
-  get inFrame(): boolean {
-    return this.stage !== 'magic';
-  }
-
-  eat(c: Uint8Array): { consumed: number; ended: boolean } {
-    let i = 0;
-    while (i < c.length) {
-      switch (this.stage) {
-        case 'magic': {
-          while (i < c.length && this.bytes.length < 4) this.bytes.push(c[i++]!);
-          if (this.bytes.length < 4) return { consumed: i, ended: false };
-          const [a, b, d, e] = this.bytes as [number, number, number, number];
-          this.bytes = [];
-          if (a === 0x28 && b === 0xb5 && d === 0x2f && e === 0xfd) this.stage = 'fhd';
-          else if ((a & 0xf0) === 0x50 && b === 0x2a && d === 0x4d && e === 0x18) this.stage = 'skiplen';
-          else throw new Error('stored snapshot is not a zstd object');
-          break;
-        }
-        case 'skiplen': {
-          while (i < c.length && this.bytes.length < 4) this.bytes.push(c[i++]!);
-          if (this.bytes.length < 4) return { consumed: i, ended: false };
-          const [a, b, d, e] = this.bytes as [number, number, number, number];
-          this.bytes = [];
-          this.left = (a | (b << 8) | (d << 16) | (e << 24)) >>> 0;
-          this.stage = 'skip';
-          break;
-        }
-        case 'skip': {
-          const k = Math.min(this.left, c.length - i);
-          i += k;
-          this.left -= k;
-          if (this.left === 0) {
-            this.stage = 'magic';
-            return { consumed: i, ended: true };
-          }
-          break;
-        }
-        case 'fhd': {
-          const fhd = c[i++]!;
-          const single = (fhd >> 5) & 1;
-          const fcs = fhd >> 6;
-          this.checksum = ((fhd >> 2) & 1) === 1;
-          const fcsLen = fcs === 0 ? (single ? 1 : 0) : fcs === 1 ? 2 : fcs === 2 ? 4 : 8;
-          this.left = (single ? 0 : 1) + [0, 1, 2, 4][did(fhd)]! + fcsLen;
-          this.stage = this.left > 0 ? 'extra' : 'blockhead';
-          break;
-        }
-        case 'extra': {
-          const k = Math.min(this.left, c.length - i);
-          i += k;
-          this.left -= k;
-          if (this.left === 0) this.stage = 'blockhead';
-          break;
-        }
-        case 'blockhead': {
-          while (i < c.length && this.bytes.length < 3) this.bytes.push(c[i++]!);
-          if (this.bytes.length < 3) return { consumed: i, ended: false };
-          const bh = this.bytes[0]! | (this.bytes[1]! << 8) | (this.bytes[2]! << 16);
-          this.bytes = [];
-          const type = (bh >> 1) & 3;
-          if (type === 3) throw new Error('reserved zstd block type');
-          this.lastBlock = (bh & 1) === 1;
-          this.left = type === 1 ? 1 : bh >> 3;
-          this.stage = 'blockdata';
-          break;
-        }
-        case 'blockdata': {
-          const k = Math.min(this.left, c.length - i);
-          i += k;
-          this.left -= k;
-          if (this.left > 0) break;
-          if (!this.lastBlock) {
-            this.stage = 'blockhead';
-            break;
-          }
-          if (!this.checksum) {
-            this.stage = 'magic';
-            return { consumed: i, ended: true };
-          }
-          this.left = 4;
-          this.stage = 'checksum';
-          break;
-        }
-        case 'checksum': {
-          const k = Math.min(this.left, c.length - i);
-          i += k;
-          this.left -= k;
-          if (this.left === 0) {
-            this.stage = 'magic';
-            return { consumed: i, ended: true };
-          }
-          break;
-        }
-      }
-    }
-    return { consumed: i, ended: false };
-  }
-}
-
-const did = (fhd: number) => fhd & 3;
-
-/**
  * Decompresses a stored zstd object frame by frame: each complete frame is
  * decoded with the sync one-shot API, which cannot lose output the way the
  * stream API's 'data' events can (they are not tied to the write and end
@@ -190,10 +75,9 @@ export function zstdDecompressAll(stream: ReadableStream<Uint8Array>): ReadableS
   const done = (async () => {
     const reader = stream.getReader();
     const writer = out.writable.getWriter();
-    const framer = new ZstdFramer();
+    const framer = new ZstdFramer('stored snapshot');
     let pieces: Uint8Array[] = [];
     let piecesLength = 0;
-    const isSkippable = (b: Uint8Array) => b[0] === 0x50 && b[1] === 0x2a && b[2] === 0x4d && b[3] === 0x18;
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -221,7 +105,7 @@ export function zstdDecompressAll(stream: ReadableStream<Uint8Array>): ReadableS
                   })();
             pieces = [];
             piecesLength = 0;
-            if (!isSkippable(frame)) {
+            if (!isSkippableZstdFrame(frame)) {
               const decoded = zstdDecompressSync(frame);
               if (decoded.length > 0) await writer.write(decoded);
             }

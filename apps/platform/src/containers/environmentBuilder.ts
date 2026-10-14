@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { runEnvironmentBuild, type EnvironmentBuildResult } from './fleetJob';
+import { instanceName } from './instances';
 
 const IMAGE = 'cloudflare/debian-trixie';
 const ENTRYPOINT = ['sleep', 'infinity'];
@@ -22,10 +23,6 @@ export type EnvironmentBuilderResult =
   | { ok: true; snapshot: { id: string; size: number }; phases: Record<string, number>; outputTail: string }
   | { ok: false; status: number; code: string; error: string; phases?: Record<string, number>; outputTail?: string };
 
-function containerInstance(instance: string): 'standard-1' | 'standard-2' | 'standard-3' | 'standard-4' {
-  return instance === 'basic' ? 'standard-1' : (instance as 'standard-1' | 'standard-2' | 'standard-3' | 'standard-4');
-}
-
 export class EnvironmentBuilder extends DurableObject<Env> {
   private busy = false;
 
@@ -46,7 +43,7 @@ export class EnvironmentBuilder extends DurableObject<Env> {
       if (container.running) await container.destroy();
       container.start({
         image: IMAGE,
-        instance: containerInstance(request.instance),
+        instance: instanceName(request.instance),
         entrypoint: ENTRYPOINT,
         enableInternet: false,
       });

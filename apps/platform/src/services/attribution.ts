@@ -22,6 +22,7 @@ import { KVARM_NOTES_REF, NotesTreeError, ZERO_OID, buildNotesCommit, encode, fi
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, guarded as baseGuarded, objectBody, type Fail } from './result';
 import type { Actor } from './authz';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { KVARM_COMMITTER, artifactsMergeSources } from './merge';
@@ -81,16 +82,14 @@ export interface AttributionWrite {
   notesCommit: string;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
 
-const fail = (status: number, code: string, error: string): Fail => ({ ok: false, status, code, error });
 
 function textField(v: unknown, name: string, code: string, required: boolean): string | undefined | Fail {
   if (v === undefined || v === null) {
-    return required ? fail(422, code, `${name} is required (a string of 1-${ATTRIBUTION_LIMITS.fieldMax} characters)`) : undefined;
+    return required ? fail(422, `${name} is required (a string of 1-${ATTRIBUTION_LIMITS.fieldMax} characters)`, code) : undefined;
   }
   if (typeof v !== 'string' || v.trim().length === 0 || v.length > ATTRIBUTION_LIMITS.fieldMax) {
-    return fail(422, code, `${name} must be a non-empty string of at most ${ATTRIBUTION_LIMITS.fieldMax} characters`);
+    return fail(422, `${name} must be a non-empty string of at most ${ATTRIBUTION_LIMITS.fieldMax} characters`, code);
   }
   return v;
 }
@@ -103,10 +102,9 @@ const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null &&
  * attribution, where the merging principal fills in what the request omits).
  */
 export function parseAttributionInput(input: unknown, defaults?: AttributionInput): ServiceResult<AttributionInput> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-    return fail(400, 'INVALID_BODY', 'body must be a JSON object {agent, session, promptHash, model?}');
-  }
-  const o = input as Record<string, unknown>;
+  const parsed = objectBody(input, '{agent, session, promptHash, model?}');
+  if (!parsed.ok) return parsed;
+  const o = parsed.value;
   const required = defaults === undefined;
   const agent = textField(o.agent, 'agent', 'INVALID_AGENT', required);
   if (isFail(agent)) return agent;
@@ -165,17 +163,10 @@ export async function writeAttributionNote(
   const ctx = resolveCtx(cx, artifacts);
   const reader = artifactsMergeSources(ctx);
   const content = encode(`${JSON.stringify(record)}\n`);
-  for (let attempt = 0; attempt < ATTRIBUTION_LIMITS.attempts; attempt++) {
-    const tip = (await lsRefs(ctx, [KVARM_NOTES_REF])).get(KVARM_NOTES_REF) ?? null;
-    let parent: { commit: string; tree: string } | null = null;
-    if (tip) {
-      const info = await readCommitInfo(ctx, tip);
-      if (!info) throw new RefStoreUnavailable(`notes commit ${tip} is not readable`);
-      parent = { commit: tip, tree: info.tree };
-    }
-    let built;
+  const built = await withNotesRefCAS(ctx, pusher, async (parent) => {
+    let note;
     try {
-      built = await buildNotesCommit({
+      note = await buildNotesCommit({
         reader,
         parent,
         target: sha,
@@ -187,22 +178,48 @@ export async function writeAttributionNote(
       if (err instanceof NotesTreeError) throw new RefStoreUnavailable(err.message);
       throw err;
     }
-    const r = await pusher.updateRef({ ref: KVARM_NOTES_REF, oldOid: tip ?? ZERO_OID, newOid: built.commit }, built.objects);
+    return { newOid: note.commit, objects: note.objects, value: note };
+  });
+  const evidence = await recordLedger(cx.env, {
+    repoId: cx.repo.id,
+    commit: sha,
+    notesCommit: built.commit,
+    source,
+    replaced: built.replaced !== null,
+    attribution: record,
+    noteDigest: await sha256Hex(content),
+    assessed,
+  });
+  return { record, evidence, replaced: built.replaced !== null, notesCommit: built.commit };
+}
+
+/**
+ * The notes-ref optimistic-CAS protocol shared by single and batched writes:
+ * each attempt reads the tip, resolves its tree as the parent and runs
+ * `build` (which may chain several commits on it), then pushes the last built
+ * commit with the tip as the expected old value; a `stale` push re-reads the
+ * tip and rebuilds, so concurrent writers never drop each other's notes.
+ */
+async function withNotesRefCAS<T>(
+  ctx: ResolveContext,
+  pusher: GitPusher,
+  build: (parent: { commit: string; tree: string } | null) => Promise<{ newOid: string; objects: GitObject[]; value: T }>,
+): Promise<T> {
+  for (let attempt = 0; attempt < ATTRIBUTION_LIMITS.attempts; attempt++) {
+    const tip = (await lsRefs(ctx, [KVARM_NOTES_REF])).get(KVARM_NOTES_REF) ?? null;
+    let parent: { commit: string; tree: string } | null = null;
+    if (tip) {
+      const info = await readCommitInfo(ctx, tip);
+      if (!info) throw new RefStoreUnavailable(`notes commit ${tip} is not readable`);
+      parent = { commit: tip, tree: info.tree };
+    }
+    const built = await build(parent);
+    const r = await pusher.updateRef({ ref: KVARM_NOTES_REF, oldOid: tip ?? ZERO_OID, newOid: built.newOid }, built.objects);
     if (r.status === 'stale') continue;
     if (r.status !== 'ok') {
       throw new RefStoreUnavailable(`notes update ${r.status}: ${r.reason ?? r.error ?? `HTTP ${r.httpStatus}`}`);
     }
-    const evidence = await recordLedger(cx.env, {
-      repoId: cx.repo.id,
-      commit: sha,
-      notesCommit: built.commit,
-      source,
-      replaced: built.replaced !== null,
-      attribution: record,
-      noteDigest: await sha256Hex(content),
-      assessed,
-    });
-    return { record, evidence, replaced: built.replaced !== null, notesCommit: built.commit };
+    return built.value;
   }
   throw new RefStoreUnavailable(`${KVARM_NOTES_REF} kept moving; retry`);
 }
@@ -226,19 +243,11 @@ interface LedgerEntry {
  * matches the note.
  */
 async function recordLedger(env: Env, e: LedgerEntry): Promise<Evidence> {
-  const now = Date.now();
   const { evidence } = e.assessed;
-  try {
-    const [, stored] = await env.DB.batch([ledgerStatement(env, e, now), evidenceStatement(env, e, now)]);
-    const prefix = (stored?.results as Array<{ token_prefix: string | null }> | undefined)?.[0]?.token_prefix ?? null;
-    return { ...evidence, tokenPrefix: prefix };
-  } catch (err) {
-    console.warn(JSON.stringify({ attributionEvidenceFailed: String(err).slice(0, 200), commit: e.commit }));
-    await ledgerStatement(env, e, now)
-      .run()
-      .catch((again: unknown) => console.warn(JSON.stringify({ attributionLedgerFailed: String(again).slice(0, 200), commit: e.commit })));
-    return undeclaredEvidence('evidence-not-recorded');
-  }
+  const stored = await writeLedger(env, [e], e.commit);
+  if (!stored) return undeclaredEvidence('evidence-not-recorded');
+  const prefix = (stored[1]?.results as Array<{ token_prefix: string | null }> | undefined)?.[0]?.token_prefix ?? null;
+  return { ...evidence, tokenPrefix: prefix };
 }
 
 /** The events-ledger row of one attribution write. */
@@ -312,32 +321,32 @@ function evidenceStatement(env: Env, e: LedgerEntry, now: number): D1PreparedSta
  * whose evidence batch failed.
  */
 async function recordLedgerBatch(env: Env, entries: LedgerEntry[]): Promise<void> {
+  await writeLedger(env, entries, entries.map((e) => e.commit).join(','));
+}
+
+/**
+ * The recovery policy both ledger writes share: batch each entry's ledger +
+ * evidence statements, and on failure warn and retry the ledger rows alone,
+ * so an evidence-write failure cannot lose a ledger row. Returns the batch
+ * results, or null after a failed batch.
+ */
+async function writeLedger(env: Env, entries: LedgerEntry[], commits: string): Promise<D1Result<unknown>[] | null> {
   const now = Date.now();
-  const commits = entries.map((e) => e.commit).join(',');
   try {
-    await env.DB.batch(entries.flatMap((e) => [ledgerStatement(env, e, now), evidenceStatement(env, e, now)]));
+    return await env.DB.batch(entries.flatMap((e) => [ledgerStatement(env, e, now), evidenceStatement(env, e, now)]));
   } catch (err) {
     console.warn(JSON.stringify({ attributionEvidenceFailed: String(err).slice(0, 200), commits }));
     await env.DB
       .batch(entries.map((e) => ledgerStatement(env, e, now)))
       .catch((again: unknown) => console.warn(JSON.stringify({ attributionLedgerFailed: String(again).slice(0, 200), commits })));
+    return null;
   }
 }
 
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ attributionStore: err.message.slice(0, 200) }));
-      return fail(503, 'STORAGE_UNAVAILABLE', 'repository storage is unavailable, retry shortly');
-    }
-    throw err;
-  }
-}
+const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('attributionStore', fn);
 
 function checkSha(sha: string): Fail | null {
-  return isFullSha(sha) ? null : fail(400, 'INVALID_SHA', `"${sha.slice(0, 80)}" is not a full 40-character lowercase commit sha`);
+  return isFullSha(sha) ? null : fail(400, `"${sha.slice(0, 80)}" is not a full 40-character lowercase commit sha`, 'INVALID_SHA');
 }
 
 /** POST commits/:sha/attribution */
@@ -356,7 +365,7 @@ export function setAttribution(
   return guarded(() =>
     withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       if (!(await readCommitInfo(resolveCtx(cx, artifacts), sha))) {
-        return fail(404, 'COMMIT_NOT_FOUND', `no commit ${sha} in this repository`);
+        return fail(404, `no commit ${sha} in this repository`, 'COMMIT_NOT_FOUND');
       }
       const assessed = await assessEvidence(cx.env, cx.repo, cx.actor, sha, parsed.value, signed.value);
       const written = await writeAttributionNote(cx, artifacts, pusher, sha, makeRecord(parsed.value, actorLogin(cx.actor)), 'api', assessed);
@@ -424,7 +433,7 @@ export function evidenceForReader(evidence: Evidence, admin: boolean): Evidence 
 export function getAttribution(cx: AttributionContext, sha: string, opts: { evidence?: boolean } = {}): Promise<ServiceResult<AttributionView>> {
   const bad = checkSha(sha);
   if (bad) return Promise.resolve(bad);
-  const none = fail(404, 'ATTRIBUTION_NOT_FOUND', `commit ${sha} has no attribution`);
+  const none = fail(404, `commit ${sha} has no attribution`, 'ATTRIBUTION_NOT_FOUND');
   return guarded(() =>
     withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx(cx, artifacts);
@@ -442,7 +451,7 @@ export function getAttribution(cx: AttributionContext, sha: string, opts: { evid
       }
       if (!loc) return none;
       const bytes = await sources.readBlob(loc.blob).catch(() => null);
-      if (!bytes) return fail(422, 'ATTRIBUTION_UNREADABLE', `the note on ${sha} is missing or larger than ${ATTRIBUTION_LIMITS.noteMaxBytes} bytes`);
+      if (!bytes) return fail(422, `the note on ${sha} is missing or larger than ${ATTRIBUTION_LIMITS.noteMaxBytes} bytes`, 'ATTRIBUTION_UNREADABLE');
       let parsed: unknown;
       try {
         parsed = JSON.parse(new TextDecoder().decode(bytes));
@@ -450,7 +459,7 @@ export function getAttribution(cx: AttributionContext, sha: string, opts: { evid
         parsed = null;
       }
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        return fail(422, 'ATTRIBUTION_NOT_JSON', `the note on ${sha} is not a JSON attribution record`);
+        return fail(422, `the note on ${sha} is not a JSON attribution record`, 'ATTRIBUTION_NOT_JSON');
       }
       // Existence checks skip the evidence read.
       const evidence = opts.evidence === false ? undeclaredEvidence('not-read') : await noteEvidence(cx.env, cx.repo.id, sha, bytes);
@@ -522,14 +531,7 @@ export async function attributeMerges(
     // Assessed once, before any note lands: an assessment failure fails the
     // whole batch, exactly like a single write.
     const assessed = await Promise.all(notes.map((n) => assessEvidence(cx.env, cx.repo, n.actor, n.sha, n.input, null)));
-    for (let attempt = 0; attempt < ATTRIBUTION_LIMITS.attempts; attempt++) {
-      const tip = (await lsRefs(ctx, [KVARM_NOTES_REF])).get(KVARM_NOTES_REF) ?? null;
-      let parent: { commit: string; tree: string } | null = null;
-      if (tip) {
-        const info = await readCommitInfo(ctx, tip);
-        if (!info) throw new RefStoreUnavailable(`notes commit ${tip} is not readable`);
-        parent = { commit: tip, tree: info.tree };
-      }
+    const writes = await withNotesRefCAS(ctx, pusher, async (parent) => {
       // Each note chains on the previous one before anything is pushed, so
       // the reader must also answer for the trees this batch just built.
       const built = new Map<string, Uint8Array>();
@@ -540,14 +542,15 @@ export async function attributeMerges(
         },
       };
       const objects: GitObject[] = [];
-      const writes: Array<{ notesCommit: string; replaced: boolean; noteDigest: string }> = [];
+      const chained: Array<{ notesCommit: string; replaced: boolean; noteDigest: string }> = [];
+      let tip = parent;
       for (const n of notes) {
         const content = encode(`${JSON.stringify(n.record)}\n`);
         let builtNote;
         try {
           builtNote = await buildNotesCommit({
             reader: localReader,
-            parent,
+            parent: tip,
             target: n.sha,
             content,
             author: { ...KVARM_COMMITTER, time: Math.floor(Date.now() / 1000) },
@@ -559,30 +562,25 @@ export async function attributeMerges(
         }
         for (const o of builtNote.objects) if (o.type === 'tree') built.set(o.hash, o.raw);
         objects.push(...builtNote.objects);
-        writes.push({ notesCommit: builtNote.commit, replaced: builtNote.replaced !== null, noteDigest: await sha256Hex(content) });
-        parent = { commit: builtNote.commit, tree: builtNote.tree };
+        chained.push({ notesCommit: builtNote.commit, replaced: builtNote.replaced !== null, noteDigest: await sha256Hex(content) });
+        tip = { commit: builtNote.commit, tree: builtNote.tree };
       }
-      const r = await pusher.updateRef({ ref: KVARM_NOTES_REF, oldOid: tip ?? ZERO_OID, newOid: writes[writes.length - 1]!.notesCommit }, objects);
-      if (r.status === 'stale') continue;
-      if (r.status !== 'ok') {
-        throw new RefStoreUnavailable(`notes update ${r.status}: ${r.reason ?? r.error ?? `HTTP ${r.httpStatus}`}`);
-      }
-      await recordLedgerBatch(
-        cx.env,
-        notes.map((n, i) => ({
-          repoId: cx.repo.id,
-          commit: n.sha,
-          notesCommit: writes[i]!.notesCommit,
-          source: 'merge',
-          replaced: writes[i]!.replaced,
-          attribution: n.record,
-          noteDigest: writes[i]!.noteDigest,
-          assessed: assessed[i]!,
-        })),
-      );
-      return;
-    }
-    throw new RefStoreUnavailable(`${KVARM_NOTES_REF} kept moving; retry`);
+      return { newOid: chained[chained.length - 1]!.notesCommit, objects, value: chained };
+    });
+    await recordLedgerBatch(
+      cx.env,
+      notes.map((n, i) => ({
+        repoId: cx.repo.id,
+        commit: n.sha,
+        notesCommit: writes[i]!.notesCommit,
+        source: 'merge',
+        replaced: writes[i]!.replaced,
+        attribution: n.record,
+        noteDigest: writes[i]!.noteDigest,
+        assessed: assessed[i]!,
+      })),
+    );
+    return;
   } catch (err) {
     console.warn(JSON.stringify({ mergeAttributionFailed: String(err).slice(0, 200), mergeCommits: notes.map((n) => n.sha).join(',') }));
   }

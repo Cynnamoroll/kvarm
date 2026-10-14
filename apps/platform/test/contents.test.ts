@@ -5,54 +5,26 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import worker from '../src/index';
-import { FakeRepo, blobHash, commit, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
+import { blobHash, commit, fakeArtifacts } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
 const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts } as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'contents-owner';
 const tok = { owner: '', outsider: '' };
 const shas = { main: '', feature: '' };
 const BINARY = new Uint8Array([0, 1, 2, 255, 254, 10]);
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private'): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  return repo;
-}
-
-async function get(path: string, token?: string): Promise<{ status: number; json: Record<string, any>; cost: CostCounters }> {
-  const ctx = createExecutionContext();
-  const req = new Request(`${ORIGIN}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost).not.toBeNull();
-  return { status: res.status, json: JSON.parse(text) as Record<string, any>, cost: cost! };
-}
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private') =>
+  (await seedRepoBase(env, name, { owner: OWNER, visibility })).repo;
+const get = async (path: string, token?: string) => {
+  const r = await apiCall(env, 'GET', path, { token });
+  return { status: r.status, json: r.json, cost: r.cost };
+};
 
 const r = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 

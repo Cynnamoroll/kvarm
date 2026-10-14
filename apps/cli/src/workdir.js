@@ -25,7 +25,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
-import { CliError, parseRepo } from './checkout.js';
+import { CliError } from './checkout.js';
+import { isTreeMode, parseRepoPath } from './guards.js';
 
 /** Untracked directories (matched by name at any depth) that survive a warm sync. */
 export const CACHE_DIRS = new Set(['node_modules', '.venv', 'venv', 'target', '.cache', '.gradle', '.turbo', '__pycache__', '.pytest_cache', '.mypy_cache', '.tox']);
@@ -77,8 +78,7 @@ const STATE_VERSION = 2;
  * @param {number} index
  */
 export function slotPaths(workRoot, repo, index) {
-  const { owner, name } = parseRepo(repo);
-  if (name === '.' || name === '..') throw new CliError(`invalid repository "${repo}", expected <owner>/<repo>`, 2);
+  const { owner, name } = parseRepoPath(repo);
   const dir = join(workRoot, owner, name, `slot-${index}`);
   return { dir, lock: `${dir}.lock`, work: join(dir, 'work'), staging: join(dir, 'staging'), state: join(dir, 'state.json') };
 }
@@ -323,9 +323,6 @@ function normalizedMode(mode) {
   if (mode === '120000') return '120000';
   return mode === '100755' ? '100755' : '100644';
 }
-
-/** Tree modes as git reports them (raw entries are never padded). @param {string|null} mode */
-const isTreeMode = (mode) => mode === '40000' || mode === '040000';
 
 /** @param {string|null} mode */
 const isGitlink = (mode) => mode === '160000';

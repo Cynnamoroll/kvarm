@@ -41,6 +41,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { parseCost } from './lib/fleet.mjs';
 
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const arg = (k) => process.argv.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
@@ -59,15 +60,6 @@ function check(label, ok, detail = '') {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function costOf(header) {
-  const out = {};
-  for (const part of (header ?? '').split(';')) {
-    const [k, v] = part.split('=');
-    if (k) out[k] = k === 'cache' ? v : Number(v);
-  }
-  return out;
-}
-
 async function http(path, { method = 'GET', json, auth = true } = {}) {
   const headers = auth ? { Authorization: `Bearer ${process.env.KVARM_PAT}` } : {};
   if (json !== undefined) headers['content-type'] = 'application/json';
@@ -83,7 +75,7 @@ async function http(path, { method = 'GET', json, auth = true } = {}) {
     // non-JSON
   }
   const header = res.headers.get('x-kvarm-cost');
-  return { status: res.status, text, body, header, cost: costOf(header), cache: res.headers.get('x-kvarm-cache'), ms: Math.round(performance.now() - started) };
+  return { status: res.status, text, body, header, cost: parseCost(header), cache: res.headers.get('x-kvarm-cache'), ms: Math.round(performance.now() - started) };
 }
 
 const api = (rest) => `/api/v1/repos/${OWNER}/${REPO}/${rest}`;
@@ -95,14 +87,11 @@ writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, auth = false) {
-  const date = '2026-10-01T00:00:00Z';
   const env = {
     ...process.env,
     GIT_ASKPASS: askpass,
     GIT_TERMINAL_PROMPT: '0',
     KVARM_E2E_TOKEN: auth ? process.env.KVARM_PAT : '',
-    GIT_AUTHOR_DATE: date,
-    GIT_COMMITTER_DATE: date,
   };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd,

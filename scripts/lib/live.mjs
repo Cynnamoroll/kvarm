@@ -69,11 +69,21 @@ export function tailLogLines(text) {
   return lines;
 }
 
-export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, log = console.log }) {
-  const work = mkdtempSync(join(tmpdir(), 'kvarm-live-'));
-  const askpass = join(work, 'askpass.sh');
+/**
+ * Writes the secret-free GIT_ASKPASS helper into `dir` and returns its path:
+ * git gets `x` for a username prompt and the token only via the child env var
+ * KVARM_E2E_TOKEN — the one place every driver's askpass comes from.
+ */
+export function writeAskpass(dir) {
+  const askpass = join(dir, 'askpass.sh');
   writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
   chmodSync(askpass, 0o700);
+  return askpass;
+}
+
+export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, log = console.log }) {
+  const work = mkdtempSync(join(tmpdir(), 'kvarm-live-'));
+  const askpass = writeAskpass(work);
   const httpLim = createLimiter(5);
   const gitLim = createLimiter(3);
   const state = { requests: 0, ceiling };
@@ -195,41 +205,44 @@ export function createLive({ base, pat, ceiling = 10_000, timeoutMs = 90_000, lo
     return JSON.parse(r.stdout).map((x) => x.results ?? []);
   }
 
-  /**
-   * Captures `wrangler tail` into a file. The binary comes from PATH (`. "$HOME/.config/vite-plus/env"`);
-   * unlike d1(), which runs the repository's wrangler through node, this spawn needs it there.
-   */
-  function startTail(file = join(work, 'tail.jsonl')) {
-    const stream = createWriteStream(file);
-    const child = spawn('wrangler', ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
-    child.stdout.pipe(stream);
-    let err = '';
-    let spawnError = null;
-    child.stderr.on('data', (d) => (err += d));
-    // Without this listener a host with no `wrangler` on PATH dies on an unhandled
-    // ENOENT; stop() reports the recorded error instead.
-    child.on('error', (e) => {
-      spawnError = e;
-    });
-    let stopped = false;
-    return {
-      file,
-      read: () => readFileSync(file, 'utf8'),
-      async stop(graceMs = 8000) {
-        if (stopped) return err;
-        stopped = true;
-        await sleep(graceMs);
-        // A spawn that never started has no process to signal or to wait for.
-        if (!spawnError) {
-          child.kill('SIGINT');
-          await new Promise((r) => (child.exitCode !== null ? r() : child.once('close', r)));
-        }
-        stream.end();
-        if (spawnError) throw new Error(`wrangler tail did not start: ${spawnError.message}`);
-        return err;
-      },
-    };
-  }
+  const startTail = (file = join(work, 'tail.jsonl')) => startWranglerTail(file);
 
   return { work, askpass, state, http, git, remove, d1, startTail };
+}
+
+/**
+ * Captures `wrangler tail` into a file. The binary comes from PATH (`. "$HOME/.config/vite-plus/env"`)
+ * unless `wrangler` names another executable (a repo-local `node_modules/.bin/wrangler` needs no PATH
+ * entry at all).
+ */
+export function startWranglerTail(file, wrangler = 'wrangler') {
+  const stream = createWriteStream(file);
+  const child = spawn(wrangler, ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdout.pipe(stream);
+  let err = '';
+  let spawnError = null;
+  child.stderr.on('data', (d) => (err += d));
+  // Without this listener a host with no `wrangler` binary dies on an unhandled
+  // ENOENT; stop() reports the recorded error instead.
+  child.on('error', (e) => {
+    spawnError = e;
+  });
+  let stopped = false;
+  return {
+    file,
+    read: () => readFileSync(file, 'utf8'),
+    async stop(graceMs = 8000) {
+      if (stopped) return err;
+      stopped = true;
+      await sleep(graceMs);
+      // A spawn that never started has no process to signal or to wait for.
+      if (!spawnError) {
+        child.kill('SIGINT');
+        await new Promise((r) => (child.exitCode !== null ? r() : child.once('close', r)));
+      }
+      stream.end();
+      if (spawnError) throw new Error(`wrangler tail did not start: ${spawnError.message}`);
+      return err;
+    },
+  };
 }

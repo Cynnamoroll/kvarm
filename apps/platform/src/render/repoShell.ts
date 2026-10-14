@@ -21,7 +21,7 @@ export interface ShellOptions extends Pick<PageOptions, 'active' | 'needsYouCoun
   showClone?: boolean;
 }
 
-function tabHref(repo: RepoRow, tab: RepoTab, ref: string): string {
+export function repoTabHref(repo: RepoRow, tab: RepoTab, ref: string): string {
   const base = `/${repo.owner_login}/${repo.name}`;
   switch (tab) {
     case 'changes':
@@ -88,7 +88,7 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
   const tabHtml = tabs
     .map(
       (t) =>
-        `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${tabHref(repo, t, ref)}"${opts.tab === t ? ' aria-current="page"' : ''}>${t}</a>`,
+        `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${repoTabHref(repo, t, ref)}"${opts.tab === t ? ' aria-current="page"' : ''}>${t}</a>`,
     )
     .join('');
 

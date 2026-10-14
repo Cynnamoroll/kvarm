@@ -12,9 +12,10 @@
 import { Hono, type Context } from 'hono';
 import { html, raw, timeAgo } from '@kvarm/ui';
 import { listReposForOwner } from '../db/repos';
+import { listOwnedOrgLogins } from '../db/users';
 import type { UserRow } from '../db/users';
 import { csrfTokenValid, isSameOriginRequest, type SessionInfo } from '../auth/workos';
-import { mintPAT, parseScopes, revokePAT, SCOPES, type Scope } from '../auth/pat';
+import { mintPAT, parseScopes, patListStatement, revokePAT, SCOPES, type PatListRow, type Scope } from '../auth/pat';
 import { csrfInput, layout, requestOrigin, type PageOptions } from '../web/render';
 import { CSRF_REFUSED } from './pageCsrf';
 import * as svc from '../repos/service';
@@ -306,23 +307,18 @@ web.get('/settings/tokens', async (c) => {
   const ctx = await requireSessionPage(c);
   if (ctx instanceof Response) return ctx;
   const owner = c.req.query('owner') || ctx.user.login;
-  const [[pats, orgs], listed] = await Promise.all([
+  const ownedOrgs = listOwnedOrgLogins(c.env.DB, ctx.user.id, SETTINGS_ORG_LIMIT);
+  const [[pats], listed, orgs] = await Promise.all([
     c.env.DB.batch([
-    c.env.DB.prepare(
-      'SELECT id, name, prefix, scopes, created_at, last_used_at FROM pat WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-    ).bind(ctx.user.id, SETTINGS_PAT_LIMIT),
-    c.env.DB.prepare(
-      `SELECT o.login FROM orgs o JOIN org_members m ON m.org_id = o.id
-        WHERE m.user_id = ? AND m.role = 'owner' ORDER BY o.login LIMIT ?`,
-    ).bind(ctx.user.id, SETTINGS_ORG_LIMIT),
+    patListStatement(c.env.DB, ctx.user.id, SETTINGS_PAT_LIMIT),
     ]),
     // An account the user cannot manage only empties the agent section; PATs stay manageable.
     agents.listAgents(c.env, sessionActor(ctx), owner, { limit: SETTINGS_AGENT_LIMIT }),
+    ownedOrgs,
   ]);
   const csrf = raw(csrfInput(ctx.session.csrfToken));
 
-  type PatRow = { id: string; name: string; prefix: string; scopes: string; created_at: number; last_used_at: number | null };
-  const patRows = ((pats?.results ?? []) as PatRow[])
+  const patRows = ((pats?.results ?? []) as PatListRow[])
     .map(
       (t) => html`
         <div class="repo-row">
@@ -345,7 +341,7 @@ web.get('/settings/tokens', async (c) => {
   const scopeBoxes = SCOPES.map(
     (s) => html`<label><input type="checkbox" name="scopes" value="${s}" ${s === 'ci' ? '' : 'checked'} /> ${s}</label>`,
   ).join('');
-  const accounts = [ctx.user.login, ...((orgs?.results ?? []) as Array<{ login: string }>).map((o) => o.login)]
+  const accounts = [ctx.user.login, ...orgs]
     .map((login) =>
       login === owner ? html`<strong>${login}</strong>` : html`<a href="/settings/tokens?owner=${encodeURIComponent(login)}">${login}</a>`,
     )

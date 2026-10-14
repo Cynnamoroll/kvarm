@@ -37,11 +37,12 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { writeAskpass } from './lib/live.mjs';
 
 const { values: args } = parseArgs({
   options: { tail: { type: 'boolean', default: false }, keep: { type: 'boolean', default: false } },
@@ -89,12 +90,10 @@ const api = (method, path, json) =>
   });
 
 const work = mkdtempSync(join(tmpdir(), 'push-events-'));
-const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo kvarm ;; *) printenv E2E_GIT_TOKEN ;; esac\n');
-chmodSync(askpass, 0o700);
+const askpass = writeAskpass(work);
 
 function git(dir, gitArgs, token = process.env.KVARM_PAT) {
-  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', E2E_GIT_TOKEN: token };
+  const env = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: token };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...gitArgs], { cwd: dir, env, encoding: 'utf8' });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }

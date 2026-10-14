@@ -18,7 +18,7 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { escapeHtml as escape, html, raw, timeAgo } from '@kvarm/ui';
+import { escapeHtml as escape, html, raw, timeAgo, type Raw } from '@kvarm/ui';
 import { repoPage } from '../render/repoShell';
 import { finish, notFound, resolveRepo, sessionFormRefused, type Resolved } from './repoPages';
 import { csrfInput } from '../web/render';
@@ -101,12 +101,12 @@ const STATE_CLASS: Record<string, string> = {
   abandoned: 'muted',
 };
 
-function stateBadge(state: string): string {
-  return `<span class="badge state ${STATE_CLASS[state] ?? 'err'}">${escape(state)}</span>`;
+function stateBadge(state: string): Raw {
+  return raw(`<span class="badge state ${STATE_CLASS[state] ?? 'err'}">${escape(state)}</span>`);
 }
 
-function checksBadge(state: CheckState): string {
-  return `<span class="badge state ${state === 'success' ? 'ok' : state === 'failure' ? 'err' : 'warn'}">checks: ${escape(state)}</span>`;
+function checksBadge(state: CheckState): Raw {
+  return raw(`<span class="badge state ${state === 'success' ? 'ok' : state === 'failure' ? 'err' : 'warn'}">checks: ${escape(state)}</span>`);
 }
 
 /** Up to `limit` path chips plus a "+n" tail; the caller wraps the result in raw(). */
@@ -157,7 +157,7 @@ async function activityPage(c: PageContext): Promise<Response> {
     ...new Set([repo.default_branch || 'main', ...a.workspaces.map((w) => w.base).filter((b): b is string => b !== null)]),
   ];
   const baseOptions = formBases
-    .map((b) => `<option value="${escape(b)}"${b === a.base ? ' selected' : ''}>${escape(b)}</option>`)
+    .map((b) => html`<option value="${b}"${raw(b === a.base ? ' selected' : '')}>${b}</option>`)
     .join('');
   const canCompare = a.status === 'active';
   const rows = a.workspaces
@@ -166,13 +166,15 @@ async function activityPage(c: PageContext): Promise<Response> {
       const branchHref = w.branch ? `${base}/tree/${encodeURIComponent(w.branch)}` : '';
       const diffHref = w.branch ? compareHref(repo, w.base ?? a.base, w.branch) : '';
       const agentLine = w.agent
-        ? `<strong>${escape(w.agent)}</strong>${w.modelFamily ? ` <span class="chip">${escape(w.modelFamily)}</span>` : ''}`
-        : `<strong>workspace</strong> <span class="muted">by ${escape(w.createdBy ?? 'unknown')}</span>`;
+        ? html`<strong>${w.agent}</strong>${w.modelFamily ? raw(html` <span class="chip">${w.modelFamily}</span>`) : ''}`
+        : html`<strong>workspace</strong> <span class="muted">by ${w.createdBy ?? 'unknown'}</span>`;
       const pins =
         w.dependencies.length > 0
-          ? `<div class="ws-pins">pins ${w.dependencies
-              .map((d) => `<span class="chip">${escape(d.onWorkspace)}<span class="muted">@${short(d.revision)}</span>${stateBadge(d.state)}</span>`)
-              .join(' ')}</div>`
+          ? html`<div class="ws-pins">pins ${raw(
+              w.dependencies
+                .map((d) => html`<span class="chip">${d.onWorkspace}<span class="muted">@${short(d.revision)}</span>${stateBadge(d.state)}</span>`)
+                .join(' '),
+            )}</div>`
           : '';
       return html`
         <div class="ws-row" id="ws-${w.id}">
@@ -180,26 +182,20 @@ async function activityPage(c: PageContext): Promise<Response> {
             <div>${raw(agentLine)} ${stateBadge(w.status)}</div>
             <div class="muted">${w.task ?? ''}</div>
             <div class="ws-meta">
-              ${raw(w.branch ? `<a href="${branchHref}"><code>${escape(w.branch)}</code></a>` : '<span class="muted">no branch</span>')}
+              ${raw(w.branch ? html`<a href="${branchHref}"><code>${w.branch}</code></a>` : '<span class="muted">no branch</span>')}
               <span class="muted">base</span> <code>${w.base ?? '—'}</code>
               <span class="muted">head</span> <code>${short(w.headSha) || '—'}</code>
               <span class="muted">updated ${ago(w.updatedAt)}</span>
-              ${w.changeSet !== null ? raw(` · <span class="muted">change</span> #${w.changeSet}`) : ''}
-              ${w.arena ? raw(` · <a href="${base}/arenas/${w.arena}">arena</a>`) : ''}
+              ${w.changeSet !== null ? raw(html` · <span class="muted">change</span> #${w.changeSet}`) : ''}
+              ${w.arena ? raw(html` · <a href="${base}/arenas/${w.arena}">arena</a>`) : ''}
             </div>
-            ${w.declaredPaths.length > 0 ? raw(`<div class="ws-paths">intent ${chips(w.declaredPaths, 6)}</div>`) : ''}
+            ${w.declaredPaths.length > 0 ? raw(html`<div class="ws-paths">intent ${raw(chips(w.declaredPaths, 6))}</div>`) : ''}
             ${raw(pins)}
-            ${
-              overlap
-                ? raw(
-                    `<div><span class="badge state warn">overlap</span> with ${chips(overlap.with, 4)} · ${overlap.paths} shared path(s) · <a href="#overlap">details</a></div>`,
-                  )
-                : ''
-            }
+            ${overlap ? raw(html`<div><span class="badge state warn">overlap</span> with ${raw(chips(overlap.with, 4))} · ${overlap.paths} shared path(s) · <a href="#overlap">details</a></div>`) : ''}
           </div>
           <div class="ws-actions">
-            ${canCompare ? raw(`<label class="muted"><input type="checkbox" name="workspaces" value="${w.id}" /> compare</label>`) : ''}
-            ${diffHref ? raw(`<a class="btn" href="${diffHref}">diff</a>`) : ''}
+            ${canCompare ? raw(html`<label class="muted"><input type="checkbox" name="workspaces" value="${w.id}" /> compare</label>`) : ''}
+            ${diffHref ? raw(html`<a class="btn" href="${diffHref}">diff</a>`) : ''}
           </div>
         </div>
       `;
@@ -209,22 +205,21 @@ async function activityPage(c: PageContext): Promise<Response> {
   const pairs = a.overlap.pairs
     .map((p) => {
       const head = (i: 0 | 1) =>
-        `<a href="#ws-${escape(p.workspaces[i])}">${escape(p.workspaces[i])}</a>` +
-        (p.heads[i].agent ? ` <span class="muted">${escape(p.heads[i].agent)}</span>` : '');
+        html`<a href="#ws-${p.workspaces[i]}">${p.workspaces[i]}</a>${p.heads[i].agent ? raw(html` <span class="muted">${p.heads[i].agent}</span>`) : ''}`;
       return html`
         <div class="pair-row">
           <div>${raw(head(0))} <span class="muted">↔</span> ${raw(head(1))}</div>
-          <div class="ws-paths">${raw(chips(p.paths, 5))} ${p.pathCount > 5 ? raw(`<span class="muted">of ${p.pathCount}</span>`) : ''}</div>
+          <div class="ws-paths">${raw(chips(p.paths, 5))} ${p.pathCount > 5 ? raw(html`<span class="muted">of ${p.pathCount}</span>`) : ''}</div>
           <div class="muted">observed ${ago(p.heads[0].observedAt)}</div>
         </div>
       `;
     })
     .join('');
 
-  const incomplete = a.overlap.incomplete?.map((i) => `<code class="chip">${escape(i.workspace)}</code>`).join(' ') ?? '';
+  const incomplete = a.overlap.incomplete?.map((i) => html`<code class="chip">${i.workspace}</code>`).join(' ') ?? '';
   const arenas = a.arenas.arenas
     .map((ar) => {
-      const winner = ar.selection ? ` · selected <code class="chip">${escape(ar.selection.selectedWorkspace)}</code>` : '';
+      const winner = ar.selection ? html` · selected <code class="chip">${ar.selection.selectedWorkspace}</code>` : '';
       return html`
         <div class="pair-row">
           <div>
@@ -252,10 +247,10 @@ async function activityPage(c: PageContext): Promise<Response> {
       ${raw(rows || '<p class="muted">no workspaces</p>')}
       ${
         canCompare
-          ? raw(`
+          ? raw(html`
         <div class="pager">
           <label for="cmp-base">Compare selected at base</label>
-          <select id="cmp-base" name="base">${baseOptions}</select>
+          <select id="cmp-base" name="base">${raw(baseOptions)}</select>
           <button class="btn" type="submit">Compare</button>
           <span class="muted">select 1-8 workspaces above</span>
         </div>`)
@@ -264,7 +259,7 @@ async function activityPage(c: PageContext): Promise<Response> {
       ${
         a.workspacesNextCursor
           ? raw(
-              `<div class="pager"><a class="btn" href="${base}/activity?status=${encodeURIComponent(a.status)}${query({ cursor: a.workspacesNextCursor, base: c.req.query('base') })}">Older workspaces</a></div>`,
+              html`<div class="pager"><a class="btn" href="${base}/activity?status=${encodeURIComponent(a.status)}${raw(query({ cursor: a.workspacesNextCursor, base: c.req.query('base') }))}">Older workspaces</a></div>`,
             )
           : ''
       }
@@ -275,10 +270,10 @@ async function activityPage(c: PageContext): Promise<Response> {
       ${raw(pairs || '<p class="muted">no overlapping workspaces on this base</p>')}
       ${
         a.overlap.truncated
-          ? raw(`<div class="flash warn">Pairs are truncated: ${escape(a.overlap.truncatedReason ?? 'bounded read')} — an empty or short list is not proof of compatibility.</div>`)
+          ? raw(html`<div class="flash warn">Pairs are truncated: ${a.overlap.truncatedReason ?? 'bounded read'} — an empty or short list is not proof of compatibility.</div>`)
           : ''
       }
-      ${incomplete ? raw(`<p class="muted">Incomplete observed index (may overlap without being reported): ${incomplete}</p>`) : ''}
+      ${incomplete ? raw(html`<p class="muted">Incomplete observed index (may overlap without being reported): ${raw(incomplete)}</p>`) : ''}
     </div>
     <div class="card">
       <div class="card-title">Arenas <span class="muted"><a href="${base}/arenas">all arenas</a></span></div>
@@ -313,25 +308,25 @@ function candidateCards(res: candidates.CandidatesResponse | candidates.ArenaCan
           const stats =
             f.additions !== undefined && f.deletions !== undefined ? ` <span class="ok">+${f.additions}</span> <span class="err">−${f.deletions}</span>` : '';
           const mark = f.binary ? ' <span class="chip">binary</span>' : f.tooLarge ? ' <span class="chip">too large</span>' : '';
-          return `<div class="file-line"><span class="diff-status ${f.status}">${escape(f.status[0]!.toUpperCase())}</span> <code>${escape(f.path)}</code>${stats}${mark}</div>`;
+          return html`<div class="file-line"><span class="diff-status ${f.status}">${f.status[0]!.toUpperCase()}</span> <code>${f.path}</code>${raw(stats)}${raw(mark)}</div>`;
         })
         .join('');
       const more = cand.vsBase.filesTruncated ? '<div class="muted">+ more files — open the full diff</div>' : '';
-      const failing = rank && rank.factors.failingChecks.length > 0 ? `<div class="muted">failing: ${chips(rank.factors.failingChecks, 4)}</div>` : '';
+      const failing = rank && rank.factors.failingChecks.length > 0 ? html`<div class="muted">failing: ${raw(chips(rank.factors.failingChecks, 4))}</div>` : '';
       const select = opts.canSelect
-        ? `<form method="post" action="/${opts.repo.owner_login}/${opts.repo.name}/arenas/${opts.arenaId}/select">
-             ${csrfInput(opts.csrf)}
-             <input type="hidden" name="workspace" value="${escape(cand.workspace)}" />
+        ? html`<form method="post" action="/${opts.repo.owner_login}/${opts.repo.name}/arenas/${opts.arenaId}/select">
+             ${raw(csrfInput(opts.csrf))}
+             <input type="hidden" name="workspace" value="${cand.workspace}" />
              <button class="btn" type="submit">Select winner</button>
            </form>`
         : '';
       return html`
         <div class="candidate-card">
-          <div class="card-title">${rank ? raw(`<span class="rank">#${rank.rank}</span> `) : ''}${cand.agent ?? 'workspace'} ${raw(checksBadge(cand.checks.state))}</div>
+          <div class="card-title">${rank ? raw(html`<span class="rank">#${rank.rank}</span> `) : ''}${cand.agent ?? 'workspace'} ${checksBadge(cand.checks.state)}</div>
           <div class="ws-meta">
             <a href="/${opts.repo.owner_login}/${opts.repo.name}/tree/${encodeURIComponent(cand.branch)}"><code>${cand.branch}</code></a>
             <span class="muted">head</span> <code>${short(cand.headSha)}</code>
-            ${cand.changeSet !== null ? raw(`<span class="muted">change</span> #${cand.changeSet}`) : ''}
+            ${cand.changeSet !== null ? raw(html`<span class="muted">change</span> #${cand.changeSet}`) : ''}
             ${cand.baseMatches ? '' : raw('<span class="badge state warn">different base</span>')}
           </div>
           <div class="ws-meta">
@@ -361,7 +356,7 @@ function pairwiseTable(res: candidates.CandidatesResponse | candidates.ArenaCand
           <div><code>${p.workspaces[0]}</code> <span class="muted">vs</span> <code>${p.workspaces[1]}</code></div>
           <div><span class="muted">${p.fileCount} differing file(s)</span> · <span class="ok">${p.identical} identical</span></div>
           <div class="ws-paths">${raw(chips(p.files.slice(0, 6).map((f) => f.path), 6))}</div>
-          ${p.truncated ? raw(`<div class="flash warn">${p.truncatedReason ?? 'pairwise file list truncated'}</div>`) : ''}
+          ${p.truncated ? raw(html`<div class="flash warn">${p.truncatedReason ?? 'pairwise file list truncated'}</div>`) : ''}
         </div>
       `,
     )
@@ -375,9 +370,9 @@ function rankingTable(res: candidates.CandidatesResponse | candidates.ArenaCandi
     .map(
       (r) => html`
         <div class="pair-row">
-          <div><span class="rank">#${r.rank}</span> <code>${r.workspace}</code>${r.changeSet !== null ? raw(` · <span class="muted">change</span> #${r.changeSet}`) : ''}</div>
+          <div><span class="rank">#${r.rank}</span> <code>${r.workspace}</code>${r.changeSet !== null ? raw(html` · <span class="muted">change</span> #${r.changeSet}`) : ''}</div>
           <div class="muted">
-            ${raw(checksBadge(r.factors.checks))} · risk ${r.factors.riskLevel} (${r.factors.riskScore}) ·
+            ${checksBadge(r.factors.checks)} · risk ${r.factors.riskLevel} (${r.factors.riskScore}) ·
             ${r.factors.changedLines ?? '?'} line(s) in ${r.factors.changedFiles} file(s)
             ${r.factors.complete ? '' : raw('<span class="badge state warn">incomplete stats</span>')}
           </div>
@@ -406,11 +401,11 @@ function comparisonBody(res: candidates.CandidatesResponse | candidates.ArenaCan
     'excluded' in res && res.excluded.length > 0
       ? html`<div class="card">
           <div class="card-title">Excluded</div>
-          ${raw(res.excluded.map((e) => `<div><code>${escape(e.workspace)}</code> <span class="muted">${escape(e.reason)}</span></div>`).join(''))}
+          ${raw(res.excluded.map((e) => html`<div><code>${e.workspace}</code> <span class="muted">${e.reason}</span></div>`).join(''))}
         </div>`
       : '';
   return html`
-    ${res.truncated ? raw(`<div class="flash warn">Comparison truncated: ${escape(res.truncatedReason ?? 'bounded read')} — the shown files and totals cover the discovered subset only.</div>`) : ''}
+    ${res.truncated ? raw(html`<div class="flash warn">Comparison truncated: ${res.truncatedReason ?? 'bounded read'} — the shown files and totals cover the discovered subset only.</div>`) : ''}
     ${raw(rankingTable(res))}
     <div class="card">
       <div class="card-title">Candidates against base <code>${res.base.ref}</code> <span class="muted">@ <code>${short(res.base.sha)}</code></span></div>
@@ -421,8 +416,8 @@ function comparisonBody(res: candidates.CandidatesResponse | candidates.ArenaCan
     ${
       duplication
         ? raw(
-            `<div class="card"><div class="card-title">Duplication (advisory)</div>${pairRows(duplication.pairs) || '<p class="muted">no duplicated paths between candidates</p>'}${
-              duplication.truncated ? `<div class="flash warn">${escape(duplication.truncatedReason ?? 'bounded read')}</div>` : ''
+            html`<div class="card"><div class="card-title">Duplication (advisory)</div>${raw(pairRows(duplication.pairs) || '<p class="muted">no duplicated paths between candidates</p>')}${
+              duplication.truncated ? raw(html`<div class="flash warn">${duplication.truncatedReason ?? 'bounded read'}</div>`) : ''
             }</div>`,
           )
         : ''
@@ -430,8 +425,8 @@ function comparisonBody(res: candidates.CandidatesResponse | candidates.ArenaCan
     ${
       overlap
         ? raw(
-            `<div class="card"><div class="card-title">Overlap with other workspaces (advisory)</div>${pairRows(overlap.pairs) || '<p class="muted">none reported</p>'}${
-              overlap.truncated ? `<div class="flash warn">${escape(overlap.truncatedReason ?? 'bounded read')}</div>` : ''
+            html`<div class="card"><div class="card-title">Overlap with other workspaces (advisory)</div>${raw(pairRows(overlap.pairs) || '<p class="muted">none reported</p>')}${
+              overlap.truncated ? raw(html`<div class="flash warn">${overlap.truncatedReason ?? 'bounded read'}</div>`) : ''
             }</div>`,
           )
         : ''
@@ -447,7 +442,7 @@ function candidatesForm(repo: RepoRow, base: string, message: string | null): st
   return html`
     <div class="card">
       <div class="card-title">Compare workspaces</div>
-      ${message ? raw(`<div class="flash err">${escape(message)}</div>`) : raw('<p class="muted">Pick 1-8 workspace ids of this repository and a base branch.</p>')}
+      ${message ? raw(html`<div class="flash err">${message}</div>`) : raw('<p class="muted">Pick 1-8 workspace ids of this repository and a base branch.</p>')}
       <form method="get" action="/${repo.owner_login}/${repo.name}/candidates">
         <label for="cw-base">Base branch</label>
         <input id="cw-base" name="base" type="text" value="${base}" placeholder="${repo.default_branch || 'main'}" />
@@ -514,7 +509,7 @@ coordinationPages.get('/arenas', async (c) => {
   const rows = r.value.arenas
     .map((ar) => {
       const winner = ar.selection
-        ? ` · selected <code class="chip">${escape(ar.selection.selectedWorkspace)}</code> by ${escape(ar.selection.selectedBy.login ?? ar.selection.selectedBy.agent ?? 'unknown')}`
+        ? html` · selected <code class="chip">${ar.selection.selectedWorkspace}</code> by ${ar.selection.selectedBy.login ?? ar.selection.selectedBy.agent ?? 'unknown'}`
         : '';
       return html`
         <div class="pair-row">
@@ -529,7 +524,7 @@ coordinationPages.get('/arenas', async (c) => {
     })
     .join('');
   const next = r.value.nextCursor
-    ? raw(`<div class="pager"><a class="btn" href="${base}/arenas?cursor=${encodeURIComponent(r.value.nextCursor)}">Older arenas</a></div>`)
+    ? raw(html`<div class="pager"><a class="btn" href="${base}/arenas?cursor=${encodeURIComponent(r.value.nextCursor)}">Older arenas</a></div>`)
     : '';
   const body = html`<div class="card"><div class="card-title">Arenas</div>${raw(rows || '<p class="muted">no arenas yet</p>')}${next}</div>`;
   return respond(c, repoPage(c.env, { repo, ref, tab: 'activity', title: 'Arenas' }, viewerLogin, body, c.req.url));
@@ -538,9 +533,9 @@ coordinationPages.get('/arenas', async (c) => {
 function arenaBody(arena: ArenaView, res: candidates.ArenaCandidatesResponse, opts: ComparisonOptions): string {
   const winner = arena.selection
     ? raw(
-        `<p><span class="badge state ok">selected</span> <code>${escape(arena.selection.selectedWorkspace)}</code> by ${escape(
-          arena.selection.selectedBy.login ?? arena.selection.selectedBy.agent ?? 'unknown',
-        )} ${ago(arena.selection.selectedAt)} — the winner merges through its own change set under the normal policy; the other candidates stay open until abandoned.</p>`,
+        html`<p><span class="badge state ok">selected</span> <code>${arena.selection.selectedWorkspace}</code> by ${
+          arena.selection.selectedBy.login ?? arena.selection.selectedBy.agent ?? 'unknown'
+        } ${ago(arena.selection.selectedAt)} — the winner merges through its own change set under the normal policy; the other candidates stay open until abandoned.</p>`,
       )
     : opts.canSelect
       ? raw(
@@ -565,7 +560,7 @@ async function arenaPage(c: PageContext, resolved: Resolved, flash: string | nul
   const [arena, res] = await Promise.all([candidates.getArena(cx, id), candidates.arenaCandidates(cx, id)]);
   if (!arena.ok) return errorCard(c, resolved, 'activity', 'Arena unavailable', arena);
   if (!res.ok) return errorCard(c, resolved, 'activity', 'Candidates unavailable', res);
-  const flashCard = flash ? raw(`<div class="flash err">${escape(flash)}</div>`) : '';
+  const flashCard = flash ? raw(html`<div class="flash err">${flash}</div>`) : '';
   const body = html`${flashCard}${raw(
     arenaBody(arena.value, res.value, {
       repo,
@@ -627,10 +622,10 @@ coordinationPages.get('/train', async (c) => {
       groups.push(g);
     }
     const waiting = e.waiting
-      ? raw(`<div><span class="badge state warn">waiting</span> ${escape(e.waiting.message)} <span class="muted">(pins: ${escape(e.waiting.dependencies.join(', '))})</span></div>`)
+      ? raw(html`<div><span class="badge state warn">waiting</span> ${e.waiting.message} <span class="muted">(pins: ${e.waiting.dependencies.join(', ')})</span></div>`)
       : '';
     const composition = e.composition
-      ? raw(`<div class="muted">composed on <code>${short(e.composition.baseSha)}</code> · tree <code>${short(e.composition.treeSha)}</code></div>`)
+      ? raw(html`<div class="muted">composed on <code>${short(e.composition.baseSha)}</code> · tree <code>${short(e.composition.treeSha)}</code></div>`)
       : '';
     g.rows.push(html`
       <div class="pair-row">
@@ -638,12 +633,12 @@ coordinationPages.get('/train', async (c) => {
           <span class="rank">${e.position ?? '·'}</span>
           <strong>#${e.number}</strong> <span class="muted">${e.mergePolicy}</span>
           ${stateBadge(e.state)}
-          ${e.agent ? raw(`<span class="muted">${e.agent.name}</span>`) : e.enqueuedBy ? raw(`<span class="muted">${e.enqueuedBy}</span>`) : ''}
+          ${e.agent ? raw(html`<span class="muted">${e.agent.name}</span>`) : e.enqueuedBy ? raw(html`<span class="muted">${e.enqueuedBy}</span>`) : ''}
         </div>
         <div class="muted">enqueued ${ago(e.enqueuedAt)} · head <code>${short(e.headSha)}</code>${e.attempts > 0 ? ` · attempt ${e.attempts + 1}` : ''}</div>
         ${waiting}
         ${composition}
-        ${e.reason ? raw(`<div class="muted">${escape(e.reason.code)}: ${escape(e.reason.message ?? '')}</div>`) : ''}
+        ${e.reason ? raw(html`<div class="muted">${e.reason.code}: ${e.reason.message ?? ''}</div>`) : ''}
       </div>
     `);
   }
@@ -656,7 +651,7 @@ coordinationPages.get('/train', async (c) => {
       (e) => html`
         <div class="pair-row">
           <div><strong>#${e.number}</strong> ${stateBadge(e.state)} <span class="muted">${e.mergePolicy}</span></div>
-          <div>${e.reason ? raw(`<code>${escape(e.reason.code)}</code> ${escape(e.reason.message ?? '')}`) : '<span class="muted">no reason recorded</span>'}</div>
+          <div>${e.reason ? raw(html`<code>${e.reason.code}</code> ${e.reason.message ?? ''}`) : '<span class="muted">no reason recorded</span>'}</div>
           <div class="muted">left the train ${ago(e.exitedAt)}</div>
         </div>
       `,
@@ -667,13 +662,13 @@ coordinationPages.get('/train', async (c) => {
     .map((t) => {
       const paths = t.conflicts?.map((cf) => cf.path) ?? [];
       const needsRegen = t.conflicts?.some((cf) => cf.needsRegeneration) === true;
-      const compare = t.baseSha && t.headSha ? raw(`<a class="btn" href="${raw(compareHref(repo, t.baseSha, t.headSha))}">diff</a>`) : '';
+      const compare = t.baseSha && t.headSha ? raw(html`<a class="btn" href="${compareHref(repo, t.baseSha, t.headSha)}">diff</a>`) : '';
       return html`
         <div class="pair-row">
           <div>
             <strong>${t.kind}</strong> for change #${t.change?.number ?? '—'}
             ${stateBadge(t.lease?.expired ? 'open' : t.status)}
-            ${t.claimedBy ? raw(`<span class="muted">claimed by ${t.claimedBy}${t.lease?.expired ? ' (lease expired)' : ''}</span>`) : ''}
+            ${t.claimedBy ? raw(html`<span class="muted">claimed by ${t.claimedBy}${t.lease?.expired ? ' (lease expired)' : ''}</span>`) : ''}
           </div>
           <div class="ws-paths">
             ${raw(chips(paths, 6))}${t.conflictsTruncated ? raw('<span class="muted">+ more paths</span>') : ''}

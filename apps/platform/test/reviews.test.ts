@@ -11,7 +11,6 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import type { RepoRow } from '../src/db/repos';
 import worker from '../src/index';
 import { headFingerprint } from '../src/services/approvalCarry';
@@ -19,31 +18,18 @@ import { suggestedReviewers } from '../src/services/reviews';
 import type { ChecksGate } from '../src/services/checksGate';
 import { defaultTrainDeps, runTrain, type TrainDeps } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, recordingEvents, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'rv-owner';
 const MAIN = 'refs/heads/main';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
-const sent: unknown[] = [];
-const fakeEvents = {
-  async send(body: unknown) {
-    sent.push(body);
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push(m.body);
-  },
-};
 
 const env = {
   ...baseEnv,
@@ -55,40 +41,6 @@ const env = {
 const tok = { owner: '', human2: '', human3: '', reader: '' };
 const userIds: Record<string, string> = {};
 const repoIds: Record<string, string> = {};
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  userIds[login] = id;
-  return id;
-}
-
-interface Reply {
-  status: number;
-  json: Record<string, any>;
-  cost: CostCounters;
-}
-
-async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, json, cost: cost! };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 
@@ -116,15 +68,10 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
   const artifactsName = `${OWNER}--${name}`;
   const repo = new FakeRepo();
   fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
+  const { id } = await seedRepoBase(env, name, { owner: OWNER, visibility: 'public', register: false, repoIds });
   const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-       VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-    ).bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, now),
-    ...['rv-human2', 'rv-human3'].map((login) =>
+  await env.DB.batch(
+    ['rv-human2', 'rv-human3'].map((login) =>
       env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(
         id,
         userIds[login],
@@ -134,7 +81,7 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
         now,
       ),
     ),
-  ]);
+  );
   const main = await commit(repo, { 'README.md': 'readme\n' });
   repo.refs.set(MAIN, main.sha);
   for (let i = 1; i <= count; i++) {
@@ -425,6 +372,10 @@ describe('review policy', () => {
   });
 });
 
+function byIdOf(cands: Array<Record<string, any>>): Record<string, Record<string, any>> {
+  return Object.fromEntries(cands.map((c) => [c.agent.id, c]));
+}
+
 describe('model families and assignment', () => {
   it('records the agent modelFamily, refuses agent self-review and prefers a different family than the author', async () => {
     await setup('family');
@@ -447,7 +398,7 @@ describe('model families and assignment', () => {
     // Agent model families are self-declared, so the cross-model claim is labeled declared.
     expect(assigned.json.preference).toEqual({ rule: 'different-model-family', authorModelFamily: 'claude', met: true, evidence: 'declared' });
     expect(assigned.json.assigned).toMatchObject({ principal: `agent:${other.id}`, modelFamily: 'gpt', differentFamily: true, eligible: true });
-    const byId = Object.fromEntries((assigned.json.candidates as Array<Record<string, any>>).map((c) => [c.agent.id, c]));
+    const byId = byIdOf(assigned.json.candidates as Array<Record<string, any>>);
     expect(byId[author.id]).toMatchObject({ eligible: false, ineligibleReason: 'author' });
     expect(byId[sameFamily.id]).toMatchObject({ eligible: true, differentFamily: false, modelFamily: 'claude' });
     expect(byId[unknown.id]).toMatchObject({ eligible: true, differentFamily: false, modelFamily: null });
@@ -584,10 +535,6 @@ describe('persisted reviewer routing', () => {
     expect(suggestions.some(({ principal }) => principal === `user:${userIds[OWNER]}`)).toBe(false);
   });
 });
-
-function byIdOf(cands: Array<Record<string, any>>): Record<string, Record<string, any>> {
-  return Object.fromEntries(cands.map((c) => [c.agent.id, c]));
-}
 
 describe('agent approval head tiers', () => {
   it('records a docs-only tier before pre-seeding and auto-merges a different-family agent approval', async () => {

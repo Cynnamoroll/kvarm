@@ -15,6 +15,7 @@
 
 import type { ServiceResult } from '../repos/service';
 import { isOrgRole, type Actor, type OrgRole } from './authz';
+import { fail, isUniqueViolation } from './result';
 
 export interface OrgRow {
   id: string;
@@ -75,9 +76,6 @@ export function canAdministerOrgRepos(role: OrgRole | null): boolean {
   return role === 'owner' || role === 'maintainer';
 }
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 export function validateOrgLogin(login: string): string | null {
   if (!ORG_LOGIN_RE.test(login)) return 'login must be 1-39 lowercase letters, digits or dashes, starting with a letter or digit';
@@ -114,7 +112,7 @@ export async function createOrg(
       ).bind(org.id, actor.user.id, org.created_at, org.created_at),
     ]);
   } catch (err) {
-    if (/UNIQUE|constraint/i.test(String(err))) {
+    if (isUniqueViolation(err, 'account_names.login')) {
       return fail(409, 'that login is already taken by a user or organization', 'NAMESPACE_TAKEN');
     }
     throw err;

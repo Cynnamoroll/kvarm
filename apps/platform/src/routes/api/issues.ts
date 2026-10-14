@@ -15,20 +15,12 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import * as svc from '../../services/issues';
 import { getTask } from '../../services/tasks';
 
 export const issuesApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
-
-async function jsonBody(c: Context<App>): Promise<unknown> {
-  return c.req.json().catch(() => undefined);
-}
 
 const invalidBody = (c: Context<App>) => c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
 
@@ -36,6 +28,7 @@ issuesApi.post('/repos/:owner/:repo/issues', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return invalidBody(c);
   const r = await svc.createIssue({ env: c.env, repo: d.repo, actor: d.actor }, body);
   if (!r.ok) return failJson(c, r);
@@ -67,6 +60,7 @@ issuesApi.patch('/repos/:owner/:repo/issues/:number', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return invalidBody(c);
   const r = await svc.updateIssue({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
@@ -77,6 +71,7 @@ issuesApi.post('/repos/:owner/:repo/issues/:number/comments', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return invalidBody(c);
   const r = await svc.createComment({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
@@ -95,6 +90,7 @@ issuesApi.post('/repos/:owner/:repo/changes/:number/issues', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return invalidBody(c);
   const r = await svc.linkIssue({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);

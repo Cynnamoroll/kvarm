@@ -51,6 +51,12 @@ export type EscalationReason = (typeof ESCALATION_REASONS)[number];
 /** Reasons opened once per change by the platform itself rather than by a review. */
 export type StickyReason = 'protected-path' | 'final-selection';
 
+/** The human-facing detail a platform-opened escalation row carries, one per sticky reason. */
+const ESCALATION_DETAIL: Record<StickyReason, string> = {
+  'protected-path': 'the change targets a ref covered by a branch rule',
+  'final-selection': "an arena selection names this change's workspace as the winner; a human confirms the selection",
+};
+
 export type ReviewBlockCode = 'APPROVALS_REQUIRED' | 'ESCALATION_OPEN' | 'REVIEWS_REQUIRED';
 
 export interface ReviewFacts {
@@ -258,10 +264,7 @@ export function reviewGate(facts: ReviewFacts, policy: BranchPolicy): ReviewGate
  * and reason: a resolved one is not reopened.
  */
 export function recordMissingEscalation(db: D1Database, changeId: string, reason: StickyReason, now: number): D1PreparedStatement {
-  const detail =
-    reason === 'protected-path'
-      ? 'the change targets a ref covered by a branch rule'
-      : "an arena selection names this change's workspace as the winner; a human confirms the selection";
+  const detail = ESCALATION_DETAIL[reason];
   return db
     .prepare(
       `INSERT OR IGNORE INTO change_escalations (id, repo_id, change_set_id, change_number, reason, state, head_sha, detail, opened_by, opened_at)
@@ -286,10 +289,9 @@ export function finalSelectionEscalation(db: D1Database, repoId: string, workspa
   return db
     .prepare(
       `INSERT OR IGNORE INTO change_escalations (id, repo_id, change_set_id, change_number, reason, state, head_sha, detail, opened_by, opened_at)
-       SELECT ?1, c.repo_id, c.id, c.number, 'final-selection', 'open', c.head_sha,
-              'an arena selection names this change''s workspace as the winner; a human confirms the selection', 'system', ?4
+       SELECT ?1, c.repo_id, c.id, c.number, 'final-selection', 'open', c.head_sha, ?6, 'system', ?4
          FROM workspaces w JOIN change_sets c ON c.id = w.change_set_id
         WHERE w.repo_id = ?2 AND w.id = ?3 AND c.state IN ('open', 'conflicted')${onlyIfSelected}`,
     )
-    .bind(crypto.randomUUID(), repoId, workspaceId, now, arenaId ?? null);
+    .bind(crypto.randomUUID(), repoId, workspaceId, now, arenaId ?? null, ESCALATION_DETAIL['final-selection']);
 }

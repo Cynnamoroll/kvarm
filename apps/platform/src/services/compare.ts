@@ -19,11 +19,12 @@ import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { markCache } from '../cost/meter';
 import { compareKeys, readJson, writeJson } from '../cache/compare';
 import type { ServiceResult } from '../repos/service';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { runPool } from './pool';
+import { fail, guarded as baseGuarded } from './result';
 import { RISK_BUDGETS, assessRisk, type ChangeRating, type FileRisk, type RiskInput, type RiskResult, type RiskStat } from './risk';
 import {
   EMPTY_TREE,
-  RefStoreUnavailable,
   isFullSha,
   isValidRefName,
   readCommitAndParent,
@@ -157,9 +158,6 @@ export interface PageOptions {
 
 type Ctx = ResolveContext;
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 // ---------------------------------------------------------------------------
 // Artifacts readers
@@ -549,16 +547,12 @@ export async function treePairRating(ctx: Ctx, baseTree: string, headTree: strin
 }
 
 function encodeCursor(offset: number, baseTree: string, headTree: string): string {
-  return btoa(`v1:${offset}:${baseTree.slice(0, 12)}${headTree.slice(0, 12)}`).replace(/=+$/, '');
+  return encodeCursorPayload(`v1:${offset}:${baseTree.slice(0, 12)}${headTree.slice(0, 12)}`);
 }
 
 function decodeCursor(cursor: string, baseTree: string, headTree: string): number | null {
-  let raw: string;
-  try {
-    raw = atob(cursor);
-  } catch {
-    return null;
-  }
+  const raw = decodeCursorPayload(cursor);
+  if (raw === null) return null;
   const m = /^v1:(\d+):([0-9a-f]{24})$/.exec(raw);
   if (!m || m[2] !== `${baseTree.slice(0, 12)}${headTree.slice(0, 12)}`) return null;
   return Number(m[1]);
@@ -622,17 +616,7 @@ function markOutcome(cache: CacheOutcome): void {
   markCache(cache);
 }
 
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ compareRefStore: err.message.slice(0, 200) }));
-      return fail(503, 'repository storage is unavailable, retry shortly', 'STORAGE_UNAVAILABLE');
-    }
-    throw err;
-  }
-}
+const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('compareRefStore', fn);
 
 /** Resolves base and head (one round trip for both names) to commits and trees. */
 async function resolvePair(

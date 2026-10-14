@@ -183,6 +183,11 @@ async function metered<T>(
   return value;
 }
 
+/**
+ * Folds a step attempt's metered counters into the stored build cost. The
+ * meter's `do` and `q` counters are not persisted: the builder issues no
+ * Durable Object or queue work, so they would only ever store zero.
+ */
 function addMeter(cost: BuildCost, meter: CostMeter, excluded: Excluded = { d1: 0, rr: 0, rw: 0 }): void {
   cost.steps++;
   cost.d1 += meter.d1 - excluded.d1;
@@ -228,18 +233,11 @@ interface ClaimRow {
 
 /** Counters metered so far in this step, as a one-step reuse/wait cost. */
 function settledCost(meter: CostMeter, extraD1 = 0): BuildCost {
-  return {
-    ...emptyCost(),
-    steps: 1,
-    d1: meter.d1 + extraD1,
-    rr: meter.rr,
-    rw: meter.rw,
-    art: meter.art,
-    r2a: meter.r2a,
-    r2b: meter.r2b,
-    sub: meter.sub,
-    reused: true,
-  };
+  const cost = emptyCost();
+  addMeter(cost, meter);
+  cost.d1 += extraD1;
+  cost.reused = true;
+  return cost;
 }
 
 async function resolveStep(env: Env, p: Required<SnapshotParams> & { instanceId: string }): Promise<Resolved> {
@@ -383,30 +381,23 @@ export interface BuildOptions {
   readBudget?: number;
 }
 
-/** Appends tar bytes and uploads every complete part. */
-class PartWriter {
+/**
+ * Buffered bytes as a queue of chunks with their total length. `take`
+ * consumes exactly n bytes, splitting the head chunk when the cut lands
+ * inside it.
+ */
+class ChunkBuffer {
   private chunks: Uint8Array[] = [];
-  private length = 0;
-
-  constructor(
-    private readonly bucket: R2Bucket,
-    private readonly key: string,
-    private readonly partSize: number,
-    private readonly contentType: string,
-    readonly state: BatchState,
-    carry: Uint8Array,
-  ) {
-    if (carry.length > 0) this.push(carry);
-  }
+  length = 0;
 
   push(bytes: Uint8Array): void {
     if (bytes.length === 0) return;
     this.chunks.push(bytes);
     this.length += bytes.length;
-    if (this.length > this.state.cost.peakBuffer) this.state.cost.peakBuffer = this.length;
   }
 
-  private take(n: number): Uint8Array {
+  /** Exactly `n` buffered bytes, splitting the head chunk if it crosses the cut. */
+  take(n: number): Uint8Array {
     const out = new Uint8Array(n);
     let off = 0;
     while (off < n) {
@@ -426,6 +417,32 @@ class PartWriter {
     return out;
   }
 
+  rest(): Uint8Array {
+    return this.take(this.length);
+  }
+}
+
+/** Appends tar bytes and uploads every complete part. */
+class PartWriter {
+  private readonly buffer = new ChunkBuffer();
+
+  constructor(
+    private readonly bucket: R2Bucket,
+    private readonly key: string,
+    private readonly partSize: number,
+    private readonly contentType: string,
+    readonly state: BatchState,
+    carry: Uint8Array,
+  ) {
+    if (carry.length > 0) this.push(carry);
+  }
+
+  push(bytes: Uint8Array): void {
+    if (bytes.length === 0) return;
+    this.buffer.push(bytes);
+    if (this.buffer.length > this.state.cost.peakBuffer) this.state.cost.peakBuffer = this.buffer.length;
+  }
+
   private upload(): R2MultipartUpload | Promise<R2MultipartUpload> {
     if (this.state.uploadId) return this.bucket.resumeMultipartUpload(this.key, this.state.uploadId);
     return this.bucket
@@ -437,10 +454,10 @@ class PartWriter {
   }
 
   async flushFull(): Promise<void> {
-    while (this.length >= this.partSize) {
+    while (this.buffer.length >= this.partSize) {
       const upload = await this.upload();
       const partNumber = this.state.parts.length + 1;
-      const part = await upload.uploadPart(partNumber, this.take(this.partSize));
+      const part = await upload.uploadPart(partNumber, this.buffer.take(this.partSize));
       this.state.parts.push(part);
       this.state.flushed += this.partSize;
       this.state.cost.parts++;
@@ -449,15 +466,15 @@ class PartWriter {
 
   /** Writes the remaining bytes as a single object or the final part, then completes. */
   async finish(): Promise<number> {
-    const size = this.state.flushed + this.length;
+    const size = this.state.flushed + this.buffer.length;
     if (!this.state.uploadId) {
-      await this.bucket.put(this.key, this.take(this.length), { httpMetadata: { contentType: this.contentType } });
+      await this.bucket.put(this.key, this.buffer.take(this.buffer.length), { httpMetadata: { contentType: this.contentType } });
       return size;
     }
     const upload = await this.upload();
     try {
-      if (this.length > 0) {
-        const part = await upload.uploadPart(this.state.parts.length + 1, this.take(this.length));
+      if (this.buffer.length > 0) {
+        const part = await upload.uploadPart(this.state.parts.length + 1, this.buffer.take(this.buffer.length));
         this.state.parts.push(part);
         this.state.cost.parts++;
       }
@@ -471,7 +488,7 @@ class PartWriter {
   }
 
   rest(): Uint8Array {
-    return this.take(this.length);
+    return this.buffer.rest();
   }
 }
 
@@ -527,37 +544,15 @@ class PlainEncoder implements TarEncoder {
  * region only costs its raw bytes on the wire.
  */
 class ZstdEncoder implements TarEncoder {
-  private chunks: Uint8Array[] = [];
-  private length = 0;
+  private readonly buffer = new ChunkBuffer();
 
   constructor(
     private readonly writer: PartWriter,
     private readonly state: BatchState,
   ) {}
 
-  /** Exactly `n` buffered bytes, splitting the head chunk if it crosses the cut. */
-  private take(n: number): Uint8Array {
-    const input = new Uint8Array(n);
-    let off = 0;
-    while (off < n) {
-      const head = this.chunks[0]!;
-      const want = n - off;
-      if (head.length <= want) {
-        input.set(head, off);
-        off += head.length;
-        this.chunks.shift();
-      } else {
-        input.set(head.subarray(0, want), off);
-        this.chunks[0] = head.subarray(want);
-        off = n;
-      }
-    }
-    this.length -= n;
-    return input;
-  }
-
   private cut(n: number): void {
-    const input = this.take(n);
+    const input = this.buffer.take(n);
     let frame: Uint8Array;
     try {
       frame = zstdCompressSync(input, {
@@ -571,9 +566,8 @@ class ZstdEncoder implements TarEncoder {
 
   async push(bytes: Uint8Array): Promise<void> {
     this.state.tarBytes += bytes.length;
-    this.chunks.push(bytes);
-    this.length += bytes.length;
-    while (this.length >= SNAPSHOT_ZSTD_FRAME_BYTES) this.cut(SNAPSHOT_ZSTD_FRAME_BYTES);
+    this.buffer.push(bytes);
+    while (this.buffer.length >= SNAPSHOT_ZSTD_FRAME_BYTES) this.cut(SNAPSHOT_ZSTD_FRAME_BYTES);
     await this.writer.flushFull();
   }
 
@@ -589,7 +583,7 @@ class ZstdEncoder implements TarEncoder {
   }
 
   async end(): Promise<void> {
-    if (this.length > 0) this.cut(this.length);
+    if (this.buffer.length > 0) this.cut(this.buffer.length);
     await this.writer.flushFull();
   }
 }
@@ -903,17 +897,8 @@ async function finishStep(
         note.discarded = target.key;
       }
     }
-    const final: BuildCost = {
-      ...cost,
-      steps: cost.steps + 1,
-      d1: cost.d1 + meter.d1,
-      rr: cost.rr + meter.rr,
-      rw: cost.rw + meter.rw,
-      art: cost.art + meter.art,
-      r2a: cost.r2a + meter.r2a,
-      r2b: cost.r2b + meter.r2b,
-      sub: cost.sub + meter.sub,
-    };
+    const final = structuredClone(cost);
+    addMeter(final, meter);
     if (repoGone) return final;
     const measured = JSON.stringify(final);
     // Both writes are fenced by tree ownership, not the commit's instance_id:

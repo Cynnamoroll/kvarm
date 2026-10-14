@@ -3,6 +3,8 @@
  * CI configuration in Node with the exact rules the platform applies.
  */
 
+import { fail as sharedFail } from './result';
+
 export const CI_CONFIG_PATH = '.kvarm/ci.json';
 export const CI_LIMITS = {
   jobs: 16,
@@ -29,7 +31,7 @@ export interface CiConfig {
 /** Structurally a `ServiceResult` (repos/service.ts), without its Worker-typed imports. */
 export type CiConfigResult = { ok: true; value: CiConfig } | { ok: false; status: number; error: string; code: string };
 
-const fail = (error: string, code: string): CiConfigResult => ({ ok: false, status: 422, error, code });
+const fail = (error: string, code: string): CiConfigResult => sharedFail(422, error, code);
 
 export function parseCiConfig(text: string): CiConfigResult {
   if (new TextEncoder().encode(text).length > CI_LIMITS.configBytes) return fail(`${CI_CONFIG_PATH} is too large`, 'CI_CONFIG_TOO_LARGE');
