@@ -170,7 +170,13 @@ export function targetConfig(base, settings, { requireOrigin }) {
     if (!url || !/^https?:$/.test(url.protocol) || url.origin !== origin) {
       throw new Error(`KVARM_APP_ORIGIN must be a bare http(s) origin such as https://kvarm.example.com (got ${origin})`);
     }
-    config.vars = { ...config.vars, APP_ORIGIN: origin };
+    config.vars = { ...config.vars, APP_ORIGIN: origin, WORKOS_REDIRECT_URI: `${origin}/auth/callback` };
+    // A custom-domain origin (anything but the workers.dev host the deploy
+    // already owns) publishes the matching Workers custom domain, so the
+    // site the origin names is the worker itself.
+    if (!/(^|\.)workers\.dev$/i.test(url.host)) {
+      config.routes = [...(config.routes ?? []), { pattern: url.host, custom_domain: true }];
+    }
   } else if (requireOrigin) {
     throw new Error('KVARM_APP_ORIGIN must be set to the public origin of your worker (https://<worker>.<subdomain>.workers.dev or a custom domain)');
   }

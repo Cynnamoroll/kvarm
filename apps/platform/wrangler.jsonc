@@ -131,7 +131,10 @@
     "SITE_NAME": "Kvarm",
     "APP_ORIGIN": "http://localhost:8787",
     "ARTIFACTS_NAMESPACE": "default",
-    "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback"
+    // Empty means the callback is the origin that served /auth/login, so local
+    // dev and any deployment work without editing this file. The deploy
+    // overlay sets it explicitly from KVARM_APP_ORIGIN.
+    "WORKOS_REDIRECT_URI": ""
   },
   "observability": {
     "enabled": true
