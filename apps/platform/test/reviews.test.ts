@@ -67,8 +67,8 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
   fakeRepos.set(artifactsName, repo);
   const { id } = await seedRepoBase(env, name, { owner: OWNER, visibility: 'public', register: false, repoIds });
   const now = Date.now();
-  await env.DB.batch([
-    ...['rv-human2', 'rv-human3'].map((login) =>
+  await env.DB.batch(
+    ['rv-human2', 'rv-human3'].map((login) =>
       env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(
         id,
         userIds[login],
@@ -78,7 +78,7 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
         now,
       ),
     ),
-  ]);
+  );
   const main = await commit(repo, { 'README.md': 'readme\n' });
   repo.refs.set(MAIN, main.sha);
   for (let i = 1; i <= count; i++) {
