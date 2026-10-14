@@ -23,7 +23,7 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { resolveCtx } from './changes';
 import { artifactsMergeSources } from './merge';
-import { RefStoreUnavailable, resolveCommitish } from './refs';
+import { isInvalidObject, RefStoreUnavailable, resolveCommitish } from './refs';
 
 export const HISTORY_LIMITS = {
   pageDefault: 30,
@@ -158,11 +158,23 @@ interface Step {
   tailLost: boolean;
 }
 
-async function logOf(h: ArtifactsRepo, ref: string, limit: number): Promise<LogCommit[]> {
+/** `log` from `ref`; with `missingIsEmpty`, a commit the binding reports as not existing is an empty log. */
+async function logOf(h: ArtifactsRepo, ref: string, limit: number, missingIsEmpty = false): Promise<LogCommit[]> {
   try {
     return chainOf(await h.log({ ref, limit }));
   } catch (err) {
+    if (missingIsEmpty && isInvalidObject(err)) return [];
     throw new RefStoreUnavailable(`log of ${ref} failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Any Artifacts failure while answering is "storage unavailable": nothing has been recorded yet. */
+async function storage<T>(what: string, op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch (err) {
+    if (err instanceof RefStoreUnavailable) throw err;
+    throw new RefStoreUnavailable(`${what}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -202,7 +214,7 @@ async function planStep(h: ArtifactsRepo, state: StateRow | null, ref: string, h
     const want = L.commitsPerStep - commits.length;
     const at = window.findIndex((c) => c.hash === tailNext);
     // One more than needed, so the last one's parent tree is known.
-    const run = at >= 0 && window.length - at > want ? window.slice(at) : await logOf(h, tailNext, want + 1);
+    const run = at >= 0 && window.length - at > want ? window.slice(at) : await logOf(h, tailNext, want + 1, true);
     const before = commits.length;
     if (run.length > 0 && run[0]!.hash === tailNext) {
       for (let i = 0; i < run.length && i < want; i++) {
@@ -264,7 +276,7 @@ export async function pathHistory(
   try {
     return await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
-      let headSha = (await resolveCommitish(ctx, [ref])).get(ref)?.sha ?? null;
+      let headSha = (await storage('head', () => resolveCommitish(ctx, [ref]))).get(ref)?.sha ?? null;
 
       const [stateRes, pageRes] = await db.batch([stateStatement(db, repo.id), pageStatement(db, repo.id, path, cursor?.seq ?? null, limit)]);
       let state = (stateRes?.results as StateRow[] | undefined)?.[0] ?? null;
@@ -277,12 +289,12 @@ export async function pathHistory(
       const needsWork = headSha !== null && (!state || state.ref !== ref || state.head_sha !== headSha || state.tail_next !== null);
       // A cursor pages through the index as it stands; only first pages advance it.
       if (headSha !== null && needsWork && !cursor) {
-        const h = await artifacts.get();
+        const h = await storage('repository', () => artifacts.get());
         let step = await planStep(h, state, ref, headSha);
         if (step?.newEpoch && state?.ref === ref && state.head_sha) {
           // The cached head may predate the indexed one (another colo saw a
           // newer push); confirm the head before discarding the index.
-          const fresh = (await resolveCommitish({ ...ctx, bypass: true }, [ref])).get(ref)?.sha ?? null;
+          const fresh = (await storage('head', () => resolveCommitish({ ...ctx, bypass: true }, [ref]))).get(ref)?.sha ?? null;
           if (fresh !== headSha) {
             headSha = fresh;
             step = fresh === null ? null : await planStep(h, state, ref, fresh);

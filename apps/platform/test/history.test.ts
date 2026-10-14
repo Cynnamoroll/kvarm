@@ -292,6 +292,27 @@ describe('GET /repos/:o/:r/history', () => {
     expect(third.json.index).toMatchObject({ rootReached: true, gaps: 1, progressed: false });
   });
 
+  it('ends the walk as one gap when the binding reports the tail commit missing, and answers 503 for a transient failure', async () => {
+    const repo = await seedRepo('missing-tail');
+    const n = HISTORY_LIMITS.commitsPerStep + 10;
+    const { shas } = await linear(repo, n, 2);
+    await setMain(repo, shas[n - 1]!);
+    await get(H('missing-tail', 'path=f0.txt'));
+    // A transient head-commit read failure is retryable and records nothing.
+    const fresh = await linear(repo, 1, 2, [shas[n - 1]!], 'w');
+    await setMain(repo, fresh.shas[0]!);
+    repo.fake.hook = async (call) => {
+      if (call === `readCommit:${fresh.shas[0]}`) throw new Error('upstream 502');
+    };
+    const flaky = await get(H('missing-tail', 'path=f0.txt'));
+    expect([flaky.status, flaky.json.code]).toEqual([503, 'STORAGE_UNAVAILABLE']);
+    repo.fake.hook = null;
+    repo.fake.logNotFound.add(shas[9]!);
+    const r = await get(H('missing-tail', 'path=f0.txt'));
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json.index).toMatchObject({ indexedHead: fresh.shas[0], rootReached: true, gaps: 1, complete: false });
+  });
+
   it('records many long paths in byte-bounded statements and skips paths no query can name', async () => {
     const repo = await seedRepo('long-paths');
     const files: Files = {};

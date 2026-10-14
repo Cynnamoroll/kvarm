@@ -59,7 +59,8 @@ export function isValidRefName(ref: string): boolean {
   return !/[\x00-\x20\x7f~^:?*[\\]/.test(ref);
 }
 
-function isInvalidObject(err: unknown): boolean {
+/** The binding's answer for an object that does not exist (not a transient failure). */
+export function isInvalidObject(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
   return code === 'INVALID_INPUT' || code === 'NOT_FOUND';
 }
