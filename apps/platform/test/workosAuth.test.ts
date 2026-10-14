@@ -705,3 +705,28 @@ describe('token settings page', () => {
     expect(res.headers.get('location')).toBe('/auth/login?returnTo=%2Fsettings%2Ftokens');
   });
 });
+
+describe('home dashboard', () => {
+  it('renders the signed-in shell and owned repositories', async () => {
+    const login = uniq('dashboard');
+    const { jar } = await signIn(fakeUser(login));
+    const me = (await whoami(jar)).login!;
+    const repo = uniq('home-repo');
+    await seedRepo(me, repo, 'public');
+
+    const res = await call('/', { jar });
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(text).toContain('class="k-shell"');
+    expect(text).toContain(`href="/${me}/${repo}"`);
+  });
+
+  it('renders the signed-out flagship shell and login link without the prototype origin', async () => {
+    const res = await call('/');
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(text).toContain('k-landing');
+    expect(text).toContain('href="/auth/login"');
+    expect(text).not.toContain('kvarm.dev');
+  });
+});

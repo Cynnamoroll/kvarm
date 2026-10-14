@@ -73,33 +73,34 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
   if (userLogin) tabs.push('environments');
   if (userLogin === repo.owner_login) tabs.push('settings');
   const tabHtml = tabs
-    .map((t) => `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${tabHref(repo, t, ref)}">${t}</a>`)
+    .map(
+      (t) =>
+        `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${tabHref(repo, t, ref)}"${opts.tab === t ? ' aria-current="page"' : ''}>${t}</a>`,
+    )
     .join('');
 
   const cloneUrl = `${env.APP_ORIGIN || 'http://localhost:8787'}/${repo.owner_login}/${repo.name}.git`;
-  const description = repo.description ? html`<p class="muted">${repo.description}</p>` : '';
+  const description = repo.description ? html`<p class="lede">${repo.description}</p>` : '';
   const crumbs =
     opts.path !== undefined && opts.tab !== 'settings' && opts.tab !== 'environments'
       ? `<div class="crumbs">${breadcrumbs(repo, ref, opts.path)}</div>`
       : '';
 
   const shellBody = html`
-<div class="repo-head">
-  <div>
-    <h1>
-      <a href="/${repo.owner_login}">${repo.owner_login}</a>
-      <span class="muted">/</span>
-      <a href="/${repo.owner_login}/${repo.name}"><strong>${repo.name}</strong></a>
-      <span class="badge">${repo.visibility}</span>
-    </h1>
+<header class="k-head repo-page-head">
+  <div class="k-head-copy">
+    <p class="hud k-head-hud"><a href="/${repo.owner_login}">${repo.owner_login}</a><span aria-hidden="true">/</span><a href="/${repo.owner_login}/${repo.name}">${repo.name}</a><span class="tag">${repo.visibility}</span><span class="k-ref">${ref}</span></p>
+    <h1>${repo.name}</h1>
     ${raw(description)}
   </div>
+  <div class="k-head-side">
   <div class="clone-box">
     <code id="clone-url">${cloneUrl}</code>
     <button class="btn" type="button" data-copy="${cloneUrl}">Copy</button>
   </div>
-</div>
-<nav class="tabs">${raw(tabHtml)}
+  </div>
+</header>
+<nav class="tabs k-tabs">${raw(tabHtml)}
   <span class="spacer"></span>
   <details class="branch-picker">
     <summary><code>${ref}</code> ▾</summary>
@@ -116,6 +117,7 @@ ${raw(body)}
       userLogin,
       script: COPY_JS,
       head: opts.head,
+      repos: [{ ownerLogin: repo.owner_login, name: repo.name }],
     },
     shellBody,
   );

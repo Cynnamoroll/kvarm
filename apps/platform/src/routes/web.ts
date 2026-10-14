@@ -15,11 +15,13 @@ import { listReposForOwner } from '../db/repos';
 import type { UserRow } from '../db/users';
 import { csrfTokenValid, isSameOriginRequest, type SessionInfo } from '../auth/workos';
 import { mintPAT, parseScopes, revokePAT, SCOPES, type Scope } from '../auth/pat';
-import { csrfInput, layout } from '../web/render';
+import { csrfInput, layout, publicOrigin, type PageOptions } from '../web/render';
 import * as svc from '../repos/service';
 import * as agents from '../services/agents';
 import { linkWorkOSIdentity } from '../services/identity';
 import type { Actor } from '../services/authz';
+import { listMyPendingApprovals, listMySandboxes } from '../services/sandboxes';
+import { landingPage } from '../web/landing';
 import { requestSession, type App } from './api';
 
 export const web = new Hono<App>();
@@ -50,8 +52,17 @@ async function pageCtx(c: Context<App>): Promise<PageCtx> {
   return { session, user: session?.user ?? null };
 }
 
-function page(c: Context<App>, ctx: PageCtx, title: string, body: string, status = 200): Response {
-  return new Response(layout(c.env, { title, userLogin: ctx.user?.login ?? null }, body), {
+function page(
+  c: Context<App>,
+  ctx: PageCtx,
+  title: string,
+  body: string,
+  status = 200,
+  shell: Omit<PageOptions, 'title' | 'userLogin'> = {},
+): Response {
+  const pathname = new URL(c.req.url).pathname;
+  const active = shell.active ?? (pathname === '/' ? 'home' : pathname.startsWith('/fleet') ? 'fleet' : pathname === '/settings/tokens' ? 'tokens' : undefined);
+  return new Response(layout(c.env, { ...shell, title, userLogin: ctx.user?.login ?? null, active }, body), {
     status,
     headers: { 'content-type': 'text/html; charset=utf-8' },
   });
@@ -95,6 +106,18 @@ function sessionActor(ctx: AuthedPageCtx): Actor {
   return { user: ctx.user, via: 'session', scopes: null };
 }
 
+async function runningSandboxCount(env: Env, actor: Actor): Promise<number | null> {
+  let cursor: string | undefined;
+  let count = 0;
+  do {
+    const page = await listMySandboxes(env, actor, { cursor, limit: 100 });
+    if (!page.ok) return null;
+    count += page.value.sandboxes.filter((sandbox) => sandbox.status === 'running' || sandbox.status === 'starting').length;
+    cursor = page.value.nextCursor ?? undefined;
+  } while (cursor);
+  return count;
+}
+
 function iso(ms: number | null): string {
   return ms === null ? 'never' : new Date(ms).toISOString();
 }
@@ -105,67 +128,128 @@ function iso(ms: number | null): string {
 
 web.get('/', async (c) => {
   const ctx = await pageCtx(c);
-  let body: string;
+  const origin = publicOrigin(c.env) ?? new URL(c.req.url).origin;
   if (!ctx.user) {
-    body = html`
-      <div class="card">
-        <h1>${c.env.SITE_NAME || 'Kvarm'}</h1>
-        <p class="muted">A git platform for the agentic era, on Cloudflare Artifacts.</p>
-        <p><a class="btn primary" href="/auth/login">Sign in to get started</a></p>
-      </div>
-    `;
-  } else {
-    const repos = await listReposForOwner(c.env.DB, ctx.user.login);
-    const rows = repos
-      .map(
-        (r) => html`
-          <div class="repo-row">
-            <div>
-              <a href="/${r.owner_login}/${r.name}"><strong>${r.owner_login}/${r.name}</strong></a>
-              <span class="badge">${r.visibility}</span>
-              <div class="muted">${r.description ?? ''}</div>
-            </div>
-            <div class="muted">${r.pushed_at ? timeAgo(r.pushed_at) : 'never pushed'}</div>
-          </div>
-        `,
-      )
-      .join('');
-    const csrf = raw(csrfInput(ctx.session?.csrfToken));
-    body = html`
-      <div class="card">
-        <h2>New repository</h2>
-        <form method="post" action="/new-repo">
-          ${csrf}
-          <label for="name">Name</label>
-          <input id="name" name="name" type="text" required placeholder="my-project" />
-          <label for="description">Description</label>
-          <input id="description" name="description" type="text" placeholder="optional" />
-          <label for="visibility">Visibility</label>
-          <select id="visibility" name="visibility">
-            <option value="private">private</option>
-            <option value="public">public</option>
-          </select>
-          <p><button class="btn primary" type="submit">Create</button></p>
-        </form>
-      </div>
-      <div class="card">
-        <h2>Import from HTTPS</h2>
-        <form method="post" action="/import-repo">
-          ${csrf}
-          <label for="url">Remote URL</label>
-          <input id="url" name="url" type="url" required placeholder="https://github.com/owner/repo" />
-          <label for="iname">Name</label>
-          <input id="iname" name="name" type="text" placeholder="defaults to remote name" />
-          <p><button class="btn" type="submit">Import</button></p>
-        </form>
-      </div>
-      <div class="card">
-        <h2>Your repositories</h2>
-        ${raw(rows || '<p class="muted">none yet</p>')}
-      </div>
-    `;
+    const body = landingPage(origin);
+    return page(c, ctx, 'Kvarm', body, 200, {
+      landing: true,
+      bodyClass: 'k-landing',
+      stylesheets: ['/assets/landing.css'],
+      scriptUrl: '/assets/landing.js',
+    });
   }
-  return page(c, ctx, 'Home', body);
+
+  const actor = sessionActor(ctx as AuthedPageCtx);
+  const [repos, approvalsResult, runningCount] = await Promise.all([
+    listReposForOwner(c.env.DB, ctx.user.login),
+    listMyPendingApprovals(c.env, actor),
+    runningSandboxCount(c.env, actor),
+  ]);
+  const approvals = approvalsResult.ok ? approvalsResult.value : null;
+  const pendingCount = approvals?.length ?? null;
+  const mcpUrl = `${origin}/mcp`;
+  const approvalRows = approvals?.map(
+    (approval) => html`<a class="k-approval-row" href="/fleet#approvals">
+      <span class="k-mono">${approval.repo}</span><span>${approval.command}</span>
+    </a>`,
+  );
+  const repoRows = repos
+    .map(
+      (repo) => html`<div class="repo-row">
+        <div class="k-repo-info">
+          <a href="/${repo.owner_login}/${repo.name}"><strong>${repo.owner_login}/${repo.name}</strong></a>
+          <span class="badge">${repo.visibility}</span>
+          <div class="muted">${repo.description ?? ''}</div>
+        </div>
+        <div class="muted">${repo.pushed_at ? timeAgo(repo.pushed_at) : 'never pushed'}</div>
+      </div>`,
+    )
+    .join('');
+  const csrf = raw(csrfInput(ctx.session?.csrfToken));
+  const humanHeading =
+    pendingCount === null ? 'Approval status unavailable.' : pendingCount > 0 ? `${pendingCount} need you` : 'All clear.';
+  const needsPanel =
+    approvals === null
+      ? html`<p class="muted">Could not load pending approvals right now.</p>`
+      : approvals.length
+        ? approvalRows!.join('')
+        : html`<p class="muted">Nothing needs you right now.</p>`;
+  const body = html`
+    <header class="k-head">
+      <div class="k-head-copy">
+        <p class="hud">Signed in as ${ctx.user.login}</p>
+        <h1 class="m-human">${humanHeading}</h1>
+        <h1 class="m-agent">Your agent workspace</h1>
+        <p class="lede m-agent">Connect to MCP at <a class="k-mono" href="${mcpUrl}">${mcpUrl}</a></p>
+      </div>
+    </header>
+    <section class="k-content">
+      <div class="k-kpis" aria-label="Account overview">
+        <div><span class="hud">Repositories</span><b>${repos.length}</b></div>
+        <div><span class="hud">Running sandboxes</span><b>${runningCount ?? 'Unavailable'}</b></div>
+        <div><span class="hud">Pending approvals</span><b class="${pendingCount ? 'warn' : ''}">${pendingCount ?? 'Unavailable'}</b></div>
+      </div>
+      <div class="k-grid">
+        <div class="k-col">
+          <section class="panel">
+            <div class="panel-head hud"><b>Needs you</b><span>${pendingCount ?? 'Unavailable'}</span></div>
+            <div class="k-panel-body">${raw(needsPanel)}</div>
+          </section>
+          <section class="panel">
+            <div class="panel-head hud"><b>Your repositories</b><span>${repos.length}</span></div>
+            <div class="k-panel-body">${raw(repoRows || '<p class="muted">none yet</p>')}</div>
+          </section>
+          <section class="panel m-agent">
+            <div class="panel-head hud"><b>Connect an agent</b><span class="k-mono">MCP</span></div>
+            <div class="k-panel-body">
+              <p class="muted">Connect over MCP at <a class="k-mono" href="${mcpUrl}">${mcpUrl}</a>.</p>
+              <pre class="code">kvarm repo list
+kvarm sandbox mine --limit 50</pre>
+            </div>
+          </section>
+        </div>
+        <div class="k-col">
+          <section class="panel">
+            <div class="panel-head hud"><b>New repository</b></div>
+            <div class="k-panel-body">
+              <form method="post" action="/new-repo">
+                ${csrf}
+                <label for="name">Name</label>
+                <input id="name" name="name" type="text" required placeholder="my-project" />
+                <label for="description">Description</label>
+                <input id="description" name="description" type="text" placeholder="optional" />
+                <label for="visibility">Visibility</label>
+                <select id="visibility" name="visibility">
+                  <option value="private">private</option>
+                  <option value="public">public</option>
+                </select>
+                <p><button class="btn primary" type="submit">Create</button></p>
+              </form>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head hud"><b>Import from HTTPS</b></div>
+            <div class="k-panel-body">
+              <form method="post" action="/import-repo">
+                ${csrf}
+                <label for="url">Remote URL</label>
+                <input id="url" name="url" type="url" required placeholder="https://example.com/owner/repo" />
+                <label for="iname">Name</label>
+                <input id="iname" name="name" type="text" placeholder="defaults to remote name" />
+                <p><button class="btn" type="submit">Import</button></p>
+              </form>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  `;
+  return page(c, ctx, 'Home', body, 200, {
+    active: 'home',
+    needsYouCount: pendingCount ?? undefined,
+    runningCount: runningCount ?? undefined,
+    repos: repos.map((repo) => ({ ownerLogin: repo.owner_login, name: repo.name })),
+  });
 });
 
 web.post('/new-repo', async (c) => {
