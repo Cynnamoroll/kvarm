@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { buildBlob, buildTree, encode, EMPTY_TREE_HASH, indexCommits, parseTree, type GitObject, type TreeReader } from '../src/index';
+import { buildBlob, buildTree, encode, EMPTY_TREE_HASH, HistoryReadError, indexCommits, parseTree, type GitObject, type TreeReader } from '../src/index';
 
 class Trees implements TreeReader {
   objects = new Map<string, GitObject>();
@@ -139,5 +139,30 @@ describe('indexCommits', () => {
       },
     };
     await expect(indexCommits(failing, [{ sha: 'c', tree: 'a'.repeat(40), parentTree: 'b'.repeat(40) }], BUDGET)).rejects.toThrow(/upstream 503/);
+  });
+
+  it('fails on a missing tree instead of reading it as an empty directory', async () => {
+    const t = new Trees();
+    const t1 = await t.tree({ a: '1', b: '1' });
+    // The parent tree does not exist: diffing against "empty" would list every path as added.
+    const r = indexCommits(t, [{ sha: 'c', tree: t1, parentTree: 'f'.repeat(40) }], BUDGET);
+    await expect(r).rejects.toBeInstanceOf(HistoryReadError);
+    await expect(r).rejects.toThrow(/missing tree/);
+  });
+
+  it('stops at the path-byte budget after the first commit, and gaps a first commit over it', async () => {
+    const t = new Trees();
+    const long = 'x'.repeat(60);
+    const t1 = await t.tree({ [long]: '1' });
+    const t2 = await t.tree({ [long]: '2' });
+    const commits = [
+      { sha: 'c1', tree: t1, parentTree: null },
+      { sha: 'c2', tree: t2, parentTree: t1 },
+    ];
+    const r = await indexCommits(t, commits, { ...BUDGET, maxRowBytes: 100 });
+    expect(r.indexed.map((c) => c.sha)).toEqual(['c1']);
+    expect(r.stopped).toBe('maxRows');
+    const tiny = await indexCommits(t, commits, { ...BUDGET, maxRowBytes: 10 });
+    expect(tiny.indexed[0]).toEqual({ sha: 'c1', gap: true, changes: [] });
   });
 });

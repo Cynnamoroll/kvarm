@@ -3,15 +3,22 @@
  *
  * Each commit is diffed against its first parent's tree (the empty tree for a
  * root commit) as leaf paths. All commits share one tree-read budget and one
- * row budget. A commit that cannot be indexed within the budgets is a gap
- * when it is the first commit of the call (so every call makes progress) and
- * ends the call otherwise; a commit with more changes than the per-commit cap
- * is always a gap. A gap is reported, never dropped silently.
+ * row budget (count and path bytes). A commit that cannot be indexed within
+ * the budgets is a gap when it is the first commit of the call (so every call
+ * makes progress) and ends the call otherwise; a commit with more changes
+ * than the per-commit cap is always a gap. A gap is reported, never dropped
+ * silently. A tree that cannot be read, or does not exist, is an error
+ * (`HistoryReadError`), never an empty directory.
  */
 
 import { diffTrees, type TreeChangeStatus, type TreeReader } from './treediff';
 
 export const EMPTY_TREE_HASH = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+/** A tree read failed or named a missing tree; nothing of the call should be recorded. */
+export class HistoryReadError extends Error {
+  override readonly name = 'HistoryReadError';
+}
 
 export interface HistoryCommit {
   sha: string;
@@ -35,6 +42,8 @@ export interface HistoryBudget {
   maxChangesPerCommit: number;
   /** Path rows the whole call may produce. */
   maxRows: number;
+  /** UTF-8 bytes of the paths of those rows (default unbounded). */
+  maxRowBytes?: number;
 }
 
 export interface HistoryIndexResult {
@@ -45,12 +54,24 @@ export interface HistoryIndexResult {
   stopped: 'maxTreeReads' | 'maxRows' | null;
 }
 
+const utf8 = new TextEncoder();
+
 export async function indexCommits(source: TreeReader, commits: readonly HistoryCommit[], budget: HistoryBudget): Promise<HistoryIndexResult> {
-  // The empty tree need not exist as an object in the repository.
-  const reader: TreeReader = { readTree: (hash) => (hash === EMPTY_TREE_HASH ? Promise.resolve([]) : source.readTree(hash)) };
+  const reader: TreeReader = {
+    readTree: async (hash) => {
+      // The empty tree need not exist as an object in the repository.
+      if (hash === EMPTY_TREE_HASH) return [];
+      const entries = await source.readTree(hash);
+      // The diff would read a missing tree as an empty directory.
+      if (!entries) throw new Error(`missing tree ${hash}`);
+      return entries;
+    },
+  };
+  const maxRowBytes = budget.maxRowBytes ?? Number.POSITIVE_INFINITY;
   const indexed: IndexedCommit[] = [];
   let treeReads = 0;
   let rows = 0;
+  let rowBytes = 0;
   for (const c of commits) {
     const first = indexed.length === 0;
     const remaining = budget.maxTreeReads - treeReads;
@@ -62,7 +83,7 @@ export async function indexCommits(source: TreeReader, commits: readonly History
       leavesOnly: true,
     });
     treeReads += d.treeReads;
-    if (d.truncated && d.truncatedReason === 'readError') throw new Error(`history: tree read failed: ${d.readError ?? 'unknown'}`);
+    if (d.truncated && d.truncatedReason === 'readError') throw new HistoryReadError(`history: tree read failed: ${d.readError ?? 'unknown'}`);
     const tooMany = (d.truncated && d.truncatedReason === 'maxChanges') || d.changes.length > budget.maxChangesPerCommit;
     if (tooMany) {
       indexed.push({ sha: c.sha, changes: [], gap: true });
@@ -74,12 +95,14 @@ export async function indexCommits(source: TreeReader, commits: readonly History
       indexed.push({ sha: c.sha, changes: [], gap: true });
       continue;
     }
-    if (rows + d.changes.length > budget.maxRows) {
+    const bytes = d.changes.reduce((n, x) => n + utf8.encode(x.path).length, 0);
+    if (rows + d.changes.length > budget.maxRows || rowBytes + bytes > maxRowBytes) {
       if (!first) return { indexed, treeReads, stopped: 'maxRows' };
       indexed.push({ sha: c.sha, changes: [], gap: true });
       continue;
     }
     rows += d.changes.length;
+    rowBytes += bytes;
     indexed.push({ sha: c.sha, changes: d.changes.map((x) => ({ path: x.path, status: x.status })), gap: false });
   }
   return { indexed, treeReads, stopped: null };

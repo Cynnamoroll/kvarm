@@ -2,19 +2,22 @@
  * Path history of the default branch (architecture §11.9): which commits on
  * the first-parent chain changed a path, newest first, without a clone.
  *
- * The index is derived data in D1 (migration 0024), built lazily by the
+ * The index is derived data in D1 (migration 0025), built lazily by the
  * requests that read it. Each request that finds work does one bounded step:
  * forward from the newest indexed commit to the branch head, then backward
  * toward the root with the budget that is left. A step is one compare-and-swap
  * on the state row (a fresh writer token), and the step's rows are inserted
  * in the same batch only if that swap applied, so racing requests never mix
  * partial steps. When the indexed head is no longer on the chain (a rewritten
- * or renamed default branch, or more than LOG_WINDOW commits behind), the
- * index restarts in a new epoch; older epochs are never served and are
- * deleted in bounded batches. Every answer says how complete the index is.
+ * or renamed default branch, or more than `logWindow` commits behind, as
+ * confirmed against an uncached ref read), the index restarts in a new
+ * epoch; older epochs are never served and are deleted in bounded batches.
+ * Every answer says how complete the index is. A tree or `log` read that
+ * fails is a 503 and records nothing; a tail `log` cannot follow ends the
+ * backward walk as one gap.
  */
 
-import { indexCommits, type HistoryCommit } from '@kvarm/gitops';
+import { HistoryReadError, indexCommits, type HistoryCommit } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -32,10 +35,12 @@ export const HISTORY_LIMITS = {
   treeReadsPerStep: 500,
   changesPerCommit: 2000,
   rowsPerStep: 5000,
+  /** UTF-8 bytes of the changed paths one step records. */
+  rowBytesPerStep: 1024 * 1024,
   /** Old-epoch rows one request deletes. */
   purgeRows: 500,
-  /** Rows per JSON-bound insert statement. */
-  insertChunk: 500,
+  /** JSON bytes bound to one insert statement (D1 caps a statement at 100 KB). */
+  statementBytes: 64 * 1024,
   maxPathBytes: 4096,
 } as const;
 
@@ -146,14 +151,25 @@ interface Step {
   newEpoch: boolean;
   /** Commits to index, forward ones first (oldest to newest), then backward ones (newest to oldest). */
   commits: Array<HistoryCommit & { seq: number; meta: LogCommit; dir: 'forward' | 'backward' }>;
-  head: { sha: string; seq: number } | null;
-  tail: { next: string | null; seq: number };
+  /**
+   * `log` of `tail_next` answered without that commit and its first parent:
+   * the backward walk ends there, and the rest of the chain is one gap.
+   */
+  tailLost: boolean;
 }
 
-/** Plans one step: which commits to index and what the state becomes if all of them are. */
+async function logOf(h: ArtifactsRepo, ref: string, limit: number): Promise<LogCommit[]> {
+  try {
+    return chainOf(await h.log({ ref, limit }));
+  } catch (err) {
+    throw new RefStoreUnavailable(`log of ${ref} failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Plans one step: which commits to index. */
 async function planStep(h: ArtifactsRepo, state: StateRow | null, ref: string, headSha: string): Promise<Step | null> {
   const L = HISTORY_LIMITS;
-  const window = chainOf(await h.log({ ref: headSha, limit: L.logWindow }));
+  const window = await logOf(h, headSha, L.logWindow);
   if (window.length === 0 || window[0]!.hash !== headSha) throw new RefStoreUnavailable(`log of ${headSha} did not start at it`);
   const parentTree = (chain: LogCommit[], i: number): string | null | undefined => {
     const c = chain[i]!;
@@ -166,8 +182,8 @@ async function planStep(h: ArtifactsRepo, state: StateRow | null, ref: string, h
   const newEpoch = idx < 0;
   const epoch = newEpoch ? (state?.epoch ?? 0) + 1 : state!.epoch;
   const commits: Step['commits'] = [];
-  let head: Step['head'] = newEpoch ? null : { sha: state!.head_sha!, seq: state!.head_seq };
-  let tailNext: string | null = newEpoch ? headSha : state!.tail_next;
+  let headSeq = newEpoch ? 0 : state!.head_seq;
+  const tailNext: string | null = newEpoch ? headSha : state!.tail_next;
   let tailSeq = newEpoch ? 1 : state!.tail_seq;
 
   // Forward: the commits newer than the indexed head, oldest first.
@@ -175,32 +191,53 @@ async function planStep(h: ArtifactsRepo, state: StateRow | null, ref: string, h
     for (let i = idx - 1; i >= 0 && commits.length < L.commitsPerStep; i--) {
       const pt = parentTree(window, i);
       if (pt === undefined) break;
-      const seq = head!.seq + 1;
-      commits.push({ sha: window[i]!.hash, tree: window[i]!.treeHash, parentTree: pt, seq, meta: window[i]!, dir: 'forward' });
-      head = { sha: window[i]!.hash, seq };
+      headSeq += 1;
+      commits.push({ sha: window[i]!.hash, tree: window[i]!.treeHash, parentTree: pt, seq: headSeq, meta: window[i]!, dir: 'forward' });
     }
   }
 
   // Backward: from tail_next toward the root with what is left.
+  let tailLost = false;
   if (tailNext && commits.length < L.commitsPerStep) {
     const want = L.commitsPerStep - commits.length;
     const at = window.findIndex((c) => c.hash === tailNext);
     // One more than needed, so the last one's parent tree is known.
-    const run = at >= 0 && window.length - at > want ? window.slice(at) : chainOf(await h.log({ ref: tailNext, limit: want + 1 }));
+    const run = at >= 0 && window.length - at > want ? window.slice(at) : await logOf(h, tailNext, want + 1);
+    const before = commits.length;
     if (run.length > 0 && run[0]!.hash === tailNext) {
       for (let i = 0; i < run.length && i < want; i++) {
         const pt = parentTree(run, i);
         if (pt === undefined) break;
-        const seq = tailSeq - 1;
-        commits.push({ sha: run[i]!.hash, tree: run[i]!.treeHash, parentTree: pt, seq, meta: run[i]!, dir: 'backward' });
-        if (newEpoch && i === 0) head = { sha: run[i]!.hash, seq };
-        tailSeq = seq;
-        tailNext = run[i]!.parents[0] ?? null;
+        tailSeq -= 1;
+        commits.push({ sha: run[i]!.hash, tree: run[i]!.treeHash, parentTree: pt, seq: tailSeq, meta: run[i]!, dir: 'backward' });
       }
     }
+    // A new epoch starts at the head `log` just walked, so only an older tail can be lost.
+    tailLost = !newEpoch && commits.length === before;
   }
-  if (commits.length === 0) return null;
-  return { epoch, newEpoch, commits, head, tail: { next: tailNext, seq: tailSeq } };
+  if (commits.length === 0 && !tailLost) return null;
+  return { epoch, newEpoch, commits, tailLost };
+}
+
+/** JSON arrays of `rows`, each small enough for one D1 statement. */
+function jsonChunks(rows: readonly unknown[], maxBytes: number): string[] {
+  const enc = new TextEncoder();
+  const out: string[] = [];
+  let current: string[] = [];
+  let bytes = 2;
+  for (const row of rows) {
+    const json = JSON.stringify(row);
+    const size = enc.encode(json).length + 1;
+    if (current.length > 0 && bytes + size > maxBytes) {
+      out.push(`[${current.join(',')}]`);
+      current = [];
+      bytes = 2;
+    }
+    current.push(json);
+    bytes += size;
+  }
+  if (current.length > 0) out.push(`[${current.join(',')}]`);
+  return out;
 }
 
 export async function pathHistory(
@@ -227,7 +264,7 @@ export async function pathHistory(
   try {
     return await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
-      const headSha = (await resolveCommitish(ctx, [ref])).get(ref)?.sha ?? null;
+      let headSha = (await resolveCommitish(ctx, [ref])).get(ref)?.sha ?? null;
 
       const [stateRes, pageRes] = await db.batch([stateStatement(db, repo.id), pageStatement(db, repo.id, path, cursor?.seq ?? null, limit)]);
       let state = (stateRes?.results as StateRow[] | undefined)?.[0] ?? null;
@@ -239,14 +276,31 @@ export async function pathHistory(
       let progressed = false;
       const needsWork = headSha !== null && (!state || state.ref !== ref || state.head_sha !== headSha || state.tail_next !== null);
       // A cursor pages through the index as it stands; only first pages advance it.
-      if (needsWork && !cursor) {
-        const step = await planStep(await artifacts.get(), state, ref, headSha);
+      if (headSha !== null && needsWork && !cursor) {
+        const h = await artifacts.get();
+        let step = await planStep(h, state, ref, headSha);
+        if (step?.newEpoch && state?.ref === ref && state.head_sha) {
+          // The cached head may predate the indexed one (another colo saw a
+          // newer push); confirm the head before discarding the index.
+          const fresh = (await resolveCommitish({ ...ctx, bypass: true }, [ref])).get(ref)?.sha ?? null;
+          if (fresh !== headSha) {
+            headSha = fresh;
+            step = fresh === null ? null : await planStep(h, state, ref, fresh);
+          }
+        }
         if (step) {
-          const r = await indexCommits(artifactsMergeSources(ctx), step.commits, {
-            maxTreeReads: L.treeReadsPerStep,
-            maxChangesPerCommit: L.changesPerCommit,
-            maxRows: L.rowsPerStep,
-          });
+          let r;
+          try {
+            r = await indexCommits(artifactsMergeSources(ctx), step.commits, {
+              maxTreeReads: L.treeReadsPerStep,
+              maxChangesPerCommit: L.changesPerCommit,
+              maxRows: L.rowsPerStep,
+              maxRowBytes: L.rowBytesPerStep,
+            });
+          } catch (err) {
+            if (err instanceof HistoryReadError) throw new RefStoreUnavailable(err.message);
+            throw err;
+          }
           const done = step.commits.slice(0, r.indexed.length);
           // State after the indexed prefix: forward ones move the head, backward ones the tail.
           let head = step.newEpoch ? null : { sha: state!.head_sha!, seq: state!.head_seq };
@@ -258,8 +312,11 @@ export async function pathHistory(
               tail = { next: c.meta.parents[0] ?? null, seq: c.seq };
             }
           }
-          if (head && done.length > 0) {
-            const gaps = r.indexed.filter((x) => x.gap).length;
+          // Only a step indexed in full reached the lost tail.
+          const lost = step.tailLost && done.length === step.commits.length;
+          if (lost) tail = { next: null, seq: tail.seq };
+          if (head && (done.length > 0 || lost)) {
+            const gaps = r.indexed.filter((x) => x.gap).length + (lost ? 1 : 0);
             const writer = crypto.randomUUID();
             const now = Date.now();
             const stmts: D1PreparedStatement[] = [];
@@ -297,8 +354,12 @@ export async function pathHistory(
               m: clip(c.meta.message.split('\n', 1)[0] ?? '', 200),
               g: r.indexed[i]!.gap ? 1 : 0,
             }));
-            const pathRows = done.flatMap((c, i) => r.indexed[i]!.changes.map((x) => ({ p: x.path, q: c.seq, k: x.status })));
-            for (let i = 0; i < commitRows.length; i += L.insertChunk) {
+            // A path longer than a query may name can never be asked for.
+            const enc = new TextEncoder();
+            const pathRows = done.flatMap((c, i) =>
+              r.indexed[i]!.changes.filter((x) => enc.encode(x.path).length <= L.maxPathBytes).map((x) => ({ p: x.path, q: c.seq, k: x.status })),
+            );
+            for (const chunk of jsonChunks(commitRows, L.statementBytes)) {
               stmts.push(
                 db
                   .prepare(
@@ -307,10 +368,10 @@ export async function pathHistory(
                             json_extract(j.value, '$.e'), json_extract(j.value, '$.t'), json_extract(j.value, '$.m'), json_extract(j.value, '$.g')
                        FROM json_each(?4) j WHERE ${applied}`,
                   )
-                  .bind(repo.id, step.epoch, writer, JSON.stringify(commitRows.slice(i, i + L.insertChunk))),
+                  .bind(repo.id, step.epoch, writer, chunk),
               );
             }
-            for (let i = 0; i < pathRows.length; i += L.insertChunk) {
+            for (const chunk of jsonChunks(pathRows, L.statementBytes)) {
               stmts.push(
                 db
                   .prepare(
@@ -318,7 +379,7 @@ export async function pathHistory(
                      SELECT ?1, ?2, json_extract(j.value, '$.p'), json_extract(j.value, '$.q'), json_extract(j.value, '$.k')
                        FROM json_each(?4) j WHERE ${applied}`,
                   )
-                  .bind(repo.id, step.epoch, writer, JSON.stringify(pathRows.slice(i, i + L.insertChunk))),
+                  .bind(repo.id, step.epoch, writer, chunk),
               );
             }
             if (step.epoch > 1) {
@@ -343,12 +404,14 @@ export async function pathHistory(
         }
       }
 
+      // No branch, no history: an index left from before it was deleted is not served.
+      if (headSha === null) page = [];
       const more = page.length > limit;
       const rows = more ? page.slice(0, limit) : page;
       const last = rows[rows.length - 1];
       const current = headSha === null ? true : state?.head_sha === headSha && state.ref === ref;
       const rootReached = headSha === null ? true : !!state && state.ref === ref && state.tail_next === null;
-      const gaps = state?.gaps ?? 0;
+      const gaps = headSha === null ? 0 : (state?.gaps ?? 0);
       return {
         ok: true,
         value: {

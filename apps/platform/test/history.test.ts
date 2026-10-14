@@ -9,7 +9,7 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { bumpRefGeneration } from '../src/cache/compare';
+import { bumpRefGeneration, compareKeys, refGeneration, writeJson } from '../src/cache/compare';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { HISTORY_LIMITS, historyCleanupStatements } from '../src/services/history';
 import worker from '../src/index';
@@ -61,6 +61,11 @@ async function linear(repo: { fake: FakeRepo }, n: number, files = 3, from: stri
     parents = [c.sha];
   }
   return { shas, tree };
+}
+
+function treeOf(repo: { fake: FakeRepo }, sha: string): string {
+  const o = repo.fake.objects.get(sha)!;
+  return /^tree ([0-9a-f]{40})/.exec(new TextDecoder().decode(o.content as Uint8Array))![1]!;
 }
 
 async function get(path: string, token = tok.owner): Promise<{ status: number; json: Record<string, any>; cost: CostCounters }> {
@@ -231,6 +236,73 @@ describe('GET /repos/:o/:r/history', () => {
     const hidden = await get(H('valid', 'path=f0.txt'), tok.outsider);
     expect(hidden.status).toBe(404);
     expect(hidden.cost.art).toBe(0);
+  });
+
+  it('serves no history for a deleted default branch', async () => {
+    const repo = await seedRepo('deleted');
+    const { shas } = await linear(repo, 3);
+    await setMain(repo, shas[2]!);
+    await settle('deleted', 'f0.txt');
+    repo.fake.refs.delete('refs/heads/main');
+    await bumpRefGeneration(repo.id);
+    const r = await get(H('deleted', 'path=f0.txt'));
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ headSha: null, commits: [], nextCursor: null, index: { gaps: 0, complete: true } });
+  });
+
+  it('keeps the index when a stale cached head is older than the indexed one', async () => {
+    const repo = await seedRepo('stale-head');
+    const { shas, tree } = await linear(repo, 3);
+    const more = await linear(repo, 2, 3, [shas[2]!], 'w', tree);
+    const head = more.shas[1]!;
+    await setMain(repo, head);
+    await settle('stale-head', 'f0.txt');
+    // This colo's ref cache still answers an older head (another colo indexed the newer one).
+    const gen = await refGeneration(repo.id);
+    await writeJson(compareKeys.ref(repo.id, gen, 'refs/heads/main'), JSON.stringify({ sha: shas[2], tree: treeOf(repo, shas[2]!) }));
+    const r = await get(H('stale-head', 'path=f0.txt'));
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ headSha: head, index: { epoch: 1, indexedHead: head, complete: true } });
+  });
+
+  it('answers 503 and records nothing when a tree is missing, instead of indexing it as empty', async () => {
+    const repo = await seedRepo('missing-tree');
+    const { shas } = await linear(repo, 3, 3);
+    await setMain(repo, shas[2]!);
+    repo.fake.objects.delete(treeOf(repo, shas[1]!));
+    const r = await get(H('missing-tree', 'path=f0.txt'));
+    expect([r.status, r.json.code]).toEqual([503, 'STORAGE_UNAVAILABLE']);
+    const state = await env.DB.prepare('SELECT COUNT(*) AS n FROM path_history_commits WHERE repo_id = ?').bind(repo.id).first<{ n: number }>();
+    expect(state!.n).toBe(0);
+  });
+
+  it('ends the backward walk as one gap when the tail commit cannot be followed, instead of stalling', async () => {
+    const repo = await seedRepo('lost-tail');
+    const n = HISTORY_LIMITS.commitsPerStep + 10;
+    const { shas } = await linear(repo, n, 2);
+    await setMain(repo, shas[n - 1]!);
+    const first = await get(H('lost-tail', 'path=f0.txt'));
+    expect(first.json.index).toMatchObject({ rootReached: false, progressed: true });
+    // The next commit the backward walk needs is gone.
+    repo.fake.objects.delete(shas[9]!);
+    const second = await get(H('lost-tail', 'path=f0.txt'));
+    expect(second.status).toBe(200);
+    expect(second.json.index).toMatchObject({ rootReached: true, gaps: 1, complete: false, progressed: true });
+    const third = await get(H('lost-tail', 'path=f0.txt'));
+    expect(third.json.index).toMatchObject({ rootReached: true, gaps: 1, progressed: false });
+  });
+
+  it('records many long paths in byte-bounded statements and skips paths no query can name', async () => {
+    const repo = await seedRepo('long-paths');
+    const files: Files = {};
+    for (let i = 0; i < 300; i++) files[`${'d'.repeat(250)}/f${i}.txt`] = `${i}\n`;
+    files[`${'x'.repeat(HISTORY_LIMITS.maxPathBytes + 1)}`] = 'too long\n';
+    const c = await commit(repo.fake, files);
+    await setMain(repo, c.sha);
+    const r = await settle('long-paths', `${'d'.repeat(250)}/f299.txt`);
+    expect(r.json.commits.map((x: any) => x.sha)).toEqual([c.sha]);
+    const rows = await env.DB.prepare('SELECT COUNT(*) AS n FROM path_history WHERE repo_id = ?').bind(repo.id).first<{ n: number }>();
+    expect(rows!.n).toBe(300);
   });
 
   it('is removed with the repository', async () => {
