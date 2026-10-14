@@ -30,6 +30,8 @@ import { gateReceivePack } from '../services/receivePackGate';
 import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type WorkspaceOwner } from '../services/workspaces';
 import { directHumanPushDenial, directPushDenial, type BranchRule } from '../services/branchRules';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
+import { ingestGatePush } from '../services/events';
+import type { RefCommand } from '@kvarm/gitops';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -184,6 +186,7 @@ export async function handleGitRequest(
   // cannot write platform-reserved namespaces. The push command list is
   // checked before any upstream token mint or byte of the pack is forwarded.
   let pushBody: ReadableStream<Uint8Array> | null = null;
+  let pushCommands: readonly RefCommand[] = [];
   if (subpath === 'git-receive-pack') {
     let owners: Promise<Map<string, WorkspaceOwner>> | null = null;
     const gate = await gateReceivePack(c.req.raw, async (cmd, commands) => {
@@ -200,6 +203,7 @@ export async function handleGitRequest(
     });
     if (!gate.ok) return gate.response;
     pushBody = gate.body;
+    pushCommands = gate.commands;
   }
 
   // Warm public advertisements are served before any token mint or upstream
@@ -268,7 +272,11 @@ export async function handleGitRequest(
     // The client's push completes only after a confirmed update has moved the
     // view generation, so the next read cannot be served a pre-push entry.
     const body = relayReceivePackReply(upstreamRes.body, {
-      onConfirmed: () => recordConfirmedPush(env, repo.id),
+      onConfirmed: (refs) => {
+        // Checks, CI dispatch and the head refresh start now instead of when the Artifacts event arrives.
+        c.executionCtx.waitUntil(ingestGatePush(env, repo, pushCommands, refs));
+        return recordConfirmedPush(env, repo.id);
+      },
       waitUntil: (p) => c.executionCtx.waitUntil(p),
     });
     return scoped(relay(new Response(body, upstreamRes)));

@@ -15,7 +15,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
 import { refGeneration } from '../src/cache/compare';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
-import { batchKey, eventIdentity, parsePushEvent, snapshotInstanceId } from '../src/services/events';
+import { batchKey, eventIdentity, GATE_MAX_REFS, ingestGatePush, PAIRING_WINDOW_MS, parsePushEvent, snapshotInstanceId } from '../src/services/events';
 import worker from '../src/index';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -512,6 +512,168 @@ describe('queue dispatcher', () => {
     expect(byRef['refs/heads/trunk']!.snapshot).toEqual({ state: 'skipped', detail: 'ref deleted' });
     expect(wf.instances.size).toBe(0);
     expect(await refRow(repo.id, 'refs/heads/trunk')).toMatchObject({ sha: ZERO });
+  });
+});
+
+describe('git gate fast path and pairing', () => {
+  const main = 'refs/heads/main';
+  const gate = (env: Env, repo: { artifactsName: string }, cmds: Array<[string, string, string]>, confirmed?: string[]) =>
+    ingestGatePush(
+      env,
+      { artifacts_name: repo.artifactsName },
+      cmds.map(([oldOid, newOid, ref]) => ({ oldOid, newOid, ref })),
+      confirmed ?? cmds.map((c) => c[2]),
+    );
+  const aliases = async (eventId: string) =>
+    (await baseEnv.DB.prepare('SELECT COUNT(*) AS n FROM push_event_aliases WHERE event_id = ?').bind(eventId).first<{ n: number }>())!.n;
+
+  it('ingests a confirmed successor at the gate; the later Artifacts delivery pairs and runs nothing again', async () => {
+    const wf = new FakeWorkflow();
+    const env = envWith(wf);
+    const repo = await seedRepo('gate-pair');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+
+    await gate(env, repo, [[A, B, main]]);
+    let rows = await events(repo.id);
+    expect(rows).toHaveLength(2);
+    const g = rows[1]!;
+    expect(g).toMatchObject({ before_sha: A, after_sha: B, deliveries: 1 });
+    expect(g.completed_at).not.toBeNull();
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: g.id });
+    expect(wf.instances.has(snapshotInstanceId(repo.id, B))).toBe(true);
+    const creates = wf.creates;
+
+    const log = vi.spyOn(console, 'log');
+    const twin = pushBody(repo.artifactsName, main, A, B, iso(T0 + 500));
+    const r1 = await deliver(env, [{ id: 'twin-1', body: twin }]);
+    expect(r1.result.explicitAcks).toEqual(['twin-1']);
+    rows = await events(repo.id);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!).toMatchObject({ id: g.id, deliveries: 2 });
+    expect(await aliases(g.id)).toBe(1);
+    expect(wf.creates).toBe(creates);
+    const line = JSON.parse(log.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('{"cost"'))!) as {
+      outcome: string;
+      eventId: string;
+      cost: { d1: number };
+    };
+    expect(line).toMatchObject({ outcome: 'duplicate', eventId: g.id, cost: { d1: 1 } });
+
+    // A redelivery of the twin stays on the same row.
+    await deliver(env, [{ id: 'twin-1', body: twin, attempts: 2 }]);
+    expect((await events(repo.id))[1]!).toMatchObject({ id: g.id, deliveries: 3 });
+    expect(await aliases(g.id)).toBe(1);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: g.id });
+  });
+
+  it('adopts an Artifacts row that arrived first', async () => {
+    const wf = new FakeWorkflow();
+    const env = envWith(wf);
+    const repo = await seedRepo('gate-late');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000)) }]);
+    const creates = wf.creates;
+    await gate(env, repo, [[A, B, main]]);
+    const rows = await events(repo.id);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!.deliveries).toBe(2);
+    expect(await aliases(rows[1]!.id)).toBe(1);
+    expect(wf.creates).toBe(creates);
+  });
+
+  it('defers anything that is not the direct successor of the ledger position', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('gate-defer');
+    // No ledger row and a non-zero old value: unknown predecessor.
+    await gate(env, repo, [[A, B, main]]);
+    expect(await events(repo.id)).toHaveLength(0);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    // The ledger is at A; C -> D does not follow it.
+    await gate(env, repo, [[C, D, main]]);
+    expect(await events(repo.id)).toHaveLength(1);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: A });
+    // Unconfirmed refs and malformed ids are ignored.
+    await gate(env, repo, [[A, B, main]], []);
+    await gate(env, repo, [['xyz', B, main]]);
+    expect(await events(repo.id)).toHaveLength(1);
+  });
+
+  it('records a new ref created at the gate, up to the per-push ref cap', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('gate-new');
+    await gate(env, repo, [[ZERO, A, 'refs/heads/feature']]);
+    expect(await refRow(repo.id, 'refs/heads/feature')).toMatchObject({ sha: A });
+    const many = Array.from({ length: GATE_MAX_REFS + 3 }, (_, i) => [ZERO, B, `refs/heads/many-${i}`] as [string, string, string]);
+    await gate(env, repo, many);
+    const n = await baseEnv.DB.prepare("SELECT COUNT(*) AS n FROM repo_refs WHERE repo_id = ? AND ref LIKE 'refs/heads/many-%'")
+      .bind(repo.id)
+      .first<{ n: number }>();
+    expect(n!.n).toBe(GATE_MAX_REFS);
+  });
+
+  it('orders a gate push after the ledger position even when that position is timed in the future', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('gate-skew');
+    const future = Date.now() + 3_600_000;
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(future)) }]);
+    await gate(env, repo, [[A, B, main]]);
+    const rows = await events(repo.id);
+    expect(rows[1]!).toMatchObject({ after_sha: B, event_at: future + 1 });
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_at: future + 1 });
+    // A late redelivery of the earlier event cannot roll it back.
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(future)) }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B });
+  });
+
+  it('leaves an effect that failed at the gate to the Artifacts delivery', async () => {
+    const wf = new FakeWorkflow();
+    const env = envWith(wf);
+    const repo = await seedRepo('gate-fail');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    wf.failNext = 1;
+    await gate(env, repo, [[A, B, main]]);
+    const g = (await events(repo.id))[1]!;
+    expect(g.completed_at).toBeNull();
+    expect((await effects(g.id)).snapshot).toBeUndefined();
+    const r = await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000)) }]);
+    expect(r.result.explicitAcks).toHaveLength(1);
+    const done = (await events(repo.id))[1]!;
+    expect(done.id).toBe(g.id);
+    expect(done.completed_at).not.toBeNull();
+    expect((await effects(g.id)).snapshot).toEqual({ state: 'done', detail: `created ${snapshotInstanceId(repo.id, B)}` });
+  });
+
+  it('pairs repeated transitions first in, first out', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('gate-abab');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    await gate(env, repo, [[A, B, main]]);
+    await gate(env, repo, [[B, A, main]]);
+    await gate(env, repo, [[A, B, main]]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B });
+    await deliver(env, [
+      { body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000)) },
+      { body: pushBody(repo.artifactsName, main, B, A, iso(T0 + 2000)) },
+      { body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 3000)) },
+    ]);
+    const rows = await events(repo.id);
+    expect(rows).toHaveLength(4);
+    expect(rows.slice(1).every((r) => r.deliveries === 2)).toBe(true);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows[3]!.id });
+  });
+
+  it('does not pair with a gate row older than the pairing window', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('gate-window');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    await gate(env, repo, [[A, B, main]]);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PAIRING_WINDOW_MS + 60_000);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000)) }]);
+    now.mockRestore();
+    const rows = await events(repo.id);
+    expect(rows).toHaveLength(3);
+    // The unpaired Artifacts row is older than the gate row and does not move the ref back.
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows.find((r) => r.event_at > T0 + 1000)!.id });
   });
 });
 

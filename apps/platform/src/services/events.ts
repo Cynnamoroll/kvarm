@@ -47,6 +47,12 @@ export interface PushEvent {
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const PUSH_TYPE = 'cf.artifacts.repo.pushed';
+/** `push_events.source` of pushes ingested by the git gate on confirmation. */
+export const GATE_SOURCE = 'kvarm-gate';
+/** How long an ingested push waits for its delivery from the other source to pair with it. */
+export const PAIRING_WINDOW_MS = 10 * 60_000;
+/** Confirmed refs of one push the gate ingests itself. */
+export const GATE_MAX_REFS = 16;
 const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
 
 function record(v: unknown): Record<string, unknown> | null {
@@ -109,6 +115,7 @@ export function snapshotInstanceId(repoId: string, sha: string): string {
 // ---------------------------------------------------------------------------
 
 interface IngestRow {
+  event_id: string;
   repo_id: string;
   default_branch: string;
   deliveries: number;
@@ -128,6 +135,8 @@ export interface PushedWorkspace {
 }
 
 export interface Ingested {
+  /** The event row this delivery belongs to: its own identity, or the paired delivery's row. */
+  eventId: string;
   repoId: string;
   defaultBranch: string;
   deliveries: number;
@@ -165,20 +174,53 @@ function parseChanges(json: string | null): ChangeOnRef[] {
  */
 async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: string, now: number): Promise<Ingested | null> {
   const eventAt = Number.isFinite(ev.eventAt) ? ev.eventAt : now;
-  const persistedAt = 'SELECT p.event_at FROM push_events p WHERE p.id = ?2 AND p.repo_id = r.id';
+  // The row this delivery belongs to: its own, or the one it was paired with.
+  const eid = (p: string) => `COALESCE((SELECT a.event_id FROM push_event_aliases a WHERE a.alias_id = ${p}), ${p})`;
+  const persistedAt = `SELECT p.event_at FROM push_events p WHERE p.id = ${eid('?2')} AND p.repo_id = r.id`;
   // Change requests name their head by branch; other refs match no change.
   const branch = ev.ref.startsWith(BRANCH_PREFIX) ? ev.ref.slice(BRANCH_PREFIX.length) : null;
   const currentRef = 'FROM repo_refs f WHERE f.repo_id = change_sets.repo_id AND f.ref = ?2';
   const results = await db.batch([
+    // Pairing: the git gate and Artifacts each deliver a confirmed push once.
+    // A delivery without a row of its own adopts the oldest unpaired row of
+    // the same transition from the other source. Repeats of a transition pair
+    // first-in first-out; the window bounds how long an unanswered row waits.
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO push_event_aliases (alias_id, event_id, created_at)
+         SELECT ?1, p.id, ?6 FROM repos r JOIN push_events p ON p.repo_id = r.id
+          WHERE r.artifacts_name = ?2
+            AND p.transition_key = r.id || ':' || ?3 || ':' || ?4 || ':' || ?5
+            AND p.id != ?1
+            AND NOT EXISTS (SELECT 1 FROM push_events s WHERE s.id = ?1)
+            AND (p.source = '${GATE_SOURCE}') != (?7 = '${GATE_SOURCE}')
+            AND p.received_at >= ?6 - ?8
+            AND NOT EXISTS (SELECT 1 FROM push_event_aliases x WHERE x.event_id = p.id)
+          ORDER BY p.event_at, p.id LIMIT 1`,
+      )
+      .bind(id, ev.repoName, ev.ref, ev.before, ev.after, now, ev.source, PAIRING_WINDOW_MS),
+    // A gate delivery records a row only as the direct successor of the
+    // ledger's position (receive-pack confirmed old == before), timed after
+    // that position, so it orders correctly whatever the two clocks say.
+    // Anything else is left to the Artifacts delivery.
     db
       .prepare(
         `INSERT OR IGNORE INTO push_events (id, repo_id, ref, before_sha, after_sha, transition_key, source,
            first_delivery_id, last_delivery_id, deliveries, event_at, received_at)
-         SELECT ?1, r.id, ?3, ?4, ?5, r.id || ':' || ?3 || ':' || ?4 || ':' || ?5, ?6, ?7, ?7, 0, ?8, ?9
-           FROM repos r WHERE r.artifacts_name = ?2`,
+         SELECT ${eid('?1')}, r.id, ?3, ?4, ?5, r.id || ':' || ?3 || ':' || ?4 || ':' || ?5, ?6, ?7, ?7, 0,
+                CASE WHEN ?6 = '${GATE_SOURCE}'
+                     THEN MAX(?8, COALESCE((SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3), 0))
+                     ELSE ?8 END,
+                ?9
+           FROM repos r WHERE r.artifacts_name = ?2
+            AND (?6 != '${GATE_SOURCE}'
+                 OR (SELECT f.sha FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3) = ?4
+                 OR (?4 = '${ZERO_OID}' AND NOT EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3)))`,
       )
       .bind(id, ev.repoName, ev.ref, ev.before, ev.after, ev.source, deliveryId, eventAt, now),
-    db.prepare('UPDATE push_events SET deliveries = deliveries + 1, last_delivery_id = ?2 WHERE id = ?1').bind(id, deliveryId),
+    db
+      .prepare(`UPDATE push_events SET deliveries = deliveries + 1, last_delivery_id = ?2 WHERE id = ${eid('?1')}`)
+      .bind(id, deliveryId),
     db
       .prepare(
         `UPDATE repos AS r SET pushed_at = MAX(COALESCE(r.pushed_at, 0), COALESCE((${persistedAt}), 0))
@@ -190,7 +232,7 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
     db
       .prepare(
         `INSERT INTO repo_refs (repo_id, ref, sha, event_id, event_at, updated_at)
-         SELECT r.id, ?3, ?4, ?2, (${persistedAt}), ?5 FROM repos r
+         SELECT r.id, ?3, ?4, ${eid('?2')}, (${persistedAt}), ?5 FROM repos r
           WHERE r.artifacts_name = ?1 AND EXISTS (${persistedAt})
          ON CONFLICT (repo_id, ref) DO UPDATE SET
            sha = excluded.sha, event_id = excluded.event_id, event_at = excluded.event_at, updated_at = excluded.updated_at
@@ -217,8 +259,8 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
       .bind(ev.repoName, ev.ref, branch, now),
     db
       .prepare(
-        `SELECT r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,
-           (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done,
+        `SELECT p.id AS event_id, r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,
+           (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = p.id) AS done,
            (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'state', c.state, 'policy', c.merge_policy, 'headSha', c.head_sha,
                      'queuedHead', (SELECT q.head_sha FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)))
               FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state IN ('open', 'conflicted')) AS changes,
@@ -226,19 +268,20 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
               FROM workspaces w WHERE w.repo_id = r.id AND w.ref = ?5) AS workspace,
            (SELECT 1 FROM change_sets b WHERE b.repo_id = r.id AND b.state = 'conflicted' AND b.merge_policy = 'auto' AND b.base_ref = ?4 LIMIT 1) AS base_conflicted
          FROM repos r
-         JOIN push_events p ON p.id = ?2 AND p.repo_id = r.id
+         JOIN push_events p ON p.id = ${eid('?2')} AND p.repo_id = r.id
          LEFT JOIN repo_refs f ON f.repo_id = r.id AND f.ref = ?3
          WHERE r.artifacts_name = ?1`,
       )
       .bind(ev.repoName, id, ev.ref, branch, ev.ref.startsWith(WORKSPACE_REF_PREFIX) ? ev.ref : null),
   ]);
-  const row = (results[5]?.results as IngestRow[] | undefined)?.[0];
+  const row = (results[6]?.results as IngestRow[] | undefined)?.[0];
   if (!row) return null;
   return {
+    eventId: row.event_id,
     repoId: row.repo_id,
     defaultBranch: row.default_branch,
     deliveries: row.deliveries,
-    superseded: row.head_event_id !== id,
+    superseded: row.head_event_id !== row.event_id,
     done: new Set(JSON.parse(row.done || '[]') as string[]),
     changes: parseChanges(row.changes),
     eventAt: row.event_at,
@@ -398,12 +441,18 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
   }
   const event = parsePushEvent(msg.body);
   if (!event) return { outcome: 'ignored' };
-  const eventId = await eventIdentity(event, msg.id);
+  const identity = await eventIdentity(event, msg.id);
   // The account-level subscription delivers every namespace; repos.artifacts_name is only unique within ours.
-  if (event.namespace !== env.ARTIFACTS_NAMESPACE) return { outcome: 'unknown-repo', eventId };
+  if (event.namespace !== env.ARTIFACTS_NAMESPACE) return { outcome: 'unknown-repo', eventId: identity };
+  return processPushEvent(env, event, identity, msg.id, counters);
+}
+
+/** Ingests one push delivery and runs its missing effects (queue consumer and git gate alike). */
+async function processPushEvent(env: Env, event: PushEvent, identity: string, deliveryId: string, counters: { wf: number }): Promise<MessageResult> {
   const now = Date.now();
-  const state = await ingest(env.DB, event, eventId, msg.id, now);
-  if (!state) return { outcome: 'unknown-repo', eventId };
+  const state = await ingest(env.DB, event, identity, deliveryId, now);
+  if (!state) return { outcome: 'unknown-repo', eventId: identity };
+  const eventId = state.eventId;
 
   const pending = PUSH_EFFECTS.filter((e) => !state.done.has(e.name));
   if (pending.length === 0) return { outcome: 'duplicate', eventId };
@@ -530,6 +579,67 @@ export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): 
         ...(result.effects ? { effects: result.effects } : {}),
         ...(result.train ? { train: result.train } : {}),
         ...(result.settle ? { settle: result.settle } : {}),
+        ...(result.error ? { error: result.error } : {}),
+      }),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Git gate fast path
+// ---------------------------------------------------------------------------
+
+/**
+ * Ingests the refs a receive-pack report confirmed, as the git gate sees
+ * them, without waiting for the Artifacts event (whose delivery lags by
+ * seconds). Each confirmed command becomes a `kvarm-gate` delivery; the
+ * Artifacts event of the same transition later pairs with it in the ingest
+ * batch and replays whatever effect did not complete here. A delivery is
+ * recorded only as the direct successor of the ledger's current position
+ * (see `ingest`); otherwise, and on any failure, nothing is recorded here and
+ * the Artifacts delivery processes the push as before (`deferred`).
+ */
+export async function ingestGatePush(
+  env: Env,
+  repo: { artifacts_name: string },
+  commands: readonly { oldOid: string; newOid: string; ref: string }[],
+  confirmed: readonly string[],
+): Promise<void> {
+  const ok = new Set(confirmed);
+  const eventAt = Date.now();
+  let taken = 0;
+  for (const cmd of commands) {
+    if (!ok.has(cmd.ref) || !SHA_RE.test(cmd.oldOid) || !SHA_RE.test(cmd.newOid)) continue;
+    // waitUntil time is bounded; refs past the cap are left to their Artifacts deliveries.
+    if (++taken > GATE_MAX_REFS) break;
+    if (!cmd.ref.startsWith('refs/') || cmd.ref.length > 1024) continue;
+    const delivery = `gate:${crypto.randomUUID()}`;
+    const event: PushEvent = {
+      namespace: env.ARTIFACTS_NAMESPACE,
+      repoName: repo.artifacts_name,
+      ref: cmd.ref,
+      before: cmd.oldOid,
+      after: cmd.newOid,
+      eventAt,
+      sourceId: delivery,
+      source: GATE_SOURCE,
+    };
+    const meter = new CostMeter();
+    const counters = { wf: 0 };
+    let result: MessageResult;
+    try {
+      const identity = await eventIdentity(event, delivery);
+      result = await runWithMeter(meter, () => processPushEvent(meter.wrapEnv(env), event, identity, delivery, counters));
+    } catch (err) {
+      result = { outcome: 'retry', error: String(err).slice(0, 200) };
+    }
+    console.log(
+      JSON.stringify({
+        cost: meter.snapshot(),
+        gatePush: result.outcome === 'unknown-repo' ? 'deferred' : result.outcome,
+        wf: counters.wf,
+        ...(result.eventId ? { eventId: result.eventId } : {}),
+        ...(result.effects ? { effects: result.effects } : {}),
         ...(result.error ? { error: result.error } : {}),
       }),
     );

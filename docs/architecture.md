@@ -190,6 +190,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0019_dependencies` | pinned draft dependencies (§11.3) |
 | `0020_check_runs_identity` | check-run tree, attempt, required, quarantined and summary (§0.3) |
 | `0021_ci_jobs` | user-owned CI runner jobs with generation and owner fencing |
+| `0023_push_event_aliases` | pairing of a push ingested at the git gate with its Artifacts delivery (§11.5) |
 
 ## 7. Testing
 
@@ -257,6 +258,7 @@ The README's "Deploy from zero" and "Redeploy an existing deployment" sections a
 ### 11.5 Events and snapshots
 
 - Artifacts `repo.pushed` events reach the `kvarm-events` queue through one account-level subscription. For each message, one ingest D1 batch records the event, advances `pushed_at` monotonically, moves the ref position only for a newer event and refreshes the heads of open changes on that branch. Each downstream effect (cache invalidation, snapshot build, `kvarm/guard`, CI dispatch, Nexus index, train kicks) runs and is recorded independently, so a redelivery runs only what is missing. Out-of-order pushes cannot roll state back; a genuine repeated transition (A→B→A→B) is still processed. A batch fills for at most 1 s; within it, messages of one repository run in delivery order and different repositories run concurrently.
+- **Gate fast path.** The git gate does not wait for the Artifacts event of a push it relayed. After a protocol-confirmed receive-pack it ingests each confirmed ref through the same ingest batch and effects (source `kvarm-gate`, in `waitUntil`), so the head refresh, `kvarm/guard` and CI dispatch start immediately. Such a delivery records a row only as the direct successor of the ledger's position for that ref (receive-pack confirmed `old == before`), timed after that position, so it orders correctly regardless of clock differences between the Worker and Artifacts; anything else records nothing and is left to the Artifacts delivery. When the Artifacts delivery of the same transition arrives (in either order, within 10 minutes), the ingest batch pairs the two in `push_event_aliases`: one audit row, one set of effects, and the later delivery replays only the effects still missing, so a failure at the gate is retried by the queue. Repeats of one transition pair first in, first out. Platform writes through the receive-pack client (merges, workspace refs) still arrive through the Artifacts event only.
 - Snapshots are addressed by commit: per-commit metadata points at an immutable per-tree tarball in R2, so commits with identical trees share bytes. `SnapshotBuilder` walks the tree in bounded Workflow steps. Reading metadata never starts a build.
 - Kvarm never deletes repository refs, user code or history automatically; an explicit abandon deletes only its workspace ref. Growing lists are paginated, comparisons and output are bounded, and runners poll with backoff.
 
