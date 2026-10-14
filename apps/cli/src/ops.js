@@ -8,7 +8,8 @@
 
 import { OPERATIONS, OperationInputError, buildRequest, requestTarget } from '@kvarm/ops';
 import { CliError } from './checkout.js';
-import { text } from './http.js';
+import { requireBaseUrl } from './guards.js';
+import { requestJson } from './http.js';
 
 /** @typedef {import('@kvarm/ops').Operation} Operation */
 /** @typedef {import('@kvarm/ops').Param} Param */
@@ -261,35 +262,18 @@ export async function callOperation(op, args, io) {
     if (err instanceof OperationInputError) throw new CliError(err.message, 2);
     throw err;
   }
-  const baseUrl = io.env.KVARM_BASE_URL;
-  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://kvarm.example.com)', 2);
-  if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`KVARM_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
-  /** @type {Record<string, string>} */
-  const headers = { accept: 'application/json' };
-  if (io.env.KVARM_PAT) headers.authorization = `Bearer ${io.env.KVARM_PAT}`;
-  if (built.body !== undefined) headers['content-type'] = 'application/json';
+  const baseUrl = requireBaseUrl(io.env);
   const url = new URL(requestTarget(built), baseUrl);
   const doFetch = io.apiFetch ?? globalThis.fetch;
   let res;
   try {
-    res = await doFetch(url, {
-      method: built.method,
-      headers,
-      ...(built.body !== undefined ? { body: JSON.stringify(built.body) } : {}),
-    });
+    res = await requestJson(doFetch, url, { pat: io.env.KVARM_PAT, method: built.method, headers: { accept: 'application/json' }, body: built.body });
   } catch (err) {
+    if (err instanceof CliError) throw err;
     const cause = /** @type {{ cause?: { code?: string, message?: string } }} */ (err).cause;
     throw new CliError(`could not reach ${url.origin}: ${cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err))}`, 1);
   }
-  const raw = await text(res);
-  /** @type {unknown} */
-  let data = raw;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    // non-JSON reply
-  }
-  return { ok: res.ok, status: res.status, data, text: raw, retryAfter: res.headers.get('retry-after') };
+  return { ok: res.ok, status: res.status, data: res.json === undefined ? res.text : res.json, text: res.text, retryAfter: res.retryAfter };
 }
 
 /**
