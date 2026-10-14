@@ -11,7 +11,7 @@
  * so nothing is stored or served for one.
  */
 
-import { createZstdDecompress } from 'node:zlib';
+import { zstdDecompressSync } from 'node:zlib';
 import { markCache } from '../cost/meter';
 
 const IMMUTABLE_TTL_SECONDS = 31536000;
@@ -178,9 +178,12 @@ class ZstdFramer {
 const did = (fhd: number) => fhd & 3;
 
 /**
- * Decompresses a stored zstd object: one decompressor per frame, each fed
- * only the frame's own bytes. A decode error or a truncated object rejects
- * the output stream — a short body is never closed cleanly.
+ * Decompresses a stored zstd object frame by frame: each complete frame is
+ * decoded with the sync one-shot API, which cannot lose output the way the
+ * stream API's 'data' events can (they are not tied to the write and end
+ * callbacks in this runtime, so a callback-timed drain truncates the tar).
+ * A decode error or a truncated object rejects the output stream — a short
+ * body is never closed cleanly. Memory is bounded by one frame.
  */
 export function zstdDecompressAll(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
   const out = new TransformStream<Uint8Array, Uint8Array>();
@@ -188,46 +191,9 @@ export function zstdDecompressAll(stream: ReadableStream<Uint8Array>): ReadableS
     const reader = stream.getReader();
     const writer = out.writable.getWriter();
     const framer = new ZstdFramer();
-    // workerd's zlib emits decoded output through 'data' events; each frame
-    // gets a fresh decoder whose queue is drained after every awaited write.
-    const queue: Uint8Array[] = [];
-    let failed: Error | null = null;
-    let broken: Promise<never>;
-    const newDecoder = () => {
-      const d = createZstdDecompress();
-      d.on('data', (chunk) => queue.push(chunk));
-      broken = new Promise<never>((_, reject) => {
-        d.once('error', (err) => {
-          failed = err ?? new Error('zstd decode failed');
-          reject(failed);
-        });
-      });
-      broken.catch(() => undefined);
-      return d;
-    };
-    let z = newDecoder();
-    // Whether the current decoder received input: end() on an empty decoder
-    // is a zstd error, and every complete frame is already ended in the loop.
-    let fed = false;
-    // A decode failure can stall the write/end callback itself, so every
-    // wait races the decoder's own 'error' event.
-    const write = (piece: Uint8Array) => {
-      fed = true;
-      return Promise.race([
-        new Promise<void>((resolve) => z.write(piece, () => resolve())),
-        broken,
-      ]).then(() => {
-        if (failed) throw failed;
-      });
-    };
-    const end = () =>
-      Promise.race([new Promise<void>((resolve) => z.end(() => resolve())), broken]).then(
-        () =>
-          new Promise<void>((resolve, reject) => queueMicrotask(() => (failed ? reject(failed) : resolve()))),
-      );
-    const drain = async () => {
-      while (queue.length > 0) await writer.write(queue.shift()!);
-    };
+    let pieces: Uint8Array[] = [];
+    let piecesLength = 0;
+    const isSkippable = (b: Uint8Array) => b[0] === 0x50 && b[1] === 0x2a && b[2] === 0x4d && b[3] === 0x18;
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -236,20 +202,32 @@ export function zstdDecompressAll(stream: ReadableStream<Uint8Array>): ReadableS
         while (off < value.length) {
           const { consumed, ended } = framer.eat(value.subarray(off));
           if (consumed > 0) {
-            await write(value.subarray(off, off + consumed));
-            await drain();
+            pieces.push(value.subarray(off, off + consumed));
+            piecesLength += consumed;
           }
           off += consumed;
-          if (ended) {
-            await end();
-            await drain();
-            z = newDecoder();
-            fed = false;
+          if (ended && piecesLength > 0) {
+            const frame =
+              pieces.length === 1
+                ? pieces[0]!
+                : (() => {
+                    const b = new Uint8Array(piecesLength);
+                    let o = 0;
+                    for (const p of pieces) {
+                      b.set(p, o);
+                      o += p.length;
+                    }
+                    return b;
+                  })();
+            pieces = [];
+            piecesLength = 0;
+            if (!isSkippable(frame)) {
+              const decoded = zstdDecompressSync(frame);
+              if (decoded.length > 0) await writer.write(decoded);
+            }
           }
         }
       }
-      if (fed) await end();
-      await drain();
       if (framer.inFrame) throw new Error('truncated zstd object');
       await writer.close();
     } catch (err) {

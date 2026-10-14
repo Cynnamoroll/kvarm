@@ -1,5 +1,5 @@
 {
-  "measuredAt": "2026-10-12T00:49:27.570Z",
+  "measuredAt": "2026-10-14T01:18:17.641Z",
   "runs": 3,
   "host": {
     "platform": "darwin 27.0.0",
@@ -11,208 +11,210 @@
   "targets": [
     {
       "target": "fixture",
-      "repo": "<owner>/fixture-1m",
+      "repo": "cynthia/fixture-1m",
       "ref": "bench-head",
-      "sha": "08333c79998f410b9c40a84cc430ce9762c29ae8",
+      "sha": "bb8fa8f407f624a0fe93bb2f647f5e1c201640f6",
       "snapshot": {
         "size": 33487360,
-        "gzipBytes": 3140134,
+        "encodedSize": 1212122,
+        "encoding": "zstd",
         "files": 502,
         "reused": false
       },
       "summary": {
         "clone": {
-          "minMs": 12042.3,
-          "medianMs": 12309.6,
-          "maxMs": 22740.6,
-          "transferBytes": 9422616,
+          "minMs": 26457.5,
+          "medianMs": 27647,
+          "maxMs": 42360.2,
+          "transferBytes": 9422618,
           "treeBytes": 33032000
         },
         "shallow": {
-          "minMs": 867.3,
-          "medianMs": 893.8,
-          "maxMs": 1102.9,
-          "transferBytes": 3753234,
+          "minMs": 1135.1,
+          "medianMs": 1331.5,
+          "maxMs": 1426.9,
+          "transferBytes": 3753235,
           "treeBytes": 33032000
         },
         "snapshot": {
-          "minMs": 888.4,
-          "medianMs": 892.8,
-          "maxMs": 963.4,
-          "transferBytes": 33487360,
+          "minMs": 465,
+          "medianMs": 658.5,
+          "maxMs": 715.3,
+          "transferBytes": 1212122,
           "treeBytes": 33032000
         }
       },
       "speedup": {
-        "vsClone": 13.8,
-        "vsShallow": 1
+        "vsClone": 42,
+        "vsShallow": 2
       },
       "runs": [
         {
           "run": 1,
           "variant": "clone",
-          "ms": 22740.6,
-          "transferBytes": 9422616,
+          "ms": 42360.2,
+          "transferBytes": 9422618,
           "treeBytes": 33032000
         },
         {
           "run": 1,
           "variant": "shallow",
-          "ms": 1102.9,
-          "transferBytes": 3753234,
+          "ms": 1426.9,
+          "transferBytes": 3753235,
           "treeBytes": 33032000
         },
         {
           "run": 1,
           "variant": "snapshot",
-          "ms": 963.4,
-          "transferBytes": 33487360,
+          "ms": 658.5,
+          "transferBytes": 1212122,
           "treeBytes": 33032000
         },
         {
           "run": 2,
           "variant": "snapshot",
-          "ms": 888.4,
-          "transferBytes": 33487360,
+          "ms": 465,
+          "transferBytes": 1212122,
           "treeBytes": 33032000
         },
         {
           "run": 2,
           "variant": "shallow",
-          "ms": 893.8,
-          "transferBytes": 3753234,
+          "ms": 1135.1,
+          "transferBytes": 3753235,
           "treeBytes": 33032000
         },
         {
           "run": 2,
           "variant": "clone",
-          "ms": 12309.6,
-          "transferBytes": 9422616,
+          "ms": 26457.5,
+          "transferBytes": 9422618,
           "treeBytes": 33032000
         },
         {
           "run": 3,
           "variant": "clone",
-          "ms": 12042.3,
-          "transferBytes": 9422616,
+          "ms": 27647,
+          "transferBytes": 9422618,
           "treeBytes": 33032000
         },
         {
           "run": 3,
           "variant": "shallow",
-          "ms": 867.3,
-          "transferBytes": 3753234,
+          "ms": 1331.5,
+          "transferBytes": 3753235,
           "treeBytes": 33032000
         },
         {
           "run": 3,
           "variant": "snapshot",
-          "ms": 892.8,
-          "transferBytes": 33487360,
+          "ms": 715.3,
+          "transferBytes": 1212122,
           "treeBytes": 33032000
         }
       ]
     },
     {
       "target": "small",
-      "repo": "<owner>/m4-cli-checkout-bench-1791766098069",
+      "repo": "cynthia/m4-cli-checkout-bench-1791940577863",
       "ref": "main",
-      "sha": "8a0d68e32960d119fff71540b14634b020a7dc77",
+      "sha": "a8cac89e5a4e7e0cae764d844f9b43c039592c98",
       "snapshot": {
         "size": 319488,
-        "gzipBytes": 10998,
+        "encodedSize": 10994,
+        "encoding": "zstd",
         "files": 61,
         "reused": false
       },
       "summary": {
         "clone": {
-          "minMs": 532.1,
-          "medianMs": 534.6,
-          "maxMs": 812.2,
-          "transferBytes": 15898,
+          "minMs": 537.2,
+          "medianMs": 812.4,
+          "maxMs": 997.7,
+          "transferBytes": 15894,
           "treeBytes": 268487
         },
         "shallow": {
-          "minMs": 444.9,
-          "medianMs": 461.7,
-          "maxMs": 565.1,
-          "transferBytes": 13657,
+          "minMs": 567.2,
+          "medianMs": 592.6,
+          "maxMs": 626,
+          "transferBytes": 13656,
           "treeBytes": 268487
         },
         "snapshot": {
-          "minMs": 315.1,
-          "medianMs": 328.1,
-          "maxMs": 561.4,
-          "transferBytes": 319488,
+          "minMs": 369.9,
+          "medianMs": 379,
+          "maxMs": 628.3,
+          "transferBytes": 10994,
           "treeBytes": 268487
         }
       },
       "speedup": {
-        "vsClone": 1.6,
-        "vsShallow": 1.4
+        "vsClone": 2.1,
+        "vsShallow": 1.6
       },
       "runs": [
         {
           "run": 1,
           "variant": "clone",
-          "ms": 812.2,
-          "transferBytes": 15898,
+          "ms": 997.7,
+          "transferBytes": 15894,
           "treeBytes": 268487
         },
         {
           "run": 1,
           "variant": "shallow",
-          "ms": 565.1,
-          "transferBytes": 13657,
+          "ms": 567.2,
+          "transferBytes": 13656,
           "treeBytes": 268487
         },
         {
           "run": 1,
           "variant": "snapshot",
-          "ms": 561.4,
-          "transferBytes": 319488,
+          "ms": 628.3,
+          "transferBytes": 10994,
           "treeBytes": 268487
         },
         {
           "run": 2,
           "variant": "snapshot",
-          "ms": 315.1,
-          "transferBytes": 319488,
+          "ms": 369.9,
+          "transferBytes": 10994,
           "treeBytes": 268487
         },
         {
           "run": 2,
           "variant": "shallow",
-          "ms": 461.7,
-          "transferBytes": 13657,
+          "ms": 626,
+          "transferBytes": 13656,
           "treeBytes": 268487
         },
         {
           "run": 2,
           "variant": "clone",
-          "ms": 532.1,
-          "transferBytes": 15898,
+          "ms": 812.4,
+          "transferBytes": 15894,
           "treeBytes": 268487
         },
         {
           "run": 3,
           "variant": "clone",
-          "ms": 534.6,
-          "transferBytes": 15898,
+          "ms": 537.2,
+          "transferBytes": 15894,
           "treeBytes": 268487
         },
         {
           "run": 3,
           "variant": "shallow",
-          "ms": 444.9,
-          "transferBytes": 13657,
+          "ms": 592.6,
+          "transferBytes": 13656,
           "treeBytes": 268487
         },
         {
           "run": 3,
           "variant": "snapshot",
-          "ms": 328.1,
-          "transferBytes": 319488,
+          "ms": 379,
+          "transferBytes": 10994,
           "treeBytes": 268487
         }
       ]

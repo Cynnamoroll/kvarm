@@ -37,9 +37,16 @@
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { constants as ZSTD, createZstdCompress } from 'node:zlib';
+import * as nodeZlib from 'node:zlib';
+import { constants as ZSTD } from 'node:zlib';
 import { decode, encode, gitModeToTar, tarEnd, tarHeader, tarPadding, type TarEntry } from '@kvarm/gitops';
 import { withRepo } from '../artifacts/repo';
+
+// The runtime ships the zstd sync one-shot (verified live) ahead of the
+// pinned @cloudflare/workers-types, which does not declare it yet.
+const zstdCompressSync = (nodeZlib as unknown as {
+  zstdCompressSync?: (input: Uint8Array, options?: { params: Record<number, number> }) => Uint8Array;
+}).zstdCompressSync!;
 import { CostMeter, runWithMeter } from '../cost/meter';
 
 export const BLOBS_PER_STEP = 500;
@@ -53,6 +60,14 @@ export const READ_AHEAD = 8;
 export const READ_BUDGET = 16 * 1024 * 1024;
 /** Compression level new snapshot objects are built with. */
 export const SNAPSHOT_ZSTD_LEVEL = 3;
+/**
+ * Tar bytes buffered before one zstd frame is cut. The runtime's one-shot
+ * compressor fails once a frame's compressed output passes ~48 KiB (an
+ * internal buffer: 32 KiB frames compress even when fully incompressible,
+ * 48 KiB ones fail), so frames stay at 32 KiB of input: every frame then
+ * compresses, and the raw-block fallback only guards against a runtime shift.
+ */
+export const SNAPSHOT_ZSTD_FRAME_BYTES = 32 * 1024;
 
 /** How the stored object's bytes relate to the tar: plain, or concatenated zstd frames. */
 export type SnapshotEncoding = 'identity' | 'zstd';
@@ -501,43 +516,64 @@ class PlainEncoder implements TarEncoder {
 }
 
 /**
- * Zstd encoding: everything a step feeds in forms one zstd frame. workerd's
- * zlib delivers compressed output through 'data' events, not read(); the
- * write callback resolves once the chunk is processed, so draining the
- * collected output after each awaited write keeps ordering deterministic.
+ * Zstd encoding: tar bytes are buffered and cut into independent zstd frames
+ * of exactly SNAPSHOT_ZSTD_FRAME_BYTES input each (a step's final frame holds
+ * its remainder), concatenated in the stored object. Compression uses the
+ * one-shot sync API because the stream API's 'data' events are not tied to
+ * its write and end callbacks in this runtime — an event after the last
+ * callback-timed drain would leave a frame's last chunks out of the stored
+ * object, corrupting every download. A frame the one-shot still refuses is
+ * stored verbatim in a raw-block frame: the build never fails, and such a
+ * region only costs its raw bytes on the wire.
  */
 class ZstdEncoder implements TarEncoder {
-  private readonly z = createZstdCompress({
-    params: { [ZSTD.ZSTD_c_compressionLevel]: SNAPSHOT_ZSTD_LEVEL, [ZSTD.ZSTD_c_checksumFlag]: 1 },
-  });
-  private pending: Uint8Array[] = [];
-  private failed: Error | null = null;
+  private chunks: Uint8Array[] = [];
+  private length = 0;
 
   constructor(
     private readonly writer: PartWriter,
     private readonly state: BatchState,
-  ) {
-    this.z.on('data', (chunk) => this.pending.push(chunk));
-    this.z.on('error', (err) => {
-      this.failed = err ?? new Error('zstd compression failed');
-    });
+  ) {}
+
+  /** Exactly `n` buffered bytes, splitting the head chunk if it crosses the cut. */
+  private take(n: number): Uint8Array {
+    const input = new Uint8Array(n);
+    let off = 0;
+    while (off < n) {
+      const head = this.chunks[0]!;
+      const want = n - off;
+      if (head.length <= want) {
+        input.set(head, off);
+        off += head.length;
+        this.chunks.shift();
+      } else {
+        input.set(head.subarray(0, want), off);
+        this.chunks[0] = head.subarray(want);
+        off = n;
+      }
+    }
+    this.length -= n;
+    return input;
   }
 
-  private write(chunk: Uint8Array): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.z.write(chunk, () => (this.failed ? reject(this.failed) : resolve()));
-    });
-  }
-
-  private drain(): void {
-    for (const c of this.pending) this.writer.push(c);
-    this.pending = [];
+  private cut(n: number): void {
+    const input = this.take(n);
+    let frame: Uint8Array;
+    try {
+      frame = zstdCompressSync(input, {
+        params: { [ZSTD.ZSTD_c_compressionLevel]: SNAPSHOT_ZSTD_LEVEL, [ZSTD.ZSTD_c_checksumFlag]: 1 },
+      });
+    } catch {
+      frame = rawBlockFrame(input);
+    }
+    this.writer.push(frame);
   }
 
   async push(bytes: Uint8Array): Promise<void> {
     this.state.tarBytes += bytes.length;
-    await this.write(bytes);
-    this.drain();
+    this.chunks.push(bytes);
+    this.length += bytes.length;
+    while (this.length >= SNAPSHOT_ZSTD_FRAME_BYTES) this.cut(SNAPSHOT_ZSTD_FRAME_BYTES);
     await this.writer.flushFull();
   }
 
@@ -553,12 +589,40 @@ class ZstdEncoder implements TarEncoder {
   }
 
   async end(): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      this.z.end(() => (this.failed ? reject(this.failed) : resolve()));
-    });
-    this.drain();
+    if (this.length > 0) this.cut(this.length);
     await this.writer.flushFull();
   }
+}
+
+/**
+ * A zstd frame of raw blocks (RFC 8878): the magic, a header with a 128 KiB
+ * window and no checksum, then the payload verbatim in 128 KiB raw blocks.
+ * Every zstd decoder reconstructs it byte for byte, so a region the runtime's
+ * one-shot compressor refuses still reaches clients uncompressed — a
+ * skippable frame would not do, as decoders skip its payload.
+ */
+function rawBlockFrame(payload: Uint8Array): Uint8Array {
+  const BLOCK = 128 * 1024;
+  const blocks = Math.max(1, Math.ceil(payload.length / BLOCK));
+  const out = new Uint8Array(6 + blocks * 3 + payload.length);
+  // Magic, then Frame_Header_Descriptor 0x00 (no content size, window present,
+  // no checksum, no dictionary), then the Window_Descriptor 0x38 (128 KiB).
+  out.set([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x38], 0);
+  let off = 6;
+  let at = 0;
+  for (let i = 0; i < blocks; i++) {
+    const size = Math.min(BLOCK, payload.length - at);
+    // Block_Header (3 bytes LE): the raw block type 0, the size, the last flag.
+    const header = (size << 3) | (i === blocks - 1 ? 1 : 0);
+    out[off] = header & 0xff;
+    out[off + 1] = (header >> 8) & 0xff;
+    out[off + 2] = (header >> 16) & 0xff;
+    off += 3;
+    out.set(payload.subarray(at, at + size), off);
+    off += size;
+    at += size;
+  }
+  return out;
 }
 
 interface Pending {

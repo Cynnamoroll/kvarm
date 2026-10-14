@@ -1,7 +1,7 @@
 {
   "generator": "scripts/fixture-1m.mjs",
   "version": 1,
-  "repo": "<owner>/fixture-1m",
+  "repo": "cynthia/fixture-1m",
   "shape": {
     "version": 1,
     "bench": {
@@ -29,23 +29,23 @@
   },
   "refs": {
     "bench-base": {
-      "sha": "cc72e4a02c8f53fcca94df9cb21ef1f94f0f5792",
+      "sha": "df227d9ac6f816684340d790f630f0eb70601bb1",
       "tree": "1b0e7fee3643ce81e6b6d9451a64dd0548a287c2"
     },
     "bench-head": {
-      "sha": "08333c79998f410b9c40a84cc430ce9762c29ae8",
+      "sha": "bb8fa8f407f624a0fe93bb2f647f5e1c201640f6",
       "tree": "4669158d06de64a366a2c6f99c629814e5505f5d"
     },
     "wide-base": {
-      "sha": "a08995ca00ffaa7cf77eda1cfde20adf4681437b",
+      "sha": "5a164e8913e59b67f655e1ca95cd354ac1e4b9c8",
       "tree": "662c6b9c10ad3e9da5a5e39affb69eee90177f53"
     },
     "wide-head": {
-      "sha": "d6e8b0d42867753e4e0265baa9ee27d7e29dc678",
+      "sha": "ae0092aae7ada1a0c853ffb560b2f49daa593ad5",
       "tree": "b9c56b65425262c666882f394a1afda2c7477d88"
     },
     "main": {
-      "sha": "cc72e4a02c8f53fcca94df9cb21ef1f94f0f5792",
+      "sha": "df227d9ac6f816684340d790f630f0eb70601bb1",
       "tree": "1b0e7fee3643ce81e6b6d9451a64dd0548a287c2"
     }
   },
