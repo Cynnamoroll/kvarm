@@ -69,17 +69,6 @@ function wranglerJson(wranglerArgs) {
   return JSON.parse(r.stdout.slice(start));
 }
 
-/** First string value under any of `keys`, searching nested objects. */
-function pick(obj, keys) {
-  if (!obj || typeof obj !== 'object') return undefined;
-  for (const k of keys) if (typeof obj[k] === 'string') return obj[k];
-  for (const v of Object.values(obj)) {
-    const found = pick(v, keys);
-    if (found) return found;
-  }
-  return undefined;
-}
-
 const work = mkdtempSync(join(tmpdir(), 'gitwrite-live-'));
 const askpass = join(work, 'askpass.sh');
 writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
@@ -93,10 +82,10 @@ function git(gitArgs, cwd = work) {
 
 async function run() {
   const info = wranglerJson(['artifacts', 'repos', 'get', ARTIFACTS_NAME, '--namespace', 'default']);
-  const remote = pick(info, ['remote', 'remoteUrl', 'url']);
+  const remote = info.remote;
   check('artifacts remote resolved', typeof remote === 'string' && remote.startsWith('https://'), remote ?? `keys: ${Object.keys(info)}`);
   const issued = wranglerJson(['artifacts', 'repos', 'issue-token', ARTIFACTS_NAME, '--namespace', 'default', '--scope', 'write', '--ttl', '900']);
-  const token = pick(issued, ['plaintext', 'token']);
+  const token = issued.plaintext;
   check('write token issued (not printed)', typeof token === 'string' && token.length > 10, token ? '' : `keys: ${Object.keys(issued)}`);
   if (!remote || !token) return;
 

@@ -9,6 +9,7 @@ import {
 import { lsRefs, type ResolveContext } from '../services/refs';
 import {
   requestEnvironmentBuild,
+  type EnvironmentBuildReason,
   type EnvironmentBuildRequest,
   type EnvironmentBuildRow,
   type EnvironmentRow,
@@ -17,6 +18,9 @@ import type { EnvironmentBuilderResult } from '../containers/environmentBuilder'
 
 const RETRY = { retries: { limit: 2, delay: '10 seconds', backoff: 'exponential' }, timeout: '30 minutes' } as const;
 const SNAPSHOT_POLLS = 30;
+/** D1 column budgets of environment_builds.error and environment_builds.output_tail. */
+const BUILD_ERROR_CHARS = 4096;
+const BUILD_OUTPUT_TAIL_BYTES = 65_536;
 
 async function refSha(env: Env, repo: RepoRow, baseRef: string): Promise<string | null> {
   if (/^[0-9a-f]{40}$/.test(baseRef)) return baseRef;
@@ -39,7 +43,7 @@ async function failedBuild(
       phases = COALESCE(?4, phases), finished_at = ?5
       WHERE id = ?1 AND status IN ('queued','building','validating')`,
   )
-    .bind(buildId, error.slice(0, 4096), outputTail.slice(-65_536), phases ? JSON.stringify(phases) : null, Date.now())
+    .bind(buildId, error.slice(0, BUILD_ERROR_CHARS), outputTail.slice(-BUILD_OUTPUT_TAIL_BYTES), phases ? JSON.stringify(phases) : null, Date.now())
     .run();
 }
 
@@ -80,6 +84,25 @@ export async function promoteBuild(
     .bind(build.id, Date.now())
     .run();
   return false;
+}
+
+/**
+ * Clears the environment's pending flag and requeues a build for the config
+ * that arrived while this one ran. `reasonFor` maps the pending config hash
+ * to the requeue reason ('manual'/'retry' when it still names this build,
+ * 'config' otherwise).
+ */
+async function drainPendingBuild(
+  env: Env,
+  environmentId: string,
+  reasonFor: (pendingHash: string) => EnvironmentBuildReason,
+): Promise<void> {
+  const pending = await env.DB.prepare(
+    'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
+  )
+    .bind(environmentId)
+    .first<{ config_hash: string }>();
+  if (pending) await requestEnvironmentBuild(env, environmentId, reasonFor(pending.config_hash));
 }
 
 export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRequest> {
@@ -175,45 +198,22 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
       if (!built.ok) {
         outputTail = built.outputTail ?? '';
         await failedBuild(this.env, buildId, built.error, outputTail, built.phases);
-        const pending = await this.env.DB.prepare(
-          'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
-        )
-          .bind(environmentId)
-          .first<{ config_hash: string }>();
-        if (pending) {
-          const reason = pending.config_hash === source.build.config_hash ? 'manual' : 'config';
-          await requestEnvironmentBuild(this.env, environmentId, reason);
-        }
+        await drainPendingBuild(this.env, environmentId, (h) => (h === source.build.config_hash ? 'manual' : 'config'));
         return { status: 'failed', buildId, error: built.error };
       }
       outputTail = built.outputTail;
       const promoted = await step.do('promote-environment-build', RETRY, () =>
         promoteBuild(this.env, source.build, built.snapshot, built.phases, built.outputTail),
       );
-      const pending = await this.env.DB.prepare(
-        'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
-      )
-        .bind(environmentId)
-        .first<{ config_hash: string }>();
-      if (pending) {
-        const reason = pending.config_hash === source.build.config_hash ? 'manual' : 'config';
-        await requestEnvironmentBuild(this.env, environmentId, reason);
-      }
+      await drainPendingBuild(this.env, environmentId, (h) => (h === source.build.config_hash ? 'manual' : 'config'));
       return { status: promoted ? 'ready' : 'superseded', buildId, snapshotId: built.snapshot.id };
     } catch (error) {
-      const message = String(error instanceof Error ? error.message : error).slice(0, 4096);
+      const message = String(error instanceof Error ? error.message : error).slice(0, BUILD_ERROR_CHARS);
       await failedBuild(this.env, buildId, message, outputTail);
-      const pending = await this.env.DB.prepare(
-        'UPDATE environments SET pending = 0 WHERE id = ?1 AND pending = 1 AND archived_at IS NULL RETURNING config_hash',
-      )
-        .bind(environmentId)
+      const current = await this.env.DB.prepare('SELECT config_hash FROM environment_builds WHERE id = ?1')
+        .bind(buildId)
         .first<{ config_hash: string }>();
-      if (pending) {
-        const current = await this.env.DB.prepare('SELECT config_hash FROM environment_builds WHERE id = ?1')
-          .bind(buildId)
-          .first<{ config_hash: string }>();
-        await requestEnvironmentBuild(this.env, environmentId, current?.config_hash === pending.config_hash ? 'retry' : 'config');
-      }
+      await drainPendingBuild(this.env, environmentId, (h) => (current?.config_hash === h ? 'retry' : 'config'));
       throw error;
     }
   }
