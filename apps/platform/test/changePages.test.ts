@@ -206,6 +206,58 @@ describe('change pages', () => {
       .bind(row!.id).first<{ computed_at: number }>()).toMatchObject({ computed_at: 1 });
   });
 
+  it('renders the low-risk agent approval policy for a docs-only head', async () => {
+    const name = 'phase-c-low-risk-preview';
+    const artifactsName = `${OWNER}--${name}`;
+    const repo = new FakeRepo();
+    fakeRepos.set(artifactsName, repo);
+    const repoId = crypto.randomUUID();
+    repoIds[name] = repoId;
+    await env.DB.prepare(
+      `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
+       VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
+    ).bind(repoId, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now()).run();
+    const main = await commit(repo, {
+      'README.md': 'Review me\n',
+      'src/app.ts': 'export const value = 1;\n',
+      '.kvarm/review.json': '{"scrutinize":["src/**"]}',
+    }, [], 'main');
+    const head = await commit(repo, {
+      'README.md': 'Review me\n',
+      'src/app.ts': 'export const value = 1;\n',
+      '.kvarm/review.json': '{"scrutinize":["src/**"]}',
+      'docs/guide.md': 'Documented behavior\n',
+    }, [main.sha], 'docs');
+    repo.refs.set('refs/heads/main', main.sha);
+    repo.refs.set('refs/heads/feature', head.sha);
+    const rule = await request('POST', `/api/v1/repos/${OWNER}/${name}/branch-rules`, {
+      token: ownerToken,
+      json: { pattern: 'main', requiredApprovals: 1, agentApprovals: 'low-risk' },
+    });
+    expect(rule.status).toBe(201);
+    const created = await request('POST', `/api/v1/repos/${OWNER}/${name}/changes`, {
+      token: ownerToken,
+      json: { title: 'Docs-only low-risk change', base: 'main', head: 'feature' },
+    });
+    expect(created.status).toBe(201);
+    const row = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoId).first<{ id: string }>();
+    await env.DB.prepare(
+      'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(repoId, userIds[REVIEWER], 'write', userIds[OWNER], Date.now(), Date.now()).run();
+
+    const browser = await browserSession(REVIEWER);
+    const page = await browser(`/${OWNER}/${name}/changes/1`);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('Docs-only low-risk change');
+    expect(page.text).toContain('different-family agents may count when the head has no scrutinize files.');
+    expect(page.text).toContain('What’s left');
+    expect(page.text).toContain('Need 1 human approval; 0 so far.');
+    expect(page.text).not.toContain('protected-path');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_escalations WHERE change_set_id = ? AND reason = ?')
+      .bind(row!.id, 'protected-path').first<{ n: number }>()).toMatchObject({ n: 0 });
+  });
+
   it('requires CSRF for a session approve and records the review', async () => {
     await seedChange('csrf');
     await env.DB.prepare(
