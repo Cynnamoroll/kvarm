@@ -22,7 +22,7 @@ import { notFound } from './repoPages';
 import { resolvePageActor, resolveRepoAccess } from '../services/access';
 import { parseNumber, type ChangeContext } from '../services/changes';
 import { forgetInboxCount, rememberInboxCount } from '../services/inboxCount';
-import { decideFromPage, decisionErrorMessage, INBOX_LIMITS, reviewInbox, type InboxItem, type InboxReason, type PageDecision } from '../services/reviewInbox';
+import { decideFromPage, decisionErrorMessage, INBOX_LIMITS, reviewInbox, type InboxGroup, type InboxItem, type PageDecision } from '../services/reviewInbox';
 import { staleApprovals, type EscalationView, type ReviewView } from '../services/reviews';
 
 /** Mounted at `/inbox`, ahead of the generic web routes. */
@@ -32,7 +32,8 @@ export const reviewPages = new Hono<App>();
 
 const HTML = { 'content-type': 'text/html; charset=utf-8' };
 
-const REASON_LABEL: Record<InboxReason, string> = {
+const REASON_LABEL: Record<InboxGroup['reason'], string> = {
+  requested: 'Requested of you',
   'reviewer-disagreement': 'Reviewers disagree',
   'review-blocked': 'Changes requested',
   'protected-path': 'Protected target',
@@ -40,7 +41,8 @@ const REASON_LABEL: Record<InboxReason, string> = {
   'approvals-required': 'Awaiting approval',
 };
 
-const REASON_HELP: Record<InboxReason, string> = {
+const REASON_HELP: Record<InboxGroup['reason'], string> = {
+  requested: 'A reviewer request names you on this change.',
   'reviewer-disagreement': 'One reviewer approved the head another asked to change. A human settles it.',
   'review-blocked': 'A reviewer asked for changes. Approve the head to overrule, or resolve with a note.',
   'protected-path': 'The change targets a protected branch. A human signs off before it can publish.',
@@ -181,6 +183,16 @@ function inboxItem(item: InboxItem, csrf: string, viewerId: string, error: strin
   const reasonTags = item.reasons
     .map((r) => html`<span class="tag ${r === 'approvals-required' ? 'tag-await' : 'tag-pending'}">${REASON_LABEL[r]}</span>`)
     .join('');
+  const readinessTag = item.readiness.ready ? '' : html`<span class="tag tag-pending">${item.readiness.reason ?? 'unknown'}</span>`;
+  const readinessCopy = item.readiness.reason === 'conflicted'
+    ? 'Has conflicts the author must resolve.'
+    : item.readiness.reason === 'checks-pending'
+      ? 'Waiting on checks.'
+      : item.readiness.reason === 'checks-failed'
+        ? 'Checks failed.'
+        : item.readiness.ready
+          ? ''
+          : 'Readiness could not be determined.';
   const stale = new Set(staleApprovals(item.reviews));
   const verdicts = item.reviews.length
     ? html`<ul class="k-verdicts" aria-label="Verdicts">${raw(
@@ -197,11 +209,12 @@ function inboxItem(item: InboxItem, csrf: string, viewerId: string, error: strin
       <div class="k-inbox-body">
         <span class="hud">${owner}/${name} · #${item.number} · into ${item.base} · ${timeAgo(item.createdAtMs)}</span>
         <h3><a href="${raw(changeHref(owner, name, item.number))}">${item.title}</a></h3>
-        <p class="k-inbox-tags">${raw(reasonTags)}<span class="tag">approvals ${item.approvals.count}/${item.approvals.required}</span>${raw(
+        <p class="k-inbox-tags">${raw(reasonTags)}${raw(readinessTag)}<span class="tag">approvals ${item.approvals.count}/${item.approvals.required}</span>${raw(
           item.approvals.humansRequired ? html`<span class="tag">human ${item.approvals.humans}/${item.approvals.humansRequired}</span>` : '',
         )}${raw(
           item.staleApprovals ? html`<span class="tag tag-stale">${item.staleApprovals} stale</span>` : '',
         )}</p>
+        ${raw(readinessCopy ? html`<p class="k-inbox-readiness">${readinessCopy}</p>` : '')}
         <p class="k-inbox-author">By ${raw(author)} · head <code>${short(item.headSha)}</code></p>
         ${raw(verdicts)}
         <p class="k-inbox-links">
@@ -275,7 +288,14 @@ inboxPages.get('/', async (c) => {
       <section class="panel" aria-labelledby="g-${g.reason}">
         <div class="panel-head"><h2 class="hud k-panel-title" id="g-${g.reason}">${REASON_LABEL[g.reason]} · <b>${g.items.length}</b></h2></div>
         <p class="k-group-help">${REASON_HELP[g.reason]}</p>
-        ${raw(g.items.map((i) => inboxItem(i, csrf, actor.user.id, itemKey(i.repo.owner, i.repo.name, i.number) === failedItem ? failedError : null, cursor)).join(''))}
+        ${raw(g.items
+          .filter((i) => i.readiness.ready || i.reasons[0] !== 'approvals-required')
+          .map((i) => inboxItem(i, csrf, actor.user.id, itemKey(i.repo.owner, i.repo.name, i.number) === failedItem ? failedError : null, cursor)).join(''))}
+        ${raw(g.items.some((i) => !i.readiness.ready && i.reasons[0] === 'approvals-required')
+          ? html`<details class="not-ready-group"><summary>Not ready yet</summary>${raw(g.items
+              .filter((i) => !i.readiness.ready && i.reasons[0] === 'approvals-required')
+              .map((i) => inboxItem(i, csrf, actor.user.id, itemKey(i.repo.owner, i.repo.name, i.number) === failedItem ? failedError : null, cursor)).join(''))}</details>`
+          : '')}
       </section>`,
     )
     .join('');

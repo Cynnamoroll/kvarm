@@ -856,12 +856,12 @@ interface PendingRow extends ReviewFactsRow {
   merge_policy: string;
 }
 
-type PendingReadiness = PendingReview['readiness'];
+export type PendingReadiness = PendingReview['readiness'];
 
-async function pendingReadiness(
+export async function pendingReadiness(
   env: Env,
   repo: RepoRow,
-  rows: readonly PendingRow[],
+  rows: readonly Pick<PendingRow, 'id' | 'number' | 'title' | 'state' | 'base_ref' | 'head_sha' | 'merge_policy'>[],
   waitUntil: (promise: Promise<unknown>) => void,
 ): Promise<PendingReadiness[]> {
   if (rows.length === 0) return [];

@@ -24,7 +24,7 @@ import { authorizeRepo, type Actor } from './authz';
 import { parseNumber, type ChangeContext } from './changes';
 import { changeDecisionTask, recordDecision, type DecisionView } from './decisions';
 import type { EscalationReason } from './reviewGate';
-import { changeAuthorPrincipal, getReviewPacket, LIVE_FOR_REVIEW, pendingAcross, REVIEW_LIMITS, resolveEscalation, submitReview, type PendingChange, type ReviewPacket, type ReviewVerdict } from './reviews';
+import { changeAuthorPrincipal, getReviewPacket, LIVE_FOR_REVIEW, pendingAcross, pendingReadiness, REVIEW_LIMITS, resolveEscalation, submitReview, type PendingChange, type PendingReview, type ReviewPacket, type ReviewVerdict } from './reviews';
 
 export const INBOX_LIMITS = {
   /** Repositories considered for one inbox read. */
@@ -72,12 +72,13 @@ export type InboxReason = (typeof INBOX_REASONS)[number];
 
 export interface InboxItem extends PendingChange {
   repo: { owner: string; name: string };
+  readiness: PendingReview['readiness'];
   /** Every reason the change is waiting, in group order; the first one places it. */
   reasons: InboxReason[];
 }
 
 export interface InboxGroup {
-  reason: InboxReason;
+  reason: InboxReason | 'requested';
   items: InboxItem[];
 }
 
@@ -124,9 +125,19 @@ export function awaitingApproval(c: Pick<PendingChange, 'approvals'>): boolean {
   return c.approvals.count < c.approvals.required || c.approvals.humans < c.approvals.humansRequired;
 }
 
-/** Items grouped by their first reason, groups in INBOX_REASONS order, empty groups dropped. */
+/** Requested items lead the page; remaining items stay in their reason groups. */
 export function groupInbox(items: InboxItem[]): InboxGroup[] {
-  return INBOX_REASONS.map((reason) => ({ reason, items: items.filter((i) => i.reasons[0] === reason) })).filter((g) => g.items.length > 0);
+  const requested = items
+    .filter((item) => item.requestedForViewer)
+    .sort((a, b) => Number(b.readiness.ready) - Number(a.readiness.ready));
+  const ordinary = items.filter((item) => !item.requestedForViewer);
+  return [
+    ...(requested.length ? [{ reason: 'requested' as const, items: requested }] : []),
+    ...INBOX_REASONS.map((reason) => ({
+    reason,
+      items: ordinary.filter((i) => i.reasons[0] === reason).sort((a, b) => Number(b.readiness.ready) - Number(a.readiness.ready)),
+    })).filter((g) => g.items.length > 0),
+  ];
 }
 
 /**
@@ -192,14 +203,42 @@ export async function reviewInbox(env: Env, actor: Actor, q: { limit?: string; c
   const { repos, truncatedReason } = await reviewableRepos(env, actor);
   const byId = new Map(repos.map((r) => [r.id, r]));
   const repoIds = [...byId.keys()];
-  const page = await pendingAcross(env, repoIds, { limit, window: INBOX_LIMITS.scanWindow, after });
+  const requestedPrincipal = actor.agent ? `agent:${actor.agent.agentId}` : `user:${actor.user.id}`;
+  const page = await pendingAcross(env, repoIds, { limit, window: INBOX_LIMITS.scanWindow, after, requestedPrincipal });
   const changes = page.changes;
   const more = page.more;
   const cursor = page.last ?? after;
   const items: InboxItem[] = changes.map((c) => {
     const repo = byId.get(c.repoId)!;
-    return { ...c, repo: { owner: repo.owner_login, name: repo.name }, reasons: inboxReasons(c) };
+    return {
+      ...c,
+      repo: { owner: repo.owner_login, name: repo.name },
+      readiness: { ready: false, reason: 'unknown' },
+      reasons: inboxReasons(c),
+    };
   });
+  await Promise.all(
+    repos.map(async (repo) => {
+      const repoItems = items.filter((item) => item.repoId === repo.id);
+      const readiness = await pendingReadiness(
+        env,
+        repo,
+        repoItems.map((item) => ({
+          id: item.id,
+          number: item.number,
+          title: item.title,
+          state: item.state,
+          base_ref: item.base,
+          head_sha: item.headSha,
+          merge_policy: item.mergePolicy,
+        })),
+        () => undefined,
+      );
+      repoItems.forEach((item, index) => {
+        item.readiness = readiness[index] ?? { ready: false, reason: 'unknown' };
+      });
+    }),
+  );
   return {
     ok: true,
     value: {
