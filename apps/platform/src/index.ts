@@ -32,6 +32,7 @@ import { fleetPages, fleetRepoPages } from './routes/fleetPages';
 import { issuePages } from './routes/issuePages';
 import { coordinationPages } from './routes/coordinationPages';
 import { comparePages } from './routes/comparePages';
+import { changePages } from './routes/changePages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -112,6 +113,7 @@ app.route('/:owner/:repo', issuePages);
 app.route('/:owner/:repo', repoPages);
 app.route('/:owner/:repo', coordinationPages);
 app.route('/:owner/:repo', comparePages);
+app.route('/:owner/:repo', changePages);
 
 // Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {

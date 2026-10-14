@@ -39,7 +39,7 @@ export const comparePages = new Hono<App>();
 const HTML = { 'content-type': 'text/html; charset=utf-8' };
 /** Files per page; the service caps a page at 5,000, this stays lean. */
 const PAGE_LIMIT = 200;
-const DIFF_CLIENT_TAG = '<script type="module" src="/assets/diffClient.js"></script>';
+export const DIFF_CLIENT_TAG = '<script type="module" src="/assets/diffClient.js"></script>';
 
 type PageContext = Context<App>;
 
@@ -147,7 +147,7 @@ const STATUS_MARK: Record<string, string> = {
 
 const HIGH_SIGNAL_TAGS = new Set(['ci-config', 'test-deletion', 'security-sensitive', 'new-dependency']);
 
-function fileRow(repo: RepoRow, encRange: string, f: CompareFile): string {
+export function renderCompareFileRow(repo: RepoRow, encRange: string, f: CompareFile, tier?: 'scrutinize' | 'read' | 'receipt'): string {
   const mark = STATUS_MARK[f.status] ?? '·';
   const stats =
     f.additions !== undefined && f.deletions !== undefined
@@ -163,6 +163,8 @@ function fileRow(repo: RepoRow, encRange: string, f: CompareFile): string {
   const tags = f.risk.tags
     .map((t) => `<span class="chip${HIGH_SIGNAL_TAGS.has(t) ? ' signal' : ''}" title="risk ${f.risk.score}">${escape(t)}</span>`)
     .join(' ');
+  const tierClasses = tier === 'scrutinize' ? 'heat-3 fail' : tier === 'read' ? 'signal-hi' : 'steel';
+  const tierTag = tier ? `<span class="tag review-tier ${tier} ${tierClasses}">${escape(tier)}</span>` : '';
   const rename = f.oldPath && f.oldPath !== f.path ? `<span class="muted">${escape(f.oldPath)} →</span> ` : '';
   // The client fetches from this pre-encoded per-file API endpoint; binary
   // and too-large files are known server-side and never fetched.
@@ -177,7 +179,7 @@ function fileRow(repo: RepoRow, encRange: string, f: CompareFile): string {
     <summary>
       <span class="diff-status ${f.status}">${mark}</span>
       ${rename}<code>${escape(f.path)}</code>
-      <span class="diff-stat">${stats}</span>${marks ? ` ${marks}` : ''}${tags ? ` ${tags}` : ''}
+      <span class="diff-stat">${stats}</span>${marks ? ` ${marks}` : ''}${tags ? ` ${tags}` : ''}${tierTag ? ` ${tierTag}` : ''}
     </summary>
     <div class="diff-body">
       <noscript><p class="muted">The line diff needs JavaScript. It is also available as JSON at <a href="/api/v1/repos/${repo.owner_login}/${repo.name}/compare/${encRange}/file?path=${encodeURIComponent(f.path)}">the file diff API</a>.</p></noscript>
@@ -214,7 +216,7 @@ async function renderCompare(c: PageContext, resolved: Resolved, range: { base: 
   const viewerLogin = resolved.viewer?.user.login ?? null;
   const base = `/${repo.owner_login}/${repo.name}`;
   const fileApi = `/api/v1/repos/${repo.owner_login}/${repo.name}/compare/${encRange}/file`;
-  const rows = res.files.map((f) => fileRow(repo, encRange, f)).join('');
+  const rows = res.files.map((f) => renderCompareFileRow(repo, encRange, f)).join('');
   const shown = res.files.length;
   const offset = c.req.query('cursor') ? ' (continuing)' : '';
 

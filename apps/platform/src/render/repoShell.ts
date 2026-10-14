@@ -7,7 +7,7 @@ import type { GitRef } from '@kvarm/gitops';
 
 const COPY_JS = `document.addEventListener('click',e=>{const b=e.target.closest('[data-copy]');if(!b)return;navigator.clipboard.writeText(b.dataset.copy).then(()=>{const o=b.textContent;b.textContent='copied';setTimeout(()=>b.textContent=o,1200)})});`;
 
-export type RepoTab = 'code' | 'commits' | 'branches' | 'issues' | 'environments' | 'compare' | 'activity' | 'train' | 'settings';
+export type RepoTab = 'code' | 'changes' | 'commits' | 'branches' | 'issues' | 'environments' | 'compare' | 'activity' | 'train' | 'settings';
 
 export interface ShellOptions {
   repo: RepoRow;
@@ -24,6 +24,8 @@ export interface ShellOptions {
 function tabHref(repo: RepoRow, tab: RepoTab, ref: string): string {
   const base = `/${repo.owner_login}/${repo.name}`;
   switch (tab) {
+    case 'changes':
+      return `${base}/changes`;
     case 'commits':
       return `${base}/commits?ref=${encodeURIComponent(ref)}`;
     case 'branches':
@@ -70,7 +72,7 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
     })
     .join('');
 
-  const tabs: RepoTab[] = ['code', 'commits', 'branches', 'issues', 'compare', 'activity', 'train'];
+  const tabs: RepoTab[] = ['code', 'changes', 'commits', 'branches', 'issues', 'compare', 'activity', 'train'];
   if (userLogin) tabs.push('environments');
   if (userLogin === repo.owner_login) tabs.push('settings');
   const tabHtml = tabs
