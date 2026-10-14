@@ -17,21 +17,12 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import type { ChangeContext } from '../../services/changes';
 import * as reviews from '../../services/reviews';
 
 export const reviewsApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
-}
-
-async function jsonBody(c: Context<App>): Promise<unknown> {
-  return c.req.json().catch(() => undefined);
-}
 
 async function writeContext(
   c: Context<App>,

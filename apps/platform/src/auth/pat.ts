@@ -114,6 +114,22 @@ export function patSelect(db: D1Database, hash: string): D1PreparedStatement {
 }
 
 /** Stamps last_used_at only when the stored value is older than the throttle window. */
+export interface PatListRow {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+/** The token list for the API and the settings page (routes/api.ts, routes/web.ts). */
+export function patListStatement(db: D1Database, userId: string, limit?: number): D1PreparedStatement {
+  return limit === undefined
+    ? db.prepare('SELECT id, name, prefix, scopes, created_at, last_used_at FROM pat WHERE user_id = ? ORDER BY created_at DESC').bind(userId)
+    : db.prepare('SELECT id, name, prefix, scopes, created_at, last_used_at FROM pat WHERE user_id = ? ORDER BY created_at DESC LIMIT ?').bind(userId, limit);
+}
+
 export function patStamp(db: D1Database, hash: string, now: number): D1PreparedStatement {
   return db
     .prepare('UPDATE pat SET last_used_at = ?1 WHERE hash = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)')

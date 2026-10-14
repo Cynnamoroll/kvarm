@@ -16,17 +16,13 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import * as candidates from '../../services/candidates';
 import * as compositions from '../../services/compositions';
 
 export const candidatesApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
-}
 
 async function context(c: Context<App>, need: 'read' | 'write') {
   const d = await authorizeRoute(c, need, need === 'write' ? { branchRules: true } : {});
@@ -46,9 +42,6 @@ function reply<T>(c: Context<App>, r: ServiceResult<T>, status: 200 | 201 = 200)
   return r.ok ? actorJson(c, r.value, status) : failJson(c, r);
 }
 
-const jsonBody = (c: Context<App>): Promise<unknown> => c.req.json().catch(() => undefined);
-const badJson = (c: Context<App>) => c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
-
 candidatesApi.get('/repos/:owner/:repo/candidates', async (c) => {
   const rd = await context(c, 'read');
   if ('denied' in rd) return rd.denied;
@@ -59,7 +52,7 @@ candidatesApi.post('/repos/:owner/:repo/candidates/compose', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body === undefined) return badJson(c);
+  if (body instanceof Response) return body;
   return reply(c, await compositions.compose(w.cx, body), 201);
 });
 
@@ -79,7 +72,7 @@ candidatesApi.post('/repos/:owner/:repo/arenas', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body === undefined) return badJson(c);
+  if (body instanceof Response) return body;
   return reply(c, await candidates.createArena(w.cx, body), 201);
 });
 
@@ -105,6 +98,6 @@ candidatesApi.post('/repos/:owner/:repo/arenas/:id/select', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body === undefined) return badJson(c);
+  if (body instanceof Response) return body;
   return reply(c, await candidates.selectArena(w.cx, c.req.param('id'), body));
 });

@@ -12,17 +12,11 @@
 
 import { concat } from '@kvarm/gitops';
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, clientIp, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, clientIp, denyJson, type App, failJson} from '../api';
 import * as incidents from '../../services/incidents';
 import * as reverts from '../../services/reverts';
 
 export const revertsApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
-}
 
 revertsApi.post('/repos/:owner/:repo/reverts', async (c) => {
   const d = await authorizeRoute(c, 'write', { branchRules: true });

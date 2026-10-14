@@ -20,7 +20,7 @@ export interface ShellOptions {
   head?: string;
 }
 
-function tabHref(repo: RepoRow, tab: RepoTab, ref: string): string {
+export function repoTabHref(repo: RepoRow, tab: RepoTab, ref: string): string {
   const base = `/${repo.owner_login}/${repo.name}`;
   switch (tab) {
     case 'commits':
@@ -73,7 +73,7 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
   if (userLogin) tabs.push('environments');
   if (userLogin === repo.owner_login) tabs.push('settings');
   const tabHtml = tabs
-    .map((t) => `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${tabHref(repo, t, ref)}">${t}</a>`)
+    .map((t) => `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${repoTabHref(repo, t, ref)}">${t}</a>`)
     .join('');
 
   const cloneUrl = `${env.APP_ORIGIN || 'http://localhost:8787'}/${repo.owner_login}/${repo.name}.git`;

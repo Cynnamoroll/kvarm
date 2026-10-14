@@ -14,16 +14,11 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson} from '../api';
 import * as svc from '../../services/intents/forecast';
 
 export const intentsApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
-}
 
 async function context(c: Context<App>, need: 'read' | 'write') {
   const d = await authorizeRoute(c, need);

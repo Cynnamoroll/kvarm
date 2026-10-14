@@ -24,18 +24,13 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import * as svc from '../../services/changes';
 import * as queue from '../../services/queue';
 import * as tasks from '../../services/tasks';
 
 export const changesApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
-}
 
 async function readContext(c: Context<App>) {
   const d = await authorizeRoute(c, 'read');
@@ -57,14 +52,11 @@ async function writeContext(c: Context<App>) {
   return { cx } as const;
 }
 
-async function jsonBody(c: Context<App>): Promise<unknown> {
-  return c.req.json().catch(() => undefined);
-}
-
 changesApi.post('/repos/:owner/:repo/changes', async (c) => {
   const w = await writeContext(c);
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.createChange(w.cx, body);
   if (!r.ok) return failJson(c, r);
@@ -95,6 +87,7 @@ changesApi.patch('/repos/:owner/:repo/changes/:number', async (c) => {
   const w = await writeContext(c);
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.updateChange(w.cx, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);

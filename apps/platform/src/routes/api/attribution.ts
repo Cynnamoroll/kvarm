@@ -14,8 +14,8 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import * as attribution from '../../services/attribution';
 import * as audit from '../../services/audit';
 import * as provenance from '../../services/provenance';
@@ -23,20 +23,13 @@ import * as decisions from '../../services/decisions';
 
 export const attributionApi = new Hono<App>();
 
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
-
-async function jsonBody(c: Context<App>): Promise<unknown> {
-  return c.req.json().catch(() => undefined);
-}
-
 const invalidBody = (c: Context<App>) => c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
 
 attributionApi.post('/repos/:owner/:repo/commits/:sha/attribution', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return invalidBody(c);
   const cx = { env: c.env, repo: d.repo, actor: d.actor, waitUntil: (p: Promise<unknown>) => c.executionCtx.waitUntil(p) };
   const r = await attribution.setAttribution(cx, c.req.param('sha'), body);
@@ -90,6 +83,7 @@ attributionApi.post('/repos/:owner/:repo/provenance-keys', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return invalidBody(c);
   const r = await provenance.addProvenanceKey(c.env, d.repo, d.actor!, body);
   if (!r.ok) return failJson(c, r);
@@ -108,6 +102,7 @@ attributionApi.post('/repos/:owner/:repo/decisions', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return invalidBody(c);
   const r = await decisions.recordDecision({ env: c.env, repo: d.repo, actor: d.actor }, body);
   if (!r.ok) return failJson(c, r);

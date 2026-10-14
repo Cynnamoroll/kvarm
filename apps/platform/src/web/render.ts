@@ -7,6 +7,7 @@
 import { escapeHtml, html, raw } from '@kvarm/ui';
 import { siteName } from '../config';
 import { cachedInboxCount, type InboxCount } from '../services/inboxCount';
+import { sandboxBadgeCounts } from '../services/sandboxes';
 
 const CRITICAL_CSS = raw(`
 :root{--bg:#0d1117;--bg-raised:#161b22;--bg-inset:#010409;--border:#30363d;--fg:#e6edf3;--fg-muted:#9198a1;--accent:#3fb950;--danger:#f85149;--link:#58a6ff;--radius:6px;--mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace}
@@ -127,18 +128,9 @@ export async function appLayout(env: Env, opts: AppLayoutOptions, body: string):
   // Changes waiting for review join sandbox approvals: both need this human (services/inboxCount.ts).
   const inboxRead = opts.inboxCount !== undefined ? Promise.resolve(opts.inboxCount) : opts.userId ? cachedInboxCount(opts.userId) : Promise.resolve(null);
   if (opts.userId && (opts.needsYouCount === undefined || opts.runningCount === undefined)) {
-    const counts = await env.DB.prepare(
-      `SELECT
-        (SELECT COUNT(*) FROM sandboxes
-         WHERE owner_user_id = ? AND status IN ('running', 'starting')) AS running,
-        (SELECT COUNT(*) FROM sandbox_approvals a
-         JOIN sandboxes s ON s.id = a.sandbox_id
-         WHERE s.owner_user_id = ? AND a.status = 'pending' AND a.expires_at > ?) AS approvals`,
-    )
-      .bind(opts.userId, opts.userId, Date.now())
-      .first<{ running: number; approvals: number }>();
-    if (opts.runningCount === undefined) runningCount = Number(counts?.running ?? 0);
-    if (opts.needsYouCount === undefined) needsYouCount = Number(counts?.approvals ?? 0);
+    const counts = await sandboxBadgeCounts(env, opts.userId);
+    if (opts.runningCount === undefined) runningCount = counts.running;
+    if (opts.needsYouCount === undefined) needsYouCount = counts.needsYou;
   }
   const inbox = await inboxRead;
   const inboxWaiting = inbox?.count ?? 0;

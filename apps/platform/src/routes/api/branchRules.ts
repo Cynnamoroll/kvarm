@@ -5,9 +5,9 @@
  * admin, as an explicit audited operations role) manage them.
  */
 
-import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { Hono } from 'hono';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import * as rules from '../../services/branchRules';
 
 export const branchRulesApi = new Hono<App>();
@@ -18,15 +18,6 @@ function iso(ms: number): string {
 
 function ruleJson(r: rules.BranchRule) {
   return { ...r, createdAt: iso(r.createdAt), updatedAt: iso(r.updatedAt) };
-}
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
-
-async function jsonBody(c: Context<App>): Promise<Record<string, unknown>> {
-  const body: unknown = await c.req.json().catch(() => null);
-  return body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
 }
 
 branchRulesApi.get('/repos/:owner/:repo/branch-rules', async (c) => {
@@ -40,6 +31,7 @@ branchRulesApi.post('/repos/:owner/:repo/branch-rules', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   const res = await rules.createRule(c.env, d.repo, d.actor, {
     pattern: body.pattern,
     requiredChecks: body.requiredChecks,
@@ -63,6 +55,7 @@ branchRulesApi.patch('/repos/:owner/:repo/branch-rules/:id', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body.pattern !== undefined) {
     return c.json({ error: 'pattern cannot be changed; delete the rule and create a new one', code: 'INVALID_PATTERN' }, 400);
   }
