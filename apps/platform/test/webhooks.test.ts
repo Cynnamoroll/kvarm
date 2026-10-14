@@ -22,76 +22,31 @@ import {
   webhookRetryDelaySeconds,
   type DeliveryDeps,
 } from '../src/services/webhooks';
+import { call as apiCall, type Reply } from './helpers/http';
+import { recordingEvents, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private' = 'private') =>
+  (await seedRepoBase(env, name, { owner: logins.owner, visibility, repoIds, register: false })).id;
+const call = (method: string, path: string, who?: Who | string, body?: unknown, extra: Record<string, string> = {}) => {
+  const token = who === undefined ? undefined : who in pat ? pat[who as Who] : who;
+  return apiCall(env, method, path, { token, body, headers: extra });
+};
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api', 'ci'];
 const SHA = 'a'.repeat(40);
 const HOOK_URL = 'https://hooks.example.com/kvarm';
 
 /** Queue sends recorded instead of delivered. */
-const sent: Array<{ body: any; delaySeconds?: number }> = [];
-const fakeEvents = {
-  async send(body: unknown, opts?: { delaySeconds?: number }) {
-    sent.push({ body, ...(opts?.delaySeconds !== undefined ? { delaySeconds: opts.delaySeconds } : {}) });
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push({ body: m.body });
-  },
-};
 const env = { ...baseEnv, EVENTS: fakeEvents as unknown as Env['EVENTS'] } as Env;
 
 type Who = 'owner' | 'writer' | 'reader' | 'outsider';
 const logins: Record<Who, string> = { owner: 'wh-owner', writer: 'wh-writer', reader: 'wh-reader', outsider: 'wh-outsider' };
 const pat = {} as Record<Who, string>;
 const repoIds: Record<string, string> = {};
-
-interface Reply {
-  status: number;
-  json: Record<string, any>;
-  headers: Headers;
-}
-
-async function call(method: string, path: string, who?: Who | string, body?: unknown, extra: Record<string, string> = {}): Promise<Reply> {
-  const token = who === undefined ? undefined : who in pat ? pat[who as Who] : who;
-  const headers: Record<string, string> = { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra };
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const ctx = createExecutionContext();
-  const res = await worker.fetch!(
-    new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }) as Request<unknown, IncomingRequestCfProperties>,
-    env,
-    ctx,
-  );
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON
-  }
-  return { status: res.status, json, headers: res.headers };
-}
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private' = 'private'): Promise<string> {
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(id, logins.owner, name, `${logins.owner}--${name}`, `https://artifacts.invalid/git/default/${logins.owner}--${name}.git`, visibility, Date.now())
-    .run();
-  return id;
-}
 
 async function seedChange(repo: string, number: number, state = 'open'): Promise<string> {
   const id = crypto.randomUUID();

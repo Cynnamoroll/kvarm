@@ -10,33 +10,20 @@ import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecu
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import { getRepoById } from '../src/db/repos';
 import { defaultMergeDeps, listChangesSql, mergeChange, mergeReadyAutoChanges, recordGuard, type MergeDeps } from '../src/services/changes';
-import {
-  FakeRepo,
-  commit,
-  fakeArtifacts,
-  fakeRepos,
-  installFakeGitRemote,
-  restoreFetch,
-  type Files,
-} from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+const seedRepo = async (name: string, visibility: 'public' | 'private' = 'public') => (await seedRepoBase(env, name, { owner: OWNER, visibility: visibility, repoIds })).repo;
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'cr-owner';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
 
 const env = {
   ...baseEnv,
@@ -48,63 +35,12 @@ const tok = { owner: '', noApi: '', bot: '', writer: '', reader: '' };
 const userIds: Record<string, string> = {};
 const repoIds: Record<string, string> = {};
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  userIds[login] = id;
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private' = 'public'): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  return repo;
-}
-
 async function grant(repo: string, login: string, role: 'read' | 'write' | 'admin'): Promise<void> {
   await env.DB.prepare(
     'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
   )
     .bind(repoIds[repo], userIds[login], role, userIds[OWNER], Date.now(), Date.now())
     .run();
-}
-
-interface Reply {
-  status: number;
-  json: Record<string, any>;
-  cost: CostCounters;
-}
-
-async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, json, cost: cost! };
 }
 
 const path = (repo: string, rest = '') => `/api/v1/repos/${OWNER}/${repo}/changes${rest}`;

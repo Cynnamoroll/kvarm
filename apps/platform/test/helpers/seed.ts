@@ -101,6 +101,8 @@ export async function seedUser(env: Env, login: string, opts: SeedUserOptions = 
 export interface SeedRepoOptions {
   owner: string;
   visibility: 'public' | 'private';
+  /** Pin the row id (default: a fresh uuid) for tests that compose it elsewhere. */
+  id?: string;
   defaultBranch?: string;
   createdAt?: number;
   pushedAt?: number | null;
@@ -120,7 +122,7 @@ export async function seedRepo(env: Env, name: string, opts: SeedRepoOptions): P
   const artifactsName = opts.artifactsName ?? `${opts.owner}--${name}`;
   const repo = new FakeRepo();
   if (opts.register !== false) fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
+  const id = opts.id ?? crypto.randomUUID();
   if (opts.repoIds) opts.repoIds[name] = id;
   await env.DB.prepare(
     `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, description, created_at, pushed_at, owner_org_id)

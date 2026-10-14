@@ -12,7 +12,7 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { type CostCounters } from '../src/cost/meter';
 import { snapshotInstanceId } from '../src/services/events';
 import { tarEnd, tarHeader, tarPadding } from '@kvarm/gitops';
 import { matchSnapshot, snapshotCacheKey, streamAndStore, zstdDecompressAll } from '../src/cache/snapshot';
@@ -34,19 +34,14 @@ import {
   type StepRunner,
 } from '../src/workflows/snapshotBuilder';
 import worker from '../src/index';
-import {
-  FakeRepo,
-  blobHash,
-  commit,
-  fakeArtifacts,
-  fakeRepos,
-  installFakeGitRemote,
-  lsRefsCalls,
-  readTar,
-  restoreFetch,
-  type Files,
-  type TarMember,
-} from './helpers/fakeArtifacts';
+import { FakeRepo, blobHash, commit, fakeArtifacts, installFakeGitRemote, lsRefsCalls, readTar, restoreFetch, type Files, type TarMember } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private' = 'public') => seedRepoBase(env, name, { owner: OWNER, visibility });
+const call = (path: string, opts: { token?: string; method?: string; accept?: string } = {}) =>
+  apiCall(env, opts.method ?? 'GET', path, { token: opts.token, headers: opts.accept ? { accept: opts.accept } : {} });
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -145,57 +140,6 @@ const env = {
 // ---------------------------------------------------------------------------
 
 const tok = { owner: '', outsider: '' };
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private' = 'public'): Promise<{ id: string; repo: FakeRepo }> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  return { id, repo };
-}
-
-interface Reply {
-  status: number;
-  json: Record<string, unknown>;
-  bytes: Uint8Array;
-  headers: Headers;
-  cost: CostCounters;
-}
-
-async function call(path: string, opts: { token?: string; method?: string; accept?: string } = {}): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = opts.token ? { Authorization: `Bearer ${opts.token}` } : {};
-  if (opts.accept) headers.accept = opts.accept;
-  const req = new Request(`${ORIGIN}${path}`, { method: opts.method ?? 'GET', headers });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: Record<string, unknown> = {};
-  try {
-    json = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
-  } catch {
-    // tar bytes or plain text
-  }
-  return { status: res.status, json, bytes, headers: res.headers, cost: cost! };
-}
 
 const snap = (repo: string, ref: string) => `/api/v1/repos/${OWNER}/${repo}/snapshots/${ref}`;
 
