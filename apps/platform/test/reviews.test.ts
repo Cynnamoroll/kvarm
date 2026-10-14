@@ -695,6 +695,7 @@ describe('pending reviews and budgets', () => {
     await createChange('budget', 'b1');
     const a = await approve('budget', 1, claude.token);
     const p = await packet('budget', 1);
+    expect(Object.hasOwn(p.json, 'remaining')).toBe(false);
     const pend = await call('GET', api('budget', '/reviews/pending'), tok.owner);
     const assign = await call('POST', api('budget', '/changes/1/reviewers/assign'), tok.owner, {});
     expect(a.cost).toMatchObject({ art: 0, do: 0 });
@@ -703,5 +704,37 @@ describe('pending reviews and budgets', () => {
       expect(r.cost).toMatchObject({ art: 0, do: 0, rw: 0 });
       expect(r.cost.d1).toBeLessThanOrEqual(2);
     }
+  });
+
+  it('reports every readiness reason and filters pending changes by readiness', async () => {
+    const { repo } = await setup('readiness', 5);
+    await setPolicy('readiness', 1);
+    for (let n = 1; n <= 5; n++) await createChange('readiness', `b${n}`);
+    const rows = await env.DB.prepare('SELECT id, number FROM change_sets WHERE repo_id = ? ORDER BY number')
+      .bind(repoIds.readiness).all<{ id: string; number: number }>();
+    const byNumber = new Map((rows.results ?? []).map((row) => [row.number, row.id]));
+    await env.DB.prepare(
+      "UPDATE check_runs SET status = 'running', conclusion = NULL WHERE change_set_id = ? AND name = 'kvarm/guard'",
+    ).bind(byNumber.get(2)).run();
+    await env.DB.prepare(
+      "UPDATE check_runs SET status = 'failure', conclusion = 'failure' WHERE change_set_id = ? AND name = 'kvarm/guard'",
+    ).bind(byNumber.get(3)).run();
+    await env.DB.prepare("UPDATE change_sets SET base_ref = 'missing' WHERE id = ?").bind(byNumber.get(4)).run();
+    await env.DB.prepare("UPDATE change_sets SET state = 'conflicted' WHERE id = ?").bind(byNumber.get(5)).run();
+
+    const all = await call('GET', api('readiness', '/reviews/pending'), tok.owner);
+    expect(all.json.changes.map((change: any) => [change.number, change.readiness])).toEqual([
+      [5, { ready: false, reason: 'conflicted' }],
+      [4, { ready: false, reason: 'unknown' }],
+      [3, { ready: false, reason: 'checks-failed' }],
+      [2, { ready: false, reason: 'checks-pending' }],
+      [1, { ready: true, reason: null }],
+    ]);
+    const ready = await call('GET', api('readiness', '/reviews/pending?ready=true'), tok.owner);
+    expect(ready.json.changes.map((change: any) => change.number)).toEqual([1]);
+    const notReady = await call('GET', api('readiness', '/reviews/pending?ready=false'), tok.owner);
+    expect(notReady.json.changes.map((change: any) => change.number)).toEqual([5, 4, 3, 2]);
+    expect((await call('GET', api('readiness', '/reviews/pending?ready=yes'), tok.owner)).json.code).toBe('INVALID_READY');
+    expect(repo.refs.get(MAIN)).toBeTruthy();
   });
 });

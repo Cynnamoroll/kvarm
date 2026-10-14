@@ -152,11 +152,21 @@ afterAll(() => restoreFetch());
 describe('change pages', () => {
   it('renders a seeded change in the changes list', async () => {
     await seedChange('list');
+    await request('PUT', `/api/v1/repos/${OWNER}/list/review-policy`, { token: ownerToken, json: { requiredReviews: 1 } });
+    const row = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds.list).first<{ id: string }>();
+    await env.DB.prepare(
+      "UPDATE check_runs SET status = 'running', conclusion = NULL WHERE change_set_id = ? AND name = 'kvarm/guard'",
+    ).bind(row!.id).run();
     const response = await request('GET', `/${OWNER}/list/changes`);
     expect(response.status).toBe(200);
     expect(response.text).toContain('Guide-driven change');
     expect(response.text).toContain('Needs your review');
-    expect(response.text).toContain('passing');
+    expect(response.text).toContain('<p class="muted">No changes ready for review.</p>');
+    expect(response.text).not.toContain('&lt;p class="muted"&gt;No changes ready for review.');
+    expect(response.text).toContain('Not ready yet');
+    expect(response.text).toContain('Waiting on checks.');
+    expect(response.text).toContain('1 pending');
   });
 
   it('renders guide chapters, tiers, checks and a review form for a signed-in reviewer', async () => {

@@ -68,7 +68,11 @@ reviewsApi.put('/repos/:owner/:repo/review-policy', async (c) => {
 reviewsApi.get('/repos/:owner/:repo/reviews/pending', async (c) => {
   const d = await authorizeRoute(c, 'read');
   if (!d.ok) return denyJson(c, d);
-  const r = await reviews.pendingReviews(c.env, d.repo, { limit: c.req.query('limit'), cursor: c.req.query('cursor') });
+  const r = await reviews.pendingReviews(c.env, d.repo, {
+    limit: c.req.query('limit'),
+    cursor: c.req.query('cursor'),
+    ready: c.req.query('ready'),
+  }, (promise) => c.executionCtx.waitUntil(promise));
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

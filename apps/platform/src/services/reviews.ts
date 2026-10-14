@@ -21,10 +21,24 @@
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { withLazyRepo } from '../artifacts/repo';
 import type { Actor } from './authz';
 import { modelFamilyEvidence, type EvidenceLevel } from './provenance';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
-import { agentMergeDenial, autoMerge, branchRef, fail, guarded, parseNumber, readChange, type ChangeContext } from './changes';
+import {
+  agentMergeDenial,
+  autoMerge,
+  branchRef,
+  fail,
+  guarded,
+  mergeabilityFor,
+  parseNumber,
+  readChange,
+  resolveCtx,
+  type ChangeContext,
+} from './changes';
+import { defaultChecksGate } from './checksGate';
+import { resolveCommitish } from './refs';
 import { carryView, storeReviewFingerprint, type CarryView, type CarryViewReview } from './approvalCarry';
 import {
   HUMAN_MODEL_FAMILY,
@@ -802,21 +816,83 @@ export interface PendingReview {
   mergePolicy: string;
   approvals: { count: number; required: number };
   openEscalations: EscalationReason[];
+  readiness: { ready: boolean; reason: null | 'conflicted' | 'checks-pending' | 'checks-failed' | 'unknown' };
 }
 
 interface PendingRow extends ReviewFactsRow {
+  id: string;
   number: number;
   title: string;
+  state: string;
   base_ref: string;
   head_sha: string | null;
   merge_policy: string;
 }
 
+type PendingReadiness = PendingReview['readiness'];
+
+async function pendingReadiness(
+  env: Env,
+  repo: RepoRow,
+  rows: readonly PendingRow[],
+  waitUntil: (promise: Promise<unknown>) => void,
+): Promise<PendingReadiness[]> {
+  if (rows.length === 0) return [];
+  const unknown: PendingReadiness = { ready: false, reason: 'unknown' };
+  try {
+    return await withLazyRepo(env, repo.artifacts_name, async (artifacts) => {
+      const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
+      const gate = defaultChecksGate(env);
+      const out: PendingReadiness[] = [];
+      for (const row of rows) {
+        if (row.state === 'conflicted') {
+          out.push({ ready: false, reason: 'conflicted' });
+          continue;
+        }
+        if (!row.head_sha) {
+          out.push(unknown);
+          continue;
+        }
+        try {
+          const ref = branchRef(row.base_ref);
+          const target = (await resolveCommitish(ctx, [ref])).get(ref);
+          if (!target) {
+            out.push(unknown);
+            continue;
+          }
+          const mergeability = await mergeabilityFor(ctx, gate, target.sha, row.head_sha, row.id);
+          if (mergeability.status === 'conflicts') {
+            out.push({ ready: false, reason: 'conflicted' });
+          } else if (mergeability.status === 'unknown' || !mergeability.treeSha || !mergeability.checks) {
+            out.push(unknown);
+          } else if (mergeability.checks.state === 'failure') {
+            out.push({ ready: false, reason: 'checks-failed' });
+          } else if (mergeability.checks.state === 'pending') {
+            out.push({ ready: false, reason: 'checks-pending' });
+          } else {
+            out.push({ ready: true, reason: null });
+          }
+        } catch {
+          out.push(unknown);
+        }
+      }
+      return out;
+    });
+  } catch {
+    return rows.map(() => unknown);
+  }
+}
+
 /**
- * GET reviews/pending?limit=&cursor= — live non-draft changes still short of
- * the required reviews or with an open escalation, newest first. One query.
+ * GET reviews/pending?limit=&cursor=&ready= — live non-draft changes still
+ * short of reviews or with an escalation, with checks readiness for each row.
  */
-export async function pendingReviews(env: Env, repo: RepoRow, q: { limit?: string; cursor?: string }): Promise<ServiceResult<{ changes: PendingReview[]; nextCursor: string | null }>> {
+export async function pendingReviews(
+  env: Env,
+  repo: RepoRow,
+  q: { limit?: string; cursor?: string; ready?: string },
+  waitUntil: (promise: Promise<unknown>) => void = () => undefined,
+): Promise<ServiceResult<{ changes: PendingReview[]; nextCursor: string | null }>> {
   let limit = REVIEW_LIMITS.pendingDefault;
   if (q.limit !== undefined) {
     if (!/^\d+$/.test(q.limit) || Number(q.limit) < 1 || Number(q.limit) > REVIEW_LIMITS.pendingMax) {
@@ -830,9 +906,12 @@ export async function pendingReviews(env: Env, repo: RepoRow, q: { limit?: strin
     if (n === null) return fail(400, 'cursor is invalid', 'INVALID_CURSOR');
     before = n;
   }
+  if (q.ready !== undefined && q.ready !== 'true' && q.ready !== 'false') {
+    return fail(400, 'ready must be true or false', 'INVALID_READY');
+  }
   const f = reviewFactExpressions('c');
   const { results } = await env.DB.prepare(
-    `SELECT c.number, c.title, c.base_ref, c.head_sha, c.merge_policy, ${reviewFactsColumns('c')}
+    `SELECT c.id, c.number, c.title, c.state, c.base_ref, c.head_sha, c.merge_policy, ${reviewFactsColumns('c')}
        FROM change_sets c
       WHERE c.repo_id = ?1 AND c.state IN ('open', 'conflicted') AND c.merge_policy != 'draft' AND c.number < ?2
         AND (${f.openCount} > 0 OR ${f.approvals} < ${f.required})
@@ -842,21 +921,27 @@ export async function pendingReviews(env: Env, repo: RepoRow, q: { limit?: strin
     .all<PendingRow>();
   const rows = results ?? [];
   const page = rows.slice(0, limit);
+  const readiness = await pendingReadiness(env, repo, page, waitUntil);
+  const changes = page.flatMap((r, index) => {
+    const ready = readiness[index] ?? { ready: false, reason: 'unknown' as const };
+    if (q.ready === 'true' && !ready.ready) return [];
+    if (q.ready === 'false' && ready.ready) return [];
+    const facts = parseReviewFacts(r);
+    return [{
+      number: r.number,
+      title: r.title,
+      base: r.base_ref,
+      headSha: r.head_sha,
+      mergePolicy: r.merge_policy,
+      approvals: { count: facts.approvals, required: facts.required },
+      openEscalations: facts.open,
+      readiness: ready,
+    }];
+  });
   return {
     ok: true,
     value: {
-      changes: page.map((r) => {
-        const facts = parseReviewFacts(r);
-        return {
-          number: r.number,
-          title: r.title,
-          base: r.base_ref,
-          headSha: r.head_sha,
-          mergePolicy: r.merge_policy,
-          approvals: { count: facts.approvals, required: facts.required },
-          openEscalations: facts.open,
-        };
-      }),
+      changes,
       nextCursor: rows.length > limit ? String(page[page.length - 1]!.number) : null,
     },
   };

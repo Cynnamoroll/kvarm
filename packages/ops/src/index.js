@@ -627,10 +627,10 @@ export const OPERATIONS = Object.freeze([
     name: 'list_pending_reviews',
     command: ['review', 'pending'],
     family: 'reviews',
-    description: 'Live changes still short of the required approvals of their current head or with an open escalation, newest first.',
+    description: 'Live changes still short of approvals or with an open escalation, including current-head checks readiness; optionally filter ready or not-ready changes.',
     method: 'GET',
     path: '/repos/{repo}/reviews/pending',
-    params: [REPO, LIMIT(100), CURSOR],
+    params: [REPO, LIMIT(100), CURSOR, query('ready', 'boolean', 'Filter readiness: true for ready changes, false for not ready')],
   }),
   define({
     name: 'assign_reviewer',

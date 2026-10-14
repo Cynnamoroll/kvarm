@@ -83,7 +83,7 @@ changePages.get('/changes', async (c) => {
   const state = c.req.query('state') ?? 'open';
   const [listed, pending] = await Promise.all([
     changes.listChanges(c.env, resolved.repo, { state, limit: String(LIST_LIMIT), cursor: c.req.query('cursor') }),
-    reviews.pendingReviews(c.env, resolved.repo, { limit: '25' }),
+    reviews.pendingReviews(c.env, resolved.repo, { limit: '25' }, (promise) => c.executionCtx.waitUntil(promise)),
   ]);
   if (!listed.ok) return page(c, resolved, 'Changes', html`<div class="flash err">${listed.error}</div>`);
   const checkResults = await Promise.all(
@@ -94,14 +94,30 @@ changePages.get('/changes', async (c) => {
     const result = checkResults[index];
     checkByNumber.set(change.number, result?.ok ? checksSummary(result.value.checks) : html`<span class="muted">unavailable</span>`);
   });
-  const pendingRows = pending.ok
-    ? pending.value.changes.map((change) => html`
-        <li><a href="${raw(`${base(resolved.repo)}/changes/${change.number}`)}"><span class="hud">#${change.number}</span> ${change.title}</a>
-          <span class="muted">· ${change.approvals.count}/${change.approvals.required} approvals</span></li>`).join('')
-    : html`<li class="muted">Review queue unavailable.</li>`;
+  const pendingLine = (change: reviews.PendingReview, reason = '') => html`
+    <li>
+      <a href="${raw(`${base(resolved.repo)}/changes/${change.number}`)}"><span class="hud">#${change.number}</span> ${change.title}</a>
+      <span class="muted">· ${change.approvals.count}/${change.approvals.required} approvals${reason ? ` · ${reason}` : ''}</span>
+    </li>`;
+  const readyReviews = pending.ok ? pending.value.changes.filter((change) => change.readiness.ready) : [];
+  const notReadyReviews = pending.ok ? pending.value.changes.filter((change) => !change.readiness.ready) : [];
+  const readinessReason: Record<Exclude<reviews.PendingReview['readiness']['reason'], null>, string> = {
+    conflicted: 'Has conflicts the author must resolve.',
+    'checks-pending': 'Waiting on checks.',
+    'checks-failed': 'Checks failed.',
+    unknown: 'Readiness could not be determined.',
+  };
   const pendingContent = pending.ok
     ? pending.value.changes.length
-      ? html`<ul class="k-list">${raw(pendingRows)}</ul>`
+      ? html`<div class="pending-review-groups">
+          <div><div class="eyebrow">Ready for review</div>
+            ${readyReviews.length ? raw(html`<ul class="k-list">${raw(readyReviews.map((change) => pendingLine(change)).join(''))}</ul>`) : raw(html`<p class="muted">No changes ready for review.</p>`)}
+          </div>
+          ${notReadyReviews.length ? raw(html`<details class="not-ready-group">
+            <summary>Not ready yet (${notReadyReviews.length})</summary>
+            <ul class="k-list">${raw(notReadyReviews.map((change) => pendingLine(change, readinessReason[change.readiness.reason ?? 'unknown'])).join(''))}</ul>
+          </details>`) : ''}
+        </div>`
       : html`<p class="muted">No changes are waiting for review.</p>`
     : html`<p class="muted">The review queue is unavailable.</p>`;
   const rows = listed.value.changes.map((change) => html`

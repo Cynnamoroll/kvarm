@@ -103,6 +103,7 @@ describe('operation registry', () => {
     expect(findOperation('get_change')?.description).toMatch(/ordered remaining actions/i);
     expect(findOperation('get_mergeability')?.description).toMatch(/ordered remaining actions/i);
     expect(findOperation('list_pending_reviews')).toMatchObject({ command: ['review', 'pending'], path: '/repos/{repo}/reviews/pending', readOnly: true });
+    expect(findOperation('list_pending_reviews')?.params.map((p) => p.name)).toContain('ready');
     expect(findOperation('assign_reviewer')).toMatchObject({ command: ['review', 'assign'], path: '/repos/{repo}/changes/{number}/reviewers/assign' });
     expect(findOperation('resolve_escalation')).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });
     expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });

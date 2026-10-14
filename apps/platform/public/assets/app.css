@@ -229,6 +229,12 @@ body.k-app:not(.k-landing) .remaining-meta { display: flex; align-items: center;
 body.k-app:not(.k-landing) .remaining-code { color: var(--steel); font: 9px var(--mono); }
 body.k-app:not(.k-landing) .remaining-paths { margin: var(--s1) 0 0; padding-left: var(--s3); color: var(--steel); }
 body.k-app:not(.k-landing) .remaining-paths code { overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .pending-review-groups > * + * { margin-top: var(--s3); }
+body.k-app:not(.k-landing) .pending-review-groups .k-list > li { grid-template-columns: minmax(0, 1fr) auto; }
+body.k-app:not(.k-landing) .pending-review-groups .k-list > li > a { min-width: 0; overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .not-ready-group { border-top: 1px solid var(--line); padding-top: var(--s2); }
+body.k-app:not(.k-landing) .not-ready-group > summary { color: var(--steel); cursor: pointer; font: 11px var(--mono); }
+body.k-app:not(.k-landing) .not-ready-group[open] > summary { margin-bottom: var(--s2); }
 body.k-app:not(.k-landing) .coverage-counts {
   display: flex;
   flex-wrap: wrap;
@@ -264,6 +270,7 @@ body.k-app:not(.k-landing) .carry-file-row > details { min-width: 0; }
   body.k-app:not(.k-landing) .change-stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   body.k-app:not(.k-landing) .change-stages li { padding: var(--s2); font-size: 10px; }
   body.k-app:not(.k-landing) .changes-table { display: table; }
+  body.k-app:not(.k-landing) .pending-review-groups .k-list > li { grid-template-columns: minmax(0, 1fr); }
   body.k-app:not(.k-landing) .remaining-row { grid-template-columns: 24px minmax(0, 1fr); }
   body.k-app:not(.k-landing) .remaining-meta { grid-column: 2; }
 }
