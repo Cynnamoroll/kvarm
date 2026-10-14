@@ -148,12 +148,15 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    npm run db:migrate:remote --workspace apps/platform
    ```
 
-6. **Deploy.** This creates the Worker, its Durable Objects, Workflows, the Container class, the rate limiters and the queue consumer.
+6. **Deploy.** `npm run deploy` is the only deploy step. It creates the Worker, its Durable Objects, Workflows, the Container classes, the rate limiters and the queue consumer, and it ships the web UI. There is no separate site build: the Worker renders every page itself, and `wrangler deploy` uploads `apps/platform/public` (stylesheets, scripts, fonts and brand assets) through the `assets` binding in `wrangler.jsonc`. The gate fails if a page links an asset the deploy would not upload (`scripts/test/wranglerAssets.test.ts`), or if `GET /` stops returning the UI (`apps/platform/test/smoke.test.ts`).
 
    ```sh
    npm run deploy            # runs `wrangler deploy` with your target (scripts/wrangler-target.mjs)
    curl -s https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # ok
+   curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://kvarm-platform.<your-subdomain>.workers.dev/   # 200 text/html; charset=utf-8
    ```
+
+   **Containers must be enabled on the account.** Three Durable Object classes run on Cloudflare Containers (public beta): `CiRunnerSandbox` (the hosted CI lane), and `EnvironmentBuilder` and `AgentSandbox` (fleet environments and sandboxes). The deploy creates them, so an account without Containers cannot deploy this configuration. `scripts/bootstrap.mjs` does not provision or check Containers. Locally, `wrangler dev` builds container images with Docker; without Docker, pass `--enable-containers=false`. Pages, the API and MCP still run, but sandboxes, environment builds and the hosted CI lane cannot start a container.
 
 7. **Secrets.** None are required. Without the WorkOS secrets every `/auth/*` route answers `503`, session cookies are ignored and personal access tokens are the way in. To let people sign in to the web UI through WorkOS AuthKit:
 
@@ -237,9 +240,10 @@ cp apps/platform/.env.deploy.example apps/platform/.env.deploy   # once: KVARM_D
 npm run db:migrate:remote --workspace apps/platform           # applies only migrations not yet applied
 npm run deploy                                                # wrangler deploy with your target settings
 curl -s -o /dev/null -w '%{http_code}\n' https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # 200 (the APP_ORIGIN host)
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://kvarm-platform.<your-subdomain>.workers.dev/   # 200 text/html: the web UI
 ```
 
-`wrangler deploy` prints the uploaded version id; `/healthz` answers `200 ok`. A deploy reuses the D1 database, bucket, queues, Artifacts namespace and subscription, and rotates no secrets.
+`wrangler deploy` prints the uploaded version id and the number of asset files it uploaded; `/healthz` answers `200 ok` and `/` serves the landing page (the signed-in home with a session). A deploy reuses the D1 database, bucket, queues, Artifacts namespace and subscription, and rotates no secrets.
 
 ## Local development and tests
 
