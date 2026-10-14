@@ -490,6 +490,9 @@ describe('persisted reviewer routing', () => {
     const withdrawn = await call('DELETE', `${path}/${encodeURIComponent(principal)}`, tok.owner);
     expect([withdrawn.status, withdrawn.json.withdrawn]).toEqual([200, true]);
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_requests WHERE principal = ?').bind(principal).first<{ n: number }>())?.n).toBe(0);
+    const afterWithdraw = await stream.fetch('https://repo-events/since?seq=0');
+    const withdrawalEvents = (await afterWithdraw.json() as { events: Array<{ type: string }> }).events;
+    expect(withdrawalEvents.map((event) => event.type)).toContain('review.withdrawn');
 
     await env.DB.prepare("UPDATE change_sets SET state = 'conflicted' WHERE repo_id = ?").bind(repoIds['review-request-routing']).run();
     const requester = await agent('review-request-routing', 'rr-requester', 'gpt');

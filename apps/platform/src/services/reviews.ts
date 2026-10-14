@@ -881,7 +881,7 @@ export function withdrawReviewRequest(
       'DELETE FROM change_review_requests WHERE change_set_id = ?1 AND principal = ?2',
     ).bind(change.id, principal).run();
     const withdrawn = (removed.meta?.changes ?? 0) > 0;
-    if (withdrawn) publishRepoEvent(cx.env, cx.repo.id, { type: 'review.requested', changeNumber: number }, cx.waitUntil);
+    if (withdrawn) publishRepoEvent(cx.env, cx.repo.id, { type: 'review.withdrawn', changeNumber: number }, cx.waitUntil);
     return { ok: true, value: { principal, withdrawn } };
   });
 }
