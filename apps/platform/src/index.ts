@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { GIT_PATH_RE, handleGitRequest } from './routes/git';
 import { authRoutes } from './routes/auth';
 import { api, persistSessionCookies } from './routes/api';
+import { sessionCsrf } from './routes/pageCsrf';
 import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
 import { branchRulesApi } from './routes/api/branchRules';
@@ -33,6 +34,7 @@ import { issuePages } from './routes/issuePages';
 import { coordinationPages } from './routes/coordinationPages';
 import { comparePages } from './routes/comparePages';
 import { changePages } from './routes/changePages';
+import { inboxPages, reviewPages } from './routes/reviewPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
@@ -75,6 +77,11 @@ app.use('/assets/*', async (c, next) => {
 // route resolved the session (routes/api.ts requestSession).
 app.use('*', persistSessionCookies);
 
+// Every session form post carries its CSRF token (architecture §11.1). Ahead
+// of every router, so a page route mounted anywhere later is covered; only
+// routes/pageCsrf.ts csrfExempt paths skip it.
+app.use('*', sessionCsrf);
+
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/api/v1', tenancyApi);
@@ -102,6 +109,7 @@ app.route('/api/v1', webhooksApi);
 // MCP tool calls are dispatched back through this router to their REST routes.
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, async (req) => app.fetch(req, c.env, c.executionCtx)));
 app.route('/fleet', fleetPages);
+app.route('/inbox', inboxPages);
 app.route('/', web);
 // Repo pages mount after the generic web routes: /new-repo, /import-repo and
 // /settings/tokens are two-segment paths that must win over /:owner/:repo.
@@ -114,15 +122,24 @@ app.route('/:owner/:repo', repoPages);
 app.route('/:owner/:repo', coordinationPages);
 app.route('/:owner/:repo', comparePages);
 app.route('/:owner/:repo', changePages);
+// Escalation resolution remains in reviewPages; change page and review posts live in changePages.
+app.route('/:owner/:repo', reviewPages);
 
 // Static assets (public/*) as the final fallback.
 app.all('*', async (c) => {
-  const res = await c.env.ASSETS.fetch(c.req.raw);
+  // sessionCsrf may already have read a form post's body; assets never need it.
+  const req = c.req.raw.bodyUsed ? new Request(c.req.url, { method: c.req.method, headers: c.req.raw.headers }) : c.req.raw;
+  const res = await c.env.ASSETS.fetch(req);
   if (res.status === 404) {
     return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
   }
   return res;
 });
+
+/** Every mounted route, for the page CSRF coverage test (routes/pageCsrf.ts). */
+export function platformRoutes(): ReadonlyArray<{ method: string; path: string; handler: unknown }> {
+  return app.routes.map(({ method, path, handler }) => ({ method, path, handler }));
+}
 
 export function dispatchPlatformRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   return serveMetered(request, env, ctx, async (req, e, cx) => {

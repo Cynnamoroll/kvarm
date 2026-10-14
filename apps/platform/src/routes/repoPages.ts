@@ -21,6 +21,7 @@ import type { RepoRow } from '../db/repos';
 import { clientIp, requestCredential, requestSession, type ApiActor, type App } from './api';
 import { csrfTokenValid } from '../auth/workos';
 import { csrfInput, layout } from '../web/render';
+import { CSRF_REFUSED } from './pageCsrf';
 import { repoPage } from '../render/repoShell';
 import {
   commitAt,
@@ -41,6 +42,8 @@ import type { RepoNeed, RepoRole } from '../services/authz';
 import { resolveRepoAccess } from '../services/access';
 import { repoViewGeneration } from '../services/pushFreshness';
 import { readCommitInfo } from '../services/refs';
+import { commitProvenance } from '../services/provenancePanel';
+import { provenancePanel } from '../render/provenance';
 
 export const repoPages = new Hono<App>();
 
@@ -572,6 +575,11 @@ repoPages.get('/commit/:sha', async (c) => {
   const resolved = await resolveRepo(c);
   if (!resolved) return notFound(c);
   const sha = c.req.param('sha');
+  // Provenance and decisions (issue #8): a full SHA lets the D1 read overlap the Artifacts one.
+  const admin = resolved.role === 'admin';
+  const early = /^[0-9a-f]{40}$/.test(sha) ? commitProvenance(c.env, resolved.repo, sha, { admin }) : null;
+  // Paths that return before awaiting it (404, warming) must not leave a rejection unhandled.
+  early?.catch(() => undefined);
   let commit: ArtifactsCommitMetadata | null;
   try {
     commit = await readCommit(c.env, resolved.repo.artifacts_name, sha);
@@ -582,6 +590,11 @@ repoPages.get('/commit/:sha', async (c) => {
   if (!commit) return notFound(c);
   const viewerLogin = resolved.viewer?.user.login ?? null;
   const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
+  // The panel renders nothing when the commit has neither attribution nor decisions.
+  // An optional panel: a failed read leaves the commit page as it was rather than failing it.
+  const panel = provenancePanel(
+    (await (early ?? commitProvenance(c.env, resolved.repo, commit.hash, { admin })).catch(() => null)) ?? { attribution: null, decisions: [], decisionsTruncated: false },
+  );
   const body = html`
     <div class="card">
       <div class="card-title">
@@ -599,6 +612,7 @@ repoPages.get('/commit/:sha', async (c) => {
       </p>
       <p><a class="btn" href="${base}/tree/${commit.hash}">Browse tree at this commit</a></p>
     </div>
+    ${raw(panel)}
   `;
   return finish(
     c,
@@ -610,6 +624,7 @@ repoPages.get('/commit/:sha', async (c) => {
           ref: commit.hash.slice(0, 10),
           tab: 'commits',
           title: commit.message.split('\n')[0] ?? '',
+          // The panel is drawn from the brand tokens (docs/brand.md), which this older shell does not load.
         },
         viewerLogin,
         body,
@@ -724,7 +739,7 @@ export async function sessionFormRefused(c: Context<App>, viewer: ApiActor, form
   if (viewer.via !== 'session') return null;
   const session = await requestSession(c);
   if (session && csrfTokenValid(session, form._csrf)) return null;
-  return c.text('invalid or missing CSRF token', 403);
+  return c.text(CSRF_REFUSED, 403);
 }
 
 repoPages.post('/settings', async (c) => {

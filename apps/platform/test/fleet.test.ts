@@ -1,6 +1,6 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { newSessionPayload, sessionCookie, type SessionPayload } from '../src/auth/workos';
 import { toUserRow } from '../src/db/users';
@@ -22,7 +22,7 @@ import {
   type SandboxContext,
 } from '../src/services/sandboxes';
 import { SANDBOX_PROVIDERS, type SandboxProvider } from '../src/services/sandboxes/provider';
-import { runFleetSweeps } from '../src/services/sandboxes/sweeps';
+import { FLEET_SWEEP_STAGES, runFleetCron, runFleetSweeps, type SweepStage } from '../src/services/sandboxes/sweeps';
 import { promoteBuild } from '../src/workflows/environmentBuild';
 import { getRepoById } from '../src/db/repos';
 import worker from '../src/index';
@@ -353,6 +353,56 @@ describe('fleet services', () => {
     expect(agentList.ok && agentList.value.sandboxes.every((sandbox) => sandbox.agentId === agentId)).toBe(true);
   });
 
+  it('keeps sweeping later stages when the first stage throws, and logs the failure', async () => {
+    const agentId = await seedAgent(owner, `isolate-${crypto.randomUUID()}`);
+    const environment = await seedEnvironment({ ready: true });
+    const workspace = await seedWorkspace(agentId);
+    const expired = await seedSandbox({ agentId, environmentId: environment.id, buildId: environment.buildId!, workspaceId: workspace.id, status: 'sleeping', expiresAt: Date.now() - 1 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const broken: SweepStage = { name: 'age', run: async () => { throw new Error('D1 down'); } };
+      const stages = FLEET_SWEEP_STAGES.map((stage) => (stage.name === 'age' ? broken : stage));
+      const outcomes = await runFleetSweeps(env, stages);
+      expect(outcomes.map((o) => [o.stage, o.ok])).toEqual([['age', false], ['retry', true], ['discard', true], ['sleep', true]]);
+      expect(outcomes[0]!.error).toContain('D1 down');
+      expect(outcomes.find((o) => o.stage === 'discard')!.count).toBeGreaterThanOrEqual(1);
+      expect(await env.DB.prepare('SELECT status FROM sandboxes WHERE id = ?').bind(expired).first()).toMatchObject({ status: 'stopped' });
+      expect(warn.mock.calls.map((c) => JSON.parse(String(c[0])))).toContainEqual({ fleetSweep: 'age', error: 'Error: D1 down' });
+      // The cron line carries each stage's outcome and counts.
+      const second = await seedSandbox({ agentId, environmentId: environment.id, buildId: environment.buildId!, workspaceId: workspace.id, status: 'sleeping', expiresAt: Date.now() - 1 });
+      await runFleetCron(env);
+      const line = log.mock.calls.map((c) => JSON.parse(String(c[0]))).find((l) => l.cron === 'fleet');
+      expect(line).toMatchObject({ ok: true, stages: { age: { failed: 0 }, retry: { failed: 0 }, discard: { failed: 0 }, sleep: { failed: 0 } } });
+      expect(line.stages.discard.count).toBeGreaterThanOrEqual(1);
+      expect(await env.DB.prepare('SELECT status FROM sandboxes WHERE id = ?').bind(second).first()).toMatchObject({ status: 'stopped' });
+      // A row whose discard throws is counted as failed and the next row is still discarded.
+      const first = await seedSandbox({ agentId, environmentId: environment.id, buildId: environment.buildId!, workspaceId: workspace.id, status: 'sleeping', expiresAt: 1 });
+      const next = await seedSandbox({ agentId, environmentId: environment.id, buildId: environment.buildId!, workspaceId: workspace.id, status: 'sleeping', expiresAt: 2 });
+      const real = SANDBOX_PROVIDERS.linux!;
+      SANDBOX_PROVIDERS.linux = {
+        ...real,
+        agentSandbox: (boundEnv, sandboxId) => {
+          const sandbox = real.agentSandbox(boundEnv, sandboxId);
+          return sandboxId === first ? { ...sandbox, discard: async () => { throw new Error('container gone'); } } : sandbox;
+        },
+      };
+      try {
+        const discard = (await runFleetSweeps(env)).find((o) => o.stage === 'discard')!;
+        expect(discard).toMatchObject({ ok: true, failed: 1 });
+      } finally {
+        SANDBOX_PROVIDERS.linux = real;
+      }
+      expect(await env.DB.prepare('SELECT status FROM sandboxes WHERE id = ?').bind(first).first()).toMatchObject({ status: 'sleeping' });
+      expect(await env.DB.prepare('SELECT status FROM sandboxes WHERE id = ?').bind(next).first()).toMatchObject({ status: 'stopped' });
+      expect(warn.mock.calls.map((c) => JSON.parse(String(c[0])))).toContainEqual({ fleetSweep: 'discard', sandboxId: first, error: 'Error: container gone' });
+      await env.DB.prepare('DELETE FROM sandboxes WHERE id = ?').bind(first).run();
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  });
+
   it('applies deny and approval policy before execution and rejects a different owner', async () => {
     const agentId = await seedAgent(owner, `policy-${crypto.randomUUID()}`);
     const policy = await seedEnvironment({ ready: true, policy: '{"deny":["rm *"],"approve":["npm install"]}' });
@@ -550,6 +600,65 @@ describe('fleet pages: session CSRF (architecture §11.1)', () => {
     expect(approved.status).toBe(302);
     expect(approved.location).toBe('/fleet');
     expect(await status()).toBe('approved');
+  });
+
+  describe('refused approval decisions', () => {
+    async function seedApproval(status: string, expiresAt = Date.now() + 60_000) {
+      const { id: sandboxId } = await seedRunningSandbox();
+      const approvalId = crypto.randomUUID();
+      await env.DB.prepare(`INSERT INTO sandbox_approvals (id, sandbox_id, repo_id, command, requested_by, status, created_at, expires_at) VALUES (?, ?, ?, 'npm publish', ?, ?, ?, ?)`)
+        .bind(approvalId, sandboxId, repo.id, ownerId, status, Date.now() - 1000, expiresAt).run();
+      return approvalId;
+    }
+    const row = (id: string) => env.DB.prepare('SELECT * FROM sandbox_approvals WHERE id = ?').bind(id).first();
+    const decide = (id: string, decision: string) =>
+      post(`/fleet/approvals/${id}`, `repo=${encodeURIComponent(`${OWNER}/fleet`)}${decision ? `&decision=${decision}` : ''}`, payload.csrf);
+
+    it('shows the service error for an already-decided approval and changes nothing', async () => {
+      const id = await seedApproval('approved');
+      const before = await row(id);
+      const res = await decide(id, 'deny');
+      expect(res.status).toBe(404);
+      expect(res.text).toContain('pending sandbox approval not found');
+      expect(res.text).toContain('APPROVAL_NOT_FOUND');
+      expect(await row(id)).toEqual(before);
+    });
+
+    it('shows the service error for an expired approval and changes nothing', async () => {
+      const id = await seedApproval('pending', Date.now() - 1000);
+      const before = await row(id);
+      const res = await decide(id, 'approve');
+      expect(res.status).toBe(404);
+      expect(res.text).toContain('APPROVAL_NOT_FOUND');
+      expect(await row(id)).toEqual(before);
+    });
+
+    it('answers 400 for a missing or unknown decision instead of denying', async () => {
+      const id = await seedApproval('pending');
+      const before = await row(id);
+      for (const decision of ['', 'maybe', 'APPROVE']) {
+        const res = await decide(id, decision);
+        expect(res.status, decision).toBe(400);
+        expect(res.text).toContain('Choose approve or deny');
+      }
+      expect(await row(id)).toEqual(before);
+    });
+
+    it('shows an error rather than a bare 404 when the repo field is missing', async () => {
+      const id = await seedApproval('pending');
+      const res = await post(`/fleet/approvals/${id}`, 'decision=approve', payload.csrf);
+      expect(res.status).toBe(404);
+      expect(res.text).toContain('Open the fleet page again');
+      expect(await row(id)).toMatchObject({ status: 'pending' });
+    });
+
+    it('still redirects to the fleet page on success', async () => {
+      const id = await seedApproval('pending');
+      const res = await decide(id, 'deny');
+      expect(res.status).toBe(302);
+      expect(res.location).toBe('/fleet');
+      expect(await row(id)).toMatchObject({ status: 'denied' });
+    });
   });
 
   it('still accepts bearer-token posts without a CSRF token', async () => {

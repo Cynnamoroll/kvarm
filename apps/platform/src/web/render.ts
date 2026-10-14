@@ -2,6 +2,7 @@
 
 import { escapeHtml, html, raw } from '@kvarm/ui';
 import { siteName } from '../config';
+import { cachedInboxCount, type InboxCount } from '../services/inboxCount';
 
 const CRITICAL_CSS = raw(`
 *{box-sizing:border-box}
@@ -21,8 +22,9 @@ export interface PageOptions {
   bodyClass?: string;
   landing?: boolean;
   contentInset?: boolean;
-  active?: 'home' | 'fleet' | 'tokens';
+  active?: 'home' | 'inbox' | 'fleet' | 'tokens';
   needsYouCount?: number;
+  inboxCount?: InboxCount | null;
   runningCount?: number;
   repos?: Array<{ ownerLogin: string; name: string }>;
 }
@@ -52,9 +54,14 @@ export interface AppLayoutOptions extends PageOptions {
   userId?: string | null;
 }
 
-export async function appLayout(env: Env, opts: AppLayoutOptions, body: string): Promise<string> {
-  let needsYouCount = opts.needsYouCount;
-  let runningCount = opts.runningCount;
+export async function appLayoutCounts(
+  env: Env,
+  opts: Pick<AppLayoutOptions, 'userId' | 'needsYouCount' | 'runningCount' | 'inboxCount'>,
+): Promise<Pick<PageOptions, 'needsYouCount' | 'runningCount' | 'inboxCount'>> {
+  let needsYouCount = opts.needsYouCount ?? 0;
+  let runningCount = opts.runningCount ?? 0;
+  // Changes waiting for review join sandbox approvals: both need this human (services/inboxCount.ts).
+  const inboxRead = opts.inboxCount !== undefined ? Promise.resolve(opts.inboxCount) : opts.userId ? cachedInboxCount(opts.userId) : Promise.resolve(null);
   if (opts.userId && (opts.needsYouCount === undefined || opts.runningCount === undefined)) {
     const counts = await env.DB.prepare(
       `SELECT
@@ -69,7 +76,12 @@ export async function appLayout(env: Env, opts: AppLayoutOptions, body: string):
     if (opts.runningCount === undefined) runningCount = Number(counts?.running ?? 0);
     if (opts.needsYouCount === undefined) needsYouCount = Number(counts?.approvals ?? 0);
   }
-  return renderShell(env, { ...opts, needsYouCount, runningCount }, body);
+  const inbox = await inboxRead;
+  return { needsYouCount, runningCount, inboxCount: inbox };
+}
+
+export async function appLayout(env: Env, opts: AppLayoutOptions, body: string): Promise<string> {
+  return renderShell(env, { ...opts, ...(await appLayoutCounts(env, opts)) }, body);
 }
 
 function renderShell(env: Env, opts: PageOptions, body: string): string {
@@ -79,6 +91,11 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
   const initial = login.slice(0, 1).toUpperCase() || '?';
   const origin = publicOrigin(env);
   const previewImage = origin ? `${origin}/assets/brand/og.png` : null;
+  const inboxWaiting = opts.inboxCount?.count ?? 0;
+  const plus = inboxWaiting > 0 && opts.inboxCount?.more ? '+' : '';
+  const badge = `${(opts.needsYouCount ?? 0) + inboxWaiting}${plus}`;
+  const badgeHref = inboxWaiting > 0 ? '/inbox' : '/fleet#approvals';
+  const badgeTitle = `${inboxWaiting}${plus} change(s) to review · ${opts.needsYouCount ?? 0} sandbox approval(s)`;
   const repoLinks = (opts.repos ?? [])
     .map(
       (repo) =>
@@ -86,7 +103,7 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
     )
     .join('');
   const active = (page: PageOptions['active']) => (opts.active === page ? 'aria-current="page"' : '');
-  const needsYou = opts.needsYouCount === undefined ? '' : html`<b>${opts.needsYouCount}</b>`;
+  const needsYou = html`<b>${badge}</b>`;
   const running = opts.runningCount === undefined ? '' : html`<span class="n">${opts.runningCount}</span>`;
   const landingNav = opts.landing
     ? html`<nav class="nav hud" aria-label="Primary">
@@ -114,7 +131,7 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
         <div class="k-mid"><div class="k-ws"><i>${initial}</i><span>${login}</span></div></div>
           <div class="k-right">
           <span class="live-indicator" data-live-status data-state="offline" hidden>OFFLINE</span>
-          <a class="k-needs" href="/fleet#approvals"><span>Needs you</span>${raw(needsYou)}</a>
+          <a class="k-needs" href="${raw(badgeHref)}" title="${badgeTitle}" aria-label="Needs you: ${badge}"><span>Needs you</span>${raw(needsYou)}</a>
           <div class="mode" role="group" aria-label="Show this app for">
             <button type="button" data-mode-set="human" aria-pressed="true"><svg aria-hidden="true"><use href="#g-node"/></svg>Human</button>
             <button type="button" data-mode-set="agent" aria-pressed="false"><svg aria-hidden="true"><use href="#g-x"/></svg>Agent</button>
@@ -142,6 +159,7 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
         <aside class="k-rail" aria-label="App">
           <nav>
             <a href="/" ${raw(active('home'))}><svg aria-hidden="true"><use href="#g-reticle"/></svg>Home</a>
+            <a href="/inbox" ${raw(active('inbox'))}><svg aria-hidden="true"><use href="#g-tray"/></svg>Inbox</a>
             <a href="/fleet" ${raw(active('fleet'))}><svg aria-hidden="true"><use href="#g-node"/></svg>Fleet${raw(running)}</a>
             <a href="/settings/tokens" ${raw(active('tokens'))}><svg aria-hidden="true"><use href="#g-x"/></svg>Tokens &amp; agents</a>
           </nav>
@@ -183,6 +201,7 @@ ${raw(customScripts)}
   <symbol id="mark" viewBox="0 0 48 48"><path fill="currentColor" d="M5 4h9v40H5zM28 18.5 42.5 4H48v5.5L33.5 24 48 38.5V44h-5.5L28 29.5 33.5 24z"/><path d="M23 17.5 29.5 24 23 30.5 16.5 24z" style="fill:var(--node,var(--signal))"/></symbol>
   <symbol id="g-node" viewBox="0 0 5 5"><path fill="currentColor" d="M1 0h3v1H1zM0 1h1v3H0zM4 1h1v3H4zM1 4h3v1H1zM2 2h1v1H2z"/></symbol>
   <symbol id="g-x" viewBox="0 0 5 5"><path fill="currentColor" d="M0 0h1v1H0zM4 0h1v1H4zM1 1h1v1H1zM3 1h1v1H3zM2 2h1v1H2zM1 3h1v1H1zM3 3h1v1H3zM0 4h1v1H0zM4 4h1v1H4z"/></symbol>
+  <symbol id="g-tray" viewBox="0 0 5 5"><path fill="currentColor" d="M1 0h3v1H1zM0 1h1v4H0zM4 1h1v4H4zM1 2h1v1H1zM3 2h1v1H3zM1 4h3v1H1z"/></symbol>
   <symbol id="g-reticle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10.5"/><path d="M12 0v4M12 20v4M0 12h4M20 12h4M12 10v4M10 12h4"/></g></symbol>
 </svg>
 <p class="sr" id="mode-status" role="status" aria-live="polite"></p>
