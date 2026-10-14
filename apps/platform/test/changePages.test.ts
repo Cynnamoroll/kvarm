@@ -7,6 +7,7 @@ import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { newSessionPayload, sessionCookie } from '../src/auth/workos';
+import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import { toUserRow } from '../src/db/users';
 import worker from '../src/index';
 import { requestOrigin } from '../src/web/render';
@@ -34,6 +35,7 @@ const env = {
 } as Env;
 const userIds: Record<string, string> = {};
 const repoIds: Record<string, string> = {};
+const pageCosts: Record<string, unknown> = {};
 let ownerToken = '';
 
 async function seedUser(login: string): Promise<string> {
@@ -82,6 +84,7 @@ interface Reply {
   text: string;
   location: string | null;
   json: Record<string, any>;
+  cost: string | null;
 }
 
 async function request(
@@ -109,7 +112,7 @@ async function request(
   } catch {
     // HTML response.
   }
-  return { status: res.status, text, location: res.headers.get('location'), json };
+  return { status: res.status, text, location: res.headers.get('location'), json, cost: res.headers.get(COST_HEADER) };
 }
 
 async function browserSession(login: string) {
@@ -148,7 +151,10 @@ beforeAll(async () => {
   ownerToken = (await mintPAT(env, userIds[OWNER]!, 'owner', FULL)).token;
 });
 
-afterAll(() => restoreFetch());
+afterAll(() => {
+  restoreFetch();
+  console.log(JSON.stringify({ changePageCosts: pageCosts }));
+});
 
 describe('change pages', () => {
   it('shows and copies a full clone command, falls back to request origin, and includes Agent checkout', async () => {
@@ -280,6 +286,159 @@ describe('change pages', () => {
     expect((await browser(`/${OWNER}/detail/changes/1`)).status).toBe(200);
     expect(await env.DB.prepare('SELECT computed_at FROM change_head_tiers WHERE change_set_id = ?')
       .bind(row!.id).first<{ computed_at: number }>()).toMatchObject({ computed_at: 1 });
+  });
+
+  it('renders author guides, validates views, escapes findings and requires CSRF for acknowledgements', async () => {
+    const { head } = await seedChange('guided-page');
+    const guidePath = `/api/v1/repos/${OWNER}/guided-page/changes/1/review-guide`;
+    const map = await request('GET', guidePath, { token: ownerToken });
+    const keys = (map.json.units as Array<{ key: string }>).map((unit) => unit.key);
+    const guide = await request('POST', guidePath, {
+      token: ownerToken,
+      json: {
+        headSha: head,
+        guide: {
+          intent: 'Review the changed implementation',
+          chapters: [{ id: 'security', title: '<script>alert("guide")</script>', why: 'Check the critical path', tier: 'scrutinize', hunks: keys }],
+          evidence: [{ kind: 'check', ref: 'example/check' }],
+        },
+      },
+    });
+    expect(guide.status).toBe(201);
+    const finding = await request('POST', `/api/v1/repos/${OWNER}/guided-page/changes/1/findings`, {
+      token: ownerToken,
+      json: {
+        headSha: head,
+        findings: [{ path: 'src/app.ts', startLine: 1, category: 'bug', severity: 'high', confidence: 'confirmed', title: '<script>alert("finding")</script>' }],
+      },
+    });
+    expect(finding.status).toBe(201);
+
+    const defaultPage = await request('GET', `/${OWNER}/guided-page/changes/1?view=invalid&layer=invalid`, { token: ownerToken });
+    expect(defaultPage.status).toBe(200);
+    expect(defaultPage.text).toContain('&lt;script&gt;alert(&quot;guide&quot;)&lt;/script&gt;');
+    expect(defaultPage.text).toContain('&lt;script&gt;alert(&quot;finding&quot;)&lt;/script&gt;');
+    expect(defaultPage.text).not.toContain('<script>alert("guide")</script>');
+    expect(defaultPage.text).not.toContain('<script>alert("finding")</script>');
+    expect(defaultPage.text).toContain('Guide evidence');
+    expect(defaultPage.text).toContain('Contracts & export breaks');
+    expect(defaultPage.text).toContain('Open findings · 1');
+    expect(defaultPage.text).toContain('Downstream impact');
+    expect(defaultPage.text).toContain('href="/cp-owner/guided-page/changes/1?view=guided"');
+
+    const tierPage = await request('GET', `/${OWNER}/guided-page/changes/1?view=tier&layer=only`, { token: ownerToken });
+    expect(tierPage.text).toContain('href="/cp-owner/guided-page/changes/1?view=tier&layer=only"');
+    expect(tierPage.text).toContain('Show full stack');
+    const filePage = await request('GET', `/${OWNER}/guided-page/changes/1?view=file`, { token: ownerToken });
+    expect(filePage.text).toContain('href="/cp-owner/guided-page/changes/1?view=file"');
+
+    const browser = await browserSession(OWNER);
+    const sessionPage = await browser(`/${OWNER}/guided-page/changes/1`);
+    const csrf = /name="_csrf" value="([^"]+)"/.exec(sessionPage.text)?.[1];
+    expect(csrf).toBeTruthy();
+    expect(sessionPage.text).toContain('Mark chapter reviewed');
+    expect(sessionPage.text).toContain('name="headSha"');
+    const action = `/${OWNER}/guided-page/changes/1/ack`;
+    const headers = { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-origin' };
+    const denied = await browser(action, {
+      method: 'POST',
+      headers,
+      body: new URLSearchParams({ headSha: head, keys: keys[0]! }).toString(),
+    });
+    expect(denied.status).toBe(403);
+    const accepted = await browser(action, {
+      method: 'POST',
+      headers,
+      body: new URLSearchParams({ _csrf: csrf!, headSha: head, keys: keys[0]! }).toString(),
+    });
+    expect(accepted.status).toBe(303);
+    expect(accepted.location).toContain('done=ack');
+
+    const stale = await browser(action, {
+      method: 'POST',
+      headers,
+      body: new URLSearchParams({ _csrf: csrf!, headSha: '0'.repeat(40), keys: keys[0]! }).toString(),
+    });
+    expect(stale.status).toBe(303);
+    expect(stale.location).toContain('error=HEAD_MOVED');
+    const staleFlash = await browser(stale.location!.replace(ORIGIN, ''));
+    expect(staleFlash.text).toContain('The head moved since this page loaded.');
+
+    await request('PUT', `/api/v1/repos/${OWNER}/guided-page/review-policy`, {
+      token: ownerToken,
+      json: { dangerAckRequired: true },
+    });
+    await env.DB.prepare(
+      'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(repoIds['guided-page'], userIds[REVIEWER], 'write', userIds[OWNER], Date.now(), Date.now()).run();
+    const reviewer = await browserSession(REVIEWER);
+    const reviewerPage = await reviewer(`/${OWNER}/guided-page/changes/1`);
+    const reviewerCsrf = /name="_csrf" value="([^"]+)"/.exec(reviewerPage.text)?.[1];
+    const reviewHead = /name="headSha" value="([^"]+)"/.exec(reviewerPage.text)?.[1];
+    const refused = await reviewer(`/${OWNER}/guided-page/changes/1/review`, {
+      method: 'POST',
+      headers,
+      body: new URLSearchParams({ _csrf: reviewerCsrf!, headSha: reviewHead!, verdict: 'approve', body: 'Reviewed the current head.' }).toString(),
+    });
+    expect(refused.status).toBe(303);
+    expect(refused.location).toContain('error=DANGER_UNACKED');
+    const dangerFlash = await reviewer(refused.location!.replace(ORIGIN, ''));
+    expect(dangerFlash.text).toContain('Acknowledge every scrutinize unit before approving this change.');
+
+    const warm = await request('GET', `/${OWNER}/guided-page/changes/1`, { token: ownerToken });
+    const cost = parseCostHeader(warm.cost);
+    expect(cost).not.toBeNull();
+    expect(cost).toMatchObject({ art: 0 });
+    expect(cost!.d1).toBeLessThanOrEqual(12);
+    pageCosts['warm change page GET'] = cost;
+  });
+
+  it('renders stack links and inherited-unit chips, and filters to the current layer', async () => {
+    const { repo, head } = await seedChange('stack-page');
+    const main = repo.refs.get('refs/heads/main')!;
+    const childHead = await commit(repo, {
+      'README.md': 'Review this change\n',
+      'src/app.ts': 'export const value = 2;\n',
+      '.kvarm/review.json': '{"scrutinize":["src/**"]}',
+      'src/child.ts': 'export const child = true;\n',
+    }, [head], 'child change');
+    repo.refs.set('refs/heads/child-feature', childHead.sha);
+    const childCreated = await request('POST', `/api/v1/repos/${OWNER}/stack-page/changes`, {
+      token: ownerToken,
+      json: { title: 'Stack child', base: 'main', head: 'child-feature' },
+    });
+    expect(childCreated.status).toBe(201);
+    const parent = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds['stack-page']).first<{ id: string }>();
+    const child = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 2')
+      .bind(repoIds['stack-page']).first<{ id: string }>();
+    const parentWorkspace = 'page-stack-parent';
+    const childWorkspace = 'page-stack-child';
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO workspaces (id, repo_id, artifacts_name, status, change_set_id, created_at, ref, base_ref, base_sha, head_sha)
+         VALUES (?, ?, 'unused', 'active', ?, ?, 'refs/heads/agents/page-parent', 'main', ?, ?)`,
+      ).bind(parentWorkspace, repoIds['stack-page'], parent!.id, now - 2_000, main, head),
+      env.DB.prepare(
+        `INSERT INTO workspaces (id, repo_id, artifacts_name, status, change_set_id, created_at, ref, base_ref, base_sha, head_sha)
+         VALUES (?, ?, 'unused', 'active', ?, ?, 'refs/heads/agents/page-child', 'main', ?, ?)`,
+      ).bind(childWorkspace, repoIds['stack-page'], child!.id, now - 1_000, main, childHead.sha),
+      env.DB.prepare(
+        `INSERT INTO workspace_dependencies (repo_id, id, workspace_id, on_workspace, revision, created_at, updated_at)
+         VALUES (?, 'page-stack-edge', ?, ?, ?, ?, ?)`,
+      ).bind(repoIds['stack-page'], childWorkspace, parentWorkspace, head, now - 1_000, now - 1_000),
+    ]);
+
+    const fullStack = await request('GET', `/${OWNER}/stack-page/changes/2?view=file`, { token: ownerToken });
+    expect(fullStack.status).toBe(200);
+    expect(fullStack.text).toContain('parent #1');
+    expect(fullStack.text).toContain('from #1');
+    const localLayer = await request('GET', `/${OWNER}/stack-page/changes/2?view=file&layer=only`, { token: ownerToken });
+    expect(localLayer.text).not.toContain('from #1');
+    expect((localLayer.text.match(/data-review-file-row/g) ?? []).length)
+      .toBeLessThan((fullStack.text.match(/data-review-file-row/g) ?? []).length);
+    expect(localLayer.text).toContain('src/child.ts');
   });
 
   it('renders the low-risk agent approval policy for a docs-only head', async () => {
