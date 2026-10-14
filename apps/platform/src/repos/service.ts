@@ -20,9 +20,8 @@ import { issueCleanupStatements } from '../services/issues';
 import { arenaCleanupStatements } from '../services/candidates';
 import { compositionCleanupStatements } from '../services/compositions';
 
-export type ServiceResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; status: number; error: string; code?: string };
+import type { ServiceResult } from './types';
+export type { ServiceResult } from './types';
 
 export interface CreateRepoParams {
   ownerLogin: string;

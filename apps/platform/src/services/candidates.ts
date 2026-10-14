@@ -23,6 +23,7 @@
 
 import { withLazyRepo } from '../artifacts/repo';
 import type { ServiceResult } from '../repos/service';
+import { fail, guarded as baseGuarded, objectBody } from './result';
 import { credentialMayUpdateRef } from './authz';
 import { mergePlanFor, normalizeBranch } from './changes';
 import { defaultChecksGate, type CheckState, type ChecksGate, type RequiredCheck } from './checksGate';
@@ -75,9 +76,6 @@ const ZERO_SHA = '0000000000000000000000000000000000000000';
 
 type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
 
-function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
 
@@ -85,17 +83,7 @@ export interface CandidatesContext extends WorkspaceContext {
   gate?: ChecksGate;
 }
 
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ candidatesRefStore: err.message.slice(0, 200) }));
-      return fail(503, 'repository storage is unavailable, retry shortly', 'STORAGE_UNAVAILABLE');
-    }
-    throw err;
-  }
-}
+const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('candidatesRefStore', fn);
 
 // ---------------------------------------------------------------------------
 // Views
@@ -595,8 +583,9 @@ interface ArenaInput {
 }
 
 function parseArena(cx: CandidatesContext, input: unknown): ArenaInput | Fail {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const brief = typeof b.brief === 'string' ? b.brief.trim() : '';
   if (brief.length === 0 || brief.length > CANDIDATE_LIMITS.briefMax) {
     return fail(422, `brief is required (1-${CANDIDATE_LIMITS.briefMax} characters)`, 'INVALID_BRIEF');
@@ -735,8 +724,9 @@ export async function listArenas(cx: CandidatesContext, q: { limit?: string; cur
  * someone abandons them.
  */
 export async function selectArena(cx: CandidatesContext, id: string, input: unknown): Promise<ServiceResult<ArenaView>> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  const ws = (input as Record<string, unknown>).workspace;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const ws = parsed.value.workspace;
   if (typeof ws !== 'string' || !WORKSPACE_ID_RE.test(ws)) return fail(422, 'workspace must be a workspace id', 'INVALID_WORKSPACE');
   const a = await readArena(cx.env, cx.repo.id, id);
   if (!a) return fail(404, 'arena not found', 'ARENA_NOT_FOUND');

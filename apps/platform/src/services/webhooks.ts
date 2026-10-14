@@ -37,6 +37,7 @@
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
+import { fail } from './result';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import {
   WEBHOOK_KEY_VERSION,
@@ -95,9 +96,6 @@ export function webhookRetryDelaySeconds(attempt: number): number {
   return Math.min(3600, 30 * 4 ** Math.max(0, attempt - 1));
 }
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 const iso = (ms: number) => new Date(ms).toISOString();
 

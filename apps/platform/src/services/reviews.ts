@@ -25,6 +25,8 @@ import type { Actor } from './authz';
 import { modelFamilyEvidence, type EvidenceLevel } from './provenance';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import { autoMerge, branchRef, fail, guarded, parseNumber, readChange, type ChangeContext } from './changes';
+import { agentMetaOf } from './agentMeta';
+import { objectBody } from './result';
 import {
   HUMAN_MODEL_FAMILY,
   parseReviewFacts,
@@ -79,15 +81,6 @@ function actorPrincipal(actor: Actor): Principal {
     : { id: `user:${actor.user.id}`, kind: 'user', userId: actor.user.id, login: actor.user.login, agentId: null, agentName: null, tokenId: null };
 }
 
-function parseAgentMeta(meta: string | null): { id: string; name: string } | null {
-  if (!meta) return null;
-  try {
-    const v = JSON.parse(meta) as { agentId?: unknown; agentName?: unknown };
-    return typeof v.agentId === 'string' && typeof v.agentName === 'string' ? { id: v.agentId, name: v.agentName } : null;
-  } catch {
-    return null;
-  }
-}
 
 function differentFamily(reviewer: string | null, author: string | null): boolean {
   return reviewer !== null && author !== null && reviewer !== author;
@@ -203,7 +196,7 @@ export interface ReviewPacket {
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function authorView(row: PacketChangeRow): AuthorView {
-  const agent = parseAgentMeta(row.agent_meta);
+  const agent = agentMetaOf(row.agent_meta);
   if (agent) {
     return { principal: `agent:${agent.id}`, kind: 'agent', login: row.author_login, agent, modelFamily: row.author_family, modelFamilyEvidence: modelFamilyEvidence(row.author_family, false) };
   }
@@ -223,7 +216,7 @@ export async function changeAuthorPrincipal(env: Env, repoId: string, number: nu
     .bind(repoId, number)
     .first<{ author_id: string | null; agent_meta: string | null }>();
   if (!row) return null;
-  const agent = parseAgentMeta(row.agent_meta);
+  const agent = agentMetaOf(row.agent_meta);
   return agent ? `agent:${agent.id}` : row.author_id ? `user:${row.author_id}` : null;
 }
 
@@ -412,8 +405,9 @@ export async function getReviewPolicy(env: Env, repo: RepoRow): Promise<ServiceR
 
 /** PUT review-policy {requiredReviews} (repo admins). One batch: upsert, audit row, read-back. */
 export async function setReviewPolicy(env: Env, repo: RepoRow, actor: Actor, input: unknown): Promise<ServiceResult<ReviewPolicyView>> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object {requiredReviews}', 'INVALID_BODY');
-  const n = (input as Record<string, unknown>).requiredReviews;
+  const parsed = objectBody(input, '{requiredReviews}');
+  if (!parsed.ok) return parsed;
+  const n = parsed.value.requiredReviews;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > REVIEW_LIMITS.requiredMax) {
     return fail(400, `requiredReviews must be an integer from 0 to ${REVIEW_LIMITS.requiredMax}`, 'INVALID_REQUIRED_REVIEWS');
   }
@@ -443,10 +437,9 @@ interface ReviewInput {
 }
 
 function parseReview(input: unknown, verdict: ReviewVerdict | null): ServiceResult<ReviewInput> {
-  if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
-    return fail(400, 'body must be a JSON object {verdict, headSha?, body?}', 'INVALID_BODY');
-  }
-  const b = (input ?? {}) as Record<string, unknown>;
+  const parsed = objectBody(input ?? {}, '{verdict, headSha?, body?}');
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const v = verdict ?? b.verdict;
   if (typeof v !== 'string' || !(REVIEW_VERDICTS as readonly string[]).includes(v)) {
     return fail(422, `verdict must be one of ${REVIEW_VERDICTS.join(', ')}`, 'INVALID_VERDICT');
@@ -513,7 +506,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     if (p.headSha !== null && p.headSha !== target.head_sha) {
       return { ...fail(409, `the change's head is ${target.head_sha}, not the reviewed ${p.headSha}; review the new head`, 'HEAD_MOVED'), headSha: target.head_sha } as ServiceResult<never>;
     }
-    const authorAgent = parseAgentMeta(target.agent_meta);
+    const authorAgent = agentMetaOf(target.agent_meta);
     const authorPrincipal = authorAgent ? `agent:${authorAgent.id}` : target.author_id ? `user:${target.author_id}` : null;
     if (authorPrincipal === me.id) {
       return fail(409, 'self-review: the author of a change cannot review it; another principal must review', 'SELF_REVIEW');
@@ -604,10 +597,9 @@ export function resolveEscalation(cx: ChangeContext, rawNumber: string, id: stri
     const number = parseNumber(rawNumber);
     if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (!cx.actor || cx.actor.agent) return fail(403, 'only a human principal resolves an escalation', 'HUMAN_REQUIRED');
-    if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
-      return fail(400, 'body must be a JSON object {resolution?, note?}', 'INVALID_BODY');
-    }
-    const b = (input ?? {}) as Record<string, unknown>;
+    const parsed = objectBody(input ?? {}, '{resolution?, note?}');
+    if (!parsed.ok) return parsed;
+    const b = parsed.value;
     const resolution = b.resolution ?? 'resolve';
     if (resolution !== 'acknowledge' && resolution !== 'resolve') return fail(422, 'resolution must be acknowledge or resolve', 'INVALID_RESOLUTION');
     let note: string | null = null;
@@ -687,10 +679,9 @@ export function assignReviewer(cx: ChangeContext, rawNumber: string, input: unkn
   return guarded(async () => {
     const number = parseNumber(rawNumber);
     if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
-    if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
-      return fail(400, 'body must be a JSON object {candidates?}', 'INVALID_BODY');
-    }
-    const raw = ((input ?? {}) as Record<string, unknown>).candidates;
+    const parsed = objectBody(input ?? {}, '{candidates?}');
+    if (!parsed.ok) return parsed;
+    const raw = parsed.value.candidates;
     let only: string[] | null = null;
     if (raw !== undefined && raw !== null) {
       if (!Array.isArray(raw) || raw.length === 0 || raw.length > REVIEW_LIMITS.candidatesMax || !raw.every((v) => typeof v === 'string' && v.length <= 64)) {

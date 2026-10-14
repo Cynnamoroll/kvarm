@@ -96,6 +96,7 @@ import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
 import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
 import { hasCiJobs, queueExactTreeCi, type CiConfigMemo } from './ci';
+import { objectBody } from './result';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -383,8 +384,9 @@ interface EnqueueInput {
 function parseEnqueue(cx: ChangeContext, number: number, body: unknown): ServiceResult<EnqueueInput> {
   const out: EnqueueInput = { headSha: null, mergePolicy: null, attribution: null };
   if (body === undefined || body === null) return { ok: true, value: out };
-  if (typeof body !== 'object' || Array.isArray(body)) return fail(400, 'body must be a JSON object {headSha?, mergePolicy?, attribution?}', 'INVALID_BODY');
-  const b = body as Record<string, unknown>;
+  const parsed = objectBody(body, '{headSha?, mergePolicy?, attribution?}');
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   if (b.headSha !== undefined && b.headSha !== null) {
     if (typeof b.headSha !== 'string' || !SHA_RE.test(b.headSha)) return fail(422, 'headSha must be a full 40-character commit SHA', 'INVALID_HEAD_SHA');
     out.headSha = b.headSha;

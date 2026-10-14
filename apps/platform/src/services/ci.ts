@@ -6,8 +6,10 @@
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { WORKSPACE_REF_PREFIX, agentMetaOf } from './agentMeta';
+import { fail } from './result';
 import { withLazyRepo } from '../artifacts/repo';
-import { CHECK_RUN_COLUMNS, checkRunView, type CheckRunRow, type CheckRunView } from './checks';
+import { CHECK_RUN_COLUMNS, changeForRunStatement, checkRunView, runChangeOf, type CheckRunRow, type CheckRunView, type RunChangeRow } from './checks';
 import { CI_CONFIG_PATH, CI_LIMITS, parseCiConfig, type CiConfig } from './ciConfig';
 import { flakeIssueStatement } from './issues';
 import { kickHostedCi } from './hostedCi';
@@ -22,8 +24,6 @@ export { CI_CONFIG_PATH, CI_LIMITS, type CiConfig } from './ciConfig';
  */
 export type CiConfigMemo = Map<string, Promise<ServiceResult<CiConfig | null>>>;
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
-const fail = (status: number, error: string, code: string): Fail => ({ ok: false, status, error, code });
 
 async function readConfigAt(env: Env, artifactsName: string, headSha: string): Promise<ServiceResult<CiConfig | null>> {
   return withLazyRepo(env, artifactsName, async (repo) => {
@@ -122,13 +122,13 @@ async function queueJobs(
   if (!pipeline) return { ok: true, value: { jobs: config.value.jobs.length, workflowId: null } };
   try {
     await pipeline.create({ id: workflowId, params: { repoId: repo.id, changeId, headSha, treeSha: tree } });
-  } catch {
+  } catch (err) {
     const exists = await pipeline.get(workflowId).then(
       () => true,
       () => false,
     );
     if (!exists) {
-      console.error(JSON.stringify({ ciPipelineStartFailed: workflowId }));
+      console.error(JSON.stringify({ ciPipelineStartFailed: workflowId, error: String(err).slice(0, 200) }));
       return { ok: true, value: { jobs: config.value.jobs.length, workflowId: null } };
     }
   }
@@ -231,10 +231,6 @@ interface ProvenanceRow {
   agent_granted: number | null;
 }
 
-// The stable agent workspace namespace (AGENTS.md), as in
-// services/workspaces.ts, which reaches this module through changes.ts, so
-// importing it here would be a cycle.
-const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
 /**
  * Whether any write agent token of the job's repository has a ref grant
  * matching the change's head ref: exact, or a trailing `/*` prefix with a
@@ -242,6 +238,11 @@ const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
  * Revoked and expired tokens count, because the head may predate the
  * revocation, and an unreadable grant matches every ref. Evaluated in SQL
  * so the claim reads no grant rows back and has no row budget to exceed.
+ */
+/**
+ * The grant-ref match of gitops refMatchesPattern restated in SQL (a D1 query
+ * cannot call it): exact ref, or a `/*` prefix grant that is a strict prefix.
+ * ciProvenance.test.ts asserts the two agree on a corpus of (grant, ref) pairs.
  */
 const AGENT_GRANT_MATCH = `EXISTS (
   SELECT 1 FROM agent_tokens t, json_each(CASE WHEN json_valid(t.refs) THEN t.refs ELSE '["refs/*"]' END) g
@@ -251,23 +252,12 @@ const AGENT_GRANT_MATCH = `EXISTS (
               AND length('refs/heads/' || c.head_ref) > length(g.value) - 1
               AND substr('refs/heads/' || c.head_ref, 1, length(g.value) - 1) = substr(g.value, 1, length(g.value) - 1))))`;
 
-// The same reading of change_sets.agent_meta as changes.ts parseAgent (a
-// cycle again keeps it local).
-function agentOf(meta: string | null): { id: string; name: string } | null {
-  if (!meta) return null;
-  try {
-    const v = JSON.parse(meta) as { agentId?: unknown; agentName?: unknown };
-    return typeof v.agentId === 'string' && typeof v.agentName === 'string' ? { id: v.agentId, name: v.agentName } : null;
-  } catch {
-    return null;
-  }
-}
 
 function provenanceOf(r: JobRow & ProvenanceRow): JobProvenance {
   const headRef = r.change_head_ref;
   const fullRef = headRef === null ? null : headRef.startsWith('refs/') ? headRef : `refs/heads/${headRef}`;
   const agentWorkspaceRef = fullRef !== null && fullRef.startsWith(WORKSPACE_REF_PREFIX);
-  const agent = agentOf(r.change_agent_meta);
+  const agent = agentMetaOf(r.change_agent_meta);
   // Unparseable agent metadata still means an agent opened the change.
   const authorKind = r.change_number === null ? 'unknown' : agent || r.change_agent_meta || agentWorkspaceRef ? 'agent' : r.change_author_login ? 'human' : 'unknown';
   return {
@@ -349,9 +339,15 @@ export async function claimJob(env: Env, repo: RepoRow, input: unknown): Promise
   const snapshotId = `snap-${repo.id}-${row.head_sha}`;
   try {
     await env.SNAPSHOT_BUILDER.create({ id: snapshotId, params: { repoId: repo.id, sha: row.head_sha, trigger: 'demand' } });
-  } catch {
+  } catch (err) {
     // A push, workflow, checkout, or earlier claim may already own the same immutable build.
-    await env.SNAPSHOT_BUILDER.get(snapshotId).catch(() => undefined);
+    const exists = await env.SNAPSHOT_BUILDER.get(snapshotId).then(
+      () => true,
+      () => false,
+    );
+    if (!exists) {
+      console.error(JSON.stringify({ snapshotBuildStartFailed: snapshotId, error: String(err).slice(0, 200) }));
+    }
   }
   return { ok: true, value: { ...jobView(row), provenance: provenanceOf(row) } };
 }
@@ -422,6 +418,29 @@ export interface ReportedJob {
  * readback recomputes from the check runs, so it stays pending through a
  * retry and concludes on the final attempt.
  */
+/**
+ * The one-automatic-retry guard (the canonical retry rule): a required,
+ * non-quarantined check's attempt-1 failure requeues it once at attempt 2.
+ * Restated for each column the job-finish UPDATE below recomputes.
+ */
+const RETRY_GUARD = `?5 = 'failure'
+                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
+                            AND check_runs.attempt = 1
+                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)`;
+
+/**
+ * The counted-run rule (the canonical gate predicate; the same newest-per-name
+ * reading services/checks.ts answer() applies to the rows it pages): of the
+ * required, non-quarantined runs for one (repo, tree, name), only the newest —
+ * created_at, then id — decides the gate. `x`/`newer` are the fixed aliases.
+ */
+const COUNTED_RUNS = `x.repo_id = ?2 AND x.tree_sha = compositions.tree_sha AND x.required = 1 AND x.quarantined = 0
+                    AND NOT EXISTS (
+                      SELECT 1 FROM check_runs newer
+                       WHERE newer.repo_id = x.repo_id AND newer.tree_sha = x.tree_sha AND newer.name = x.name
+                         AND (newer.created_at > x.created_at OR (newer.created_at = x.created_at AND newer.id > x.id))
+                    )`;
+
 export async function reportJob(env: Env, repo: RepoRow, id: string, input: unknown): Promise<ServiceResult<ReportedJob>> {
   const p = parseReport(input);
   if (!p.ok) return p;
@@ -445,35 +464,17 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
     ).bind(id, repo.id, flakeId, now),
     env.DB.prepare(
       `UPDATE check_runs SET
-         attempt = CASE WHEN ?5 = 'failure'
-                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
-                            AND check_runs.attempt = 1
-                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+         attempt = CASE WHEN ${RETRY_GUARD}
                        THEN 2 ELSE check_runs.attempt END,
-         status = CASE WHEN ?5 = 'failure'
-                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
-                            AND check_runs.attempt = 1
-                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+         status = CASE WHEN ${RETRY_GUARD}
                        THEN 'queued' ELSE ?5 END,
-         conclusion = CASE WHEN ?5 = 'failure'
-                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
-                            AND check_runs.attempt = 1
-                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+         conclusion = CASE WHEN ${RETRY_GUARD}
                        THEN NULL ELSE ?5 END,
-         summary = CASE WHEN ?5 = 'failure'
-                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
-                            AND check_runs.attempt = 1
-                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+         summary = CASE WHEN ${RETRY_GUARD}
                        THEN (SELECT summary FROM ci_jobs WHERE id = ?1) ELSE ?6 END,
-         started_at = CASE WHEN ?5 = 'failure'
-                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
-                            AND check_runs.attempt = 1
-                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+         started_at = CASE WHEN ${RETRY_GUARD}
                        THEN NULL ELSE check_runs.started_at END,
-         finished_at = CASE WHEN ?5 = 'failure'
-                            AND (SELECT required FROM ci_jobs WHERE id = ?1) = 1
-                            AND check_runs.attempt = 1
-                            AND NOT EXISTS (SELECT 1 FROM ci_quarantine q WHERE q.repo_id = ?2 AND q.name = check_runs.name)
+         finished_at = CASE WHEN ${RETRY_GUARD}
                        THEN NULL ELSE ?7 END
        WHERE id = (SELECT check_run_id FROM ci_jobs
                     WHERE id = ?1 AND repo_id = ?2 AND generation = ?3 AND claimed_by = ?4 AND status = ?5 AND finished_at = ?7)
@@ -486,11 +487,7 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
         WHERE id = ?1 AND repo_id = ?2
           AND EXISTS (SELECT 1 FROM check_runs k WHERE k.id = ci_jobs.check_run_id AND k.status = 'queued' AND k.attempt = 2)`,
     ).bind(id, repo.id, now, crypto.randomUUID()),
-    env.DB.prepare(
-      `SELECT c.number, c.merge_policy, c.base_ref,
-              EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queued
-         FROM change_sets c WHERE c.id = (SELECT change_set_id FROM ci_jobs WHERE id = ?1 AND repo_id = ?2)`,
-    ).bind(id, repo.id),
+    changeForRunStatement(env.DB, 'ci_jobs', id, repo.id),
     env.DB.prepare(
       `UPDATE compositions
           SET checks = json_object(
@@ -504,28 +501,17 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
                     'runId', x.id
                   ))
                   FROM check_runs x
-                  WHERE x.repo_id = ?2 AND x.tree_sha = compositions.tree_sha AND x.required = 1 AND x.quarantined = 0
-                    AND NOT EXISTS (
-                      SELECT 1 FROM check_runs newer
-                       WHERE newer.repo_id = x.repo_id AND newer.tree_sha = x.tree_sha AND newer.name = x.name
-                         AND (newer.created_at > x.created_at OR (newer.created_at = x.created_at AND newer.id > x.id))
-                    )
+                  WHERE ${COUNTED_RUNS}
                 ),
                 'state', CASE
                   WHEN EXISTS (
                     SELECT 1 FROM check_runs x
-                     WHERE x.repo_id = ?2 AND x.tree_sha = compositions.tree_sha AND x.required = 1 AND x.quarantined = 0 AND x.status = 'failure'
-                       AND NOT EXISTS (SELECT 1 FROM check_runs newer
-                         WHERE newer.repo_id = x.repo_id AND newer.tree_sha = x.tree_sha AND newer.name = x.name
-                           AND (newer.created_at > x.created_at OR (newer.created_at = x.created_at AND newer.id > x.id)))
+                     WHERE ${COUNTED_RUNS} AND x.status = 'failure'
                   )
                     THEN 'failure'
                   WHEN EXISTS (
                     SELECT 1 FROM check_runs x
-                     WHERE x.repo_id = ?2 AND x.tree_sha = compositions.tree_sha AND x.required = 1 AND x.quarantined = 0 AND x.status IN ('queued','running')
-                       AND NOT EXISTS (SELECT 1 FROM check_runs newer
-                         WHERE newer.repo_id = x.repo_id AND newer.tree_sha = x.tree_sha AND newer.name = x.name
-                           AND (newer.created_at > x.created_at OR (newer.created_at = x.created_at AND newer.id > x.id)))
+                     WHERE ${COUNTED_RUNS} AND x.status IN ('queued','running')
                   )
                     THEN 'pending'
                   ELSE 'success'
@@ -534,10 +520,7 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
               conflict_kind = CASE
                 WHEN EXISTS (
                   SELECT 1 FROM check_runs x
-                   WHERE x.repo_id = ?2 AND x.tree_sha = compositions.tree_sha AND x.required = 1 AND x.quarantined = 0 AND x.status = 'failure'
-                     AND NOT EXISTS (SELECT 1 FROM check_runs newer
-                       WHERE newer.repo_id = x.repo_id AND newer.tree_sha = x.tree_sha AND newer.name = x.name
-                         AND (newer.created_at > x.created_at OR (newer.created_at = x.created_at AND newer.id > x.id)))
+                   WHERE ${COUNTED_RUNS} AND x.status = 'failure'
                 )
                   THEN 'semantic'
                 ELSE NULL
@@ -553,13 +536,13 @@ export async function reportJob(env: Env, repo: RepoRow, id: string, input: unkn
     const exists = await env.DB.prepare('SELECT 1 FROM ci_jobs WHERE id = ? AND repo_id = ?').bind(id, repo.id).first();
     return fail(exists ? 409 : 404, exists ? 'the CI job claim is stale' : 'CI job not found', exists ? 'STALE_GENERATION' : 'CI_JOB_NOT_FOUND');
   }
-  const c = (changeRead?.results as Array<{ number: number; merge_policy: string; base_ref: string; queued: number }> | undefined)?.[0];
+  const c = (changeRead?.results as RunChangeRow[] | undefined)?.[0];
   return {
     ok: true,
     value: {
       run: checkRunView(run),
       treeSha: moved.tree_sha,
-      change: c ? { number: c.number, policy: c.merge_policy, baseRef: c.base_ref, queued: c.queued === 1 } : null,
+      change: runChangeOf(c),
       retried: p.value.conclusion === 'failure' && run.status === 'queued' && (run.attempt ?? 1) === 2,
     },
   };

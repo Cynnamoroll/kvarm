@@ -25,6 +25,7 @@ import type { ServiceResult } from '../repos/service';
 import { resolveRepoAccessAs } from './access';
 import type { Actor } from './authz';
 import { parseModelFamily } from './reviewGate';
+import { fail } from './result';
 
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const AGENT_DESCRIPTION_MAX = 500;
@@ -66,9 +67,6 @@ export interface AgentTokenListRow {
   agent_revoked_at: number | null;
 }
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 /** Manageability of the agent row named `t` for the user bound at `uid`. */
 function manageCond(t: string, uid: string): string {

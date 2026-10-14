@@ -20,6 +20,7 @@ import { CHECKS_PRODUCERS, rollupState, type CheckState, type ChecksProducer, ty
 import { treePairBody, type CompareBody } from './compare';
 import { runPool } from './pool';
 import { resolveCommitish, type ResolveContext } from './refs';
+import { objectBody } from './result';
 
 export const GUARD_CHECK = 'kvarm/guard';
 export const CHECKS_WINDOW_CHECK = 'kvarm/checks-window';
@@ -505,10 +506,37 @@ interface ReportInput {
   summary: string | null;
 }
 
+export interface RunChangeRow {
+  number: number;
+  merge_policy: string;
+  base_ref: string;
+  queued: number;
+}
+
+/**
+ * The change a run belongs to (through its change_set_id) plus whether that
+ * change sits in the live merge queue — the `{number, policy, baseRef, queued}`
+ * block the run create/update/report responses all carry.
+ */
+export function changeForRunStatement(db: D1Database, runsTable: 'check_runs' | 'ci_jobs', id: string, repoId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT c.number, c.merge_policy, c.base_ref,
+              EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queued
+         FROM change_sets c WHERE c.id = (SELECT change_set_id FROM ${runsTable} WHERE id = ?1 AND repo_id = ?2)`,
+    )
+    .bind(id, repoId);
+}
+
+export function runChangeOf(row: RunChangeRow | undefined): { number: number; policy: string; baseRef: string; queued: boolean } | null {
+  return row === undefined ? null : { number: row.number, policy: row.merge_policy, baseRef: row.base_ref, queued: row.queued === 1 };
+}
+
 function parseReport(input: unknown): ServiceResult<ReportInput> {
   const bad = (error: string, code: string): ServiceResult<ReportInput> => ({ ok: false, status: 422, error, code });
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: false, status: 400, error: 'body must be a JSON object', code: 'INVALID_BODY' };
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const headSha = b.headSha ?? b.head_sha;
   if (typeof headSha !== 'string' || !SHA_RE.test(headSha)) return bad('headSha must be a full 40-character commit id', 'INVALID_SHA');
   if (typeof b.name !== 'string' || b.name.trim() === '' || b.name.length > CHECK_LIMITS.nameMax) {
@@ -579,33 +607,29 @@ export async function reportCheckRun(ctx: ResolveContext, input: unknown): Promi
       )
       .bind(id, ctx.repo.id, now, p.headSha, commit.tree, p.name, p.status, p.conclusion, p.detailsUrl, p.summary, p.required ? 1 : 0, p.status === 'queued' ? null : now, done ? now : null),
     db.prepare(`SELECT ${CHECK_RUN_COLUMNS} FROM check_runs k WHERE k.id = ?`).bind(id),
-    db
-      .prepare(
-        `SELECT c.number, c.merge_policy, c.base_ref,
-                EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queued
-           FROM change_sets c WHERE c.id = (SELECT k.change_set_id FROM check_runs k WHERE k.id = ?)`,
-      )
-      .bind(id),
+    changeForRunStatement(db, 'check_runs', id, ctx.repo.id),
   ]);
   const row = (runRead?.results as CheckRunRow[] | undefined)?.[0];
   if (!row) return { ok: false, status: 500, error: 'check run could not be recorded', code: 'CREATE_FAILED' };
-  const c = (changeRead?.results as Array<{ number: number; merge_policy: string; base_ref: string; queued: number }> | undefined)?.[0];
+  const c = (changeRead?.results as RunChangeRow[] | undefined)?.[0];
   return {
     ok: true,
-    value: { run: checkRunView(row), change: c ? { number: c.number, policy: c.merge_policy, baseRef: c.base_ref, queued: c.queued === 1 } : null },
+    value: { run: checkRunView(row), change: runChangeOf(c) },
   };
 }
 
 /** PATCH check-runs/:id — terminal/status updates for an externally created run. */
 export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input: unknown): Promise<ServiceResult<ReportedRun>> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-    return { ok: false, status: 400, error: 'body must be a JSON object', code: 'INVALID_BODY' };
-  }
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const conclusion = b.conclusion;
   const status = conclusion === undefined ? b.status : CONCLUSIONS[String(conclusion)];
   if (conclusion !== undefined && (typeof conclusion !== 'string' || !(conclusion in CONCLUSIONS))) {
     return { ok: false, status: 422, error: `conclusion must be one of ${Object.keys(CONCLUSIONS).join(', ')}`, code: 'INVALID_CONCLUSION' };
+  }
+  if (conclusion !== undefined && b.status !== undefined && b.status !== 'completed' && b.status !== status) {
+    return { ok: false, status: 422, error: 'status contradicts the conclusion (omit status or pass "completed")', code: 'INVALID_STATUS' };
   }
   if (typeof status !== 'string' || !(STATUSES as readonly string[]).includes(status)) {
     return { ok: false, status: 422, error: `status must be one of ${STATUSES.join(', ')}`, code: 'INVALID_STATUS' };
@@ -629,11 +653,7 @@ export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input:
          AND NOT EXISTS (SELECT 1 FROM ci_jobs j WHERE j.check_run_id = check_runs.id)
        RETURNING ${CHECK_RUN_COLUMNS.replaceAll('k.', '')}`,
     ).bind(id, repo.id, status, conclusion ?? (terminal ? status : null), summary === undefined ? null : summary, now, terminal ? 1 : 0),
-    env.DB.prepare(
-      `SELECT c.number, c.merge_policy, c.base_ref,
-              EXISTS (SELECT 1 FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queued
-         FROM change_sets c WHERE c.id = (SELECT change_set_id FROM check_runs WHERE id = ?1 AND repo_id = ?2)`,
-    ).bind(id, repo.id),
+    changeForRunStatement(env.DB, 'check_runs', id, repo.id),
     env.DB.prepare(
       `SELECT name, EXISTS (SELECT 1 FROM ci_jobs j WHERE j.check_run_id = k.id) AS runner_owned
          FROM check_runs k WHERE k.id = ?1 AND k.repo_id = ?2`,
@@ -652,12 +672,12 @@ export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input:
     }
     return { ok: false, status: 404, error: 'check run not found', code: 'CHECK_RUN_NOT_FOUND' };
   }
-  const c = (changeRead?.results as Array<{ number: number; merge_policy: string; base_ref: string; queued: number }> | undefined)?.[0];
+  const c = (changeRead?.results as RunChangeRow[] | undefined)?.[0];
   return {
     ok: true,
     value: {
       run: checkRunView(row),
-      change: c ? { number: c.number, policy: c.merge_policy, baseRef: c.base_ref, queued: c.queued === 1 } : null,
+      change: runChangeOf(c),
     },
   };
 }

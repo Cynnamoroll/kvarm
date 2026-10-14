@@ -7,6 +7,7 @@ import { matchCommandPolicy, sandboxPath, tailText } from '../containers/fleetJo
 import { createWorkspace, type WorkspaceContext, type WorkspaceRow } from './workspaces';
 import { sandboxProvider } from './sandboxes/provider';
 import type { ServiceResult } from '../repos/service';
+import { fail } from './result';
 
 const RETENTION_MS = 25 * 24 * 60 * 60 * 1000;
 const MAX_TTL_HOURS = 24 * 7;
@@ -115,9 +116,6 @@ export interface StartSandboxInput {
   fresh?: boolean;
 }
 
-function fail<T>(status: number, error: string, code: string, extra: Record<string, unknown> = {}): ServiceResult<T> {
-  return { ok: false, status, error, code, ...extra };
-}
 
 function iso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
@@ -990,6 +988,24 @@ export async function listSandboxApprovals(
       expiresAt: new Date(row.expires_at).toISOString(),
     })),
   };
+}
+
+/** The header badge counts behind "Needs you" and running sandboxes (web/render appLayout). */
+export async function sandboxBadgeCounts(
+  env: Env,
+  userId: string,
+): Promise<{ running: number; needsYou: number }> {
+  const counts = await env.DB.prepare(
+    `SELECT
+      (SELECT COUNT(*) FROM sandboxes
+       WHERE owner_user_id = ? AND status IN ('running', 'starting')) AS running,
+      (SELECT COUNT(*) FROM sandbox_approvals a
+       JOIN sandboxes s ON s.id = a.sandbox_id
+       WHERE s.owner_user_id = ? AND a.status = 'pending' AND a.expires_at > ?) AS approvals`,
+  )
+    .bind(userId, userId, Date.now())
+    .first<{ running: number; approvals: number }>();
+  return { running: Number(counts?.running ?? 0), needsYou: Number(counts?.approvals ?? 0) };
 }
 
 export async function listMyPendingApprovals(

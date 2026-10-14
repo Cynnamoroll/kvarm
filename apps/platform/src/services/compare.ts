@@ -20,10 +20,10 @@ import { markCache } from '../cost/meter';
 import { compareKeys, readJson, writeJson } from '../cache/compare';
 import type { ServiceResult } from '../repos/service';
 import { runPool } from './pool';
+import { fail, guarded as baseGuarded } from './result';
 import { RISK_BUDGETS, assessRisk, type ChangeRating, type FileRisk, type RiskInput, type RiskResult, type RiskStat } from './risk';
 import {
   EMPTY_TREE,
-  RefStoreUnavailable,
   isFullSha,
   isValidRefName,
   readCommitAndParent,
@@ -157,9 +157,6 @@ export interface PageOptions {
 
 type Ctx = ResolveContext;
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 // ---------------------------------------------------------------------------
 // Artifacts readers
@@ -622,17 +619,7 @@ function markOutcome(cache: CacheOutcome): void {
   markCache(cache);
 }
 
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ compareRefStore: err.message.slice(0, 200) }));
-      return fail(503, 'repository storage is unavailable, retry shortly', 'STORAGE_UNAVAILABLE');
-    }
-    throw err;
-  }
-}
+const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('compareRefStore', fn);
 
 /** Resolves base and head (one round trip for both names) to commits and trees. */
 async function resolvePair(

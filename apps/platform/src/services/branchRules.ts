@@ -24,6 +24,7 @@ import { isSafeRefName, isValidRefPattern, refMatchesPattern } from '@kvarm/gito
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
+import { fail } from './result';
 
 export const BRANCH_RULES_MAX = 50;
 export const REQUIRED_CHECKS_MAX = 32;
@@ -85,9 +86,6 @@ export interface BranchPolicy {
   rules: string[];
 }
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 /**
  * Accepts a branch name (`main`, `release/*`) or a full ref pattern

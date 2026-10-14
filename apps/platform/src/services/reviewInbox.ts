@@ -20,6 +20,7 @@
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail } from './result';
 import { splitFacts, type RepoFactsRow } from './access';
 import { authorizeRepo, type Actor } from './authz';
 import { parseNumber, type ChangeContext } from './changes';
@@ -68,8 +69,6 @@ export interface ReviewInbox {
   nextCursor: string | null;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
-const fail = (status: number, code: string, error: string): Fail => ({ ok: false, status, code, error });
 
 function encodeCursor(c: { at: number; id: string }): string {
   return btoa(JSON.stringify([c.at, c.id])).replace(/=+$/, '');
@@ -157,14 +156,14 @@ export async function reviewInbox(env: Env, actor: Actor, q: { limit?: string; c
   if (q.limit !== undefined && q.limit !== '') {
     const n = Number(q.limit);
     if (!Number.isInteger(n) || n < 1 || n > INBOX_LIMITS.changesMax) {
-      return fail(400, 'INVALID_LIMIT', `limit must be an integer from 1 to ${INBOX_LIMITS.changesMax}`);
+      return fail(400, `limit must be an integer from 1 to ${INBOX_LIMITS.changesMax}`, 'INVALID_LIMIT');
     }
     limit = n;
   }
   let after: { at: number; id: string } | null = null;
   if (q.cursor) {
     after = decodeCursor(q.cursor);
-    if (!after) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this page');
+    if (!after) return fail(400, 'cursor is not a nextCursor from this page', 'INVALID_CURSOR');
   }
   const { repos, truncatedReason } = await reviewableRepos(env, actor);
   const byId = new Map(repos.map((r) => [r.id, r]));
@@ -212,10 +211,10 @@ export interface PageDecisionOutcome {
 
 /** The note a page decision requires: the review body or resolution note, and the decision's reason. */
 export function parseDecisionNote(v: unknown): ServiceResult<string> {
-  if (typeof v !== 'string' || v.trim().length === 0) return fail(422, 'NOTE_REQUIRED', 'a note is required: say why, for the record');
+  if (typeof v !== 'string' || v.trim().length === 0) return fail(422, 'a note is required: say why, for the record', 'NOTE_REQUIRED');
   // Browsers submit textarea line breaks as CRLF, which maxlength does not count twice.
   const note = v.replace(/\r\n/g, '\n').trim();
-  if (note.length > INBOX_LIMITS.noteMax) return fail(422, 'INVALID_NOTE', `the note is at most ${INBOX_LIMITS.noteMax} characters`);
+  if (note.length > INBOX_LIMITS.noteMax) return fail(422, `the note is at most ${INBOX_LIMITS.noteMax} characters`, 'INVALID_NOTE');
   return { ok: true, value: note };
 }
 
@@ -234,7 +233,7 @@ export async function decideFromPage(cx: ChangeContext, rawNumber: string, d: Pa
     // REST may omit the head to review the current one; a page reviews only the head it rendered, so a post
     // without one (a page that loaded before the change had a head, or a hand-made post) must not bind to a
     // head nobody on the page saw.
-    if (!d.headSha) return fail(409, 'HEAD_MOVED', 'review the head the page showed: headSha is required');
+    if (!d.headSha) return fail(409, 'review the head the page showed: headSha is required', 'HEAD_MOVED');
     // Record any escalation the gate requires but nobody opened yet, so a human approval answers it now
     // instead of the approval's own packet read opening it right afterwards.
     if (d.verdict === 'approve') {
@@ -251,7 +250,7 @@ export async function decideFromPage(cx: ChangeContext, rawNumber: string, d: Pa
     // post holds to the same rule rather than trusting the hidden form; submitReview refuses SELF_REVIEW alike.
     const n = parseNumber(rawNumber);
     if (n !== null && cx.actor && (await changeAuthorPrincipal(cx.env, cx.repo.id, n)) === `user:${cx.actor.user.id}`) {
-      return fail(409, 'SELF_RESOLVE', 'the author of a change cannot resolve its escalations; another human must');
+      return fail(409, 'the author of a change cannot resolve its escalations; another human must', 'SELF_RESOLVE');
     }
     const r = await resolveEscalation(cx, rawNumber, d.escalationId, { resolution: d.resolution, note: note.value });
     if (!r.ok) return r;

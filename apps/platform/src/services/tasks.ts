@@ -39,6 +39,7 @@ import { isAncestor } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import { touchRepoPushedStatement, type RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, objectBody } from './result';
 import { attributeCommit, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import { directPushDenial, repoBranchRulesSelect, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
@@ -247,9 +248,6 @@ function fenceSelect(db: D1Database, id: string): D1PreparedStatement {
 
 type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
 
-function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 const first = <T>(r: D1Result | undefined): T | null => ((r?.results as T[] | undefined) ?? [])[0] ?? null;
 
@@ -360,8 +358,7 @@ type Body = Record<string, unknown>;
 
 function bodyOf(input: unknown): ServiceResult<Body> {
   if (input === undefined || input === null) return { ok: true, value: {} };
-  if (typeof input !== 'object' || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  return { ok: true, value: input as Body };
+  return objectBody(input);
 }
 
 /**

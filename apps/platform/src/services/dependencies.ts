@@ -21,6 +21,7 @@
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, isUniqueViolation, objectBody } from './result';
 import {
   DEPENDENCY_LIMITS,
   dependencyRowsStatement,
@@ -50,9 +51,6 @@ const ZERO_SHA = '0000000000000000000000000000000000000000';
 
 type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
 
-function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 export interface DependencyDeps {
   kick(env: Env, repoId: string, ref: string, reason: string): Promise<void>;
@@ -326,8 +324,9 @@ interface Input {
 
 function parseInput(body: unknown, sourceRequired: boolean): ServiceResult<Input> {
   const shape = sourceRequired ? '{onWorkspace, revision}' : '{revision, onWorkspace?}';
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) return fail(400, `body must be a JSON object ${shape}`, 'INVALID_BODY');
-  const b = body as Record<string, unknown>;
+  const parsed = objectBody(body, shape);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   let onWorkspace: string | null = null;
   if (b.onWorkspace !== undefined && b.onWorkspace !== null) {
     if (typeof b.onWorkspace !== 'string' || !WORKSPACE_ID_RE.test(b.onWorkspace)) return fail(422, 'onWorkspace must be a workspace id', 'INVALID_WORKSPACE');
@@ -422,9 +421,6 @@ function dependentRefusal(cx: WorkspaceContext, row: DependentRow | undefined, w
   return null;
 }
 
-function isUnique(err: unknown): boolean {
-  return /UNIQUE constraint failed/i.test(String(err));
-}
 
 async function kickPartition(cx: WorkspaceContext, deps: DependencyDeps, rows: WakeRow[]): Promise<void> {
   for (const r of rows) {
@@ -532,7 +528,7 @@ export async function createDependency(cx: WorkspaceContext, workspaceId: string
       .bind(cx.repo.id, id, workspaceId, source, revision, cx.actor?.user.id ?? null, cx.actor?.user.login ?? null, cx.actor?.agent?.agentId ?? null, now)
       .all();
   } catch (err) {
-    if (isUnique(err)) return exists(workspaceId, source);
+    if (isUniqueViolation(err)) return exists(workspaceId, source);
     throw err;
   }
   if (!written.results?.length) return graphChanged('a workspace left active');
@@ -654,7 +650,7 @@ export async function repinDependency(
       .bind(cx.repo.id, depId, workspaceId, source, parsed.value.revision, now)
       .all();
   } catch (err) {
-    if (isUnique(err)) return exists(workspaceId, source);
+    if (isUniqueViolation(err)) return exists(workspaceId, source);
     throw err;
   }
   if (!written.results?.length) return graphChanged('the source left active');

@@ -22,6 +22,7 @@ import { KVARM_NOTES_REF, NotesTreeError, ZERO_OID, buildNotesCommit, encode, fi
 import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, guarded as baseGuarded, objectBody, type Fail } from './result';
 import type { Actor } from './authz';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { KVARM_COMMITTER, artifactsMergeSources } from './merge';
@@ -81,16 +82,14 @@ export interface AttributionWrite {
   notesCommit: string;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
 
-const fail = (status: number, code: string, error: string): Fail => ({ ok: false, status, code, error });
 
 function textField(v: unknown, name: string, code: string, required: boolean): string | undefined | Fail {
   if (v === undefined || v === null) {
-    return required ? fail(422, code, `${name} is required (a string of 1-${ATTRIBUTION_LIMITS.fieldMax} characters)`) : undefined;
+    return required ? fail(422, `${name} is required (a string of 1-${ATTRIBUTION_LIMITS.fieldMax} characters)`, code) : undefined;
   }
   if (typeof v !== 'string' || v.trim().length === 0 || v.length > ATTRIBUTION_LIMITS.fieldMax) {
-    return fail(422, code, `${name} must be a non-empty string of at most ${ATTRIBUTION_LIMITS.fieldMax} characters`);
+    return fail(422, `${name} must be a non-empty string of at most ${ATTRIBUTION_LIMITS.fieldMax} characters`, code);
   }
   return v;
 }
@@ -103,10 +102,9 @@ const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null &&
  * attribution, where the merging principal fills in what the request omits).
  */
 export function parseAttributionInput(input: unknown, defaults?: AttributionInput): ServiceResult<AttributionInput> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-    return fail(400, 'INVALID_BODY', 'body must be a JSON object {agent, session, promptHash, model?}');
-  }
-  const o = input as Record<string, unknown>;
+  const parsed = objectBody(input, '{agent, session, promptHash, model?}');
+  if (!parsed.ok) return parsed;
+  const o = parsed.value;
   const required = defaults === undefined;
   const agent = textField(o.agent, 'agent', 'INVALID_AGENT', required);
   if (isFail(agent)) return agent;
@@ -324,20 +322,10 @@ async function recordLedgerBatch(env: Env, entries: LedgerEntry[]): Promise<void
   }
 }
 
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ attributionStore: err.message.slice(0, 200) }));
-      return fail(503, 'STORAGE_UNAVAILABLE', 'repository storage is unavailable, retry shortly');
-    }
-    throw err;
-  }
-}
+const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('attributionStore', fn);
 
 function checkSha(sha: string): Fail | null {
-  return isFullSha(sha) ? null : fail(400, 'INVALID_SHA', `"${sha.slice(0, 80)}" is not a full 40-character lowercase commit sha`);
+  return isFullSha(sha) ? null : fail(400, `"${sha.slice(0, 80)}" is not a full 40-character lowercase commit sha`, 'INVALID_SHA');
 }
 
 /** POST commits/:sha/attribution */
@@ -356,7 +344,7 @@ export function setAttribution(
   return guarded(() =>
     withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       if (!(await readCommitInfo(resolveCtx(cx, artifacts), sha))) {
-        return fail(404, 'COMMIT_NOT_FOUND', `no commit ${sha} in this repository`);
+        return fail(404, `no commit ${sha} in this repository`, 'COMMIT_NOT_FOUND');
       }
       const assessed = await assessEvidence(cx.env, cx.repo, cx.actor, sha, parsed.value, signed.value);
       const written = await writeAttributionNote(cx, artifacts, pusher, sha, makeRecord(parsed.value, actorLogin(cx.actor)), 'api', assessed);
@@ -424,7 +412,7 @@ export function evidenceForReader(evidence: Evidence, admin: boolean): Evidence 
 export function getAttribution(cx: AttributionContext, sha: string, opts: { evidence?: boolean } = {}): Promise<ServiceResult<AttributionView>> {
   const bad = checkSha(sha);
   if (bad) return Promise.resolve(bad);
-  const none = fail(404, 'ATTRIBUTION_NOT_FOUND', `commit ${sha} has no attribution`);
+  const none = fail(404, `commit ${sha} has no attribution`, 'ATTRIBUTION_NOT_FOUND');
   return guarded(() =>
     withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx(cx, artifacts);
@@ -442,7 +430,7 @@ export function getAttribution(cx: AttributionContext, sha: string, opts: { evid
       }
       if (!loc) return none;
       const bytes = await sources.readBlob(loc.blob).catch(() => null);
-      if (!bytes) return fail(422, 'ATTRIBUTION_UNREADABLE', `the note on ${sha} is missing or larger than ${ATTRIBUTION_LIMITS.noteMaxBytes} bytes`);
+      if (!bytes) return fail(422, `the note on ${sha} is missing or larger than ${ATTRIBUTION_LIMITS.noteMaxBytes} bytes`, 'ATTRIBUTION_UNREADABLE');
       let parsed: unknown;
       try {
         parsed = JSON.parse(new TextDecoder().decode(bytes));
@@ -450,7 +438,7 @@ export function getAttribution(cx: AttributionContext, sha: string, opts: { evid
         parsed = null;
       }
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        return fail(422, 'ATTRIBUTION_NOT_JSON', `the note on ${sha} is not a JSON attribution record`);
+        return fail(422, `the note on ${sha} is not a JSON attribution record`, 'ATTRIBUTION_NOT_JSON');
       }
       // Existence checks skip the evidence read.
       const evidence = opts.evidence === false ? undeclaredEvidence('not-read') : await noteEvidence(cx.env, cx.repo.id, sha, bytes);

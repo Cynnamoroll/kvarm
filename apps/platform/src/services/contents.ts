@@ -6,6 +6,7 @@
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail } from './result';
 import { withRepo } from '../artifacts/repo';
 import { readFileImmutable } from '../cache/content';
 
@@ -37,9 +38,7 @@ export interface FileView {
   content: string;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
 
-const fail = (status: number, code: string, error: string): Fail => ({ ok: false, status, code, error });
 
 /**
  * Repo-relative path without leading/trailing slashes, or null when it has
@@ -71,7 +70,7 @@ function lsTreeEntry(dir: string, e: ArtifactsTreeEntry): TreeEntryView {
 
 export async function readTreeView(env: Env, repo: RepoRow, ref: string, rawPath: string): Promise<ServiceResult<TreeView>> {
   const path = normalizeRepoPath(rawPath);
-  if (path === null) return fail(400, 'INVALID_PATH', `invalid path "${rawPath}"`);
+  if (path === null) return fail(400, `invalid path "${rawPath}"`, 'INVALID_PATH');
   try {
     return await withRepo(env, repo.artifacts_name, async (h): Promise<ServiceResult<TreeView>> => {
       let commit: ArtifactsCommitMetadata | undefined;
@@ -80,23 +79,23 @@ export async function readTreeView(env: Env, repo: RepoRow, ref: string, rawPath
       } catch (err) {
         if (!isMissingObject(err)) throw err;
       }
-      if (!commit) return fail(404, 'REF_NOT_FOUND', `ref "${ref}" not found`);
+      if (!commit) return fail(404, `ref "${ref}" not found`, 'REF_NOT_FOUND');
       let hash = commit.treeHash;
       for (const part of path ? path.split('/') : []) {
         const entries = await h.readTree(hash);
         const entry = entries?.find((e) => e.name === part);
         if (!entry || entry.mode.padStart(6, '0') !== '040000') {
-          return fail(404, 'PATH_NOT_FOUND', `no directory "${path}" at ${ref}`);
+          return fail(404, `no directory "${path}" at ${ref}`, 'PATH_NOT_FOUND');
         }
         hash = entry.hash;
       }
       const entries = await h.readTree(hash);
-      if (!entries) return fail(404, 'PATH_NOT_FOUND', `no directory "${path}" at ${ref}`);
+      if (!entries) return fail(404, `no directory "${path}" at ${ref}`, 'PATH_NOT_FOUND');
       return { ok: true, value: { ref, sha: commit.hash, path, entries: entries.map((e) => lsTreeEntry(path, e)) } };
     });
   } catch (err) {
     console.error(JSON.stringify({ treeReadFailed: { repo: repo.id, error: String(err) } }));
-    return fail(503, 'STORAGE_UNAVAILABLE', 'repository storage is unavailable; retry');
+    return fail(503, 'repository storage is unavailable; retry', 'STORAGE_UNAVAILABLE');
   }
 }
 
@@ -128,21 +127,21 @@ export async function readFileView(
   rawPath: string,
 ): Promise<ServiceResult<FileView>> {
   const path = normalizeRepoPath(rawPath);
-  if (!path) return fail(400, 'INVALID_PATH', 'path is required and must be a repository-relative file path');
+  if (!path) return fail(400, 'path is required and must be a repository-relative file path', 'INVALID_PATH');
   let blob: Blob | null;
   try {
     blob = await readFileImmutable(env, ctx, repo, ref, path);
   } catch (err) {
     if (isMissingObject(err)) blob = null;
-    else if (isMemoryLimit(err)) return fail(422, 'FILE_TOO_LARGE', `"${path}" is too large to read (limit ${MAX_FILE_BYTES} bytes)`);
+    else if (isMemoryLimit(err)) return fail(422, `"${path}" is too large to read (limit ${MAX_FILE_BYTES} bytes)`, 'FILE_TOO_LARGE');
     else {
       console.error(JSON.stringify({ fileReadFailed: { repo: repo.id, error: String(err) } }));
-      return fail(503, 'STORAGE_UNAVAILABLE', 'repository storage is unavailable; retry');
+      return fail(503, 'repository storage is unavailable; retry', 'STORAGE_UNAVAILABLE');
     }
   }
-  if (!blob) return fail(404, 'FILE_NOT_FOUND', `no file "${path}" at ${ref}`);
+  if (!blob) return fail(404, `no file "${path}" at ${ref}`, 'FILE_NOT_FOUND');
   if (blob.size > MAX_FILE_BYTES) {
-    return fail(422, 'FILE_TOO_LARGE', `"${path}" is ${blob.size} bytes; the limit is ${MAX_FILE_BYTES}`);
+    return fail(422, `"${path}" is ${blob.size} bytes; the limit is ${MAX_FILE_BYTES}`, 'FILE_TOO_LARGE');
   }
   const bytes = new Uint8Array(await blob.arrayBuffer());
   return { ok: true, value: { ref, path, size: bytes.length, ...encodeContent(bytes) } };

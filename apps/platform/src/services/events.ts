@@ -39,6 +39,7 @@ import { requestEnvironmentBuild } from './environments';
 import { commitCloseStatement, commitClosingRefs, guardScanStatements, pushedCommits, retireIssueTasksStatement } from './issues';
 import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
 import type { RepoRow } from '../db/repos';
+import { WORKSPACE_REF_PREFIX } from './agentMeta';
 
 export interface PushEvent {
   namespace: string;
@@ -55,7 +56,7 @@ export interface PushEvent {
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const PUSH_TYPE = 'cf.artifacts.repo.pushed';
-const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
+
 
 function record(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;

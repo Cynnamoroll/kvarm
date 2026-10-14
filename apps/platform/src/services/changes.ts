@@ -21,6 +21,9 @@ import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { agentMetaOf } from './agentMeta';
+import { fail, guarded as baseGuarded, objectBody } from './result';
+export { fail };
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { recordMergeAudit } from './audit';
 import { credentialMayUpdateRef, type Actor } from './authz';
@@ -74,9 +77,11 @@ import {
   publishMerge,
   type Mergeability,
   type MergeErrorCode,
+  type MergeSources,
   type MergePlanView,
   type MergeStatus,
   type MergeWork,
+  type PreparedMerge,
 } from './merge';
 import { RefStoreUnavailable, isValidRefName, lsRefs, resolveCommitish, type ResolveContext } from './refs';
 import {
@@ -209,15 +214,6 @@ export interface ChangeDetail extends ChangeView {
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
 
-function parseAgent(meta: string | null): { id: string; name: string } | null {
-  if (!meta) return null;
-  try {
-    const v = JSON.parse(meta) as { agentId?: unknown; agentName?: unknown };
-    return typeof v.agentId === 'string' && typeof v.agentName === 'string' ? { id: v.agentId, name: v.agentName } : null;
-  } catch {
-    return null;
-  }
-}
 
 export function changeView(row: ChangeRow): ChangeView {
   return {
@@ -232,7 +228,7 @@ export function changeView(row: ChangeRow): ChangeView {
     baseSha: row.base_sha,
     headSha: row.head_sha,
     author: row.author_login,
-    agent: parseAgent(row.agent_meta),
+    agent: agentMetaOf(row.agent_meta),
     mergeCommit: row.merge_commit,
     mergedAt: iso(row.merged_at),
     createdAt: iso(row.created_at)!,
@@ -307,9 +303,6 @@ export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
   reason?: string;
 };
 
-export function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 /** The pin refusal (services/dependencyGate.ts) for the rows of a change's workspace pins, or null. */
 export function dependencyRefusal(rows: readonly DependencyRow[] | undefined, mode: 'enqueue' | 'publish' = 'publish'): Fail | null {
@@ -321,17 +314,7 @@ export function resolveCtx(cx: Pick<ChangeContext, 'env' | 'repo' | 'waitUntil'>
   return { env: cx.env, repo: cx.repo, artifacts, bypass: false, waitUntil: cx.waitUntil };
 }
 
-export async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ changesRefStore: err.message.slice(0, 200) }));
-      return fail(503, 'repository storage is unavailable, retry shortly', 'STORAGE_UNAVAILABLE');
-    }
-    throw err;
-  }
-}
+export const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('changesRefStore', fn);
 
 /** A branch name as given (`main`) or as a full branch ref (`refs/heads/main`); null otherwise. */
 export function normalizeBranch(input: unknown): string | null {
@@ -699,8 +682,9 @@ interface CreateInput {
 }
 
 function parseCreate(input: unknown): ServiceResult<CreateInput> {
-  const b = (input ?? {}) as Record<string, unknown>;
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const title = validTitle(b.title);
   if (title === null) return fail(422, `title is required (1-${CHANGE_LIMITS.titleMax} characters)`, 'INVALID_TITLE');
   const body = b.body === undefined ? null : validBody(b.body);
@@ -834,10 +818,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       // on that persisted head, so return the created, blocked change rather
       // than an error that suggests no change exists.
       if (!queued.ok && row.head_sha === headSha) return queued;
-      if (queued.ok && queued.value.jobs > 0) {
-        const read = await listChangeChecks(cx.env, cx.repo, String(row.number));
-        if (read.ok) checks = read.value.checks;
-      } else if (!queued.ok) {
+      if (!queued.ok || queued.value.jobs > 0) {
         const read = await listChangeChecks(cx.env, cx.repo, String(row.number));
         if (read.ok) checks = read.value.checks;
       }
@@ -855,8 +836,9 @@ interface Patch {
 }
 
 function parsePatch(input: unknown): ServiceResult<Patch> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const out: Patch = {};
   if (b.title !== undefined) {
     const t = validTitle(b.title);
@@ -1207,6 +1189,66 @@ export function mergedRecordStatements(
  * between that last read and the send is not caught here; the guarded
  * merged write then refuses to record it.
  */
+
+/**
+ * The prepared-commit CI staging step of a publication: points the change's
+ * platform-reserved staging ref at the prepared merge commit (reusing a
+ * leftover from a crashed attempt, or re-pointing one staged for a moved
+ * base), then queues the result tree's jobs. Returns the staging ref so the
+ * caller can clean it up when a later step refuses the publication.
+ */
+async function stagePreparedCi(
+  cx: ChangeContext,
+  ctx: ResolveContext,
+  sources: MergeSources,
+  pusher: GitPusher,
+  row: ChangeRow,
+  prepared: PreparedMerge,
+): Promise<ServiceResult<string | null>> {
+  const configured = await hasCiJobs(cx.env, cx.repo.artifacts_name, prepared.headSha);
+  if (!configured.ok) return configured;
+  if (!configured.value) return { ok: true, value: null };
+  const checkRef = `refs/heads/kvarm-ci/${row.id}/${prepared.treeSha}`;
+  const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
+  if (live) {
+    const expected = await cx.env.DB.prepare(
+      'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
+    )
+      .bind(cx.repo.id, row.id, prepared.treeSha)
+      .first<string>('head_sha');
+    const staged = await sources.readCommit(live);
+    const usable =
+      staged !== null &&
+      live === expected &&
+      staged.treeHash === prepared.treeSha &&
+      staged.parents.length === 2 &&
+      staged.parents[0] === prepared.targetSha &&
+      staged.parents[1] === prepared.headSha;
+    if (usable) {
+      prepared.mergeCommit = live;
+    } else if (prepared.mergeCommit === live) {
+      // Only the queueing was lost (a crash between the staging push
+      // and the job rows): the ref already holds this preparation.
+    } else {
+      // The staging ref holds a commit prepared for another attempt at
+      // this tree: the base moved under an unchanged result tree. The
+      // namespace is platform-reserved, so this preparation re-points
+      // it (expected old value = the stale commit) instead of
+      // refusing forever.
+      const restaged = await pusher.updateRef({ ref: checkRef, oldOid: live, newOid: prepared.mergeCommit }, prepared.objects);
+      if (restaged.status !== 'ok') {
+        return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
+      }
+    }
+  } else {
+    const staged = await pusher.updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: prepared.mergeCommit }, prepared.objects);
+    if (staged.status !== 'ok') return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
+  }
+  const queued = await queueExactTreeCi(cx.env, cx.repo, row.id, prepared.headSha, prepared.mergeCommit, prepared.treeSha);
+  if (!queued.ok) return queued;
+  return { ok: true, value: checkRef };
+}
+
 async function performMerge(
   cx: ChangeContext,
   row: ChangeRow,
@@ -1255,56 +1297,9 @@ async function performMerge(
       }
       let ciCheckRef: string | null = null;
       if (prepared.value.kind === 'merge') {
-        const configured = await hasCiJobs(cx.env, cx.repo.artifacts_name, prepared.value.headSha);
-        if (!configured.ok) return configured;
-        if (configured.value) {
-          const checkRef = `refs/heads/kvarm-ci/${row.id}/${prepared.value.treeSha}`;
-          ciCheckRef = checkRef;
-          const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
-          if (live) {
-            const expected = await cx.env.DB.prepare(
-              'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
-            )
-              .bind(cx.repo.id, row.id, prepared.value.treeSha)
-              .first<string>('head_sha');
-            const staged = await sources.readCommit(live);
-            const usable =
-              staged !== null &&
-              live === expected &&
-              staged.treeHash === prepared.value.treeSha &&
-              staged.parents.length === 2 &&
-              staged.parents[0] === prepared.value.targetSha &&
-              staged.parents[1] === prepared.value.headSha;
-            if (usable) {
-              prepared.value.mergeCommit = live;
-            } else if (prepared.value.mergeCommit === live) {
-              // Only the queueing was lost (a crash between the staging push
-              // and the job rows): the ref already holds this preparation.
-            } else {
-              // The staging ref holds a commit prepared for another attempt at
-              // this tree: the base moved under an unchanged result tree. The
-              // namespace is platform-reserved, so this preparation re-points
-              // it (expected old value = the stale commit) instead of
-              // refusing forever.
-              const restaged = await pusher.updateRef({ ref: checkRef, oldOid: live, newOid: prepared.value.mergeCommit }, prepared.value.objects);
-              if (restaged.status !== 'ok') {
-                return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
-              }
-            }
-          } else {
-            const staged = await pusher.updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: prepared.value.mergeCommit }, prepared.value.objects);
-            if (staged.status !== 'ok') return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
-          }
-          const queued = await queueExactTreeCi(
-            cx.env,
-            cx.repo,
-            row.id,
-            prepared.value.headSha,
-            prepared.value.mergeCommit,
-            prepared.value.treeSha,
-          );
-          if (!queued.ok) return queued;
-        }
+        const staged = await stagePreparedCi(cx, ctx, sources, pusher, row, prepared.value);
+        if (!staged.ok) return staged;
+        ciCheckRef = staged.value;
       }
       const guardBase = await sources.readCommit(prepared.value.mergeBase);
       if (!guardBase) return fail(503, 'the merge base could not be read', 'MERGE_READ_FAILED');
@@ -1457,8 +1452,9 @@ export function mergeChange(
     const number = parseNumber(rawNumber);
     let attribution: AttributionInput | null = null;
     if (body !== undefined && body !== null) {
-      if (typeof body !== 'object' || Array.isArray(body)) return fail(400, 'body must be a JSON object {attribution?}', 'INVALID_BODY');
-      const raw = (body as { attribution?: unknown }).attribution;
+      const parsed = objectBody(body, '{attribution?}');
+      if (!parsed.ok) return parsed;
+      const raw = parsed.value.attribution;
       if (raw !== undefined && raw !== null) {
         if (typeof raw !== 'object' || Array.isArray(raw)) {
           return fail(422, 'attribution must be an object {agent?, session?, promptHash?, model?}', 'INVALID_ATTRIBUTION');
