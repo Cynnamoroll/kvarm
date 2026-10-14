@@ -37,6 +37,9 @@ const MAX_DELTA_READ_BYTES = 64 * 1024 * 1024;
 /** The platform's own CI bounds (services/ciConfig.ts) that a claimed job's fields are held to. */
 const JOB_TIMEOUT_MAX_SECONDS = 3_600;
 const JOB_TIMEOUT_DEFAULT_SECONDS = 900;
+/** The platform's claim lease; heartbeats fire at a third of it, well before the lease lapses. */
+const CLAIM_LEASE_MS = 120_000;
+const HEARTBEAT_MS = Math.floor(CLAIM_LEASE_MS / 3);
 const utf8 = new TextEncoder();
 
 /** @param {unknown} value */
@@ -540,12 +543,11 @@ export async function runRunner(options) {
         const plan = await planExecution({ trust, executor: executorMode, provenance: job.provenance, runtime });
         // Refused before any byte of the job's code reaches this machine.
         if (plan.run === null) throw new JobRefused(plan.reason);
-        const every = Math.max(10_000, Math.floor(120_000 / 3));
         heartbeat = setInterval(() => {
           void post(options.baseUrl, reposUrl, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
             options.stderr(`heartbeat: ${err instanceof Error ? err.message : String(err)}`),
           );
-        }, every);
+        }, HEARTBEAT_MS);
         heartbeat.unref();
         const isolated = plan.run === 'container';
         const slot = isolated
