@@ -195,14 +195,14 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
       <p class="screen-cap">Example composition. Inspect the evidence and exact combined changes before deciding.</p>
     </div>
 
-    <div class="split">
+    <div>
       <div class="m-human">
         <p class="screen-label hud"><span class="tag">Example</span> Escalation · example/api</p>
         <div class="esc frame">
           <i class="c-tr"></i><i class="c-bl"></i>
           <div class="esc-q">
             <p class="hud"><span class="tag">Example decision</span> <span class="steel">·</span> illustrative review</p>
-            <h3 class="h2">Ship the example combination of Example A and Example B?</h3>
+            <h3 class="app-title">Ship the example combination of Example A and Example B?</h3>
             <ul class="evidence">
               <li><span class="ink-hi">■</span> Example check results are shown for review, not as live status</li>
               <li><span class="ink-hi">■</span> Example reviewer input is illustrative, not an actual approval</li>

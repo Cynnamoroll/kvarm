@@ -263,7 +263,7 @@ body.k-landing .harness li { border-radius: 0; }
 body.k-landing .foot { overflow: hidden; }
 body.k-landing .ft-mark { position: relative; display: block; padding: var(--s6) 0 var(--s6) 38px; color: var(--bone); }
 body.k-landing .ft-mark .mark { position: absolute; bottom: var(--s6); left: 0; width: 26px; height: 26px; }
-body.k-landing .wordmark-foot { display: block; width: 100%; margin-left: -.05em; color: transparent; font: 800 22vw/.74 var(--f-sans); font-stretch: 125%; letter-spacing: -.05em; white-space: nowrap; -webkit-text-stroke: 1px var(--hairline-2); }
+body.k-landing .wordmark-foot { display: block; margin-left: -.05em; color: transparent; font: 800 22vw/.74 var(--f-sans); font-stretch: 125%; letter-spacing: -.05em; white-space: nowrap; -webkit-text-stroke: 1px var(--hairline-2); }
 body.k-landing .ft-cols { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 body.k-landing .rail-track { width: 160%; flex: none; animation: landing-rail 18s linear infinite; }
 body.k-landing .rail-track i { flex: 1 0 0; }
@@ -358,7 +358,6 @@ body.k-landing .pc.pick { border-color: var(--signal); background: var(--signal)
 body.k-landing .pc.bad { border: 0; background: linear-gradient(90deg, var(--heat-1), var(--heat-3) 70%, var(--heat-4)); color: #fff; }
 body.k-landing .esc { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: var(--s6); padding: var(--s6); border: 1px solid var(--hairline); background: var(--carbon); }
 body.k-landing .esc-q { min-width: 0; }
-body.k-landing .esc .h2 { margin: var(--s3) 0 var(--s4); color: var(--bone); font-size: clamp(28px, 3vw, 40px); }
 body.k-landing .evidence { display: grid; gap: var(--s2); margin: 0; padding: 0; color: var(--silver); list-style: none; }
 body.k-landing .evidence li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: var(--s2); }
 body.k-landing .esc-a { display: flex; flex-direction: column; justify-content: flex-end; gap: var(--s2); min-width: 0; }
