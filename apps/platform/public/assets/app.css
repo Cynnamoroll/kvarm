@@ -32,7 +32,7 @@ body.k-app:not(.k-landing) .tag-ready, body.k-app:not(.k-landing) .signal { colo
 body.k-app:not(.k-landing) .warn { color: var(--heat-4); }
 body.k-app:not(.k-landing) .repo-head { padding: var(--s5); border-bottom: 1px solid var(--hairline); }
 body.k-app:not(.k-landing) .clone-box { display: flex; align-items: stretch; max-width: 100%; border: 1px solid var(--hairline-2); background: var(--void); }
-body.k-app:not(.k-landing) .clone-box code { min-width: 0; padding: 9px; overflow: auto; white-space: nowrap; }
+body.k-app:not(.k-landing) .clone-box code { flex: 1 1 auto; min-width: 0; padding: 9px; overflow: visible; overflow-wrap: anywhere; white-space: normal; font: 400 11px/1.5 var(--f-mono); }
 body.k-app:not(.k-landing) .tabs { display: flex; align-items: center; gap: 0; max-width: 100%; overflow-x: auto; border-bottom: 1px solid var(--hairline); }
 body.k-app:not(.k-landing) .tab { flex: none; padding: 11px var(--s3); border-bottom: 2px solid transparent; color: var(--steel); text-transform: capitalize; }
 body.k-app:not(.k-landing) .tab.active { border-bottom-color: var(--signal); color: var(--bone); }
@@ -226,6 +226,12 @@ body.k-app:not(.k-landing) .guard-results > div { display: flex; flex-wrap: wrap
 body.k-app:not(.k-landing) .review-timeline { margin: 0; padding-left: var(--s4); }
 body.k-app:not(.k-landing) .review-timeline > li { margin-bottom: var(--s3); padding-left: var(--s2); }
 body.k-app:not(.k-landing) .review-actions { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+body.k-app:not(.k-landing) .approval-carry { margin-top: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--line); }
+body.k-app:not(.k-landing) .approval-carry > p { margin: 0 0 var(--s2); }
+body.k-app:not(.k-landing) .carry-agent-paths { margin: 0; padding-left: var(--s4); color: var(--steel); }
+body.k-app:not(.k-landing) .carry-agent-paths code { overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .carry-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--s2); }
+body.k-app:not(.k-landing) .carry-file-row > details { min-width: 0; }
 @media (max-width: 900px) {
   body.k-app:not(.k-landing) .change-review-grid { grid-template-columns: minmax(0, 1fr); }
   body.k-app:not(.k-landing) .change-review-side { position: static; }

@@ -12,7 +12,9 @@ import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecu
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import type { RepoRow } from '../src/db/repos';
 import worker from '../src/index';
+import { headFingerprint } from '../src/services/approvalCarry';
 import type { ChecksGate } from '../src/services/checksGate';
 import { defaultTrainDeps, runTrain, type TrainDeps } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
@@ -203,6 +205,130 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('review policy', () => {
+  it('carries an approval only when every base-to-head file fingerprint still matches', async () => {
+    const full = await setup('carry-full');
+    await setPolicy('carry-full', 1);
+    await createChange('carry-full', 'b1');
+    const fullHead = full.repo.refs.get('refs/heads/b1')!;
+    const reviewer = await agent('carry-full', 'carry-agent', 'claude');
+    const approved = await approve('carry-full', 1, reviewer.token, { headSha: fullHead });
+    const approvalId = approved.json.review.id as string;
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_files WHERE review_id = ?').bind(approvalId).first<{ n: number }>())?.n).toBe(1);
+    const equivalent = await commit(full.repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [fullHead]);
+    full.repo.refs.set('refs/heads/b1', equivalent.sha);
+    await deliver(pushBody('carry-full', 'refs/heads/b1', fullHead, equivalent.sha));
+    const carried = await packet('carry-full', 1);
+    expect(carried.json.approvals.count).toBe(1);
+    expect(carried.json.reviews).toContainEqual(expect.objectContaining({ headSha: equivalent.sha, carriedFromHead: fullHead }));
+    const carriedRow = await env.DB.prepare(
+      `SELECT id, principal, user_id, user_login, agent_id, token_id, model_family, body, carried_from_head, carried_from_review
+         FROM change_reviews WHERE repo_id = ? AND head_sha = ?`,
+    ).bind(repoIds['carry-full'], equivalent.sha).first<Record<string, unknown>>();
+    const originalToken = await env.DB.prepare('SELECT token_id FROM change_reviews WHERE id = ?').bind(approvalId).first<{ token_id: string }>();
+    expect(carriedRow).toMatchObject({
+      principal: `agent:${reviewer.id}`,
+      user_id: userIds[OWNER],
+      agent_id: reviewer.id,
+      token_id: originalToken?.token_id,
+      model_family: 'claude',
+      body: null,
+      carried_from_head: fullHead,
+      carried_from_review: approvalId,
+    });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_files WHERE review_id = ?').bind(carriedRow!.id).first<{ n: number }>())?.n).toBe(1);
+    await env.DB.prepare('UPDATE agents SET revoked_at = ? WHERE id = ?').bind(Date.now(), reviewer.id).run();
+    expect((await packet('carry-full', 1)).json.approvals.count).toBe(0);
+
+    const partial = await setup('carry-partial');
+    await setPolicy('carry-partial', 1);
+    const partialHead = await commit(partial.repo, { 'README.md': 'new readme\n', 'f1.txt': 'file 1\n' }, [partial.main]);
+    partial.repo.refs.set('refs/heads/b1', partialHead.sha);
+    await createChange('carry-partial', 'b1');
+    await approve('carry-partial', 1, tok.human2, { headSha: partialHead.sha });
+    const changed = await commit(partial.repo, { 'README.md': 'new readme\n', 'f1.txt': 'file 1 changed\n' }, [partialHead.sha]);
+    partial.repo.refs.set('refs/heads/b1', changed.sha);
+    await deliver(pushBody('carry-partial', 'refs/heads/b1', partialHead.sha, changed.sha));
+    const partialPacket = await packet('carry-partial', 1);
+    expect(partialPacket.json.approvals.count).toBe(0);
+    expect(partialPacket.json.carry).toContainEqual(expect.objectContaining({
+      fromHead: partialHead.sha,
+      carried: false,
+      unchangedPaths: ['README.md'],
+      changedPaths: ['f1.txt'],
+    }));
+  });
+
+  it('does not fingerprint truncated or unavailable comparisons', async () => {
+    const { repo, main } = await setup('carry-budget');
+    const files = Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`file-${index}.txt`, `content ${index}\n`]));
+    const large = await commit(repo, files, [main]);
+    const repoRow = await env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repoIds['carry-budget']).first<RepoRow>();
+    expect(repoRow).not.toBeNull();
+    expect(await headFingerprint(env, repoRow!, { base: 'main' }, large.sha)).toBeNull();
+    expect(await headFingerprint(env, repoRow!, { base: 'main' }, 'f'.repeat(40))).toBeNull();
+  });
+
+  it('does not carry request-changes or resolve an escalation while carrying another approver', async () => {
+    const { repo } = await setup('carry-escalation');
+    await setPolicy('carry-escalation', 1);
+    await createChange('carry-escalation', 'b1');
+    const oldHead = repo.refs.get('refs/heads/b1')!;
+    await approve('carry-escalation', 1, tok.human2);
+    await requestChanges('carry-escalation', 1, tok.human3);
+    const escalation = ((await packet('carry-escalation', 1)).json.escalations as Array<Record<string, any>>).find((item) => item.state === 'open');
+    expect(escalation).toBeTruthy();
+    const equivalent = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [oldHead]);
+    repo.refs.set('refs/heads/b1', equivalent.sha);
+    await deliver(pushBody('carry-escalation', 'refs/heads/b1', oldHead, equivalent.sha));
+    const result = await packet('carry-escalation', 1);
+    expect(result.json.approvals.count).toBe(1);
+    expect(result.json.escalations).toContainEqual(expect.objectContaining({ id: escalation!.id, state: 'open' }));
+    expect(result.json.reviews).not.toContainEqual(expect.objectContaining({ principal: `user:${userIds['rv-human3']}`, headSha: equivalent.sha }));
+  });
+
+  it('approve-and-ship sets auto policy in the same review and refuses invalid ships without writes', async () => {
+    const success = await setup('ship-success');
+    await setPolicy('ship-success', 1);
+    await createChange('ship-success', 'b1');
+    const shipped = await approve('ship-success', 1, tok.human2, { ship: true, headSha: success.repo.refs.get('refs/heads/b1') });
+    expect(shipped.status, JSON.stringify(shipped.json)).toBe(201);
+    expect(shipped.json.packet).toMatchObject({ mergePolicy: 'auto', state: 'merged', satisfied: true });
+
+    await setup('ship-pending');
+    await setPolicy('ship-pending', 2);
+    await createChange('ship-pending', 'b1');
+    const pending = await approve('ship-pending', 1, tok.human2, { ship: true });
+    expect(pending.json.packet).toMatchObject({ mergePolicy: 'auto', state: 'open', satisfied: false });
+    const later = await approve('ship-pending', 1, tok.human3);
+    expect(later.json.packet.state).toBe('merged');
+
+    const requestRepo = await setup('ship-request');
+    await createChange('ship-request', 'b1');
+    const beforeRequest = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-request']).first<{ n: number }>();
+    const request = await requestChanges('ship-request', 1, tok.human2, { ship: true });
+    expect([request.status, request.json.code]).toEqual([422, 'SHIP_REQUIRES_APPROVE']);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-request']).first<{ n: number }>())?.n).toBe(beforeRequest?.n);
+    expect((await env.DB.prepare('SELECT merge_policy FROM change_sets WHERE repo_id = ?').bind(repoIds['ship-request']).first<{ merge_policy: string }>())?.merge_policy).toBe('review');
+    expect(requestRepo.repo.refs.get(MAIN)).not.toBe(requestRepo.repo.refs.get('refs/heads/b1'));
+
+    await setup('ship-draft');
+    await createChange('ship-draft', 'b1', tok.owner, 'draft');
+    const beforeDraft = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-draft']).first<{ n: number }>();
+    const draft = await approve('ship-draft', 1, tok.human2, { ship: true });
+    expect([draft.status, draft.json.code]).toEqual([409, 'CHANGE_DRAFT']);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-draft']).first<{ n: number }>())?.n).toBe(beforeDraft?.n);
+    expect((await env.DB.prepare('SELECT merge_policy FROM change_sets WHERE repo_id = ?').bind(repoIds['ship-draft']).first<{ merge_policy: string }>())?.merge_policy).toBe('draft');
+
+    await setup('ship-agent');
+    const restricted = await agent('ship-agent', 'ship-restricted', 'claude');
+    await createChange('ship-agent', 'b1');
+    const beforeAgent = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-agent']).first<{ n: number }>();
+    const denied = await approve('ship-agent', 1, restricted.token, { ship: true });
+    expect([denied.status, denied.json.code]).toEqual([403, 'AGENT_REF_FORBIDDEN']);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-agent']).first<{ n: number }>())?.n).toBe(beforeAgent?.n);
+    expect((await env.DB.prepare('SELECT merge_policy FROM change_sets WHERE repo_id = ?').bind(repoIds['ship-agent']).first<{ merge_policy: string }>())?.merge_policy).toBe('review');
+  });
+
   it('is unset by default (review merges unchanged), admin-only to change and validated', async () => {
     const { repo } = await setup('policy-unset');
     const unset = await call('GET', api('policy-unset', '/review-policy'), tok.reader);
@@ -572,7 +698,7 @@ describe('pending reviews and budgets', () => {
     const pend = await call('GET', api('budget', '/reviews/pending'), tok.owner);
     const assign = await call('POST', api('budget', '/changes/1/reviewers/assign'), tok.owner, {});
     expect(a.cost).toMatchObject({ art: 0, do: 0 });
-    expect(a.cost.d1).toBeLessThanOrEqual(3);
+    expect(a.cost.d1).toBeLessThanOrEqual(4);
     for (const r of [p, pend, assign]) {
       expect(r.cost).toMatchObject({ art: 0, do: 0, rw: 0 });
       expect(r.cost.d1).toBeLessThanOrEqual(2);

@@ -15,6 +15,8 @@ import { resolveRepo, notFound, finish, sessionFormRefused, type Resolved } from
 import * as changes from '../services/changes';
 import * as reviews from '../services/reviews';
 import * as compare from '../services/compare';
+import { compareChange } from '../services/changeDiff';
+import type { CarryView } from '../services/approvalCarry';
 import { DIFF_CLIENT_TAG, renderCompareFileRow } from './comparePages';
 
 export const changePages = new Hono<App>();
@@ -166,6 +168,7 @@ function renderGuide(
   guide: ReturnType<typeof fallbackGuide>,
   map: Awaited<ReturnType<typeof buildCoverage>>,
   configError: string | null,
+  carry: CarryView | null,
 ): string {
   const units = new Map(map.units.map((unit) => [unit.key, unit]));
   const files = new Map(result.files.map((file) => [file.path, file]));
@@ -181,7 +184,12 @@ function renderGuide(
     const fileRows = [...keysByPath].map(([path, keys]) => {
       const file = files.get(path);
       if (!file) return '';
-      return renderCompareFileRow(repo, encRange, file, tierFor(guide, keys));
+      const tier = tierFor(guide, keys);
+      const mark = carry?.unchangedPaths.includes(path) ? 'unchanged' : carry?.changedPaths.includes(path) ? 'changed' : null;
+      return html`<div class="carry-file-row ${mark ? `carry-${mark}` : ''}">
+        ${raw(renderCompareFileRow(repo, encRange, file, tier))}
+        ${mark ? raw(html`<span class="tag ${mark === 'changed' ? 'err' : 'steel'}">${mark}</span>`) : ''}
+      </div>`;
     }).join('');
     return html`<section class="card guide-chapter">
       <div class="card-title">${chapter.title} ${raw(tierTag(chapter.tier))}</div>
@@ -204,6 +212,10 @@ function renderGuide(
     </div>
     ${map.truncated ? raw(html`<p class="flash warn">Coverage is truncated by the review-page diff budget.</p>`) : ''}
     ${configError ? raw(html`<p class="flash warn">${configError}</p>`) : ''}
+    ${carry && carry.changedPaths.length
+      ? raw(html`<div class="approval-carry"><p>Your approval at <code>${carry.fromHead.slice(0, 8)}</code> still covers ${carry.unchangedPaths.length} of ${carry.unchangedPaths.length + carry.changedPaths.length} files. Review the ${carry.changedPaths.length} changed files.</p>
+          <ul class="carry-agent-paths">${raw(carry.changedPaths.map((path) => `<li><code>${escapeHtml(path)}</code></li>`).join(''))}</ul></div>`)
+      : ''}
   </section>`;
   return html`<div class="compare-root review-guide-root" data-file-api="/api/v1/repos/${repo.owner_login}/${repo.name}/compare/${raw(encRange)}/file">
     ${raw(summary)}
@@ -227,6 +239,7 @@ function reviewTimeline(packet: reviews.ReviewPacket): string {
     <li><div><strong>${escapeHtml(review.reviewer.agent?.name ?? review.reviewer.login)}</strong>
       <span class="tag ${review.verdict === 'approve' ? 'ok' : 'err'}">${escapeHtml(review.verdict)}</span>
       ${review.current ? '' : '<span class="muted"> · previous head</span>'}
+      ${review.carriedFromHead ? `<span class="muted"> · carried from ${escapeHtml(review.carriedFromHead.slice(0, 8))}</span>` : ''}
       <span class="muted"> · ${timeAgo(Date.parse(review.updatedAt))}</span></div>
       ${review.body ? `<p>${escapeHtml(review.body)}</p>` : ''}</li>`).join(''))}</ol>`;
 }
@@ -250,12 +263,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   let coverageBody = html`<div class="flash warn">The base or head commit is unavailable for a bounded diff.</div>`;
   let configError: string | null = null;
   if (change.headSha) {
-    const diff = await compare.compare(
-      { env: c.env, repo: resolved.repo, bypass: false, waitUntil: (promise) => c.executionCtx.waitUntil(promise) },
-      change.base,
-      change.headSha,
-      { order: 'path', limit: '100' },
-    );
+    const diff = await compareChange(c.env, resolved.repo, { base: change.base }, change.headSha, (promise) => c.executionCtx.waitUntil(promise));
     if (diff.ok) {
       const response = diff.value.response;
       const inputs: CoverageFileInput[] = [];
@@ -324,7 +332,13 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
       const map = await buildCoverage(inputs, config);
       if (response.truncated || response.nextCursor !== undefined) map.truncated = true;
       const guide = fallbackGuide(map);
-      coverageBody = renderGuide(resolved.repo, encRange, response, guide, map, configError);
+      const principal = resolved.viewer
+        ? resolved.viewer.agent
+          ? `agent:${resolved.viewer.agent.agentId}`
+          : `user:${resolved.viewer.user.id}`
+        : null;
+      const carry = reviewPacket.carry.find((item) => item.principal === principal && item.changedPaths.length > 0) ?? null;
+      coverageBody = renderGuide(resolved.repo, encRange, response, guide, map, configError, carry);
     } else {
       coverageBody = html`<div class="flash warn">Diff coverage unavailable: ${diff.error}</div>`;
     }
@@ -333,6 +347,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   const reviewRows = reviewTimeline(reviewPacket);
   const writable = resolved.viewer !== null && (resolved.role === 'write' || resolved.role === 'admin');
   const csrf = writable ? csrfInput((await requestSession(c))?.csrfToken) : '';
+  const draft = change.mergePolicy === 'draft';
   const author =
     reviewPacket.author.agent && reviewPacket.author.login
       ? html`agent <strong>${reviewPacket.author.agent.name}</strong> for ${reviewPacket.author.login}`
@@ -373,10 +388,12 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
             <textarea id="review-body" name="body" rows="6" maxlength="65536"></textarea>
             <div class="review-actions">
               <button class="btn primary" type="submit" name="verdict" value="approve">Approve</button>
+              <button class="btn primary" type="submit" name="ship" value="1"${draft ? ' disabled' : ''}>Approve &amp; ship</button>
               <button class="btn" type="submit" name="verdict" value="request-changes">Request changes</button>
               <button class="btn" type="submit" disabled aria-describedby="comment-only-note">Comment</button>
             </div>
             <p id="comment-only-note" class="muted">Comment-only reviews are not supported by the current review service.</p>
+            ${draft ? raw(html`<p class="muted">Draft changes cannot be shipped until the merge policy changes.</p>`) : ''}
           </form>
         </section>`) : ''}
       </main>
@@ -417,7 +434,7 @@ changePages.post('/changes/:number/review', async (c) => {
   if (!auth.actor) return redirect(c, url, { error: 'Sign in to review this change.' });
   const refused = await sessionFormRefused(c, auth.actor, form);
   if (refused) return refused;
-  const verdict = form.verdict;
+  const verdict = form.verdict ?? (form.ship === '1' ? 'approve' : undefined);
   if (verdict !== 'approve' && verdict !== 'request-changes') {
     return redirect(c, url, { error: 'Comment-only reviews are not supported by the current review service.' });
   }
@@ -428,7 +445,7 @@ changePages.post('/changes/:number/review', async (c) => {
     branchRules: auth.branchRules ?? [],
     waitUntil: (promise) => c.executionCtx.waitUntil(promise),
   };
-  const result = await reviews.submitReview(cx, number, { body: String(form.body ?? ''), headSha: form.headSha }, verdict);
+  const result = await reviews.submitReview(cx, number, { body: String(form.body ?? ''), headSha: form.headSha, ship: form.ship === '1' }, verdict);
   if (!result.ok) return redirect(c, url, { error: result.error });
   return redirect(c, url, { notice: `${verdict === 'approve' ? 'Approval' : 'Request for changes'} recorded.` });
 });

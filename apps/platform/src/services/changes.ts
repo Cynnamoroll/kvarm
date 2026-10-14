@@ -39,6 +39,7 @@ import {
 } from './checks';
 import { defaultChecksGate, type ChecksGate, type ChecksSubject, type RequiredChecks } from './checksGate';
 import { treePairBody, treePairRating, type CompareBody } from './compare';
+import { carryApprovals } from './approvalCarry';
 import {
   blockFromRows,
   changeDependenciesStatement,
@@ -1576,6 +1577,7 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
   async (e) => {
     await refreshPathLinks(e.env, e.repoId, e.change.id, e.headSha);
   },
+  (e) => carryApprovals(e),
 ];
 
 async function repoWithRules(env: Env, repoId: string): Promise<{ repo: RepoRow; rules: BranchRule[] } | null> {

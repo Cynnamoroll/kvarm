@@ -582,7 +582,7 @@ export const OPERATIONS = Object.freeze([
     command: ['review', 'submit'],
     family: 'reviews',
     description:
-      "Review the change's current head (approve or request-changes) as a human or agent principal other than the author. A request-changes, or an approval next to one, escalates to a human.",
+      "Review the change's current head as a human or agent principal other than the author. An approval may also enable auto-merge when all gates pass; a request-changes, or an approval next to one, escalates to a human.",
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/reviews',
     params: [
@@ -591,13 +591,14 @@ export const OPERATIONS = Object.freeze([
       body('verdict', 'string', 'Review verdict', { required: true, enum: ['approve', 'request-changes'] }),
       body('headSha', 'string', 'The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
       body('body', 'string', 'Review comment'),
+      body('ship', 'boolean', 'Set merge policy to auto with this approval'),
     ],
   }),
   define({
     name: 'approve_change',
     command: ['review', 'approve'],
     family: 'reviews',
-    description: "Approve the change's current head. The approval is bound to that exact head; a head movement stales it.",
+    description: "Approve the change's current head. Set ship to enable auto-merge when all gates pass. The approval is bound to that exact head.",
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/approve',
     params: [
@@ -605,6 +606,7 @@ export const OPERATIONS = Object.freeze([
       CHANGE,
       body('headSha', 'string', 'The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
       body('body', 'string', 'Review comment'),
+      body('ship', 'boolean', 'Set merge policy to auto with this approval'),
     ],
   }),
   define({

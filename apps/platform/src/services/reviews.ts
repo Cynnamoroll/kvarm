@@ -24,7 +24,8 @@ import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
 import { modelFamilyEvidence, type EvidenceLevel } from './provenance';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
-import { autoMerge, branchRef, fail, guarded, parseNumber, readChange, type ChangeContext } from './changes';
+import { agentMergeDenial, autoMerge, branchRef, fail, guarded, parseNumber, readChange, type ChangeContext } from './changes';
+import { carryView, storeReviewFingerprint, type CarryView, type CarryViewReview } from './approvalCarry';
 import {
   HUMAN_MODEL_FAMILY,
   parseReviewFacts,
@@ -120,6 +121,8 @@ interface ReviewRow {
   model_family: string | null;
   verdict: ReviewVerdict;
   body: string | null;
+  carried_from_head: string | null;
+  carried_from_review: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -164,6 +167,7 @@ export interface ReviewView {
   /** Reviews of an older head are stale and never count. */
   current: boolean;
   body: string | null;
+  carriedFromHead: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -197,6 +201,7 @@ export interface ReviewPacket {
   blockers: ReviewBlocker[];
   reviews: ReviewView[];
   escalations: EscalationView[];
+  carry: CarryView[];
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -238,6 +243,7 @@ function reviewView(r: ReviewRow, headSha: string | null, author: Pick<AuthorVie
     headSha: r.head_sha,
     current: r.head_sha === headSha,
     body: r.body,
+    carriedFromHead: r.carried_from_head,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
   };
@@ -281,7 +287,7 @@ function packetStatements(db: D1Database, repoId: string, number: number): D1Pre
     db
       .prepare(
         `SELECT r.id, r.head_sha, r.principal, r.user_id, r.user_login, r.agent_id, r.agent_name, r.model_family, r.verdict, r.body,
-                r.created_at, r.updated_at
+                r.carried_from_head, r.carried_from_review, r.created_at, r.updated_at
            FROM change_reviews r WHERE r.change_set_id = ${CHANGE_ID}
           ORDER BY r.updated_at DESC, r.id LIMIT ${REVIEW_LIMITS.reviewsMax}`,
       )
@@ -340,6 +346,7 @@ function buildPacket(p: PacketRead): ReviewPacket {
     blockers: gate.blockers,
     reviews: p.reviews.map((r) => reviewView(r, c.head_sha, author)),
     escalations: p.escalations.map(escalationView),
+    carry: [],
   };
 }
 
@@ -364,7 +371,26 @@ export function getReviewPacket(env: Env, repo: RepoRow, rawNumber: string): Pro
     if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const read = packetRead(await env.DB.batch(packetStatements(env.DB, repo.id, number)), 0);
     if (!read) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
-    return { ok: true, value: buildPacket(await withRecordedEscalations(env, repo.id, read)) };
+    const withEscalations = await withRecordedEscalations(env, repo.id, read);
+    const packet = buildPacket(withEscalations);
+    if (packet.headSha) {
+      const carryReviews: CarryViewReview[] = withEscalations.reviews.map((review) => ({
+        id: review.id,
+        headSha: review.head_sha,
+        principal: review.principal,
+        verdict: review.verdict,
+        carriedFromHead: review.carried_from_head,
+        carriedFromReview: review.carried_from_review,
+      }));
+      packet.carry = await carryView(
+        env,
+        repo,
+        { id: read.change.id, number, base: read.change.base_ref, state: read.change.state, head_sha: packet.headSha },
+        packet.headSha,
+        carryReviews,
+      );
+    }
+    return { ok: true, value: packet };
   });
 }
 
@@ -429,6 +455,7 @@ interface ReviewInput {
   verdict: ReviewVerdict;
   headSha: string | null;
   body: string | null;
+  ship: boolean;
 }
 
 function parseReview(input: unknown, verdict: ReviewVerdict | null): ServiceResult<ReviewInput> {
@@ -452,7 +479,8 @@ function parseReview(input: unknown, verdict: ReviewVerdict | null): ServiceResu
     }
     body = b.body;
   }
-  return { ok: true, value: { verdict: v as ReviewVerdict, headSha, body } };
+  if (b.ship !== undefined && typeof b.ship !== 'boolean') return fail(422, 'ship must be a boolean', 'INVALID_SHIP');
+  return { ok: true, value: { verdict: v as ReviewVerdict, headSha, body, ship: b.ship === true } };
 }
 
 interface ReviewTargetRow {
@@ -463,6 +491,7 @@ interface ReviewTargetRow {
   author_id: string | null;
   agent_meta: string | null;
   merge_policy: string;
+  base_ref: string;
   reviewer_family: string | null;
 }
 
@@ -486,11 +515,12 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     const parsed = parseReview(input, verdict);
     if (!parsed.ok) return parsed;
     const p = parsed.value;
+    if (p.ship && p.verdict !== 'approve') return fail(422, 'ship requires an approve verdict', 'SHIP_REQUIRES_APPROVE');
     const me = actorPrincipal(cx.actor);
     const db = cx.env.DB;
     const target = await db
       .prepare(
-        `SELECT c.id, c.number, c.state, c.head_sha, c.author_id, c.agent_meta, c.merge_policy,
+        `SELECT c.id, c.number, c.state, c.head_sha, c.author_id, c.agent_meta, c.merge_policy, c.base_ref,
                 (SELECT a.model_family FROM agents a WHERE a.id = ?3) AS reviewer_family
            FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2`,
       )
@@ -499,6 +529,11 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     if (!target) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (target.state !== 'open' && target.state !== 'conflicted') return fail(409, `a ${target.state} change cannot be reviewed`, 'CHANGE_NOT_OPEN');
     if (!target.head_sha) return fail(409, 'the change has no head commit', 'NO_HEAD');
+    if (p.ship && target.merge_policy === 'draft') return fail(409, 'a draft change cannot be shipped', 'CHANGE_DRAFT');
+    if (p.ship) {
+      const denied = agentMergeDenial(cx.actor, target.base_ref, 'merge');
+      if (denied) return denied;
+    }
     if (p.headSha !== null && p.headSha !== target.head_sha) {
       return { ...fail(409, `the change's head is ${target.head_sha}, not the reviewed ${p.headSha}; review the new head`, 'HEAD_MOVED'), headSha: target.head_sha } as ServiceResult<never>;
     }
@@ -547,17 +582,29 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
              FROM change_sets c WHERE c.id = ?2 AND c.head_sha = ?3 AND c.state IN ('open', 'conflicted')
            ON CONFLICT (change_set_id, head_sha, principal) DO UPDATE SET
              verdict = excluded.verdict, body = excluded.body, model_family = excluded.model_family, token_id = excluded.token_id,
-             user_login = excluded.user_login, agent_name = excluded.agent_name, updated_at = excluded.updated_at`,
+             user_login = excluded.user_login, agent_name = excluded.agent_name, updated_at = excluded.updated_at,
+             carried_from_head = NULL, carried_from_review = NULL`,
         )
         .bind(crypto.randomUUID(), target.id, headSha, me.id, me.userId, me.login, me.agentId, me.agentName, me.tokenId, family, p.verdict, p.body, now),
+      ...(p.ship
+        ? [
+            db
+              .prepare(
+                `UPDATE change_sets SET merge_policy = 'auto', updated_at = ?3
+                  WHERE id = ?1 AND head_sha = ?2 AND state IN ('open', 'conflicted')`,
+              )
+              .bind(target.id, headSha, now),
+          ]
+        : []),
       ...effects,
       ...packetStatements(db, cx.repo.id, number),
     ]);
-    const read = packetRead(results, 1 + effects.length);
+    const read = packetRead(results, 1 + (p.ship ? 1 : 0) + effects.length);
     const mine = read?.reviews.find((r) => r.principal === me.id && r.head_sha === headSha && r.updated_at === now);
     if (!read || !mine) {
       return fail(409, "the change's head moved or the change closed while the review was recorded; review the current head", 'HEAD_MOVED');
     }
+    if (p.verdict === 'approve') await storeReviewFingerprint(cx.env, cx.repo, { base: target.base_ref }, headSha, mine.id);
     let packet = buildPacket(await withRecordedEscalations(cx.env, cx.repo.id, read));
     packet = await proceedPerPolicy(cx, number, packet);
     return { ok: true, value: { created: mine.created_at === now, review: reviewView(mine, headSha, packet.author), packet } };
@@ -814,4 +861,3 @@ export async function pendingReviews(env: Env, repo: RepoRow, q: { limit?: strin
     },
   };
 }
-

@@ -69,6 +69,7 @@ import {
   type MergePolicy,
 } from './changes';
 import { guardPending } from './checks';
+import { headFingerprint, sameFingerprint } from './approvalCarry';
 import type { ChecksGate, RequiredChecks } from './checksGate';
 import {
   blockFromRows,
@@ -826,6 +827,7 @@ interface WindowRow extends EntryRow, ReviewFactsRow {
   c_head: string | null;
   c_title: string;
   c_head_ref: string;
+  c_base_ref: string;
   /** The prepared commit the CI jobs of the recorded composed tree run on (null when none are queued). */
   ci_staged: string | null;
 }
@@ -919,7 +921,8 @@ function windowStatements(db: D1Database, repoId: string, ref: string): D1Prepar
     // MIN() row, which reads the (repo, tree) index range once instead of reading it and then sorting it.
     db
       .prepare(
-        `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title, c.head_ref AS c_head_ref,
+        `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title,
+                c.head_ref AS c_head_ref, c.base_ref AS c_base_ref,
                 ${reviewFactsColumns('c')},
                 CASE WHEN q.tree_sha IS NOT NULL THEN
                   (SELECT head_sha FROM (SELECT j.head_sha, MIN(j.created_at) FROM ci_jobs j INDEXED BY idx_ci_jobs_tree
@@ -1160,7 +1163,26 @@ async function trainPass(
     }
     if (e.c_head !== e.head_sha) {
       if (e.c_policy !== 'auto') {
-        exit('HEAD_MOVED', `the change's head moved from the approved ${e.head_sha} to ${e.c_head}; enqueue again to approve the new head`);
+        const oldFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, e.head_sha);
+        const newFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, e.c_head);
+        if (!sameFingerprint(oldFingerprint, newFingerprint)) {
+          exit('HEAD_MOVED', `the change's head moved from the approved ${e.head_sha} to ${e.c_head}; enqueue again to approve the new head`);
+          continue;
+        }
+        push(
+          null,
+          db
+            .prepare(
+              `UPDATE merge_queue SET head_sha = ?3, state = 'queued', generation = generation + 1, attempts = 0,
+                      base_sha = NULL, tree_sha = NULL, checks_state = NULL, updated_at = ?4
+                WHERE repo_id = ?5 AND id = ?1 AND generation = ?2 AND active = 1 AND state != 'publishing'`,
+            )
+            .bind(e.id, plan.generation, e.c_head, now, e.repo_id),
+        );
+        plan.generation += 1;
+        plan.headSha = e.c_head;
+        plan.next = 'queued';
+        out.progress = true;
         continue;
       }
       // An auto change needs no approval: the train follows its head.
@@ -1180,8 +1202,23 @@ async function trainPass(
     const headRef = branchRef(e.c_head_ref);
     const moved = liveHeadRefusal(headRef, plan.headSha, tips.get(headRef));
     if (moved) {
+      const movedHead = moved.headSha;
+      if (!movedHead) {
+        plan.next = 'queued';
+        blocked = true;
+        out.waiting = true;
+        continue;
+      }
       if (e.c_policy !== 'auto') {
-        exit('HEAD_MOVED', `${headRef} moved from the approved ${plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
+        const oldFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, plan.headSha);
+        const newFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, movedHead);
+        if (sameFingerprint(oldFingerprint, newFingerprint)) {
+          plan.next = 'queued';
+          blocked = true;
+          out.waiting = true;
+          continue;
+        }
+        exit('HEAD_MOVED', `${headRef} moved from the approved ${plan.headSha} to ${movedHead}; enqueue again to approve the new head`);
         continue;
       }
       // The auto change follows its new head once its push event records it (that event kicks the train); the partition waits until then.
@@ -2378,6 +2415,18 @@ async function publishChain(
       // event records it (that event kicks the train). The candidates stacked
       // on it wait for the next pass.
       if (c.change?.merge_policy !== 'auto') {
+        const movedHead = moved.headSha;
+        if (movedHead) {
+          const [oldFingerprint, newFingerprint] = await Promise.all([
+            headFingerprint(env, repo, { base: c.e.c_base_ref }, c.plan.headSha),
+            headFingerprint(env, repo, { base: c.e.c_base_ref }, movedHead),
+          ]);
+          if (sameFingerprint(oldFingerprint, newFingerprint)) {
+            await back(c, 'queued');
+            c.result = { kind: 'pending' };
+            continue;
+          }
+        }
         await exit(c, 'HEAD_MOVED', `${headRef} moved from the approved ${c.plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
       } else {
         await back(c, 'queued');
@@ -2694,7 +2743,24 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
   // must not stale the fresh approval or regress an auto entry's head.
   const active = `SELECT q.id FROM merge_queue q WHERE q.change_set_id = ?1 AND q.active = 1 AND q.state != 'publishing' AND q.head_sha = ?5`;
   let ref: string | null;
-  if (e.change.policy === 'auto') {
+  let equivalent = false;
+  if (e.change.policy !== 'auto') {
+    const found = await db
+      .prepare(
+        `SELECT r.*, c.base_ref FROM repos r JOIN change_sets c ON c.repo_id = r.id
+          WHERE r.id = ?1 AND c.id = ?2`,
+      )
+      .bind(e.repoId, e.change.id)
+      .first<RepoRow & { base_ref: string }>();
+    if (found) {
+      const [oldFingerprint, newFingerprint] = await Promise.all([
+        headFingerprint(e.env, found, { base: found.base_ref }, queued),
+        headFingerprint(e.env, found, { base: found.base_ref }, e.headSha),
+      ]);
+      equivalent = sameFingerprint(oldFingerprint, newFingerprint);
+    }
+  }
+  if (e.change.policy === 'auto' || equivalent) {
     const row = await db
       .prepare(
         `UPDATE merge_queue SET head_sha = ?2, state = 'queued', generation = generation + 1, attempts = 0, base_sha = NULL, tree_sha = NULL,

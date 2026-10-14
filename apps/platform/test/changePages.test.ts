@@ -177,6 +177,7 @@ describe('change pages', () => {
     expect(page.text).toContain('src');
     expect(page.text).toContain('name="_csrf"');
     expect(page.text).toContain('Request changes');
+    expect(page.text).toContain('Approve &amp; ship');
   });
 
   it('requires CSRF for a session approve and records the review', async () => {
@@ -200,5 +201,49 @@ describe('change pages', () => {
     expect(accepted.status).toBe(303);
     expect(await env.DB.prepare('SELECT verdict FROM change_reviews WHERE repo_id = ?').bind(repoIds.csrf).first<{ verdict: string }>())
       .toMatchObject({ verdict: 'approve' });
+  });
+
+  it('renders a partial approval carry summary and tags matching and changed files', async () => {
+    const { repo, head } = await seedChange('partial-carry');
+    await env.DB.prepare(
+      'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(repoIds['partial-carry'], userIds[REVIEWER], 'write', userIds[OWNER], Date.now(), Date.now()).run();
+    const reviewerToken = (await mintPAT(env, userIds[REVIEWER]!, 'reviewer', FULL)).token;
+    const approved = await request('POST', `/api/v1/repos/${OWNER}/partial-carry/changes/1/approve`, {
+      token: reviewerToken,
+      json: { headSha: head },
+    });
+    expect(approved.status).toBe(201);
+    const main = repo.refs.get('refs/heads/main')!;
+    const next = await commit(repo, {
+      'README.md': 'Review this change\n',
+      'src/app.ts': 'export const value = 3;\n',
+      '.kvarm/review.json': '{"scrutinize":["src/**"]}',
+    }, [head], 'partial');
+    repo.refs.set('refs/heads/feature', next.sha);
+    await env.DB.prepare('UPDATE change_sets SET head_sha = ? WHERE repo_id = ? AND number = 1').bind(next.sha, repoIds['partial-carry']).run();
+    expect(main).not.toBe(head);
+
+    const browser = await browserSession(REVIEWER);
+    const page = await browser(`/${OWNER}/partial-carry/changes/1`);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('Your approval at');
+    expect(page.text).toContain('still covers 2 of 3 files');
+    expect(page.text).toContain('Review the 1 changed files.');
+    expect(page.text).toContain('carry-unchanged');
+    expect(page.text).toContain('carry-changed');
+    expect(page.text).toContain('<code>src/app.ts</code>');
+  });
+
+  it('disables approve-and-ship for a draft change with a clear reason', async () => {
+    await seedChange('draft-ship');
+    await env.DB.prepare("UPDATE change_sets SET merge_policy = 'draft' WHERE repo_id = ? AND number = 1").bind(repoIds['draft-ship']).run();
+    await env.DB.prepare(
+      'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(repoIds['draft-ship'], userIds[REVIEWER], 'write', userIds[OWNER], Date.now(), Date.now()).run();
+    const browser = await browserSession(REVIEWER);
+    const page = await browser(`/${OWNER}/draft-ship/changes/1`);
+    expect(page.text).toContain('name="ship" value="1" disabled');
+    expect(page.text).toContain('Draft changes cannot be shipped until the merge policy changes.');
   });
 });

@@ -96,7 +96,7 @@ describe('operation registry', () => {
 
   it('registers review, approval and escalation operations', () => {
     expect(findOperation('review_change')).toMatchObject({ command: ['review', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/reviews', family: 'reviews' });
-    expect(findOperation('review_change')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'verdict', 'headSha', 'body']);
+    expect(findOperation('review_change')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'verdict', 'headSha', 'body', 'ship']);
     expect(findOperation('approve_change')).toMatchObject({ command: ['review', 'approve'], method: 'POST', path: '/repos/{repo}/changes/{number}/approve' });
     expect(findOperation('request_changes')).toMatchObject({ command: ['review', 'request-changes'], method: 'POST', path: '/repos/{repo}/changes/{number}/request-changes' });
     expect(findOperation('get_reviews')).toMatchObject({ command: ['review', 'get'], method: 'GET', path: '/repos/{repo}/changes/{number}/reviews', readOnly: true });
@@ -106,8 +106,8 @@ describe('operation registry', () => {
     expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
-    const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40) });
-    expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40) }]);
+    const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40), ship: true });
+    expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40), ship: true }]);
   });
 
   it('registers the audit export and provenance key operations', () => {
