@@ -28,6 +28,40 @@ export interface PageOptions {
   inboxCount?: InboxCount | null;
   runningCount?: number;
   repos?: Array<{ ownerLogin: string; name: string }>;
+  /** Request path: with APP_ORIGIN it becomes the canonical and og:url. */
+  path?: string;
+  description?: string;
+  /** Server-rendered `?mode=` so a client without JavaScript gets the same view. */
+  mode?: 'human' | 'agent';
+  /** schema.org JSON-LD for the page. */
+  jsonLd?: unknown;
+}
+
+const DEFAULT_DESCRIPTION =
+  'Git for people and their agents: git smart-HTTP, a REST API, an MCP server and review pages on Cloudflare Artifacts.';
+
+/** Identity metadata agents use for citations and previews; the Markdown twin is advertised on every page. */
+function headMetadata(env: Env, opts: PageOptions, title: string): string {
+  const origin = publicOrigin(env);
+  const description = opts.description ?? DEFAULT_DESCRIPTION;
+  const url = origin && opts.path ? `${origin}${opts.path}` : null;
+  const markdown = opts.path === '/' ? '/index.md' : null;
+  const lines = [
+    `<meta name="description" content="${escapeHtml(description)}">`,
+    url ? `<link rel="canonical" href="${escapeHtml(url)}">` : '',
+    markdown ? `<link rel="alternate" type="text/markdown" href="${markdown}">` : '',
+    '<link rel="describedby" type="text/markdown" href="/llms.txt">',
+    '<link rel="service-desc" type="application/vnd.oai.openapi+json" href="/openapi.json">',
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:site_name" content="${escapeHtml(siteName(env))}">`,
+    `<meta property="og:title" content="${escapeHtml(title)}">`,
+    `<meta property="og:description" content="${escapeHtml(description)}">`,
+    url ? `<meta property="og:url" content="${escapeHtml(url)}">` : '',
+    origin ? `<meta property="og:image" content="${escapeHtml(`${origin}/assets/brand/og.png`)}">` : '',
+    // `<` is escaped so page text can never close the script element.
+    opts.jsonLd ? `<script type="application/ld+json">${JSON.stringify(opts.jsonLd).replace(/</g, '\\u003c')}</script>` : '',
+  ];
+  return lines.filter(Boolean).join('\n');
 }
 
 export function publicOrigin(env: Env): string | null {
@@ -85,8 +119,7 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
   const login = opts.userLogin?.trim() ?? '';
   const signedIn = login.length > 0;
   const initial = login.slice(0, 1).toUpperCase() || '?';
-  const origin = publicOrigin(env);
-  const previewImage = origin ? `${origin}/assets/brand/og.png` : null;
+  const title = opts.title && opts.title !== name ? `${opts.title} · ${name}` : name;
   const inboxWaiting = opts.inboxCount?.count ?? 0;
   const plus = inboxWaiting > 0 && opts.inboxCount?.more ? '+' : '';
   const badge = `${(opts.needsYouCount ?? 0) + inboxWaiting}${plus}`;
@@ -170,11 +203,12 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
   const bodyClass = ['k-app', opts.bodyClass].filter(Boolean).join(' ');
 
   return html`<!DOCTYPE html>
-<html lang="en" class="k-app">
+<html lang="en" class="k-app"${raw(opts.mode ? ` data-mode="${opts.mode}"` : '')}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${opts.title ? `${opts.title} · ${name}` : name}</title>
+<title>${title}</title>
+${raw(headMetadata(env, opts, title))}
 <script>{const q=new URLSearchParams(location.search).get("mode");let m=q;try{m=m||localStorage.getItem("kvarm-mode")}catch{}document.documentElement.dataset.mode=m==="agent"?"agent":"human"}</script>
 <style>${raw(CRITICAL_CSS.value)}</style>
 <link rel="stylesheet" href="/assets/tokens.css">
@@ -185,7 +219,6 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
 <link rel="apple-touch-icon" href="/assets/brand/apple-touch-icon.png">
 <link rel="manifest" href="/assets/brand/site.webmanifest">
 <meta name="theme-color" content="#050608">
-${previewImage ? raw(`<meta property="og:image" content="${escapeHtml(previewImage)}">`) : ''}
 ${raw(headStyles)}
 ${raw(opts.head ?? '')}
 <script src="/assets/mode.js" type="module"></script>

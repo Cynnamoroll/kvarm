@@ -2,6 +2,11 @@ import { Hono } from 'hono';
 import { GIT_PATH_RE, handleGitRequest } from './routes/git';
 import { authRoutes } from './routes/auth';
 import { api, persistSessionCookies } from './routes/api';
+import { getSessionInfo } from './auth/workos';
+import { agentDocs } from './routes/agentDocs';
+import { discoveryLinkHeader, notFoundMarkdown, prefersMarkdown } from './services/agentDiscovery';
+import { layout } from './web/render';
+import { html } from '@kvarm/ui';
 import { sessionCsrf } from './routes/pageCsrf';
 import { tenancyApi } from './routes/api/tenancy';
 import { agentsApi } from './routes/api/agents';
@@ -83,6 +88,17 @@ app.use('*', persistSessionCookies);
 // routes/pageCsrf.ts csrfExempt paths skip it.
 app.use('*', sessionCsrf);
 
+// Every HTML page points agents at the discovery files (RFC 8288), so they
+// learn about llms.txt and the API contract before parsing a page.
+app.use('*', async (c, next) => {
+  await next();
+  if (c.res.headers.get('content-type')?.startsWith('text/html') && !c.res.headers.has('link')) {
+    c.res.headers.set('link', discoveryLinkHeader());
+  }
+});
+
+app.route('/', agentDocs);
+
 app.route('/auth', authRoutes);
 app.route('/api/v1', api);
 app.route('/api/v1', tenancyApi);
@@ -132,10 +148,26 @@ app.all('*', async (c) => {
   // sessionCsrf may already have read a form post's body; assets never need it.
   const req = c.req.raw.bodyUsed ? new Request(c.req.url, { method: c.req.method, headers: c.req.raw.headers }) : c.req.raw;
   const res = await c.env.ASSETS.fetch(req);
-  if (res.status === 404) {
-    return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+  if (res.status !== 404) return res;
+  // A miss is a real 404: JSON under the API, a page for browsers, Markdown for agents.
+  const path = new URL(c.req.url).pathname;
+  if (path === '/api/v1' || path.startsWith('/api/v1/')) return c.json({ error: 'not found', code: 'NOT_FOUND' }, 404);
+  const accept = c.req.header('accept') ?? '';
+  if (accept.includes('text/html') && !prefersMarkdown(accept)) {
+    // No refresh: a rotated session cookie could not reach this response.
+    const { session } = await getSessionInfo(c.req.raw, c.env, { refresh: false });
+    const body = html`<section class="panel"><div class="panel-head hud"><b>404 · Not found</b></div>
+      <div class="k-panel-body"><p class="muted">Nothing is published at <code>${path}</code>.</p>
+      <p><a class="btn btn-primary" href="/">Home</a> <a class="btn" href="/llms.txt">llms.txt</a></p></div></section>`;
+    return new Response(layout(c.env, { title: 'Not found', userLogin: session?.user.login ?? null }, body), {
+      status: 404,
+      headers: { 'content-type': 'text/html; charset=utf-8', vary: 'Accept' },
+    });
   }
-  return res;
+  return new Response(notFoundMarkdown(c.env, path), {
+    status: 404,
+    headers: { 'content-type': 'text/markdown; charset=utf-8', vary: 'Accept' },
+  });
 });
 
 /** Every mounted route, for the page CSRF coverage test (routes/pageCsrf.ts). */

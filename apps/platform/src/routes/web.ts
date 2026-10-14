@@ -24,6 +24,7 @@ import { linkWorkOSIdentity } from '../services/identity';
 import type { Actor } from '../services/authz';
 import { listMyPendingApprovals, listMySandboxes } from '../services/sandboxes';
 import { landingPage } from '../web/landing';
+import { homeJsonLd, homeMarkdown, prefersMarkdown, SUMMARY } from '../services/agentDiscovery';
 import { requestSession, type App } from './api';
 
 export const web = new Hono<App>();
@@ -64,7 +65,9 @@ function page(
 ): Response {
   const pathname = new URL(c.req.url).pathname;
   const active = shell.active ?? (pathname === '/' ? 'home' : pathname.startsWith('/fleet') ? 'fleet' : pathname === '/settings/tokens' ? 'tokens' : undefined);
-  return new Response(layout(c.env, { ...shell, title, userLogin: ctx.user?.login ?? null, active }, body), {
+  const queryMode = c.req.query('mode');
+  const mode = queryMode === 'agent' || queryMode === 'human' ? queryMode : undefined;
+  return new Response(layout(c.env, { path: pathname, mode, ...shell, title, userLogin: ctx.user?.login ?? null, active }, body), {
     status,
     headers: { 'content-type': 'text/html; charset=utf-8' },
   });
@@ -129,16 +132,24 @@ function iso(ms: number | null): string {
 // ---------------------------------------------------------------------------
 
 web.get('/', async (c) => {
+  // The same URL in Markdown for agents that ask for it; Vary keeps caches from mixing the two.
+  if (prefersMarkdown(c.req.header('accept'))) {
+    return new Response(homeMarkdown(c.env), { headers: { 'content-type': 'text/markdown; charset=utf-8', vary: 'Accept' } });
+  }
   const ctx = await pageCtx(c);
   const origin = requestOrigin(c.env, c.req.url);
   if (!ctx.user) {
     const body = landingPage(origin);
-    return page(c, ctx, 'Kvarm', body, 200, {
+    const res = page(c, ctx, 'Kvarm', body, 200, {
       landing: true,
       bodyClass: 'k-landing',
       stylesheets: ['/assets/landing.css'],
       scriptUrl: '/assets/landing.js',
+      description: SUMMARY,
+      jsonLd: homeJsonLd(c.env, origin),
     });
+    res.headers.set('vary', 'Accept');
+    return res;
   }
 
   const actor = sessionActor(ctx as AuthedPageCtx);
@@ -246,12 +257,14 @@ kvarm sandbox mine --limit 50</pre>
       </div>
     </section>
   `;
-  return page(c, ctx, 'Home', body, 200, {
+  const res = page(c, ctx, 'Home', body, 200, {
     active: 'home',
     needsYouCount: pendingCount ?? undefined,
     runningCount: runningCount ?? undefined,
     repos: repos.map((repo) => ({ ownerLogin: repo.owner_login, name: repo.name })),
   });
+  res.headers.set('vary', 'Accept');
+  return res;
 });
 
 web.post('/new-repo', async (c) => {

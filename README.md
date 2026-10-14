@@ -302,6 +302,22 @@ Example client configuration (Claude Code):
 claude mcp add --transport http kvarm "$KVARM_BASE_URL/mcp" --header "Authorization: Bearer $KVARM_PAT"
 ```
 
+### Agent discovery
+
+A deployment describes itself to agents that arrive without setup. Every file is public, needs no JavaScript, and builds its absolute URLs from `APP_ORIGIN`:
+
+| path | contents |
+| --- | --- |
+| `/llms.txt` (also `/.well-known/llms.txt`) | described index of the files below, the MCP endpoint and the git conventions |
+| `/index.md`, or `GET /` with `Accept: text/markdown` | the home page as Markdown (`Vary: Accept`) |
+| `/auth.md` | how an agent gets, uses and revokes a token |
+| `/openapi.json` | OpenAPI 3.1 for `/api/v1`, generated from the operation registry (`packages/ops/src/openapi.js`); each `operationId` is the MCP tool name |
+| `/.well-known/api-catalog` | RFC 9727 linkset pointing at the OpenAPI document |
+| `/.well-known/mcp/server-card.json` | the MCP server's transport, authentication and tool count |
+| `/robots.txt`, `/sitemap.xml` | open crawling; the sitemap lists the public repositories (one bounded D1 read, at most 1,000) |
+
+Pages carry a canonical URL, a description, Open Graph tags and discovery `Link` headers. The home page also carries JSON-LD and a Markdown alternate. `?mode=agent` renders the agent view on the server. A path that does not exist answers a real `404`: Markdown for agents, a page for browsers, and JSON under `/api/v1`. To check a deployment, run `curl -s -H 'Accept: text/markdown' <origin>/`, or scan it with [is-agentic.com](https://is-agentic.com).
+
 ## API reference
 
 All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 UTC timestamps, and fail with `{"error": "...", "code": "..."}`. Authenticate with `Authorization: Bearer kvarm_pat_...` (the PAT needs the `api` scope) or an agent token; a browser signed in through WorkOS authenticates with its session cookie, and state-changing calls carrying that cookie count only when they come from the same origin. Git uses the token as the basic-auth password. Every response carries `x-kvarm-cost` (`d1`, `rr`, `rw`, `art`, `do`, `r2a`, `r2b`, `q`, `sub`, `cache`); compare responses also carry `x-kvarm-cache: hit|miss|bypass`.
