@@ -140,7 +140,7 @@ web.get('/', async (c) => {
   const origin = requestOrigin(c.env, c.req.url);
   if (!ctx.user) {
     const body = landingPage(origin);
-    const res = page(c, ctx, 'Kvarm', body, 200, {
+    const res = page(c, ctx, 'The next-generation git platform', body, 200, {
       landing: true,
       bodyClass: 'k-landing',
       stylesheets: ['/assets/landing.css'],
