@@ -439,3 +439,20 @@ describe('generation-keyed caches', () => {
     expect(await repoViewGeneration(row)).toBe(g);
   });
 });
+
+describe('repo view generation covers repo metadata', () => {
+  it('changes when the description or visibility changes, with no push at all', async () => {
+    const repo = {
+      id: 'r1',
+      pushed_at: 5,
+      description: 'Imported from https://github.com/colinhacks/zod',
+      visibility: 'public',
+    } as Pick<RepoRow, 'id' | 'pushed_at' | 'description' | 'visibility'>;
+    const before = await repoViewGeneration(repo);
+    expect(await repoViewGeneration(repo)).toBe(before);
+    const edited = await repoViewGeneration({ ...repo, description: 'Demo — an example import of colinhacks/zod' });
+    expect(edited).not.toBe(before);
+    const flipped = await repoViewGeneration({ ...repo, visibility: 'private' });
+    expect(flipped).not.toBe(before);
+  });
+});

@@ -168,12 +168,17 @@ describe('retained cached-public row after a direct D1 visibility flip', () => {
     const outsiderPack = await read(await call(pack, packInit(basic(tok.outsider))));
     expect(outsiderPack.status).toBe(200);
 
-    // Another colo flips visibility; this colo's caches are untouched.
+    // Another colo flips visibility; this colo's caches are untouched. The
+    // stale entries live at the generation they were cached under — the read
+    // path derives a fresh generation per request, which now also rotates on
+    // the metadata itself, so pin the entry's own key before the flip.
     await writeCachedJson(retainedRowKey(name), await repoRow(name), 60);
+    const stalePageKey = await pageKey(name, page);
+    const staleRefsKey = await refsKey(name, null);
     await flipInD1(name, 'private');
     expect((await readCachedJson<RepoRow>(retainedRowKey(name)))?.visibility).toBe('public');
-    expect(await caches.default.match(await pageKey(name, page))).toBeTruthy();
-    expect(await caches.default.match(await refsKey(name, null))).toBeTruthy();
+    expect(await caches.default.match(stalePageKey)).toBeTruthy();
+    expect(await caches.default.match(staleRefsKey)).toBeTruthy();
 
     const upstreamBefore = upstreamCalls.length;
     const deniedBudget = { art: 0, do: 0, sub: 0 };
