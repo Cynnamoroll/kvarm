@@ -331,6 +331,30 @@ describe('queue dispatcher', () => {
     expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows[3]!.id });
   });
 
+  it('orders two pushes of the same millisecond by succession, not by identity', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('same-ms');
+    const main = 'refs/heads/main';
+    // Source ids chosen so the older push has the larger identity (the identity tiebreak alone would pick it).
+    let older = '';
+    let newer = '';
+    for (let i = 0; i < 64 && !older; i++) {
+      const o = { namespace: 'default', sourceId: `older-${i}` } as Parameters<typeof eventIdentity>[0];
+      const n = { namespace: 'default', sourceId: `newer-${i}` } as Parameters<typeof eventIdentity>[0];
+      if ((await eventIdentity(o, 'm')) > (await eventIdentity(n, 'm'))) [older, newer] = [`older-${i}`, `newer-${i}`];
+    }
+    expect(older).not.toBe('');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    const bc = pushBody(repo.artifactsName, main, B, C, iso(T0 + 5000));
+    (bc as Record<string, unknown>).id = newer;
+    const ab = pushBody(repo.artifactsName, main, A, B, iso(T0 + 5000));
+    (ab as Record<string, unknown>).id = older;
+    // The newer push arrives first; the push it follows ties with it and must not displace it.
+    await deliver(env, [{ body: bc }]);
+    await deliver(env, [{ body: ab }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: C });
+  });
+
   it('never moves ref state or pushed_at backwards for out-of-order events', async () => {
     const wf = new FakeWorkflow();
     const env = envWith(wf);
