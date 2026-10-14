@@ -10,10 +10,10 @@ import { Hono, type Context } from 'hono';
 import { html, raw, timeAgo } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
 import { listReposForOwner } from '../db/repos';
-import { clientIp, requestCredential, requestSession, type ApiActor, type App as ApiApp } from './api';
-import { sessionFormRefused } from './repoPages';
+import { requestCredential, requestSession, type ApiActor, type App as ApiApp } from './api';
+import { sessionFormRefused, resolveRepo as sharedResolveRepo, type Resolved } from './repoPages';
 import { appLayout, csrfInput } from '../web/render';
-import { resolveRepoAccess } from '../services/access';
+import { repoTabHref, type RepoTab } from '../render/repoShell';
 import { getRepo } from '../db/repos';
 import * as environments from '../services/environments';
 import * as sandboxes from '../services/sandboxes';
@@ -29,12 +29,7 @@ export const fleetPages = new Hono<App>();
 
 const INSTANCES = ['basic', 'standard-1', 'standard-2', 'standard-3', 'standard-4'] as const;
 
-interface Resolved {
-  repo: RepoRow;
-  viewer: ApiActor | null;
-  role: string;
-}
-
+// Cookie-appending finish: this router does not mount persistSessionCookies.
 function finish(c: Context<App>, res: Response): Response {
   for (const cookie of c.get('refreshCookies') ?? []) res.headers.append('Set-Cookie', cookie);
   return res;
@@ -48,22 +43,7 @@ function notFound(c: Context<App>): Response {
   return finish(c, new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } }));
 }
 
-async function resolveRepo(c: Context<App>): Promise<Resolved | null> {
-  const owner = c.req.param('owner');
-  const name = c.req.param('repo');
-  if (!owner || !name) return null;
-  const access = await resolveRepoAccess(c.env, {
-    owner,
-    name,
-    need: 'read',
-    transport: 'page',
-    credential: await requestCredential(c),
-    clientIp: clientIp(c),
-    rejectedCredentialAsAnonymous: true,
-  });
-  if (!access.ok) return null;
-  return { repo: access.repo, viewer: access.actor, role: access.role };
-}
+const resolveRepo = (c: Context<App>): Promise<Resolved | null> => sharedResolveRepo(c);
 
 async function sessionActor(c: Context<App>): Promise<ApiActor | null> {
   const credential = await requestCredential(c);
@@ -149,27 +129,7 @@ function flash(message: string | undefined, kind: 'ok' | 'err' = 'err'): string 
   return message ? html`<div class="k-note ${kind === 'err' ? 'risk' : 'signal'}">${message}</div>` : '';
 }
 
-function repoTabHref(repo: RepoRow, tab: string): string {
-  const base = repoBase(repo);
-  switch (tab) {
-    case 'commits':
-      return `${base}/commits?ref=${encodeURIComponent(repo.default_branch)}`;
-    case 'branches':
-      return `${base}/branches`;
-    case 'compare':
-      return `${base}/compare`;
-    case 'activity':
-      return `${base}/activity`;
-    case 'train':
-      return `${base}/train`;
-    case 'settings':
-      return `${base}/settings`;
-    case 'environments':
-      return `${base}/environments`;
-    default:
-      return `${base}/tree/${encodeURIComponent(repo.default_branch)}`;
-  }
-}
+
 
 async function repoShell(c: Context<App>, resolved: Resolved, title: string, body: string, status = 200): Promise<Response> {
   const repo = resolved.repo;
@@ -178,7 +138,7 @@ async function repoShell(c: Context<App>, resolved: Resolved, title: string, bod
   if (resolved.viewer?.user.login === repo.owner_login) tabs.push('settings');
   const tabLinks = tabs.map((tab) => {
     const label = tab === 'environments' ? 'Environments' : tab[0]?.toUpperCase() + tab.slice(1);
-    return html`<a class="k-tab ${tab === 'environments' ? 'active' : ''}" href="${raw(repoTabHref(repo, tab))}" ${raw(tab === 'environments' ? 'aria-current="page"' : '')}>${label}</a>`;
+    return html`<a class="k-tab ${tab === 'environments' ? 'active' : ''}" href="${raw(repoTabHref(repo, tab as RepoTab, repo.default_branch))}" ${raw(tab === 'environments' ? 'aria-current="page"' : '')}>${label}</a>`;
   }).join('');
   const ownedRepos = resolved.viewer
     ? await listReposForOwner(c.env.DB, resolved.viewer.user.login, 8)
@@ -237,13 +197,15 @@ function formValues(env: EnvironmentView | null, defaultBranch: string): FormVal
   };
 }
 
-function formInput(form: Record<string, unknown>, creating: boolean): Record<string, unknown> {
+function formInput(form: Record<string, unknown>, creating: true): environments.CreateEnvironmentInput;
+function formInput(form: Record<string, unknown>, creating: false): environments.UpdateEnvironmentInput;
+function formInput(form: Record<string, unknown>, creating: boolean): environments.EnvironmentInput {
   const envVars: Record<string, string> = {};
   for (const line of lines(form.envVars)) {
     const eq = line.indexOf('=');
     if (eq > 0) envVars[line.slice(0, eq).trim()] = line.slice(eq + 1);
   }
-  const input: Record<string, unknown> = {
+  const input: environments.EnvironmentInput = {
     baseRef: String(form.baseRef ?? '').trim(),
     instance: String(form.instance ?? 'standard-1'),
     setupScript: String(form.setupScript ?? '').replaceAll('\r\n', '\n'),
@@ -421,25 +383,21 @@ function pageHead(
     </header>`;
 }
 
-function phaseValue(phases: Record<string, number>, name: string): unknown {
-  const values = phases as Record<string, unknown>;
-  return values[name] ?? (name === 'clone' ? values.checkout ?? values.extract : undefined);
+function phaseValue(phases: Record<string, environments.BuildPhase>, name: string): environments.BuildPhase | undefined {
+  return phases[name] ?? (name === 'clone' ? phases.checkout ?? phases.extract : undefined);
 }
 
-function phaseDuration(phases: Record<string, number>, name: string): number | undefined {
+function phaseDuration(phases: Record<string, environments.BuildPhase>, name: string): number | undefined {
   const phase = phaseValue(phases, name);
-  if (typeof phase === 'number') return phase;
-  if (typeof phase !== 'object' || phase === null) return undefined;
-  const duration = (phase as { durationMs?: unknown }).durationMs;
-  return typeof duration === 'number' ? duration : undefined;
+  return typeof phase === 'number' ? phase : phase?.durationMs;
 }
 
-function phaseFailed(phases: Record<string, number>, name: string): boolean {
+function phaseFailed(phases: Record<string, environments.BuildPhase>, name: string): boolean {
   const phase = phaseValue(phases, name);
-  return typeof phase === 'object' && phase !== null && (phase as { status?: unknown }).status === 'failed';
+  return typeof phase === 'object' && phase.status === 'failed';
 }
 
-function phaseBar(phases: Record<string, number>, buildStatus: string, detail = false): string {
+function phaseBar(phases: Record<string, environments.BuildPhase>, buildStatus: string, detail = false): string {
   const names = ['clone', 'setup', 'validate', 'snapshot'];
   const failedPhase = names.find((name) => phaseFailed(phases, name)) ??
     (buildStatus === 'failed' ? [...names].reverse().find((name) => phaseDuration(phases, name) !== undefined) : undefined);
@@ -550,7 +508,7 @@ fleetRepoPages.post('/environments', async (c) => {
   if (form instanceof Response) return form;
   const created = await environments.createEnvironment(
     { env: c.env, repo: resolved.repo, actor: resolved.viewer },
-    formInput(form, true) as unknown as environments.CreateEnvironmentInput,
+    formInput(form, true),
   );
   const base = repoBase(resolved.repo);
   if (!created.ok) {
@@ -663,7 +621,7 @@ fleetRepoPages.post('/environments/:name', async (c) => {
   const updated = await environments.updateEnvironment(
     { env: c.env, repo: resolved.repo, actor: resolved.viewer },
     env.id,
-    formInput(form, false) as environments.UpdateEnvironmentInput,
+    formInput(form, false),
   );
   if (!updated.ok) {
     const values = { ...formFromBody(form), name: env.name };
@@ -899,10 +857,7 @@ async function renderFleet(c: Context<App>, actor: ApiActor, error?: string, sta
   const sleeping = count('sleeping');
   const active = all.filter((s) => s.status !== 'stopped' && s.status !== 'failed');
   const ended = all.filter((s) => s.status === 'stopped' || s.status === 'failed').slice(0, 20);
-  const envCount = await c.env.DB.prepare(
-    `SELECT COUNT(*) AS count FROM environments e JOIN repos r ON r.id = e.repo_id
-     WHERE r.owner_login = ? AND e.archived_at IS NULL`,
-  ).bind(actor.user.login).first<{ count: number }>();
+  const envCount = await environments.countEnvironmentsForOwner(c.env, actor.user.login);
   const repositories = await listReposForOwner(c.env.DB, actor.user.login, 12);
   const csrf = await csrfField(c);
   const table = (rows: SandboxView[]) =>
@@ -926,7 +881,7 @@ async function renderFleet(c: Context<App>, actor: ApiActor, error?: string, sta
         { label: 'Running', value: running },
         { label: 'Sleeping', value: sleeping },
         { label: 'Needs you', value: pending.length, warn: pending.length > 0 },
-        { label: 'Environments', value: Number(envCount?.count ?? 0) },
+        { label: 'Environments', value: Number(envCount ?? 0) },
       ],
     ))}
     ${raw(flash(error))}

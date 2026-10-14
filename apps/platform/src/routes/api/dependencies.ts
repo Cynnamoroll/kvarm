@@ -12,17 +12,12 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import * as svc from '../../services/dependencies';
 import type { WorkspaceContext } from '../../services/workspaces';
 
 export const dependenciesApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
-}
 
 async function context(c: Context<App>, need: 'read' | 'write') {
   const d = await authorizeRoute(c, need);
@@ -37,16 +32,13 @@ async function context(c: Context<App>, need: 'read' | 'write') {
   return { cx } as const;
 }
 
-async function jsonBody(c: Context<App>): Promise<unknown> {
-  return c.req.json().catch(() => undefined);
-}
-
 const BASE = '/repos/:owner/:repo/workspaces/:id/dependencies';
 
 dependenciesApi.post(BASE, async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return c.json({ error: 'body must be JSON {onWorkspace, revision}', code: 'INVALID_BODY' }, 400);
   const r = await svc.createDependency(w.cx, c.req.param('id'), body);
   if (!r.ok) return failJson(c, r);
@@ -65,6 +57,7 @@ dependenciesApi.post(`${BASE}/:dep/repin`, async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return c.json({ error: 'body must be JSON {revision, onWorkspace?}', code: 'INVALID_BODY' }, 400);
   const r = await svc.repinDependency(w.cx, c.req.param('id'), c.req.param('dep'), body);
   if (!r.ok) return failJson(c, r);

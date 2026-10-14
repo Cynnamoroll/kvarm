@@ -19,6 +19,7 @@
     "@kvarm/ops": "*",
     "@kvarm/review": "*",
     "@kvarm/ui": "*",
+    "@kvarm/zstd": "*",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "hono": "^4.6.0",
     "markdown-it": "^15.0.2",

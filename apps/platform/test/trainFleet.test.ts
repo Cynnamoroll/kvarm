@@ -12,37 +12,25 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
+import { CostMeter, runWithMeter, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
 import { headWorkspacePins, headWorkspacePinsStatement, type HeadWorkspacePinRow } from '../src/services/dependencyGate';
 import { TRAIN_LIMITS, backoffSeconds, defaultTrainDeps, runTrain, type TrainDeps, type TrainEvent } from '../src/services/queue';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, recordingEvents, seedRepo as seedRepoBase, seedRepoWithCommit, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string) => { const { repo, main } = await seedRepoWithCommit(env, name, { owner: OWNER, visibility: 'public', repoIds }); repos[name] = repo; return { repo, main }; };
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'fleet-owner';
 const MAIN = 'refs/heads/main';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
-const sent: Array<{ body: any; delaySeconds?: number }> = [];
-const fakeEvents = {
-  async send(body: unknown, opts?: { delaySeconds?: number }) {
-    sent.push({ body, ...(opts?.delaySeconds !== undefined ? { delaySeconds: opts.delaySeconds } : {}) });
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push({ body: m.body });
-  },
-};
 
 const env = {
   ...baseEnv,
@@ -55,49 +43,6 @@ let ownerToken = '';
 const repoIds: Record<string, string> = {};
 const repos: Record<string, FakeRepo> = {};
 let clock = Date.now();
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string): Promise<{ repo: FakeRepo; main: string }> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  repos[name] = repo;
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  const main = await commit(repo, { 'README.md': 'readme\n' });
-  repo.refs.set(MAIN, main.sha);
-  return { repo, main: main.sha };
-}
-
-async function call(method: string, path: string, token: string, body?: unknown): Promise<{ status: number; json: Record<string, any>; cost: CostCounters | null }> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, json, cost: parseCostHeader(res.headers.get('x-kvarm-cost')) };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 
@@ -399,10 +344,15 @@ describe('workspace-backed publication window', () => {
   it('the head workspace and its pins are read once each, whatever entry follows the ref in its index', async () => {
     const db = env.DB;
     const repoId = crypto.randomUUID();
-    await db
-      .prepare(`INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at) VALUES (?, ?, ?, ?, 'x', 'public', 'main', 0)`)
-      .bind(repoId, OWNER, `pin-read-${repoId}`, `pin-read-${repoId}`)
-      .run();
+    await seedRepoBase(env, `pin-read-${repoId}`, {
+      id: repoId,
+      owner: OWNER,
+      visibility: 'public',
+      artifactsName: `pin-read-${repoId}`,
+      artifactsRemote: 'x',
+      createdAt: 0,
+      register: false,
+    });
     const ws = (n: string) => `${repoId}-${n}`;
     const changeC = crypto.randomUUID();
     await db

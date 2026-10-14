@@ -50,6 +50,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withFixtureRepo } from './lib/fixture-repo.mjs';
 import { remoteD1Args } from './lib/wrangler-target.mjs';
 
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
@@ -288,214 +289,217 @@ async function assertOwnerReads(label, sha) {
   check(`${label}: owner git clone reads the marker`, clone.code === 0 && content === MARKER, true);
 }
 
-const created = [];
+/** One scratch repo's create/body/delete lifecycle through the shared fixture guard. */
+const fixture = (repo, visibility, body, org) =>
+  withFixtureRepo({ owner: OWNER, repo, prefix: PREFIX, org, http: (path, init) => http('owner', path, init), keep: KEEP, visibility, log: console.log }, body);
+
 try {
   console.log(`# ${stamp()} repos ${OWNER}/${FLIP}, ${COST}, ${PRIV}; org ${ORG}/${ORGREPO}`);
-  for (const [name, visibility] of [[FLIP, 'public'], [COST, 'public'], [PRIV, 'private']]) {
-    const r = await api('owner', 'POST', '/repos', { name, visibility });
-    if (check(`create ${visibility} ${name}`, r.status, 201)) created.push(`${OWNER}/${name}`);
-  }
 
-  // Seed the flip repo with one marker commit.
-  const seed = join(work, 'seed');
-  git(null, ['init', '-q', '-b', 'main', seed]);
-  writeFileSync(join(seed, 'MARKER.txt'), `${MARKER}\n`);
-  git(null, ['add', 'MARKER.txt'], seed);
-  git(null, ['commit', '-q', '-m', 'marker'], seed);
-  const sha = git(null, ['rev-parse', 'HEAD'], seed).out;
-  git(null, ['remote', 'add', 'origin', `${BASE}/${OWNER}/${FLIP}.git`], seed);
-  check('owner pushes marker commit', (await pushWithRetry(seed)).code, 0);
+  const flip = await fixture(FLIP, 'public', async () => {
+    // Seed the flip repo with one marker commit.
+    const seed = join(work, 'seed');
+    git(null, ['init', '-q', '-b', 'main', seed]);
+    writeFileSync(join(seed, 'MARKER.txt'), `${MARKER}\n`);
+    git(null, ['add', 'MARKER.txt'], seed);
+    git(null, ['commit', '-q', '-m', 'marker'], seed);
+    const sha = git(null, ['rev-parse', 'HEAD'], seed).out;
+    git(null, ['remote', 'add', 'origin', `${BASE}/${OWNER}/${FLIP}.git`], seed);
+    check('owner pushes marker commit', (await pushWithRetry(seed)).code, 0);
 
-  // ---- Warm every surface while public ----
-  console.log(`# ${stamp()} warming public surfaces`);
-  for (const who of [null, 'outsider']) {
-    await http(who, `/api/v1/repos/${OWNER}/${FLIP}`);
-    const warm = await http(who, `/api/v1/repos/${OWNER}/${FLIP}`);
-    check(`warm: ${who ?? 'anonymous'} REST metadata 200 [${warm.at}] ${warm.header}`,
-      warm.status === 200 && within(warm.cost, { d1: 1, rr: 8, rw: 0, do: 0 }), true);
-  }
-  for (const path of [`/${OWNER}/${FLIP}`, `/${OWNER}/${FLIP}/raw/main/MARKER.txt`]) {
-    let r;
-    for (let i = 0; i < 6; i++) {
-      r = await http(null, path);
-      if (r.cost.cache === 'hit') break;
-      await sleep(1000);
+    // ---- Warm every surface while public ----
+    console.log(`# ${stamp()} warming public surfaces`);
+    for (const who of [null, 'outsider']) {
+      await http(who, `/api/v1/repos/${OWNER}/${FLIP}`);
+      const warm = await http(who, `/api/v1/repos/${OWNER}/${FLIP}`);
+      check(`warm: ${who ?? 'anonymous'} REST metadata 200 [${warm.at}] ${warm.header}`,
+        warm.status === 200 && within(warm.cost, { d1: 1, rr: 8, rw: 0, do: 0 }), true);
     }
-    check(`warm: anonymous page ${path} served from edge cache after the lookup [${r.at}] ${r.header}`,
-      r.status === 200 && r.text.includes(path.endsWith('.txt') ? MARKER : 'MARKER.txt') && within(r.cost, { d1: 1, rr: 8, art: 0, do: 0, cache: 'hit' }), true);
-  }
-  for (const proto of [null, 'version=2']) {
-    let r;
-    for (let i = 0; i < 6; i++) {
-      r = await http(null, `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, { headers: proto ? { 'Git-Protocol': proto } : {} });
-      if (r.cost.cache === 'hit') break;
-      await sleep(1000);
+    for (const path of [`/${OWNER}/${FLIP}`, `/${OWNER}/${FLIP}/raw/main/MARKER.txt`]) {
+      let r;
+      for (let i = 0; i < 6; i++) {
+        r = await http(null, path);
+        if (r.cost.cache === 'hit') break;
+        await sleep(1000);
+      }
+      check(`warm: anonymous page ${path} served from edge cache after the lookup [${r.at}] ${r.header}`,
+        r.status === 200 && r.text.includes(path.endsWith('.txt') ? MARKER : 'MARKER.txt') && within(r.cost, { d1: 1, rr: 8, art: 0, do: 0, cache: 'hit' }), true);
     }
-    check(`warm: anonymous info/refs ${proto ?? 'v0'} cache hit (VAL-COST-002 cached advertisement) [${r.at}] ${r.header}`,
-      r.status === 200 && within(r.cost, { d1: 1, rr: 8, rw: 0, art: 0, do: 0, sub: 0, cache: 'hit' }), true);
-  }
-  const shaRaw = `/${OWNER}/${FLIP}/raw/${sha}/MARKER.txt`;
-  await http(null, shaRaw);
-  const publicRaw = await http(null, shaRaw);
-  check(`warm: anonymous public commit-SHA raw keeps public Cache-Control "${publicRaw.cacheControl}" ${publicRaw.header}`,
-    publicRaw.status === 200 && (publicRaw.cacheControl ?? '').startsWith('public, max-age=31536000'), true);
-  const patRaw = await http('outsider', shaRaw);
-  check(`warm: PAT-authorized public raw is private-scoped "${patRaw.cacheControl}" ${patRaw.header}`,
-    patRaw.status === 200 && patRaw.text.includes(MARKER) && privateScope(patRaw.cacheControl), true);
-  for (const who of [null, 'outsider']) {
-    const pack = await uploadPack(who, FLIP, sha);
-    check(`warm: ${who ?? 'anonymous'} upload-pack returns the pack [${pack.at}] ${pack.header}`,
-      pack.status === 200 && pack.text.includes('PACK') && within(pack.cost, { d1: 1, rr: 8, do: 0 }), true);
-  }
-  const anonClone = git(null, ['clone', '-q', `${BASE}/${OWNER}/${FLIP}.git`, join(work, 'anon-public')]);
-  check('warm: anonymous git clone of the public repo', anonClone.code, 0);
+    for (const proto of [null, 'version=2']) {
+      let r;
+      for (let i = 0; i < 6; i++) {
+        r = await http(null, `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, { headers: proto ? { 'Git-Protocol': proto } : {} });
+        if (r.cost.cache === 'hit') break;
+        await sleep(1000);
+      }
+      check(`warm: anonymous info/refs ${proto ?? 'v0'} cache hit (VAL-COST-002 cached advertisement) [${r.at}] ${r.header}`,
+        r.status === 200 && within(r.cost, { d1: 1, rr: 8, rw: 0, art: 0, do: 0, sub: 0, cache: 'hit' }), true);
+    }
+    const shaRaw = `/${OWNER}/${FLIP}/raw/${sha}/MARKER.txt`;
+    await http(null, shaRaw);
+    const publicRaw = await http(null, shaRaw);
+    check(`warm: anonymous public commit-SHA raw keeps public Cache-Control "${publicRaw.cacheControl}" ${publicRaw.header}`,
+      publicRaw.status === 200 && (publicRaw.cacheControl ?? '').startsWith('public, max-age=31536000'), true);
+    const patRaw = await http('outsider', shaRaw);
+    check(`warm: PAT-authorized public raw is private-scoped "${patRaw.cacheControl}" ${patRaw.header}`,
+      patRaw.status === 200 && patRaw.text.includes(MARKER) && privateScope(patRaw.cacheControl), true);
+    for (const who of [null, 'outsider']) {
+      const pack = await uploadPack(who, FLIP, sha);
+      check(`warm: ${who ?? 'anonymous'} upload-pack returns the pack [${pack.at}] ${pack.header}`,
+        pack.status === 200 && pack.text.includes('PACK') && within(pack.cost, { d1: 1, rr: 8, do: 0 }), true);
+    }
+    const anonClone = git(null, ['clone', '-q', `${BASE}/${OWNER}/${FLIP}.git`, join(work, 'anon-public')]);
+    check('warm: anonymous git clone of the public repo', anonClone.code, 0);
 
-  // ---- Rejected Bearer on warm public pages: anonymous outcome on one lookup ----
-  console.log(`# ${stamp()} rejected-Bearer page fallback`);
-  const pagePaths = [`/${OWNER}/${FLIP}`, `/${OWNER}/${FLIP}/raw/main/MARKER.txt`];
-  const pageMark = (path) => (path.endsWith('.txt') ? MARKER : 'MARKER.txt');
-  const hitBudget = { d1: 1, rr: 8, rw: 0, art: 0, do: 0, sub: 0, cache: 'hit' };
-  const minted = mintScratchPats(2);
-  check(`scratch owner PATs inserted directly in D1 ${minted.err}`, minted.code === 0 && minted.changes === 1, true);
-  for (const who of ['scratch0', 'scratch1']) {
-    const r = await http(who, `/api/v1/repos/${OWNER}/${FLIP}`);
-    check(`fallback: ${who} warmed (REST metadata 200) ${r.header}`, r.status, 200);
-  }
-  for (const path of pagePaths) {
-    const r = await http(null, path, bearerOnly(randomPat()));
-    check(`fallback: unknown well-formed Bearer page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} anonymous hit [${r.at}] ${r.header}`,
-      r.status === 200 && r.text.includes(pageMark(path)) && within(r.cost, hitBudget), true);
-  }
-  const revoke = revokeScratchPats();
-  check(`fallback: scratch PATs revoked by direct D1 DELETE (cached PAT copies retained) [${stamp()}] ${revoke.err}`,
-    revoke.code === 0 && revoke.changes === 2, true);
-  for (const path of pagePaths) {
-    const r = await http('scratch0', path);
-    check(`fallback: newly revoked warmed PAT page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} anonymous hit [${r.at}] ${r.header}`,
-      r.status === 200 && r.text.includes(pageMark(path)) && within(r.cost, hitBudget), true);
-  }
-  const revokedRest = await http('scratch0', `/api/v1/repos/${OWNER}/${FLIP}`);
-  check(`fallback: revoked PAT REST metadata still 401 ${revokedRest.header}`,
-    revokedRest.status === 401 && !revokedRest.text.includes(FLIP), true);
-  const revokedGit = await http('scratch0', `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, { kind: 'basic' });
-  check(`fallback: revoked PAT git info/refs still 401 ${revokedGit.header}`, revokedGit.status === 401 && !revokedGit.text.includes(sha), true);
-  const unknownRest = await http(null, `/api/v1/repos/${OWNER}/${FLIP}`, bearerOnly(randomPat()));
-  check(`fallback: unknown Bearer REST metadata 401 ${unknownRest.header}`,
-    unknownRest.status === 401 && !unknownRest.text.includes(FLIP) && within(unknownRest.cost, deniedBudget), true);
-  const unknownGit = await http(null, `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, basicOnly(randomPat()));
-  check(`fallback: unknown basic git info/refs 401 ${unknownGit.header}`,
-    unknownGit.status === 401 && !unknownGit.text.includes(sha) && within(unknownGit.cost, deniedBudget), true);
-
-  // ---- Flip 1: direct D1 update, nothing purged ----
-  const flip = d1Flip(FLIP, 'private');
-  check(`flip 1: direct remote D1 UPDATE visibility=private (no Worker, no purge) [${stamp()}] ${flip.err}`, flip.code === 0 && flip.changes === 1, true);
-  const t0 = Date.now();
-  // A rejected Bearer, even the owner's own just-revoked PAT, is anonymous and sees nothing private.
-  for (const [label, opts] of [['revoked owner PAT', {}], ['unknown Bearer', null]]) {
+    // ---- Rejected Bearer on warm public pages: anonymous outcome on one lookup ----
+    console.log(`# ${stamp()} rejected-Bearer page fallback`);
+    const pagePaths = [`/${OWNER}/${FLIP}`, `/${OWNER}/${FLIP}/raw/main/MARKER.txt`];
+    const pageMark = (path) => (path.endsWith('.txt') ? MARKER : 'MARKER.txt');
+    const hitBudget = { d1: 1, rr: 8, rw: 0, art: 0, do: 0, sub: 0, cache: 'hit' };
+    const minted = mintScratchPats(2);
+    check(`scratch owner PATs inserted directly in D1 ${minted.err}`, minted.code === 0 && minted.changes === 1, true);
+    for (const who of ['scratch0', 'scratch1']) {
+      const r = await http(who, `/api/v1/repos/${OWNER}/${FLIP}`);
+      check(`fallback: ${who} warmed (REST metadata 200) ${r.header}`, r.status, 200);
+    }
     for (const path of pagePaths) {
-      const r = opts ? await http('scratch1', path, opts) : await http(null, path, bearerOnly(randomPat()));
-      check(`flip 1: ${label} private page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} concealed [${r.at}] ${r.header}`,
-        r.status === 404 && !r.text.includes(MARKER) && !r.text.includes('MARKER.txt') && within(r.cost, { ...deniedBudget, cache: 'none' }), true);
+      const r = await http(null, path, bearerOnly(randomPat()));
+      check(`fallback: unknown well-formed Bearer page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} anonymous hit [${r.at}] ${r.header}`,
+        r.status === 200 && r.text.includes(pageMark(path)) && within(r.cost, hitBudget), true);
     }
-  }
-  for (const who of [null, 'outsider']) await assertDenied('flip 1', who, sha);
-  await assertOwnerReads('flip 1', sha);
-  check('flip 1: all denials and owner reads ran inside the 60 s warm window', Date.now() - t0 < 60_000, true);
+    const revoke = revokeScratchPats();
+    check(`fallback: scratch PATs revoked by direct D1 DELETE (cached PAT copies retained) [${stamp()}] ${revoke.err}`,
+      revoke.code === 0 && revoke.changes === 2, true);
+    for (const path of pagePaths) {
+      const r = await http('scratch0', path);
+      check(`fallback: newly revoked warmed PAT page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} anonymous hit [${r.at}] ${r.header}`,
+        r.status === 200 && r.text.includes(pageMark(path)) && within(r.cost, hitBudget), true);
+    }
+    const revokedRest = await http('scratch0', `/api/v1/repos/${OWNER}/${FLIP}`);
+    check(`fallback: revoked PAT REST metadata still 401 ${revokedRest.header}`,
+      revokedRest.status === 401 && !revokedRest.text.includes(FLIP), true);
+    const revokedGit = await http('scratch0', `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, { kind: 'basic' });
+    check(`fallback: revoked PAT git info/refs still 401 ${revokedGit.header}`, revokedGit.status === 401 && !revokedGit.text.includes(sha), true);
+    const unknownRest = await http(null, `/api/v1/repos/${OWNER}/${FLIP}`, bearerOnly(randomPat()));
+    check(`fallback: unknown Bearer REST metadata 401 ${unknownRest.header}`,
+      unknownRest.status === 401 && !unknownRest.text.includes(FLIP) && within(unknownRest.cost, deniedBudget), true);
+    const unknownGit = await http(null, `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, basicOnly(randomPat()));
+    check(`fallback: unknown basic git info/refs 401 ${unknownGit.header}`,
+      unknownGit.status === 401 && !unknownGit.text.includes(sha) && within(unknownGit.cost, deniedBudget), true);
 
-  // ---- Retention: the same edge entries come back once public again ----
-  const back = await api('owner', 'PATCH', `/repos/${OWNER}/${FLIP}`, { visibility: 'public' });
-  check(`owner PATCH back to public ${back.header}`, back.status, 200);
-  const retained = await http(null, `/${OWNER}/${FLIP}/raw/main/MARKER.txt`);
-  check(`retained raw page entry is a cache hit again once public (it survived the private window unserved) ${retained.header}`,
-    retained.status === 200 && retained.cost.cache === 'hit', true);
-  const retainedRefs = await http(null, `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`);
-  check(`retained info/refs entry still present ${retainedRefs.header}`, retainedRefs.status, 200);
+    // ---- Flip 1: direct D1 update, nothing purged ----
+    const flip = d1Flip(FLIP, 'private');
+    check(`flip 1: direct remote D1 UPDATE visibility=private (no Worker, no purge) [${stamp()}] ${flip.err}`, flip.code === 0 && flip.changes === 1, true);
+    const t0 = Date.now();
+    // A rejected Bearer, even the owner's own just-revoked PAT, is anonymous and sees nothing private.
+    for (const [label, opts] of [['revoked owner PAT', {}], ['unknown Bearer', null]]) {
+      for (const path of pagePaths) {
+        const r = opts ? await http('scratch1', path, opts) : await http(null, path, bearerOnly(randomPat()));
+        check(`flip 1: ${label} private page ${path.slice(OWNER.length + FLIP.length + 2) || '/'} concealed [${r.at}] ${r.header}`,
+          r.status === 404 && !r.text.includes(MARKER) && !r.text.includes('MARKER.txt') && within(r.cost, { ...deniedBudget, cache: 'none' }), true);
+      }
+    }
+    for (const who of [null, 'outsider']) await assertDenied('flip 1', who, sha);
+    await assertOwnerReads('flip 1', sha);
+    check('flip 1: all denials and owner reads ran inside the 60 s warm window', Date.now() - t0 < 60_000, true);
 
-  // ---- Flip 2: the owner's documented PATCH ----
-  const patch = await api('owner', 'PATCH', `/repos/${OWNER}/${FLIP}`, { visibility: 'private' });
-  check(`flip 2: owner PATCH visibility=private [${patch.at}] ${patch.header}`, patch.status === 200 && JSON.parse(patch.text).repo?.visibility === 'private', true);
-  for (const who of [null, 'outsider']) await assertDenied('flip 2', who, sha);
-  await assertOwnerReads('flip 2', sha);
+    // ---- Retention: the same edge entries come back once public again ----
+    const back = await api('owner', 'PATCH', `/repos/${OWNER}/${FLIP}`, { visibility: 'public' });
+    check(`owner PATCH back to public ${back.header}`, back.status, 200);
+    const retained = await http(null, `/${OWNER}/${FLIP}/raw/main/MARKER.txt`);
+    check(`retained raw page entry is a cache hit again once public (it survived the private window unserved) ${retained.header}`,
+      retained.status === 200 && retained.cost.cache === 'hit', true);
+    const retainedRefs = await http(null, `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`);
+    check(`retained info/refs entry still present ${retainedRefs.header}`, retainedRefs.status, 200);
 
-  // ---- Private content at a commit SHA on the flipped repo ----
-  console.log(`# ${stamp()} private content cache`);
-  await warmPrivateContent('flipped repo owner commit-SHA raw', 'owner', shaRaw, MARKER);
-  for (const who of [null, 'outsider']) {
-    assertContentDenied(`flipped repo ${who ?? 'anonymous'} commit-SHA raw`, await http(who, shaRaw), MARKER);
-  }
-  const refsScope = await http('owner', `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, { kind: 'basic' });
-  check(`private info/refs Cache-Control "${refsScope.cacheControl}"`, refsScope.status === 200 && privateScope(refsScope.cacheControl), true);
-  const metaScope = await http('owner', `/api/v1/repos/${OWNER}/${FLIP}`);
-  check(`private REST metadata Cache-Control "${metaScope.cacheControl}"`, metaScope.status === 200 && privateScope(metaScope.cacheControl), true);
+    // ---- Flip 2: the owner's documented PATCH ----
+    const patch = await api('owner', 'PATCH', `/repos/${OWNER}/${FLIP}`, { visibility: 'private' });
+    check(`flip 2: owner PATCH visibility=private [${patch.at}] ${patch.header}`, patch.status === 200 && JSON.parse(patch.text).repo?.visibility === 'private', true);
+    for (const who of [null, 'outsider']) await assertDenied('flip 2', who, sha);
+    await assertOwnerReads('flip 2', sha);
 
-  // ---- VAL-COST-002: warm authenticated public metadata ----
-  for (const who of ['admin', 'owner']) {
-    const first = await api(who, 'GET', `/repos/${OWNER}/${COST}`);
-    const warm = await api(who, 'GET', `/repos/${OWNER}/${COST}`);
-    check(`VAL-COST-002 ${who === 'admin' ? 'KVARM_PAT' : 'owner'} warm public metadata: first ${first.status} ${first.header} | warm`,
-      `${warm.status} ${warm.header}`, () => first.status === 200 && warm.status === 200 && within(warm.cost, { d1: 1, rr: 8, rw: 0, do: 0 }));
-  }
+    // ---- Private content at a commit SHA on the flipped repo ----
+    console.log(`# ${stamp()} private content cache`);
+    await warmPrivateContent('flipped repo owner commit-SHA raw', 'owner', shaRaw, MARKER);
+    for (const who of [null, 'outsider']) {
+      assertContentDenied(`flipped repo ${who ?? 'anonymous'} commit-SHA raw`, await http(who, shaRaw), MARKER);
+    }
+    const refsScope = await http('owner', `/${OWNER}/${FLIP}.git/info/refs?service=git-upload-pack`, { kind: 'basic' });
+    check(`private info/refs Cache-Control "${refsScope.cacheControl}"`, refsScope.status === 200 && privateScope(refsScope.cacheControl), true);
+    const metaScope = await http('owner', `/api/v1/repos/${OWNER}/${FLIP}`);
+    check(`private REST metadata Cache-Control "${metaScope.cacheControl}"`, metaScope.status === 200 && privateScope(metaScope.cacheControl), true);
+  });
+  check(`create public ${FLIP}`, flip.ok ? 201 : flip.reason, 201);
 
-  // ---- VAL-COST-021: warm private personal content, then PAT revocation ----
-  const PRIV_MARK = `avca-private-${ts}`;
-  const privSeed = await seedMarker(OWNER, PRIV, 'PRIVATE.txt', PRIV_MARK);
-  check('owner pushes private personal marker commit', privSeed.code, 0);
-  const privRaw = `/${OWNER}/${PRIV}/raw/${privSeed.sha}/PRIVATE.txt`;
-  await warmPrivateContent('VAL-COST-021 personal owner commit-SHA raw', 'owner', privRaw, PRIV_MARK);
-  const privBlob = await http('owner', `/${OWNER}/${PRIV}/blob/${privSeed.sha}/PRIVATE.txt`);
-  check(`VAL-COST-021 personal blob page reuses the immutable body "${privBlob.cacheControl}" ${privBlob.header}`,
-    privBlob.status === 200 && privBlob.text.includes(PRIV_MARK) && privateScope(privBlob.cacheControl) && within(privBlob.cost, contentHitBudget), true);
-  for (const who of [null, 'outsider']) {
-    assertContentDenied(`personal ${who ?? 'anonymous'} commit-SHA raw`, await http(who, privRaw), PRIV_MARK);
-  }
-  const privMinted = mintScratchPats(1, 2);
-  check(`scratch owner PAT for private content inserted directly in D1 ${privMinted.err}`, privMinted.code === 0 && privMinted.changes === 1, true);
-  await warmPrivateContent('VAL-COST-021 personal scratch PAT commit-SHA raw', 'scratch2', privRaw, PRIV_MARK);
-  const privRevoke = revokeScratchPats();
-  check(`scratch PAT revoked by direct D1 DELETE [${stamp()}] ${privRevoke.err}`, privRevoke.code === 0 && privRevoke.changes === 1, true);
-  assertContentDenied('VAL-COST-021 personal first read after PAT revocation', await http('scratch2', privRaw), PRIV_MARK);
-  const privRetained = await http('owner', privRaw);
-  check(`personal owner still hits the retained entry ${privRetained.header}`,
-    privRetained.status === 200 && privRetained.text.includes(PRIV_MARK) && within(privRetained.cost, contentHitBudget), true);
+  const cost = await fixture(COST, 'public', async () => {
+    // ---- VAL-COST-002: warm authenticated public metadata ----
+    for (const who of ['admin', 'owner']) {
+      const first = await api(who, 'GET', `/repos/${OWNER}/${COST}`);
+      const warm = await api(who, 'GET', `/repos/${OWNER}/${COST}`);
+      check(`VAL-COST-002 ${who === 'admin' ? 'KVARM_PAT' : 'owner'} warm public metadata: first ${first.status} ${first.header} | warm`,
+        `${warm.status} ${warm.header}`, () => first.status === 200 && warm.status === 200 && within(warm.cost, { d1: 1, rr: 8, rw: 0, do: 0 }));
+    }
+  });
+  check(`create public ${COST}`, cost.ok ? 201 : cost.reason, 201);
 
-  // ---- VAL-COST-021: warm private personal and org reads, then revoke ----
-  await api('owner', 'GET', `/repos/${OWNER}/${PRIV}`);
-  const privWarm = await api('owner', 'GET', `/repos/${OWNER}/${PRIV}`);
-  check('VAL-COST-021 private personal warm read', `${privWarm.status} ${privWarm.header}`,
-    () => privWarm.status === 200 && within(privWarm.cost, { d1: 2, rr: 8, do: 0, art: 0, sub: 0 }));
+  const priv = await fixture(PRIV, 'private', async () => {
+    // ---- VAL-COST-021: warm private personal content, then PAT revocation ----
+    const PRIV_MARK = `avca-private-${ts}`;
+    const privSeed = await seedMarker(OWNER, PRIV, 'PRIVATE.txt', PRIV_MARK);
+    check('owner pushes private personal marker commit', privSeed.code, 0);
+    const privRaw = `/${OWNER}/${PRIV}/raw/${privSeed.sha}/PRIVATE.txt`;
+    await warmPrivateContent('VAL-COST-021 personal owner commit-SHA raw', 'owner', privRaw, PRIV_MARK);
+    const privBlob = await http('owner', `/${OWNER}/${PRIV}/blob/${privSeed.sha}/PRIVATE.txt`);
+    check(`VAL-COST-021 personal blob page reuses the immutable body "${privBlob.cacheControl}" ${privBlob.header}`,
+      privBlob.status === 200 && privBlob.text.includes(PRIV_MARK) && privateScope(privBlob.cacheControl) && within(privBlob.cost, contentHitBudget), true);
+    for (const who of [null, 'outsider']) {
+      assertContentDenied(`personal ${who ?? 'anonymous'} commit-SHA raw`, await http(who, privRaw), PRIV_MARK);
+    }
+    const privMinted = mintScratchPats(1, 2);
+    check(`scratch owner PAT for private content inserted directly in D1 ${privMinted.err}`, privMinted.code === 0 && privMinted.changes === 1, true);
+    await warmPrivateContent('VAL-COST-021 personal scratch PAT commit-SHA raw', 'scratch2', privRaw, PRIV_MARK);
+    const privRevoke = revokeScratchPats();
+    check(`scratch PAT revoked by direct D1 DELETE [${stamp()}] ${privRevoke.err}`, privRevoke.code === 0 && privRevoke.changes === 1, true);
+    assertContentDenied('VAL-COST-021 personal first read after PAT revocation', await http('scratch2', privRaw), PRIV_MARK);
+    const privRetained = await http('owner', privRaw);
+    check(`personal owner still hits the retained entry ${privRetained.header}`,
+      privRetained.status === 200 && privRetained.text.includes(PRIV_MARK) && within(privRetained.cost, contentHitBudget), true);
+
+    // ---- VAL-COST-021: warm private personal and org reads, then revoke ----
+    await api('owner', 'GET', `/repos/${OWNER}/${PRIV}`);
+    const privWarm = await api('owner', 'GET', `/repos/${OWNER}/${PRIV}`);
+    check('VAL-COST-021 private personal warm read', `${privWarm.status} ${privWarm.header}`,
+      () => privWarm.status === 200 && within(privWarm.cost, { d1: 2, rr: 8, do: 0, art: 0, sub: 0 }));
+  });
+  check(`create private ${PRIV}`, priv.ok ? 201 : priv.reason, 201);
 
   check('create org', (await api('owner', 'POST', '/orgs', { login: ORG, name: 'visibility authority e2e' })).status, 201);
   check('add member', (await api('owner', 'PUT', `/orgs/${ORG}/members/${MEMBER}`, { role: 'member' })).status, 200);
-  const mk = await api('owner', 'POST', `/orgs/${ORG}/repos`, { name: ORGREPO, visibility: 'private' });
-  if (check('create private org repo', mk.status, 201)) created.push(`${ORG}/${ORGREPO}`);
-  check('grant member read', (await api('owner', 'PUT', `/repos/${ORG}/${ORGREPO}/grants/${MEMBER}`, { role: 'read' })).status, 200);
-  await api('member', 'GET', `/repos/${ORG}/${ORGREPO}`);
-  const orgWarm = await api('member', 'GET', `/repos/${ORG}/${ORGREPO}`);
-  check('VAL-COST-021 private org warm read (member with grant)', `${orgWarm.status} ${orgWarm.header}`,
-    () => orgWarm.status === 200 && within(orgWarm.cost, { d1: 2, rr: 8, do: 0, art: 0, sub: 0 }));
-  const ORG_MARK = `avca-org-private-${ts}`;
-  const orgSeed = await seedMarker(ORG, ORGREPO, 'ORG.txt', ORG_MARK);
-  check('org owner pushes private org marker commit', orgSeed.code, 0);
-  const orgRaw = `/${ORG}/${ORGREPO}/raw/${orgSeed.sha}/ORG.txt`;
-  await warmPrivateContent('VAL-COST-021 org member (read grant) commit-SHA raw', 'member', orgRaw, ORG_MARK);
-  assertContentDenied('org outsider commit-SHA raw', await http('outsider', orgRaw), ORG_MARK);
-  check('revoke member grant', (await api('owner', 'DELETE', `/repos/${ORG}/${ORGREPO}/grants/${MEMBER}`)).status, 200);
-  assertContentDenied('VAL-COST-021 org member first content read after grant revoke', await http('member', orgRaw), ORG_MARK);
-  const orgRetained = await http('owner', orgRaw);
-  check(`org owner still hits the retained entry "${orgRetained.cacheControl}" ${orgRetained.header}`,
-    orgRetained.status === 200 && orgRetained.text.includes(ORG_MARK) && privateScope(orgRetained.cacheControl) && within(orgRetained.cost, contentHitBudget), true);
-  const revoked = await api('member', 'GET', `/repos/${ORG}/${ORGREPO}`);
-  check('VAL-COST-021 first read after revoke denied without the warmed body', `${revoked.status} ${revoked.header}`,
-    () => revoked.status === 404 && !revoked.text.includes(ORGREPO) && within(revoked.cost, deniedBudget));
+  const orgRepo = await fixture(ORGREPO, 'private', async () => {
+    check('grant member read', (await api('owner', 'PUT', `/repos/${ORG}/${ORGREPO}/grants/${MEMBER}`, { role: 'read' })).status, 200);
+    await api('member', 'GET', `/repos/${ORG}/${ORGREPO}`);
+    const orgWarm = await api('member', 'GET', `/repos/${ORG}/${ORGREPO}`);
+    check('VAL-COST-021 private org warm read (member with grant)', `${orgWarm.status} ${orgWarm.header}`,
+      () => orgWarm.status === 200 && within(orgWarm.cost, { d1: 2, rr: 8, do: 0, art: 0, sub: 0 }));
+    const ORG_MARK = `avca-org-private-${ts}`;
+    const orgSeed = await seedMarker(ORG, ORGREPO, 'ORG.txt', ORG_MARK);
+    check('org owner pushes private org marker commit', orgSeed.code, 0);
+    const orgRaw = `/${ORG}/${ORGREPO}/raw/${orgSeed.sha}/ORG.txt`;
+    await warmPrivateContent('VAL-COST-021 org member (read grant) commit-SHA raw', 'member', orgRaw, ORG_MARK);
+    assertContentDenied('org outsider commit-SHA raw', await http('outsider', orgRaw), ORG_MARK);
+    check('revoke member grant', (await api('owner', 'DELETE', `/repos/${ORG}/${ORGREPO}/grants/${MEMBER}`)).status, 200);
+    assertContentDenied('VAL-COST-021 org member first content read after grant revoke', await http('member', orgRaw), ORG_MARK);
+    const orgRetained = await http('owner', orgRaw);
+    check(`org owner still hits the retained entry "${orgRetained.cacheControl}" ${orgRetained.header}`,
+      orgRetained.status === 200 && orgRetained.text.includes(ORG_MARK) && privateScope(orgRetained.cacheControl) && within(orgRetained.cost, contentHitBudget), true);
+    const revoked = await api('member', 'GET', `/repos/${ORG}/${ORGREPO}`);
+    check('VAL-COST-021 first read after revoke denied without the warmed body', `${revoked.status} ${revoked.header}`,
+      () => revoked.status === 404 && !revoked.text.includes(ORGREPO) && within(revoked.cost, deniedBudget));
+  }, ORG);
+  check('create private org repo', orgRepo.ok ? 201 : orgRepo.reason, 201);
 } finally {
   const leftover = revokeScratchPats();
   if (leftover.changes) console.log(`# cleanup removed ${leftover.changes} scratch PAT rows`);
-  if (!KEEP) {
-    for (const repo of created) {
-      const r = await api('owner', 'DELETE', `/repos/${repo}`);
-      console.log(`# cleanup DELETE ${repo} -> ${r.status}`);
-    }
-  }
   rmSync(work, { recursive: true, force: true });
 }
 

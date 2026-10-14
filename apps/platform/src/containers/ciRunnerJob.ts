@@ -12,6 +12,7 @@
  * tests drive this with a local stand-in for `ctx.container`.
  */
 
+import { tailText } from './fleetJob';
 import { DRAIN_ENTRY_FILE, GO_FILE, GO_TIMEOUT_MS, PREPARED_LINE, RUNNER_DIR, WORK_ROOT, WRITE_FILES_SCRIPT, containerRunnerFiles, runnerExecEnv, type RunnerExecInput } from './runnerFiles';
 
 export interface ExecLike {
@@ -69,7 +70,11 @@ export interface JobOptions {
 
 const OUTPUT_TAIL = 4_000;
 
-const tailText = (text: string) => (text.length <= OUTPUT_TAIL ? text : `[...]${text.slice(-OUTPUT_TAIL)}`);
+/** The shared byte-aware tail, marked where earlier output was cut. */
+const outputTail = (text: string) => {
+  const tail = tailText(text, OUTPUT_TAIL);
+  return tail === text ? text : `[...]${tail}`;
+};
 
 /**
  * Reads a byte stream as text, keeping only a bounded tail once `until` is
@@ -92,10 +97,16 @@ function textReader(stream: ReadableStream | null) {
   return {
     /** Resolves true once a whole line equal to `line` has been read, false at end of stream. */
     async until(line: string): Promise<boolean> {
+      // A whole-line match needs only a trailing window of the marker's
+      // length; OUTPUT_TAIL more is kept so rest() still returns the
+      // output leading up to it. Without the bound a runner that never
+      // prints the line would buffer its whole stdout here.
+      const keep = Math.max(line.length + 2, OUTPUT_TAIL * 2);
       for (;;) {
         if (`\n${text}`.includes(`\n${line}\n`)) return true;
         if (done) return false;
         await pull();
+        if (text.length > keep) text = text.slice(-keep);
       }
     },
     async rest(): Promise<string> {
@@ -103,7 +114,7 @@ function textReader(stream: ReadableStream | null) {
         await pull();
         if (text.length > OUTPUT_TAIL * 2) text = text.slice(-OUTPUT_TAIL - 1);
       }
-      return tailText(text);
+      return outputTail(text);
     },
   };
 }
@@ -112,7 +123,7 @@ async function mustExec(container: ContainerLike, cmd: string[], options: { cwd?
   const out = await (await container.exec(cmd, options)).output();
   if (out.exitCode !== 0) {
     const dec = new TextDecoder();
-    throw new Error(`${what} exited ${out.exitCode}: ${tailText(dec.decode(out.stderr)) || tailText(dec.decode(out.stdout))}`);
+    throw new Error(`${what} exited ${out.exitCode}: ${outputTail(dec.decode(out.stderr)) || outputTail(dec.decode(out.stdout))}`);
   }
 }
 
@@ -264,19 +275,30 @@ export async function drainAndRunJobs(container: ContainerLike, o: DrainOptions)
       }),
     ),
   );
+  let claimed = false;
   try {
-    if (await firstPrepared) {
-      if (o.cold) {
-        const s = Date.now();
-        snapshot = await container.snapshotContainer({ name: o.snapshotName });
-        await o.saveSnapshot?.(snapshot);
-        phases.snapshot = Date.now() - s;
-      }
-      await mustExec(container, ['touch', goFile], {}, 'releasing the prepared workers');
-    }
+    claimed = await firstPrepared;
   } catch {
     // Every worker exited without claiming (another runner drained the
     // queue first); the workers report empty on their own.
+  }
+  if (claimed) {
+    // A snapshot or save failure still releases the workers waiting at
+    // the prepared point — otherwise they hang until the runner-side go
+    // timeout — and then aborts the drain so the failure is reported.
+    let failure: unknown;
+    if (o.cold) {
+      const s = Date.now();
+      try {
+        snapshot = await container.snapshotContainer({ name: o.snapshotName });
+        await o.saveSnapshot?.(snapshot);
+        phases.snapshot = Date.now() - s;
+      } catch (err) {
+        failure = err;
+      }
+    }
+    await mustExec(container, ['touch', goFile], {}, 'releasing the prepared workers');
+    if (failure !== undefined) throw failure;
   }
   const workers = await Promise.all(
     started.map(async (w) => ({ runnerId: w.runnerId, exitCode: await w.proc.exitCode, stdout: await w.stdout.rest(), stderr: await w.stderrDone })),

@@ -26,6 +26,7 @@ import { bumpRefGeneration } from '../cache/compare';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import type { ServiceResult } from '../repos/service';
 import { onBasePushed, onHeadPushed, type ChangeOnRef } from './changes';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { reconcileObserved } from './intents/forecast';
 import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
@@ -39,6 +40,7 @@ import { requestEnvironmentBuild } from './environments';
 import { commitCloseStatement, commitClosingRefs, guardScanStatements, pushedCommits, retireIssueTasksStatement } from './issues';
 import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
 import type { RepoRow } from '../db/repos';
+import { WORKSPACE_REF_PREFIX } from './agentMeta';
 import { publishRepoEvent } from './live';
 
 export interface PushEvent {
@@ -56,7 +58,7 @@ export interface PushEvent {
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const PUSH_TYPE = 'cf.artifacts.repo.pushed';
-const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
+
 
 function record(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -710,17 +712,12 @@ interface PushEventListRow {
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function encodeCursor(eventAt: number, id: string): string {
-  return btoa(`${eventAt}:${id}`).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return encodeCursorPayload(`${eventAt}:${id}`);
 }
 
 function decodeCursor(cursor: string): { eventAt: number; id: string } | null {
-  try {
-    const text = atob(cursor.replace(/-/g, '+').replace(/_/g, '/'));
-    const m = /^(\d{1,16}):([0-9a-f]{64})$/.exec(text);
-    return m ? { eventAt: Number(m[1]), id: m[2]! } : null;
-  } catch {
-    return null;
-  }
+  const m = /^(\d{1,16}):([0-9a-f]{64})$/.exec(decodeCursorPayload(cursor) ?? '');
+  return m ? { eventAt: Number(m[1]), id: m[2]! } : null;
 }
 
 /** One bounded page of a repo's push events, newest source time first, with their effects. */

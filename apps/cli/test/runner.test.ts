@@ -11,6 +11,53 @@ const HOST_TRUSTED = { trust: 'all', hostWarning: false } as const;
 const root = tempDir('kvarm-cli-runner-');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
+type RunnerJob = Record<string, any>;
+
+/**
+ * The runner API the platform serves: a job queue behind /claim, a lease
+ * answer behind /heartbeat, /report capturing bodies, and 404 for the rest
+ * (`opts.route` serves extra paths first). `opts.claim`/`opts.report`
+ * override a call's response by its 1-based index, for scripted sequences.
+ */
+function fakeRunnerApi(
+  jobs: RunnerJob[] = [],
+  opts: {
+    claim?: (n: number, body: any) => Response;
+    report?: (n: number, body: any) => Response;
+    route?: (path: string, url: URL, body: any) => Response | undefined;
+  } = {},
+) {
+  const calls: Array<{ path: string; body: any }> = [];
+  const reports: any[] = [];
+  /** Date.now() per claim, for backoff assertions under fake timers. */
+  const claims: number[] = [];
+  const queue = [...jobs];
+  const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const path = url.pathname;
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    calls.push({ path, body });
+    if (path.endsWith('/claim')) {
+      claims.push(Date.now());
+      if (opts.claim) return opts.claim(claims.length, body);
+      const next = queue.shift();
+      return next ? Response.json({ job: { runnerId: body.runnerId, ...next } }) : new Response(null, { status: 204 });
+    }
+    if (path.endsWith('/heartbeat')) {
+      return Response.json({ job: { leaseUntil: new Date(Date.now() + 120_000).toISOString() } });
+    }
+    if (path.endsWith('/report')) {
+      reports.push(body);
+      if (opts.report) return opts.report(reports.length, body);
+      return Response.json({ run: { status: body.conclusion } });
+    }
+    const routed = opts.route?.(path, url, body);
+    if (routed) return routed;
+    return Response.json({ error: 'not found' }, { status: 404 });
+  };
+  return { apiFetch, calls, reports, claims };
+}
+
 describe('kvarm runner', () => {
   it('caps the aggregate content fetched by one warm delta', async () => {
     let reads = 0;
@@ -77,29 +124,11 @@ describe('kvarm runner', () => {
 
   it('claims, checks out the exact immutable sha, runs the command and reports its summary', async () => {
     const sha = 'a'.repeat(40);
-    const calls: Array<{ path: string; body: any }> = [];
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      calls.push({ path, body });
-      if (path.endsWith('/claim')) {
-        return Response.json({
-          job: {
-            id: 'job-1',
-            name: 'build',
-            command: 'cat ci-marker.txt',
-            sha,
-            treeSha: 'b'.repeat(40),
-            generation: 3,
-            runnerId: body.runnerId,
-            timeoutSeconds: 30,
-          },
-        });
-      }
-      if (path.endsWith('/heartbeat')) return Response.json({ job: { leaseUntil: new Date(Date.now() + 120_000).toISOString() } });
-      if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
-      return Response.json({ error: 'not found' }, { status: 404 });
-    };
+    const api = fakeRunnerApi([
+      { id: 'job-1', name: 'build', command: 'cat ci-marker.txt', sha, treeSha: 'b'.repeat(40), generation: 3, timeoutSeconds: 30 },
+    ]);
+    const apiFetch = api.apiFetch;
+    const calls = api.calls;
     const stdout: string[] = [];
     const stderr: string[] = [];
     const checkoutFn = async (o: any) => {
@@ -146,13 +175,8 @@ describe('kvarm runner', () => {
   });
 
   it('uses the normalized encoded repository path for every runner API request', async () => {
-    const paths: string[] = [];
-    const apiFetch = async (input: string | URL | Request) => {
-      const path = new URL(String(input)).pathname;
-      paths.push(path);
-      if (path.endsWith('/claim')) return new Response(null, { status: 204 });
-      return Response.json({});
-    };
+    const api = fakeRunnerApi();
+    const apiFetch = api.apiFetch;
     await runRunner({
       ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
@@ -171,24 +195,15 @@ describe('kvarm runner', () => {
       tempRoot: root,
       workRoot: join(root, 'repo-path-work'),
     });
-    expect(paths).toEqual(['/api/v1/repos/alice/demo/ci/jobs/claim']);
+    expect(api.calls.map((c) => c.path)).toEqual(['/api/v1/repos/alice/demo/ci/jobs/claim']);
   });
 
   it('reports a failed or timed-out command as failure and exits cleanly when no job is queued', async () => {
-    let claims = 0;
-    const reports: any[] = [];
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (path.endsWith('/claim')) {
-        claims++;
-        return claims === 1
-          ? Response.json({ job: { id: 'job-2', name: 'test', command: 'exit 1', sha: 'c'.repeat(40), treeSha: 'd'.repeat(40), generation: 1, runnerId: body.runnerId, timeoutSeconds: 1 } })
-          : new Response(null, { status: 204 });
-      }
-      if (path.endsWith('/report')) reports.push(body);
-      return Response.json({ run: { status: 'failure' } });
-    };
+    const api = fakeRunnerApi([
+      { id: 'job-2', name: 'test', command: 'exit 1', sha: 'c'.repeat(40), treeSha: 'd'.repeat(40), generation: 1, timeoutSeconds: 1 },
+    ]);
+    const apiFetch = api.apiFetch;
+    const reports = api.reports;
     const checkoutFn = async (o: any) => {
       mkdirSync(o.dir, { recursive: true });
       return { source: 'clone' as const, sha: 'c'.repeat(40) };
@@ -229,24 +244,12 @@ describe('kvarm runner', () => {
   });
 
   it('retries the original successful report without changing its conclusion', async () => {
-    const reports: any[] = [];
-    let reportAttempts = 0;
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (path.endsWith('/claim')) {
-        return Response.json({
-          job: { id: 'job-retry', name: 'build', command: 'true', sha: 'e'.repeat(40), generation: 1, timeoutSeconds: 10 },
-        });
-      }
-      if (path.endsWith('/report')) {
-        reports.push(body);
-        reportAttempts++;
-        if (reportAttempts === 1) return Response.json({ error: 'temporary' }, { status: 503 });
-        return Response.json({ run: { status: 'success' } });
-      }
-      return Response.json({});
-    };
+    const api = fakeRunnerApi(
+      [{ id: 'job-retry', name: 'build', command: 'true', sha: 'e'.repeat(40), generation: 1, timeoutSeconds: 10 }],
+      { report: (n) => (n === 1 ? Response.json({ error: 'temporary' }, { status: 503 }) : Response.json({ run: { status: 'success' } })) },
+    );
+    const apiFetch = api.apiFetch;
+    const reports = api.reports;
     const result = await runRunner({
       ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
@@ -272,21 +275,10 @@ describe('kvarm runner', () => {
     const sha = 'f'.repeat(40);
     const stdout = '😀'.repeat(16_100);
     const stderr = 'stderr 😀';
-    let report: any;
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (path.endsWith('/claim')) {
-        return Response.json({
-          job: { id: 'job-byte-edge', name: 'build', command: 'node build.js', sha, generation: 4, timeoutSeconds: 10 },
-        });
-      }
-      if (path.endsWith('/report')) {
-        report = body;
-        return Response.json({ run: { status: body.conclusion } });
-      }
-      return Response.json({});
-    };
+    const api = fakeRunnerApi([
+      { id: 'job-byte-edge', name: 'build', command: 'node build.js', sha, generation: 4, timeoutSeconds: 10 },
+    ]);
+    const apiFetch = api.apiFetch;
 
     const result = await runRunner({
       ...HOST_TRUSTED,
@@ -307,6 +299,7 @@ describe('kvarm runner', () => {
     });
 
     expect(result).toEqual({ claimed: 1, reported: 1 });
+    const report = api.reports[0]!;
     expect(report.conclusion).toBe('success');
     expect(report.summary).toMatchObject({
       command: 'node build.js',
@@ -327,21 +320,10 @@ describe('kvarm runner', () => {
     const sha = '9'.repeat(40);
     const stdout = '😀'.repeat(16_000);
     const stderr = 'fits 😀';
-    let report: any;
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (path.endsWith('/claim')) {
-        return Response.json({
-          job: { id: 'job-fits', name: 'build', command: 'node build.js', sha, generation: 2, timeoutSeconds: 10 },
-        });
-      }
-      if (path.endsWith('/report')) {
-        report = body;
-        return Response.json({ run: { status: body.conclusion } });
-      }
-      return Response.json({});
-    };
+    const api = fakeRunnerApi([
+      { id: 'job-fits', name: 'build', command: 'node build.js', sha, generation: 2, timeoutSeconds: 10 },
+    ]);
+    const apiFetch = api.apiFetch;
 
     const result = await runRunner({
       ...HOST_TRUSTED,
@@ -362,6 +344,7 @@ describe('kvarm runner', () => {
     });
 
     expect(result).toEqual({ claimed: 1, reported: 1 });
+    const report = api.reports[0]!;
     expect(report.conclusion).toBe('success');
     expect(report.summary).toEqual({
       command: 'node build.js',
@@ -380,18 +363,8 @@ describe('kvarm runner', () => {
   it('trims a summary whose command alone exceeds the budget, before any output', async () => {
     const sha = 'c'.repeat(40);
     const command = `echo ${'x'.repeat(70_000)}`;
-    let report: any;
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      if (path.endsWith('/claim')) {
-        return Response.json({ job: { id: 'job-cmd', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 } });
-      }
-      if (path.endsWith('/report')) {
-        report = init?.body ? JSON.parse(String(init.body)) : {};
-        return Response.json({ run: { status: report.conclusion } });
-      }
-      return Response.json({});
-    };
+    const api = fakeRunnerApi([{ id: 'job-cmd', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 }]);
+    const apiFetch = api.apiFetch;
 
     const result = await runRunner({
       ...HOST_TRUSTED,
@@ -412,6 +385,7 @@ describe('kvarm runner', () => {
     });
 
     expect(result).toEqual({ claimed: 1, reported: 1 });
+    const report = api.reports[0]!;
     expect(report.summary.command).not.toBe(command);
     expect(report.summary.command).toMatch(/…\[truncated\]$/);
     // The command is display metadata: it is cut first, leaving the output whole.
@@ -423,18 +397,8 @@ describe('kvarm runner', () => {
   it('still fits the report when neither an oversized command nor its output fits alone', async () => {
     const sha = '4'.repeat(40);
     const command = `echo ${'y'.repeat(70_000)}`;
-    let report: any;
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      if (path.endsWith('/claim')) {
-        return Response.json({ job: { id: 'job-both', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 } });
-      }
-      if (path.endsWith('/report')) {
-        report = init?.body ? JSON.parse(String(init.body)) : {};
-        return Response.json({ run: { status: report.conclusion } });
-      }
-      return Response.json({});
-    };
+    const api = fakeRunnerApi([{ id: 'job-both', name: 'build', command, sha, generation: 1, timeoutSeconds: 10 }]);
+    const apiFetch = api.apiFetch;
 
     const result = await runRunner({
       ...HOST_TRUSTED,
@@ -455,6 +419,7 @@ describe('kvarm runner', () => {
     });
 
     expect(result).toEqual({ claimed: 1, reported: 1 });
+    const report = api.reports[0]!;
     expect(new TextEncoder().encode(JSON.stringify(report.summary)).length).toBeLessThanOrEqual(65_536 - 1_024);
     // The command is display metadata: it is the one cut to the bare marker
     // so the oversized output keeps the largest share of the budget.
@@ -472,24 +437,19 @@ describe('kvarm runner', () => {
   it('waits adaptively between idle claims, resets after a job, and polls exactly one claim per wait', async () => {
     vi.useFakeTimers();
     try {
-      const calls: string[] = [];
-      const claims: number[] = [];
-      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-        const path = new URL(String(input)).pathname;
-        const body = init?.body ? JSON.parse(String(init.body)) : {};
-        calls.push(path);
-        if (path.endsWith('/claim')) {
-          claims.push(Date.now());
-          if (claims.length === 4) {
+      const api = fakeRunnerApi([], {
+        claim: (n) => {
+          if (n === 4) {
             return Response.json({ job: { id: 'j', name: 'build', command: 'true', sha: 'b'.repeat(40), generation: 1, timeoutSeconds: 30 } });
           }
           // A refused claim (bad credentials) ends the loop; a retriable one never would.
-          if (claims.length >= 7) return Response.json({ error: 'runner stopped' }, { status: 401 });
+          if (n >= 7) return Response.json({ error: 'runner stopped' }, { status: 401 });
           return new Response(null, { status: 204 });
-        }
-        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
-        return Response.json({});
-      };
+        },
+      });
+      const apiFetch = api.apiFetch;
+      const calls = api.calls;
+      const claims = api.claims;
       const run = runRunner({
       ...HOST_TRUSTED,
         baseUrl: 'https://kvarm.test',
@@ -512,36 +472,23 @@ describe('kvarm runner', () => {
       const waits = claims.slice(1).map((t, i) => t - claims[i]!);
       expect(waits).toEqual([2_000, 4_000, 8_000, 0, 2_000, 4_000]);
       // Each idle poll is one claim; the only other call is the job's report.
-      const nonClaim = calls.filter((c) => !c.endsWith('/claim'));
+      const nonClaim = calls.filter((c) => !c.path.endsWith('/claim'));
       expect(nonClaim).toHaveLength(1);
-      expect(nonClaim[0]).toMatch(/\/report$/);
-      expect(calls.filter((c) => c.endsWith('/claim'))).toHaveLength(7);
+      expect(nonClaim[0]!.path).toMatch(/\/report$/);
+      expect(calls.filter((c) => c.path.endsWith('/claim'))).toHaveLength(7);
     } finally {
       vi.useRealTimers();
     }
   });
 
   it('drainUntilEmpty exits as soon as a claim finds no job, reporting every job it claimed', async () => {
-    const jobs = [
+    const api = fakeRunnerApi([
       { id: 'j1', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 },
       { id: 'j2', name: 'test', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 },
-    ];
-    const claims: number[] = [];
-    const reports: any[] = [];
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (path.endsWith('/claim')) {
-        claims.push(Date.now());
-        const job = jobs.shift();
-        return job ? Response.json({ job }) : new Response(null, { status: 204 });
-      }
-      if (path.endsWith('/report')) {
-        reports.push(body);
-        return Response.json({ run: { status: 'success' } });
-      }
-      return Response.json({});
-    };
+    ]);
+    const apiFetch = api.apiFetch;
+    const claims = api.claims;
+    const reports = api.reports;
     const result = await runRunner({
       baseUrl: 'https://kvarm.test',
       pat: 'p',
@@ -570,23 +517,17 @@ describe('kvarm runner', () => {
   it('retries a claim on a 429, a network error and a 5xx, honoring Retry-After, and keeps serving', async () => {
     vi.useFakeTimers();
     try {
-      const claims: number[] = [];
       const stderr: string[] = [];
-      let claim = 0;
-      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-        const path = new URL(String(input)).pathname;
-        const body = init?.body ? JSON.parse(String(init.body)) : {};
-        if (path.endsWith('/claim')) {
-          claims.push(Date.now());
-          claim++;
-          if (claim === 1) return Response.json({ error: 'slow down' }, { status: 429, headers: { 'retry-after': '3' } });
-          if (claim === 2) throw new TypeError('fetch failed');
-          if (claim === 3) return Response.json({ error: 'storage unavailable' }, { status: 503 });
+      const api = fakeRunnerApi([], {
+        claim: (n) => {
+          if (n === 1) return Response.json({ error: 'slow down' }, { status: 429, headers: { 'retry-after': '3' } });
+          if (n === 2) throw new TypeError('fetch failed');
+          if (n === 3) return Response.json({ error: 'storage unavailable' }, { status: 503 });
           return Response.json({ job: { id: 'j-r', name: 'build', command: 'true', sha: 'b'.repeat(40), generation: 1, timeoutSeconds: 30 } });
-        }
-        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
-        return Response.json({});
-      };
+        },
+      });
+      const apiFetch = api.apiFetch;
+      const claims = api.claims;
       const run = runRunner({
         ...HOST_TRUSTED,
         baseUrl: 'https://kvarm.test',
@@ -624,11 +565,10 @@ describe('kvarm runner', () => {
   });
 
   it('stays fatal on a refused claim: bad credentials are actionable, not retriable', async () => {
-    let claims = 0;
-    const apiFetch = async () => {
-      claims++;
-      return Response.json({ error: 'unauthorized', code: 'INVALID_TOKEN' }, { status: 401 });
-    };
+    const api = fakeRunnerApi([], {
+      claim: () => Response.json({ error: 'unauthorized', code: 'INVALID_TOKEN' }, { status: 401 }),
+    });
+    const apiFetch = api.apiFetch;
     await expect(
       runRunner({
         ...HOST_TRUSTED,
@@ -649,7 +589,7 @@ describe('kvarm runner', () => {
         workRoot: join(root, 'claim-fatal-work'),
       }),
     ).rejects.toThrow(/unauthorized \(INVALID_TOKEN\)/);
-    expect(claims).toBe(1);
+    expect(api.claims).toHaveLength(1);
   });
 
   it('treats a malformed claim as a failed claim and retries it, never a crash', async () => {
@@ -658,23 +598,20 @@ describe('kvarm runner', () => {
       const claims: string[] = [];
       const stderr: string[] = [];
       const replies = [
-        { job: { id: 'm1', name: 'build', command: 'true', sha: 'a'.repeat(40), timeoutSeconds: 30, generation: 0 } },
-        { job: { id: 'm2', name: 'build', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 } },
-        { job: { id: '../m3', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
-        { job: { id: 'm4', name: 'build', command: 'true', sha: '../bad', generation: 2, timeoutSeconds: 30 } },
-        { job: { id: 'm5', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 } },
+        { id: 'm1', name: 'build', command: 'true', sha: 'a'.repeat(40), timeoutSeconds: 30, generation: 0 },
+        { id: 'm2', name: 'build', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 30 },
+        { id: '../m3', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 },
+        { id: 'm4', name: 'build', command: 'true', sha: '../bad', generation: 2, timeoutSeconds: 30 },
+        { id: 'm5', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 2, timeoutSeconds: 30 },
       ];
-      const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-        const path = new URL(String(input)).pathname;
-        const body = init?.body ? JSON.parse(String(init.body)) : {};
-        if (path.endsWith('/claim')) {
+      const api = fakeRunnerApi([], {
+        claim: () => {
           const next = replies.shift();
-          claims.push(next ? String(next.job.id) : 'gone');
-          return next ? Response.json(next) : new Response(null, { status: 204 });
-        }
-        if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
-        return Response.json({});
-      };
+          claims.push(next ? String(next.id) : 'gone');
+          return next ? Response.json({ job: next }) : new Response(null, { status: 204 });
+        },
+      });
+      const apiFetch = api.apiFetch;
       const run = runRunner({
         ...HOST_TRUSTED,
         baseUrl: 'https://kvarm.test',
@@ -706,15 +643,9 @@ describe('kvarm runner', () => {
 
   it('runs a claimed job whose timeoutSeconds is out of range at the platform default', async () => {
     const timeouts: number[] = [];
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (path.endsWith('/claim')) {
-        return Response.json({ job: { id: 'j-t', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 'fast' } });
-      }
-      if (path.endsWith('/report')) return Response.json({ run: { status: body.conclusion } });
-      return Response.json({});
-    };
+    const apiFetch = fakeRunnerApi([
+      { id: 'j-t', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 1, timeoutSeconds: 'fast' },
+    ]).apiFetch;
     const result = await runRunner({
       ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
@@ -740,11 +671,8 @@ describe('kvarm runner', () => {
   });
 
   it('refuses a repo that could retarget its authenticated requests, before any fetch', async () => {
-    const calls: string[] = [];
-    const apiFetch = async (input: string | URL | Request) => {
-      calls.push(String(input));
-      return new Response(null, { status: 204 });
-    };
+    const api = fakeRunnerApi();
+    const apiFetch = api.apiFetch;
     for (const repo of ['../demo', 'a%b/c', 'a#b/c', 'a?b/c', 'owner/..', 'owner/./demo']) {
       await expect(
         runRunner({
@@ -767,7 +695,7 @@ describe('kvarm runner', () => {
         }),
       ).rejects.toThrow(/invalid repository/);
     }
-    expect(calls).toEqual([]);
+    expect(api.calls).toEqual([]);
   });
 
   it('derives the claim retry delay from Retry-After, else a doubling ramp to a 60 s cap', async () => {
@@ -784,27 +712,15 @@ describe('kvarm runner', () => {
   it('keeps claiming after a fenced-away report (409 STALE_GENERATION) instead of dying with it', async () => {
     vi.useFakeTimers();
     try {
-      let reports = 0;
-      const claims: string[] = [];
-      let jobClaimed = false;
       const stderr: string[] = [];
-      const apiFetch = async (input: string | URL | Request) => {
-        const path = new URL(String(input)).pathname;
-        if (path.endsWith('/claim')) {
-          if (!jobClaimed) {
-            jobClaimed = true;
-            claims.push('job');
-            return Response.json({ job: { id: 'job-x', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 5, timeoutSeconds: 30 } });
-          }
-          claims.push('after-report');
-          return Response.json({ error: 'unauthorized' }, { status: 401 });
-        }
-        if (path.endsWith('/report')) {
-          reports++;
-          return Response.json({ error: 'the CI job claim is stale', code: 'STALE_GENERATION' }, { status: 409 });
-        }
-        return Response.json({});
-      };
+      const api = fakeRunnerApi([], {
+        claim: (n) =>
+          n === 1
+            ? Response.json({ job: { id: 'job-x', name: 'build', command: 'true', sha: 'a'.repeat(40), generation: 5, timeoutSeconds: 30 } })
+            : Response.json({ error: 'unauthorized' }, { status: 401 }),
+        report: () => Response.json({ error: 'the CI job claim is stale', code: 'STALE_GENERATION' }, { status: 409 }),
+      });
+      const apiFetch = api.apiFetch;
       const run = runRunner({
         ...HOST_TRUSTED,
         baseUrl: 'https://kvarm.test',
@@ -825,8 +741,8 @@ describe('kvarm runner', () => {
       // Three report attempts (250 ms and 500 ms between them), then the loop claims again.
       await vi.advanceTimersByTimeAsync(3_000);
       await done;
-      expect(reports).toBe(3);
-      expect(claims).toEqual(['job', 'after-report']);
+      expect(api.reports).toHaveLength(3);
+      expect(api.claims).toHaveLength(2);
       expect(stderr.filter((l) => l.startsWith('warning:'))).toEqual([
         'warning: could not report build (job-x) after 3 attempts: ci/jobs/job-x/report: the CI job claim is stale (STALE_GENERATION); the platform requeues the job when the lease expires',
       ]);
@@ -848,34 +764,25 @@ describe('kvarm runner', () => {
     ];
     let checkouts = 0;
     const contentsGets: string[] = [];
-    const reports: any[] = [];
     const stdout: string[] = [];
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(String(input));
-      const path = url.pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (path.endsWith('/claim')) {
-        const next = jobs.shift();
-        return next ? Response.json({ job: next }) : new Response(null, { status: 204 });
-      }
-      if (path.endsWith('/report')) {
-        reports.push(body);
-        return Response.json({ run: { status: body.conclusion } });
-      }
-      if (path === `/api/v1/repos/alice/demo/compare/${a}...${b}`) {
-        return Response.json({
-          files: [
-            { path: 'a.txt', status: 'modified', oldHash: blobSha('v1\n'), newHash: blobSha('v2\n'), oldMode: '100644', newMode: '100644' },
-          ],
-          truncated: false,
-        });
-      }
-      if (path === '/api/v1/repos/alice/demo/contents') {
-        contentsGets.push(String(url.searchParams.get('path')));
-        return Response.json({ ref: b, path: 'a.txt', size: 4, encoding: 'utf-8', content: 'v2\n' });
-      }
-      return Response.json({ error: 'not found' }, { status: 404 });
-    };
+    const api = fakeRunnerApi(jobs, {
+      route: (path, url) => {
+        if (path === `/api/v1/repos/alice/demo/compare/${a}...${b}`) {
+          return Response.json({
+            files: [
+              { path: 'a.txt', status: 'modified', oldHash: blobSha('v1\n'), newHash: blobSha('v2\n'), oldMode: '100644', newMode: '100644' },
+            ],
+            truncated: false,
+          });
+        }
+        if (path === '/api/v1/repos/alice/demo/contents') {
+          contentsGets.push(String(url.searchParams.get('path')));
+          return Response.json({ ref: b, path: 'a.txt', size: 4, encoding: 'utf-8', content: 'v2\n' });
+        }
+      },
+    });
+    const apiFetch = api.apiFetch;
+    const reports = api.reports;
     const options = {
       ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
@@ -924,28 +831,24 @@ describe('kvarm runner', () => {
     let checkouts = 0;
     const stdout: string[] = [];
     const stderr: string[] = [];
-    const apiFetch = async (input: string | URL | Request) => {
-      const path = new URL(String(input)).pathname;
-      if (path.endsWith('/claim')) {
-        const next = jobs.shift();
-        return next ? Response.json({ job: next }) : new Response(null, { status: 204 });
-      }
-      if (path.endsWith('/report')) return Response.json({ run: { status: 'success' } });
-      if (path === `/api/v1/repos/alice/demo/compare/${a}...${c}`) {
-        return Response.json({
-          files: Array.from({ length: 1_500 }, (_, i) => ({
-            path: `f${i}.txt`,
-            status: 'added',
-            oldHash: null,
-            oldMode: null,
-            newHash: String(i).padStart(40, '0'),
-            newMode: '100644',
-          })),
-          truncated: false,
-        });
-      }
-      return Response.json({ error: 'not found' }, { status: 404 });
-    };
+    const api = fakeRunnerApi(jobs, {
+      route: (path) => {
+        if (path === `/api/v1/repos/alice/demo/compare/${a}...${c}`) {
+          return Response.json({
+            files: Array.from({ length: 1_500 }, (_, i) => ({
+              path: `f${i}.txt`,
+              status: 'added',
+              oldHash: null,
+              oldMode: null,
+              newHash: String(i).padStart(40, '0'),
+              newMode: '100644',
+            })),
+            truncated: false,
+          });
+        }
+      },
+    });
+    const apiFetch = api.apiFetch;
     const options = {
       ...HOST_TRUSTED,
       baseUrl: 'https://kvarm.test',
@@ -976,25 +879,10 @@ describe('kvarm runner', () => {
     expect(readFileSync(join(work, 'seed.txt'), 'utf8')).toBe(`seed ${c}\n`);
   });
 
-  /** One queued job; records every call path and report body. */
+  /** One queued job; records every call path (relative to the repo API) and report body. */
   function preparedPlatform(sha: string) {
-    const calls: string[] = [];
-    const reports: any[] = [];
-    let queued = true;
-    const apiFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname;
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      calls.push(path.slice('/api/v1/repos/alice/demo/'.length));
-      if (path.endsWith('/claim')) {
-        if (!queued) return new Response(null, { status: 204 });
-        queued = false;
-        return Response.json({ job: { id: 'job-p', name: 'build', command: 'build', sha, generation: 2, timeoutSeconds: 30 } });
-      }
-      if (path.endsWith('/heartbeat')) return Response.json({ job: {} });
-      if (path.endsWith('/report')) return reports.push(body), Response.json({ run: { status: body.conclusion } });
-      return Response.json({ error: 'not found' }, { status: 404 });
-    };
-    return { apiFetch, calls, reports };
+    const api = fakeRunnerApi([{ id: 'job-p', name: 'build', command: 'build', sha, generation: 2, timeoutSeconds: 30 }]);
+    return { apiFetch: api.apiFetch, calls: api.calls, reports: api.reports };
   }
 
   it('awaits the prepared hook after the workspace is materialized and before the command runs, heartbeating meanwhile', async () => {
@@ -1039,7 +927,11 @@ describe('kvarm runner', () => {
       vi.useRealTimers();
     }
     expect(order).toEqual(['checkout', `prepared job-p true fresh snapshot`, 'released', 'execute']);
-    expect(platform.calls).toEqual(['ci/jobs/claim', 'ci/jobs/job-p/heartbeat', 'ci/jobs/job-p/report']);
+    expect(platform.calls.map((c) => c.path.slice('/api/v1/repos/alice/demo/'.length))).toEqual([
+      'ci/jobs/claim',
+      'ci/jobs/job-p/heartbeat',
+      'ci/jobs/job-p/report',
+    ]);
     expect(platform.reports[0]).toMatchObject({ conclusion: 'success', generation: 2 });
   });
 

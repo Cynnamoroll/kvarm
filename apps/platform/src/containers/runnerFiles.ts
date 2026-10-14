@@ -16,6 +16,26 @@ export const PREPARED_LINE = 'kvarm-runner: workspace prepared';
 export const GO_TIMEOUT_MS = 180_000;
 
 /**
+ * The prepared-point wait shared by run.mjs and drain.mjs: print the marker
+ * line, then poll for the go file. The Durable Object snapshots the prepared
+ * workspace while this wait runs, and a large save can outlast a fixed
+ * 180 s, so the budget follows KVARM_GO_WAIT_MS when the caller provides one
+ * (runnerExecEnv) and defaults to GO_TIMEOUT_MS. Indented to land inside
+ * each entry's `prepared` arrow.
+ */
+const GO_WAIT = `process.stdout.write(${JSON.stringify(PREPARED_LINE)} + '\\n');
+        // The Durable Object snapshots the prepared workspace while this wait
+        // runs, and a large save can outlast a fixed 180 s, so the wait budget
+        // follows the enclosing \`timeout\` process when it provides one.
+        const provided = Number(env.KVARM_GO_WAIT_MS);
+        const budget = Number.isSafeInteger(provided) && provided > 0 ? provided : ${GO_TIMEOUT_MS};
+        const deadline = Date.now() + budget;
+        while (!existsSync(go)) {
+          if (Date.now() > deadline) throw new Error(\`no go signal within \${Math.round(budget / 1000)} s after the workspace was prepared\`);
+          await new Promise((r) => setTimeout(r, 100));
+        }`;
+
+/**
  * One job, then exit: 0 when a claimed job was reported, 3 when none was
  * queued. Credentials arrive only through this process's environment, which
  * executeShell does not pass on to the repository command.
@@ -56,17 +76,7 @@ const result = await runRunner({
   stderr: (line) => process.stderr.write(line + '\\n'),
   prepared: go
     ? async () => {
-        process.stdout.write(${JSON.stringify(PREPARED_LINE)} + '\\n');
-        // The Durable Object snapshots the prepared workspace while this wait
-        // runs, and a large save can outlast a fixed 180 s, so the wait budget
-        // follows the enclosing \`timeout\` process when it provides one.
-        const provided = Number(env.KVARM_GO_WAIT_MS);
-        const budget = Number.isSafeInteger(provided) && provided > 0 ? provided : ${GO_TIMEOUT_MS};
-        const deadline = Date.now() + budget;
-        while (!existsSync(go)) {
-          if (Date.now() > deadline) throw new Error(\`no go signal within \${Math.round(budget / 1000)} s after the workspace was prepared\`);
-          await new Promise((r) => setTimeout(r, 100));
-        }
+        ${GO_WAIT}
       }
     : undefined,
 });
@@ -112,12 +122,7 @@ const result = await runRunner({
     ? async () => {
         if (!first) return;
         first = false;
-        process.stdout.write(${JSON.stringify(PREPARED_LINE)} + '\\n');
-        const deadline = Date.now() + ${GO_TIMEOUT_MS};
-        while (!existsSync(go)) {
-          if (Date.now() > deadline) throw new Error('no go signal within ${GO_TIMEOUT_MS / 1000} s after the workspace was prepared');
-          await new Promise((r) => setTimeout(r, 100));
-        }
+        ${GO_WAIT}
       }
     : undefined,
 });

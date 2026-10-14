@@ -18,17 +18,18 @@
 import { Hono, type Context } from 'hono';
 import { actorJson, authorizeRoute, denyJson, type App } from '../api';
 import { withLazyRepo } from '../../artifacts/repo';
-import { matchSnapshot, streamAndStore, zstdToTar } from '../../cache/snapshot';
+import { matchSnapshot, zstdToTar } from '../../cache/snapshot';
 import type { RepoRow } from '../../db/repos';
 import { isFullSha, type ResolveContext } from '../../services/refs';
 import {
   RefStoreUnavailable,
   commitExists,
   demandSnapshot,
-  isReady,
+  downloadSnapshot,
   readSnapshot,
   resolveSnapshotRef,
   snapshotView,
+  type StoredSnapshot,
 } from '../../services/snapshots';
 
 export const snapshotsApi = new Hono<App>();
@@ -110,22 +111,13 @@ snapshotsApi.get('/repos/:owner/:repo/snapshots/*', async (c) => {
       const view = snapshotView(parsed.ref, sha, row, demandPath(repo, parsed.ref));
       return actorJson(c, view.body, view.status);
     }
-    if (!isReady(row)) {
-      const state = row?.state ?? 'absent';
-      return c.json({ error: 'snapshot is not ready', code: 'SNAPSHOT_NOT_READY', state, sha }, 409);
+    const dl = await downloadSnapshot(c.env, c.executionCtx, repo.id, sha, row);
+    if (!dl.ok) {
+      return dl.code === 'SNAPSHOT_NOT_READY'
+        ? c.json({ error: dl.error, code: dl.code, state: dl.state, sha }, 409)
+        : c.json({ error: dl.error, code: dl.code, sha }, 409);
     }
-    const object = await c.env.SNAPSHOTS.get(row.r2_key);
-    if (!object) return c.json({ error: 'snapshot bytes missing', code: 'SNAPSHOT_MISSING', sha }, 409);
-    const encoding: 'identity' | 'zstd' = row.encoding === 'zstd' ? 'zstd' : 'identity';
-    const tree = row.tree ?? sha;
-    const stored = {
-      body: streamAndStore(c.executionCtx, repo.id, sha, tree, object, { encoding, tarSize: row.size }),
-      size: object.size,
-      tree,
-      encoding,
-      tarSize: row.size,
-    };
-    return downloadResponse(c, repo, sha, stored, acceptsZstd(c.req.header('accept')));
+    return downloadResponse(c, repo, sha, dl.stored, acceptsZstd(c.req.header('accept')));
   });
 });
 
@@ -138,7 +130,7 @@ function downloadResponse(
   c: Context<App>,
   repo: RepoRow,
   sha: string,
-  stored: { body: ReadableStream<Uint8Array>; size: number; tree: string; encoding: 'identity' | 'zstd'; tarSize: number },
+  stored: StoredSnapshot,
   wantsZstd: boolean,
 ): Response {
   const zstd = stored.encoding === 'zstd' && wantsZstd;

@@ -1,4 +1,4 @@
-import { env as cfEnv, exports } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, patCacheKey, patHash, revokePAT, PAT_STAMP_INTERVAL_MS, type Scope } from '../src/auth/pat';
 import { CostMeter, COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
@@ -6,15 +6,19 @@ import { resolveRepoAccess } from '../src/services/access';
 import type { RepoRow } from '../src/db/repos';
 import { infoRefsCacheKey } from '../src/routes/git';
 import { repoViewGeneration } from '../src/services/pushFreshness';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = (path: string, init: RequestInit = {}) => request(env, path, init);
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private' = 'public') => {
+  await seedRepoBase(env, name, { owner: OWNER, visibility, register: false });
+  return `https://artifacts.invalid/git/default/${OWNER}--${name}.git`;
+};
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const OWNER = 'cost-owner';
 const FULL: Scope[] = ['read', 'write', 'api'];
-
-function call(path: string, init: RequestInit = {}): Promise<Response> {
-  return exports.default.fetch(new Request(`${ORIGIN}${path}`, init));
-}
 
 async function costOf(res: Response): Promise<CostCounters> {
   const parsed = parseCostHeader(res.headers.get(COST_HEADER));
@@ -33,17 +37,6 @@ function basic(token: string): Record<string, string> {
 
 let userId = '';
 
-async function seedRepo(name: string, visibility: 'public' | 'private'): Promise<string> {
-  const artifactsName = `${OWNER}--${name}`;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, created_at) VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  return `https://artifacts.invalid/git/default/${artifactsName}.git`;
-}
-
 async function freshToken(scopes: Scope[] = FULL): Promise<{ id: string; token: string }> {
   const minted = await mintPAT(env, userId, `cost-${crypto.randomUUID().slice(0, 8)}`, scopes);
   return { id: minted.id, token: minted.token };
@@ -52,12 +45,7 @@ async function freshToken(scopes: Scope[] = FULL): Promise<{ id: string; token: 
 let openRemote = '';
 
 beforeAll(async () => {
-  userId = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
-    .run();
+  userId = await seedUser(OWNER);
   openRemote = await seedRepo('open', 'public');
   await seedRepo('secret', 'private');
   await seedRepo('flip', 'public');

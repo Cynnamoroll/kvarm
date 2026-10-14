@@ -57,3 +57,12 @@ export async function getUserByLogin(db: D1Database, login: string): Promise<Use
     .first<UserRow>();
   return row ? toUserRow(row) : null;
 }
+
+/** Orgs where the user holds the owner role (settings pages). */
+export async function listOwnedOrgLogins(db: D1Database, userId: string, limit: number): Promise<string[]> {
+  const { results } = await db.prepare(
+    `SELECT o.login FROM orgs o JOIN org_members m ON m.org_id = o.id
+        WHERE m.user_id = ? AND m.role = 'owner' ORDER BY o.login LIMIT ?`,
+  ).bind(userId, limit).all<{ login: string }>();
+  return (results ?? []).map((r) => r.login);
+}

@@ -11,18 +11,14 @@ import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { OPERATIONS } from '@kvarm/ops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, seedRepoWithCommit, seedUser as seedUserBase } from './helpers/seed';
 
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private' = 'private') => { const { repo, main } = await seedRepoWithCommit(env, name, { owner: OWNER, visibility: visibility, files: BASE }); return { repo, main }; };
 
 const env = {
   ...(cfEnv as unknown as Env),
@@ -35,54 +31,7 @@ const OWNER = 'mcp-owner';
 const tok = { owner: '', outsider: '', gitOnly: '' };
 const BASE: Files = { 'README.md': 'readme\n', 'src/a.ts': 'export const a = 1;\n', 'src/lib/b.ts': 'b\n', 'docs/guide.md': 'guide\n' };
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private' = 'private'): Promise<{ repo: FakeRepo; main: string }> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  const main = await commit(repo, BASE);
-  repo.refs.set('refs/heads/main', main.sha);
-  return { repo, main: main.sha };
-}
-
-interface Reply {
-  status: number;
-  json: any;
-  cost: CostCounters;
-  headers: Headers;
-}
-
-async function send(method: string, path: string, opts: { token?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}), ...opts.headers };
-  if (opts.body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: any = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = text;
-  }
-  return { status: res.status, json, cost: cost!, headers: res.headers };
-}
+const send = (method: string, path: string, opts: { token?: string; body?: unknown; headers?: Record<string, string> } = {}) => apiCall(env, method, path, opts);
 
 const ACCEPT = { accept: 'application/json, text/event-stream' };
 let nextId = 1;

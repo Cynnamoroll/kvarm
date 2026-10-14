@@ -28,6 +28,7 @@
 import { sha256Hex } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, objectBody } from './result';
 import type { Actor } from './authz';
 
 export type EvidenceLevel = 'declared' | 'authenticated' | 'verified';
@@ -119,8 +120,6 @@ export function legacyCanonicalPayload(p: { runId: string; model: string; prompt
   return `${LEGACY_PROVENANCE_PAYLOAD_VERSION}\nrun:${p.runId}\nmodel:${p.model}\ninput:${p.promptHash}\ncommit:${p.commit}\n`;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
-const fail = (status: number, code: string, error: string): Fail => ({ ok: false, status, code, error });
 
 // Control characters (newlines above all) would let one field forge another line of the payload.
 function lineSafe(s: string): boolean {
@@ -135,13 +134,13 @@ function lineSafe(s: string): boolean {
 export function parseSignedEvidence(v: unknown): ServiceResult<SignedEvidence | null> {
   if (v === undefined || v === null) return { ok: true, value: null };
   if (typeof v !== 'object' || Array.isArray(v)) {
-    return fail(422, 'INVALID_EVIDENCE', 'evidence must be an object {keyId, runId, signature}');
+    return fail(422, 'evidence must be an object {keyId, runId, signature}', 'INVALID_EVIDENCE');
   }
   const o = v as Record<string, unknown>;
   for (const k of ['keyId', 'runId', 'signature'] as const) {
     const s = o[k];
     if (typeof s !== 'string' || s.length === 0 || s.length > (k === 'signature' ? 200 : PROVENANCE_LIMITS.idMax) || !lineSafe(s)) {
-      return fail(422, 'INVALID_EVIDENCE', `evidence.${k} must be a non-empty single-line string`);
+      return fail(422, `evidence.${k} must be a non-empty single-line string`, 'INVALID_EVIDENCE');
     }
   }
   return { ok: true, value: { keyId: o.keyId as string, runId: o.runId as string, signature: o.signature as string } };
@@ -361,15 +360,14 @@ export async function listProvenanceKeys(env: Env, repo: RepoRow): Promise<Servi
 
 /** POST provenance-keys {name, publicKey}: trusts an execution service's Ed25519 public key for this repository. */
 export async function addProvenanceKey(env: Env, repo: RepoRow, actor: Actor, input: unknown): Promise<ServiceResult<ProvenanceKeyView>> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-    return fail(400, 'INVALID_BODY', 'body must be a JSON object {name, publicKey}');
-  }
-  const o = input as Record<string, unknown>;
+  const parsed = objectBody(input, '{name, publicKey}');
+  if (!parsed.ok) return parsed;
+  const o = parsed.value;
   if (typeof o.name !== 'string' || o.name.trim().length === 0 || o.name.length > PROVENANCE_LIMITS.nameMax) {
-    return fail(422, 'INVALID_NAME', `name must be a non-empty string of at most ${PROVENANCE_LIMITS.nameMax} characters`);
+    return fail(422, `name must be a non-empty string of at most ${PROVENANCE_LIMITS.nameMax} characters`, 'INVALID_NAME');
   }
   const raw = parsePublicKey(o.publicKey);
-  if (!raw) return fail(422, 'INVALID_PUBLIC_KEY', 'publicKey must be a raw 32-byte Ed25519 public key, base64url encoded');
+  if (!raw) return fail(422, 'publicKey must be a raw 32-byte Ed25519 public key, base64url encoded', 'INVALID_PUBLIC_KEY');
   const id = await keyFingerprint(raw);
   const now = Date.now();
   const row = await env.DB.prepare(
@@ -382,7 +380,7 @@ export async function addProvenanceKey(env: Env, repo: RepoRow, actor: Actor, in
   )
     .bind(id, repo.id, o.name, base64urlEncode(raw), actor.user.id, now)
     .first<KeyRow>();
-  if (!row) return fail(409, 'TOO_MANY_KEYS', `a repository trusts at most ${PROVENANCE_LIMITS.repoKeysMax} live keys`);
+  if (!row) return fail(409, `a repository trusts at most ${PROVENANCE_LIMITS.repoKeysMax} live keys`, 'TOO_MANY_KEYS');
   return { ok: true, value: keyView(row) };
 }
 
@@ -394,6 +392,6 @@ export async function revokeProvenanceKey(env: Env, repo: RepoRow, id: string): 
   )
     .bind(repo.id, id, Date.now())
     .first<KeyRow>();
-  if (!row) return fail(404, 'KEY_NOT_FOUND', 'no such provenance key in this repository');
+  if (!row) return fail(404, 'no such provenance key in this repository', 'KEY_NOT_FOUND');
   return { ok: true, value: keyView(row) };
 }

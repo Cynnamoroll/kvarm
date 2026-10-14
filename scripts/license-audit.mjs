@@ -52,4 +52,4 @@ if (opts.stdout) {
   writeFileSync(reportPath, report);
   console.log(`license-audit: wrote docs/licenses.md (${summary})`);
 }
-for (const d of runtimeFlagged) console.log(`  runtime ${d.class}: ${d.name}@${d.version} (${d.license})`);
+for (const d of runtimeFlagged) console.error(`  runtime ${d.class}: ${d.name}@${d.version} (${d.license})`);

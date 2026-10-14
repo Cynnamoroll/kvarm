@@ -41,7 +41,7 @@ import { toUserRow, type UserRow } from '../db/users';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, attributeMerges, mergeAttributionDefaults, parseAttributionInput, type AttributionInput, type MergeAttributionItem } from './attribution';
 import { credentialMayUpdateRef, isOrgRole, isRepoNeed, repoRole, type Actor } from './authz';
-import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
+import { BRANCH_RULE_COLUMNS, effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   HEAD_MOVED_HOOKS,
   MERGE_POLICIES,
@@ -94,9 +94,11 @@ import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
 import { artifactsMergeSources, overlaySources, prepareMerge, type MergeSources, type PreparedMerge } from './merge';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
 import { hasCiJobs, queueExactTreeCi, type CiConfigMemo } from './ci';
+import { objectBody } from './result';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -384,8 +386,9 @@ interface EnqueueInput {
 function parseEnqueue(cx: ChangeContext, number: number, body: unknown): ServiceResult<EnqueueInput> {
   const out: EnqueueInput = { headSha: null, mergePolicy: null, attribution: null };
   if (body === undefined || body === null) return { ok: true, value: out };
-  if (typeof body !== 'object' || Array.isArray(body)) return fail(400, 'body must be a JSON object {headSha?, mergePolicy?, attribution?}', 'INVALID_BODY');
-  const b = body as Record<string, unknown>;
+  const parsed = objectBody(body, '{headSha?, mergePolicy?, attribution?}');
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   if (b.headSha !== undefined && b.headSha !== null) {
     if (typeof b.headSha !== 'string' || !SHA_RE.test(b.headSha)) return fail(422, 'headSha must be a full 40-character commit SHA', 'INVALID_HEAD_SHA');
     out.headSha = b.headSha;
@@ -636,12 +639,14 @@ interface Cursor {
 }
 
 function encodeCursor(c: Cursor): string {
-  return btoa(JSON.stringify(c)).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify(c));
 }
 
 function decodeCursor(raw: string): Cursor | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const c = JSON.parse(atob(raw)) as Cursor;
+    const c = JSON.parse(text) as Cursor;
     return typeof c.ref === 'string' && Number.isInteger(c.seq) && Number.isInteger(c.pos) ? c : null;
   } catch {
     return null;
@@ -912,12 +917,7 @@ const WINDOW_IDS = (() => {
 function windowStatements(db: D1Database, repoId: string, ref: string): D1PreparedStatement[] {
   return [
     db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
-    db
-      .prepare(
-        `SELECT ${BRANCH_RULE_COLUMNS}
-           FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
-      )
-      .bind(repoId),
+    repoBranchRulesSelect(db, repoId),
     // ci_staged: the earliest CI job of the recorded tree (the staged commit). SQLite takes a bare column from the
     // MIN() row, which reads the (repo, tree) index range once instead of reading it and then sorting it.
     db
@@ -2024,7 +2024,8 @@ interface ChainEntry {
   plan: Plan;
   e: WindowRow;
   pv: PreparedMerge;
-  checks: RequiredChecks;
+  /** Filled by the checks-gate phase before any read; the phases below throw on a null. */
+  checks: RequiredChecks | null;
   claimedGen: number;
   /** Before the claim: `ready` at the pass's generation; after it, `publishing` at the claimed one. */
   fence: { generation: number; state: QueueState };
@@ -2096,7 +2097,7 @@ async function publishChain(
     plan,
     e: plan.e,
     pv: plan.prepared!,
-    checks: null as unknown as RequiredChecks,
+    checks: null,
     claimedGen: plan.generation + 1,
     fence: { generation: plan.generation, state: 'ready' as QueueState },
     intent: null,
@@ -2353,6 +2354,7 @@ async function publishChain(
         await backOut(i + 1);
         break;
       }
+      if (!c.checks) throw new RefStoreUnavailable('checks not prepared');
       const block = branchPolicyBlock(freshPolicy, c.checks);
       if (block?.code === 'GUARD_INCOMPLETE' && c.checks.state !== 'failure') {
         await exit(c, 'GUARD_INCOMPLETE', block.error);

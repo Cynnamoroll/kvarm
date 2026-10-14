@@ -1,7 +1,5 @@
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import worker from '../src/index';
 import { mintPAT } from '../src/auth/pat';
 import {
   beginSignIn,
@@ -17,6 +15,24 @@ import {
 import { loginCandidate, loginFromEmail, type UserRow } from '../src/db/users';
 import { provisionSessionUser } from '../src/services/identity';
 import { CookieJar, FakeWorkOS, setCookieNamed, type FakeUser } from './helpers/fakeWorkOS';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = async (path: string, init: RequestInit & { jar?: CookieJar; e?: Env } = {}): Promise<Response> => {
+  const headers = new Headers(init.headers);
+  if (init.jar && init.jar.header()) headers.set('cookie', init.jar.header());
+  const res = await request(init.e ?? env, path, { ...init, headers, redirect: 'manual' });
+  init.jar?.absorb(res);
+  return res;
+};
+const seedUser = async (login: string, opts: { admin?: boolean; workosUserId?: string; email?: string } = {}): Promise<UserRow> => {
+  const workosUserId = opts.workosUserId ?? `kvarm-ops:${login}`;
+  const id = await seedUserBase(env, login, { admin: opts.admin, workosUserId, email: opts.email });
+  const created_at = (await env.DB.prepare('SELECT created_at FROM users WHERE id = ?').bind(id).first<{ created_at: number }>())!.created_at;
+  return { id, workos_user_id: workosUserId, login, email: opts.email ?? `${login}@kvarm.invalid`, name: login, avatar_url: null, is_admin: opts.admin === true, created_at };
+};
+const seedRepo = async (owner: string, name: string, visibility: 'public' | 'private') =>
+  (await seedRepoBase(env, name, { owner, visibility, register: false })).id;
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -43,17 +59,6 @@ function stateCookie(res: Response): string | undefined {
   return res.headers.getSetCookie().find((line) => line.startsWith(`${STATE_COOKIE}-`));
 }
 
-async function call(path: string, init: RequestInit & { jar?: CookieJar; e?: Env } = {}): Promise<Response> {
-  const headers = new Headers(init.headers);
-  if (init.jar && init.jar.header()) headers.set('cookie', init.jar.header());
-  const ctx = createExecutionContext();
-  const req = new Request(`${ORIGIN}${path}`, { ...init, headers, redirect: 'manual' });
-  const res = await worker.fetch(req as Request<unknown, IncomingRequestCfProperties>, init.e ?? env, ctx);
-  await waitOnExecutionContext(ctx);
-  init.jar?.absorb(res);
-  return res;
-}
-
 function form(fields: Record<string, string | string[]>): URLSearchParams {
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(fields)) for (const x of Array.isArray(v) ? v : [v]) body.append(k, x);
@@ -78,36 +83,6 @@ function uniq(prefix: string): string {
 
 function fakeUser(local: string, extra: Partial<FakeUser> = {}): FakeUser {
   return { id: `user_${crypto.randomUUID().replace(/-/g, '')}`, email: `${local}@example.test`, ...extra };
-}
-
-async function seedUser(login: string, opts: { admin?: boolean; workosUserId?: string; email?: string } = {}): Promise<UserRow> {
-  const user: UserRow = {
-    id: crypto.randomUUID(),
-    workos_user_id: opts.workosUserId ?? `kvarm-ops:${login}`,
-    login,
-    email: opts.email ?? `${login}@kvarm.invalid`,
-    name: login,
-    avatar_url: null,
-    is_admin: opts.admin === true,
-    created_at: Date.now(),
-  };
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  )
-    .bind(user.id, user.workos_user_id, login, user.email, login, opts.admin ? 1 : 0, user.created_at)
-    .run();
-  return user;
-}
-
-async function seedRepo(owner: string, name: string, visibility: 'public' | 'private'): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(id, owner, name, `${owner}--${name}`, `https://artifacts.invalid/git/default/${owner}--${name}.git`, visibility, Date.now())
-    .run();
-  return id;
 }
 
 async function grant(repoId: string, userId: string, role: 'read' | 'write' | 'admin'): Promise<void> {

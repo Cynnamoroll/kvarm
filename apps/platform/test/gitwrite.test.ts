@@ -24,6 +24,17 @@ import { internalKey, writeCachedJson } from '../src/cache/internal';
 import type { RepoRow } from '../src/db/repos';
 import { RefStoreUnavailable } from '../src/services/refs';
 import { artifactsPusher } from '../src/services/gitwrite';
+import { seedRepo as seedRepoBase } from './helpers/seed';
+
+const seedRepo = async (name: string, tokens = true): Promise<RepoRow> => {
+  const { id } = await seedRepoBase(baseEnv, name, { owner: 'gw-owner', visibility: 'private', pushedAt: 1000, register: false });
+  if (tokens) {
+    for (const scope of ['read', 'write'] as const) {
+      await writeCachedJson(internalKey('gittoken', `gw-owner--${name}`, scope), { token: `${scope}-tok`, expiresAt: Date.now() + 86_400_000 }, 86_400);
+    }
+  }
+  return (await baseEnv.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(id).first<RepoRow>())!;
+};
 
 const baseEnv = cfEnv as unknown as Env;
 const dec = new TextDecoder();
@@ -33,23 +44,6 @@ interface Seen {
   method: string;
   authorization: string | null;
   body: Uint8Array;
-}
-
-async function seedRepo(name: string, tokens = true): Promise<RepoRow> {
-  const id = crypto.randomUUID();
-  const artifactsName = `gw-owner--${name}`;
-  await baseEnv.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, created_at, pushed_at) VALUES (?, 'gw-owner', ?, ?, ?, 'private', 'main', ?, 1000)`,
-  )
-    .bind(id, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  if (tokens) {
-    for (const scope of ['read', 'write'] as const) {
-      await writeCachedJson(internalKey('gittoken', artifactsName, scope), { token: `${scope}-tok`, expiresAt: Date.now() + 86_400_000 }, 86_400);
-    }
-  }
-  return (await baseEnv.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(id).first<RepoRow>())!;
 }
 
 async function pushedAt(id: string): Promise<number | null> {

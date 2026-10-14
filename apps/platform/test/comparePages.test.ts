@@ -8,15 +8,25 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FLUSH_PKT, buildBlob, buildCommit, buildTree, concat, decode, pktLine, parseTree, readPktLines, type TreeEntry } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import worker from '../src/index';
+import { countingFetch, type CostCounters } from '../src/cost/meter';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: 'pub' | 'priv' | 'wide', visibility: 'public' | 'private') => {
+  const { repo } = await seedRepoBase(env, name, { owner: OWNER, visibility, register: false });
+  repos.set(`${OWNER}--${name}`, repo);
+  return repo;
+};
+const call = async (path: string, token?: string, method = 'GET'): Promise<Read> => {
+  const r = await apiCall(env, method, path, { token });
+  return { status: r.status, text: r.text, cost: r.cost, cache: r.headers.get('x-kvarm-cache'), cacheControl: r.headers.get('cache-control'), refresh: r.headers.get('refresh'), location: r.headers.get('location') };
+};
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const OWNER = 'page-owner';
 const FULL: Scope[] = ['read', 'write', 'api'];
 
@@ -148,29 +158,6 @@ interface RepoShas {
 }
 const shas = {} as { pub: RepoShas; priv: RepoShas; wide: RepoShas };
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: 'pub' | 'priv' | 'wide', visibility: 'public' | 'private'): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  repos.set(artifactsName, repo);
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-    )
-    .bind(crypto.randomUUID(), OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  return repo;
-}
-
 interface Read {
   status: number;
   text: string;
@@ -179,29 +166,6 @@ interface Read {
   cacheControl: string | null;
   location: string | null;
   refresh: string | null;
-}
-
-async function call(path: string, token?: string, method = 'GET'): Promise<Read> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const res = await worker.fetch!(
-    new Request(`${ORIGIN}${path}`, { method, headers }) as Request<unknown, IncomingRequestCfProperties>,
-    env,
-    ctx,
-  );
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  return {
-    status: res.status,
-    text,
-    cost: cost!,
-    cache: res.headers.get('x-kvarm-cache'),
-    cacheControl: res.headers.get('cache-control'),
-    location: res.headers.get('location'),
-    refresh: res.headers.get('refresh'),
-  };
 }
 
 const page = (repo: string, rest: string) => `/${OWNER}/${repo}/${rest}`;

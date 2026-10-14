@@ -462,18 +462,20 @@ describe('kvarm runner trust enforcement', () => {
     let now = realNow();
     Date.now = () => now;
     try {
-      await runRunner({
-        ...h.base,
-        once: false,
-        apiFetch: async (input, init) => {
-          const path = new URL(String(input)).pathname;
-          // A refused claim ends the loop; a retriable failure never would.
-          if (path.endsWith('/claim') && ++claims > 3) return Response.json({ error: 'stop' }, { status: 401 });
-          if (path.endsWith('/report')) now += 61_000;
-          return apiFetch(input, init);
-        },
-        detectRuntimeFn: async () => answers[Math.min(probes++, answers.length - 1)]!,
-      }).catch((err) => expect(String(err)).toContain('stop'));
+      await expect(
+        runRunner({
+          ...h.base,
+          once: false,
+          apiFetch: async (input, init) => {
+            const path = new URL(String(input)).pathname;
+            // A refused claim ends the loop; a retriable failure never would.
+            if (path.endsWith('/claim') && ++claims > 3) return Response.json({ error: 'stop' }, { status: 401 });
+            if (path.endsWith('/report')) now += 61_000;
+            return apiFetch(input, init);
+          },
+          detectRuntimeFn: async () => answers[Math.min(probes++, answers.length - 1)]!,
+        }),
+      ).rejects.toThrow('stop');
     } finally {
       Date.now = realNow;
     }

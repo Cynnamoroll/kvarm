@@ -24,6 +24,7 @@ import { isSafeRefName, isValidRefPattern, refMatchesPattern } from '@kvarm/gito
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
+import { fail } from './result';
 
 export const BRANCH_RULES_MAX = 50;
 export const REQUIRED_CHECKS_MAX = 32;
@@ -91,9 +92,6 @@ export interface BranchPolicy {
   rules: string[];
 }
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 /**
  * Accepts a branch name (`main`, `release/*`) or a full ref pattern
@@ -141,20 +139,27 @@ export function parseAgentApprovals(input: unknown): AgentApprovals | null {
   return typeof input === 'string' && (AGENT_APPROVALS as readonly string[]).includes(input) ? (input as AgentApprovals) : null;
 }
 
-function parseStoredChecks(json: string): string[] {
+/** A check name nothing can report, standing in for a required_checks row that failed to parse. */
+const CORRUPT_CHECKS_SENTINEL = 'kvarm/corrupt-required-checks';
+
+function parseStoredChecks(json: string, ruleId: string): string[] {
   try {
     const parsed: unknown = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === 'string');
   } catch {
-    return [];
+    // falls through to the fail-closed path
   }
+  // Fails closed like guard_completeness below: a corrupt stored row must not
+  // silently relax the rule to 'no required checks' and open the merge gate.
+  console.warn(JSON.stringify({ branchRuleCorruptChecks: { rule: ruleId, value: json.slice(0, 200) } }));
+  return [CORRUPT_CHECKS_SENTINEL];
 }
 
 export function ruleFromRow(row: BranchRuleRow): BranchRule {
   return {
     id: row.id,
     pattern: row.pattern,
-    requiredChecks: parseStoredChecks(row.required_checks),
+    requiredChecks: parseStoredChecks(row.required_checks, row.id),
     requiredApprovals: Number(row.required_approvals) || 0,
     agentApprovals: row.agent_approvals === 'low-risk' ? 'low-risk' : 'never',
     // Fails closed: a statement that forgot the column must not relax a required rule.

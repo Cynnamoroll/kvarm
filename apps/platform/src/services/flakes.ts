@@ -23,6 +23,7 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { checkFingerprint } from '@kvarm/issues';
 import { CI_LIMITS } from './ciConfig';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { quarantineIssueStatement, resolveSignalStatements } from './issues';
 
 const FLAKE_PAGE_DEFAULT = 50;
@@ -95,17 +96,12 @@ export async function quarantinedNames(db: D1Database, repoId: string): Promise<
 }
 
 function encodeCursor(seenAt: number, id: string): string {
-  return btoa(`${seenAt}:${id}`).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return encodeCursorPayload(`${seenAt}:${id}`);
 }
 
 function decodeCursor(cursor: string): { seenAt: number; id: string } | null {
-  try {
-    const text = atob(cursor.replace(/-/g, '+').replace(/_/g, '/'));
-    const m = /^(\d{1,16}):([0-9a-f-]{36})$/.exec(text);
-    return m ? { seenAt: Number(m[1]), id: m[2]! } : null;
-  } catch {
-    return null;
-  }
+  const m = /^(\d{1,16}):([0-9a-f-]{36})$/.exec(decodeCursorPayload(cursor) ?? '');
+  return m ? { seenAt: Number(m[1]), id: m[2]! } : null;
 }
 
 /** The flake registry (newest first) and the currently quarantined names. */

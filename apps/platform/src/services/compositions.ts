@@ -20,6 +20,7 @@ import { buildCommit, composeTrees, mergeBase, type ComposePiece, type GitIdent,
 import { withLazyRepo } from '../artifacts/repo';
 import { touchRepoPushedStatement } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, guarded as baseGuarded, objectBody, parseJson } from './result';
 import { credentialMayUpdateRef } from './authz';
 import { CHANGE_LIMITS, MERGE_POLICIES, mergeAuthor, normalizeBranch } from './changes';
 import { defaultChecksGate, type ChecksGate, type RequiredChecks } from './checksGate';
@@ -27,7 +28,7 @@ import { reconcileObserved } from './intents/forecast';
 import { observedSeedFailedStatement } from './intents/store';
 import { normalizePath } from './intents/paths';
 import { CommitCache, KVARM_COMMITTER, MERGE_BUDGETS, artifactsMergeSources, crissCrossBase, isCrissCrossRefusal, overlaySources, sharedTrees, type SharedTrees } from './merge';
-import { RefStoreUnavailable, lsRefs, readCommitInfo, type ResolveContext } from './refs';
+import { lsRefs, readCommitInfo, type CommitWithParents, type ResolveContext } from './refs';
 import {
   WORKSPACE_ID_RE,
   WORKSPACE_SELECT,
@@ -61,9 +62,6 @@ const COMPOSE_READ_REASONS = new Set(['readError', 'missingObject', 'missingComm
 
 type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
 
-function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === false;
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -139,14 +137,14 @@ function semanticConflict(checks: RequiredChecks): SemanticConflict | null {
 }
 
 function compositionView(row: CompositionRow, ws: WorkspaceRow | null, cx: Pick<WorkspaceContext, 'repo' | 'origin'>): CompositionView {
-  const checks = JSON.parse(row.checks) as RequiredChecks;
+  const checks = parseJson(row.checks, { treeSha: row.tree_sha, configId: null, required: [], state: 'pending' } as RequiredChecks);
   return {
     id: row.id,
     base: row.base_ref,
     baseSha: row.base_sha,
     treeSha: row.tree_sha,
     commitSha: row.commit_sha,
-    sources: JSON.parse(row.sources) as CompositionSource[],
+    sources: parseJson(row.sources, [] as CompositionSource[]),
     workspace: ws ? workspaceView(ws, cx.repo, cx.origin) : null,
     changeSet: ws?.change_number ?? null,
     checks,
@@ -187,8 +185,9 @@ function parsePaths(workspace: string, raw: unknown): string[] | Fail {
 }
 
 function parseCompose(cx: ComposeContext, input: unknown): ComposeInput | Fail {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const list = b.workspaces;
   if (!Array.isArray(list) || list.length < COMPOSE_LIMITS.minPieces || list.length > COMPOSE_LIMITS.maxPieces) {
     return fail(422, `workspaces must list ${COMPOSE_LIMITS.minPieces}-${COMPOSE_LIMITS.maxPieces} workspaces`, 'INVALID_COMPOSITION', {
@@ -254,23 +253,150 @@ export interface ComposeConflictView {
   hunks?: number;
 }
 
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ composeRefStore: err.message.slice(0, 200) }));
-      return fail(503, 'repository storage is unavailable, retry shortly', 'STORAGE_UNAVAILABLE');
-    }
-    throw err;
-  }
-}
+const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('composeRefStore', fn);
 
 /**
  * POST candidates/compose {base?, workspaces: [id | {workspace, paths?}], paths?: {id: [...]}, title?, mergePolicy?}
  * → 201 composition. Refusals create no ref, row or change:
  * 409 COMPOSITION_CONFLICT (textual), 422 SELECTION_UNMATCHED, 422 COMPOSITION_TOO_LARGE, 422 EMPTY_COMPOSITION.
  */
+interface CompositionComputation {
+  baseSha: string;
+  baseTree: string;
+  treeSha: string;
+  objects: GitObject[];
+  recorded: CompositionSource[];
+}
+
+/**
+ * The composition fold itself: each piece diffs against the base — against
+ * the virtual merge of its own merge bases for a criss-cross, whose objects
+ * join the fold's sources — inside the budgets the virtual bases left, and
+ * composeTrees folds the pieces into one tree.
+ */
+async function computeComposition(
+  ctx: ResolveContext,
+  p: ComposeInput,
+  found: Map<string, WorkspaceRow>,
+  heads: Map<string, string | null>,
+  baseSha: string,
+  baseCommit: CommitWithParents,
+): Promise<ServiceResult<CompositionComputation>> {
+  const sources = artifactsMergeSources(ctx);
+  const pieces: ComposePiece[] = [];
+  const recorded: CompositionSource[] = [];
+  const virtualObjects = new Map<string, GitObject>();
+  // Virtual merge bases of criss-cross pieces spend the composition's own read and created-bytes budgets;
+  // their trees are memoized for the fold below.
+  const spent = { blobReads: 0, bytes: 0 };
+  let trees: SharedTrees | null = null;
+  for (const piece of p.pieces) {
+    const headSha = heads.get(found.get(piece.workspace)!.ref!) ?? null;
+    if (!headSha) return fail(409, `the ref of workspace ${piece.workspace} is gone`, 'WORKSPACE_REF_MISSING', { workspace: piece.workspace });
+    const commits = new CommitCache(sources);
+    const mb = await mergeBase(commits, baseSha, headSha, { maxCommitReads: MERGE_BUDGETS.maxCommitReads, concurrency: MERGE_BUDGETS.concurrency });
+    if (mb.truncated) {
+      return mb.truncatedReason === 'maxCommitReads'
+        ? fail(422, `history of ${piece.workspace} exceeds the merge-base budget`, 'COMPOSITION_TOO_LARGE', { workspace: piece.workspace })
+        : fail(503, `could not read the history of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
+    }
+    if (mb.bases.length === 0) return fail(409, `workspace ${piece.workspace} shares no history with ${p.base}`, 'UNRELATED_HISTORIES', { workspace: piece.workspace });
+    const bases = [...mb.bases].sort();
+    // Both were read by the merge-base walk; the cache answers without another read.
+    const [headCommit, mbCommit] = await Promise.all([commits.readCommit(headSha), commits.readCommit(bases[0]!)]);
+    if (!headCommit || !mbCommit) return fail(503, `could not read the commits of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
+    let baseTree = mbCommit.treeHash;
+    if (bases.length > 1) {
+      // A criss-cross piece diffs against the virtual merge of its bases (architecture §3.1).
+      trees ??= sharedTrees(sources, MERGE_BUDGETS.maxTreeReads);
+      const v = await crissCrossBase(trees, commits, bases, {
+        ...MERGE_BUDGETS,
+        maxBlobReads: MERGE_BUDGETS.maxBlobReads - spent.blobReads,
+        maxMergedBytes: MERGE_BUDGETS.maxMergedBytes - spent.bytes,
+      });
+      spent.blobReads += v.work.blobReads;
+      spent.bytes += v.work.bytes;
+      if (!v.ok) {
+        const reason = v.reason;
+        if (isCrissCrossRefusal(reason)) {
+          return fail(422, `workspace ${piece.workspace} has several merge bases with ${p.base} that cannot be merged (${reason})`, 'MULTIPLE_MERGE_BASES', {
+            workspace: piece.workspace,
+            reason,
+          });
+        }
+        return COMPOSE_READ_REASONS.has(reason)
+          ? fail(503, `could not read the merge bases of ${piece.workspace} (${reason})`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace })
+          : fail(422, `merging the merge bases of ${piece.workspace} exceeds the ${reason} budget`, 'COMPOSITION_TOO_LARGE', { workspace: piece.workspace });
+      }
+      baseTree = v.treeHash;
+      for (const o of v.objects) virtualObjects.set(o.hash, o);
+    }
+    pieces.push({
+      name: piece.workspace,
+      baseTree,
+      headTree: headCommit.treeHash,
+      ...(piece.paths ? { paths: piece.paths } : {}),
+      ...(bases.length > 1 ? { refuseAmbiguousRenames: true } : {}),
+    });
+    recorded.push({ workspace: piece.workspace, headSha, mergeBase: bases[0]!, ...(bases.length > 1 ? { mergeBases: bases } : {}), paths: piece.paths });
+  }
+
+  const n = pieces.length;
+  // composeTrees counts the memoized re-reads too, so its share stays within what the virtual bases left.
+  const result = await composeTrees(trees ? overlaySources(trees, virtualObjects) : sources, baseCommit.tree, pieces, {
+    maxTreeReads: Math.max(1, MERGE_BUDGETS.maxTreeReads - (trees?.fetched() ?? 0)),
+    maxChanges: MERGE_BUDGETS.maxChanges,
+    maxBlobReads: Math.max(1, Math.floor((MERGE_BUDGETS.maxBlobReads - spent.blobReads) / n)),
+    maxBlobBytes: MERGE_BUDGETS.maxBlobBytes,
+    nodeBudget: MERGE_BUDGETS.nodeBudget,
+    concurrency: MERGE_BUDGETS.concurrency,
+    maxMergedBytes: Math.max(1, Math.floor((MERGE_BUDGETS.maxMergedBytes - spent.bytes) / n)),
+    contentConcurrency: MERGE_BUDGETS.contentConcurrency,
+  });
+  if (result.unmatched.length > 0) {
+    return fail(422, 'some selected paths match no change of their workspace', 'SELECTION_UNMATCHED', {
+      unmatched: result.unmatched.map((u) => ({ workspace: u.piece, path: u.path })),
+    });
+  }
+  if (result.truncated) {
+    if (isCrissCrossRefusal(result.truncatedReason)) {
+      return fail(422, `workspace ${result.truncatedPiece} has several merge bases with ${p.base} that cannot be merged (${result.truncatedReason})`, 'MULTIPLE_MERGE_BASES', {
+        workspace: result.truncatedPiece,
+        reason: result.truncatedReason,
+      });
+    }
+    const read = result.truncatedReason === 'readError' || result.truncatedReason === 'missingObject';
+    return read
+      ? fail(503, `could not read the composition inputs (${result.truncatedReason})`, 'COMPOSE_READ_FAILED', { workspace: result.truncatedPiece })
+      : fail(422, `composition exceeds the ${result.truncatedReason} budget`, 'COMPOSITION_TOO_LARGE', { workspace: result.truncatedPiece });
+  }
+  if (!result.clean || result.treeHash === null) {
+    const folded: string[] = [];
+    const conflicted = new Set(result.conflicts.map((c) => c.piece));
+    const before = new Map<string, string[]>();
+    for (const piece of pieces) {
+      before.set(piece.name, [...folded]);
+      if (!conflicted.has(piece.name)) folded.push(piece.name);
+    }
+    const conflicts: ComposeConflictView[] = result.conflicts.map((c) => ({
+      workspace: c.piece,
+      with: before.get(c.piece) ?? [],
+      path: c.path,
+      kind: c.kind,
+      paths: c.paths,
+      ...(c.hunks !== undefined ? { hunks: c.hunks } : {}),
+    }));
+    const incompatible = [...new Set(result.conflicts.flatMap((c) => c.paths))].sort();
+    return fail(409, `the selection is incompatible: ${incompatible.length} path(s) conflict`, 'COMPOSITION_CONFLICT', {
+      conflictKind: 'textual',
+      incompatible,
+      conflicts,
+    });
+  }
+  if (result.treeHash === baseCommit.tree) return fail(422, `the selection changes nothing on ${p.base}`, 'EMPTY_COMPOSITION');
+  return { ok: true as const, value: { baseSha, baseTree: baseCommit.tree, treeSha: result.treeHash, objects: result.objects, recorded } };
+}
+
 export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = defaultComposeDeps): Promise<ServiceResult<CompositionView>> {
   return guarded(async () => {
     const p = parseCompose(cx, input);
@@ -300,122 +426,10 @@ export function compose(cx: ComposeContext, input: unknown, deps: ComposeDeps = 
       const heads = await lsRefs(ctx, [baseRef, ...refs]);
       const baseSha = heads.get(baseRef) ?? null;
       if (!baseSha) return fail(422, `base branch not found: ${p.base}`, 'REF_NOT_FOUND', { ref: p.base });
-      const sources = artifactsMergeSources(ctx);
       const baseCommit = await readCommitInfo(ctx, baseSha);
       if (!baseCommit) return fail(503, 'could not read the base commit', 'COMPOSE_READ_FAILED');
 
-      const pieces: ComposePiece[] = [];
-      const recorded: CompositionSource[] = [];
-      const virtualObjects = new Map<string, GitObject>();
-      // Virtual merge bases of criss-cross pieces spend the composition's own read and created-bytes budgets;
-      // their trees are memoized for the fold below.
-      const spent = { blobReads: 0, bytes: 0 };
-      let trees: SharedTrees | null = null;
-      for (const piece of p.pieces) {
-        const headSha = heads.get(found.get(piece.workspace)!.ref!) ?? null;
-        if (!headSha) return fail(409, `the ref of workspace ${piece.workspace} is gone`, 'WORKSPACE_REF_MISSING', { workspace: piece.workspace });
-        const commits = new CommitCache(sources);
-        const mb = await mergeBase(commits, baseSha, headSha, { maxCommitReads: MERGE_BUDGETS.maxCommitReads, concurrency: MERGE_BUDGETS.concurrency });
-        if (mb.truncated) {
-          return mb.truncatedReason === 'maxCommitReads'
-            ? fail(422, `history of ${piece.workspace} exceeds the merge-base budget`, 'COMPOSITION_TOO_LARGE', { workspace: piece.workspace })
-            : fail(503, `could not read the history of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
-        }
-        if (mb.bases.length === 0) return fail(409, `workspace ${piece.workspace} shares no history with ${p.base}`, 'UNRELATED_HISTORIES', { workspace: piece.workspace });
-        const bases = [...mb.bases].sort();
-        // Both were read by the merge-base walk; the cache answers without another read.
-        const [headCommit, mbCommit] = await Promise.all([commits.readCommit(headSha), commits.readCommit(bases[0]!)]);
-        if (!headCommit || !mbCommit) return fail(503, `could not read the commits of ${piece.workspace}`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace });
-        let baseTree = mbCommit.treeHash;
-        if (bases.length > 1) {
-          // A criss-cross piece diffs against the virtual merge of its bases (architecture §3.1).
-          trees ??= sharedTrees(sources, MERGE_BUDGETS.maxTreeReads);
-          const v = await crissCrossBase(trees, commits, bases, {
-            ...MERGE_BUDGETS,
-            maxBlobReads: MERGE_BUDGETS.maxBlobReads - spent.blobReads,
-            maxMergedBytes: MERGE_BUDGETS.maxMergedBytes - spent.bytes,
-          });
-          spent.blobReads += v.work.blobReads;
-          spent.bytes += v.work.bytes;
-          if (!v.ok) {
-            const reason = v.reason;
-            if (isCrissCrossRefusal(reason)) {
-              return fail(422, `workspace ${piece.workspace} has several merge bases with ${p.base} that cannot be merged (${reason})`, 'MULTIPLE_MERGE_BASES', {
-                workspace: piece.workspace,
-                reason,
-              });
-            }
-            return COMPOSE_READ_REASONS.has(reason)
-              ? fail(503, `could not read the merge bases of ${piece.workspace} (${reason})`, 'COMPOSE_READ_FAILED', { workspace: piece.workspace })
-              : fail(422, `merging the merge bases of ${piece.workspace} exceeds the ${reason} budget`, 'COMPOSITION_TOO_LARGE', { workspace: piece.workspace });
-          }
-          baseTree = v.treeHash;
-          for (const o of v.objects) virtualObjects.set(o.hash, o);
-        }
-        pieces.push({
-          name: piece.workspace,
-          baseTree,
-          headTree: headCommit.treeHash,
-          ...(piece.paths ? { paths: piece.paths } : {}),
-          ...(bases.length > 1 ? { refuseAmbiguousRenames: true } : {}),
-        });
-        recorded.push({ workspace: piece.workspace, headSha, mergeBase: bases[0]!, ...(bases.length > 1 ? { mergeBases: bases } : {}), paths: piece.paths });
-      }
-
-      const n = pieces.length;
-      // composeTrees counts the memoized re-reads too, so its share stays within what the virtual bases left.
-      const result = await composeTrees(trees ? overlaySources(trees, virtualObjects) : sources, baseCommit.tree, pieces, {
-        maxTreeReads: Math.max(1, MERGE_BUDGETS.maxTreeReads - (trees?.fetched() ?? 0)),
-        maxChanges: MERGE_BUDGETS.maxChanges,
-        maxBlobReads: Math.max(1, Math.floor((MERGE_BUDGETS.maxBlobReads - spent.blobReads) / n)),
-        maxBlobBytes: MERGE_BUDGETS.maxBlobBytes,
-        nodeBudget: MERGE_BUDGETS.nodeBudget,
-        concurrency: MERGE_BUDGETS.concurrency,
-        maxMergedBytes: Math.max(1, Math.floor((MERGE_BUDGETS.maxMergedBytes - spent.bytes) / n)),
-        contentConcurrency: MERGE_BUDGETS.contentConcurrency,
-      });
-      if (result.unmatched.length > 0) {
-        return fail(422, 'some selected paths match no change of their workspace', 'SELECTION_UNMATCHED', {
-          unmatched: result.unmatched.map((u) => ({ workspace: u.piece, path: u.path })),
-        });
-      }
-      if (result.truncated) {
-        if (isCrissCrossRefusal(result.truncatedReason)) {
-          return fail(422, `workspace ${result.truncatedPiece} has several merge bases with ${p.base} that cannot be merged (${result.truncatedReason})`, 'MULTIPLE_MERGE_BASES', {
-            workspace: result.truncatedPiece,
-            reason: result.truncatedReason,
-          });
-        }
-        const read = result.truncatedReason === 'readError' || result.truncatedReason === 'missingObject';
-        return read
-          ? fail(503, `could not read the composition inputs (${result.truncatedReason})`, 'COMPOSE_READ_FAILED', { workspace: result.truncatedPiece })
-          : fail(422, `composition exceeds the ${result.truncatedReason} budget`, 'COMPOSITION_TOO_LARGE', { workspace: result.truncatedPiece });
-      }
-      if (!result.clean || result.treeHash === null) {
-        const folded: string[] = [];
-        const conflicted = new Set(result.conflicts.map((c) => c.piece));
-        const before = new Map<string, string[]>();
-        for (const piece of pieces) {
-          before.set(piece.name, [...folded]);
-          if (!conflicted.has(piece.name)) folded.push(piece.name);
-        }
-        const conflicts: ComposeConflictView[] = result.conflicts.map((c) => ({
-          workspace: c.piece,
-          with: before.get(c.piece) ?? [],
-          path: c.path,
-          kind: c.kind,
-          paths: c.paths,
-          ...(c.hunks !== undefined ? { hunks: c.hunks } : {}),
-        }));
-        const incompatible = [...new Set(result.conflicts.flatMap((c) => c.paths))].sort();
-        return fail(409, `the selection is incompatible: ${incompatible.length} path(s) conflict`, 'COMPOSITION_CONFLICT', {
-          conflictKind: 'textual',
-          incompatible,
-          conflicts,
-        });
-      }
-      if (result.treeHash === baseCommit.tree) return fail(422, `the selection changes nothing on ${p.base}`, 'EMPTY_COMPOSITION');
-      return { ok: true as const, value: { baseSha, baseTree: baseCommit.tree, treeSha: result.treeHash, objects: result.objects, recorded } };
+      return computeComposition(ctx, p, found, heads, baseSha, baseCommit);
     });
     if (!composed.ok) return composed;
     const { baseSha, baseTree, treeSha, objects, recorded } = composed.value;

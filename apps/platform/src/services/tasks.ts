@@ -39,6 +39,7 @@ import { isAncestor } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import { touchRepoPushedStatement, type RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, objectBody } from './result';
 import { attributeCommit, parseAttributionInput, type AttributionInput } from './attribution';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import { directPushDenial, repoBranchRulesSelect, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
@@ -77,6 +78,7 @@ import {
   workspaceRef,
   workspaceView,
   type WorkspaceRow,
+  type WorkspaceSpec,
   type WorkspaceView,
 } from './workspaces';
 
@@ -247,9 +249,6 @@ function fenceSelect(db: D1Database, id: string): D1PreparedStatement {
 
 type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
 
-function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 const first = <T>(r: D1Result | undefined): T | null => ((r?.results as T[] | undefined) ?? [])[0] ?? null;
 
@@ -360,8 +359,7 @@ type Body = Record<string, unknown>;
 
 function bodyOf(input: unknown): ServiceResult<Body> {
   if (input === undefined || input === null) return { ok: true, value: {} };
-  if (typeof input !== 'object' || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  return { ok: true, value: input as Body };
+  return objectBody(input);
 }
 
 /**
@@ -430,6 +428,127 @@ export interface ClaimOutcome {
   lease: TaskLease;
 }
 
+interface TaskClaimPlan {
+  /** fenced_claims identity the claim is taken under. */
+  identity: string;
+  /** An active workspace the claimant may act on, reassigned instead of inserting one. */
+  reuse: WorkspaceRow | null;
+  /** The workspace the claim inserts when `reuse` is null. */
+  spec: WorkspaceSpec;
+  /** Extra SET text of the claim UPDATE ('' when none). */
+  updateSet?: string;
+  /** Extra WHERE clauses of the claim UPDATE; their parameters bind from ?9 on. */
+  updateWhere?: string;
+  updateParams?: unknown[];
+  /** Nexus intent the inserted workspace declares. */
+  intent?: string | null;
+  /** Statements appended after the workspace statement (issue link, declared intent). */
+  extras?: (now: number) => D1PreparedStatement[];
+  /** The head a created ref points at, and the cleanup delete's expected oldOid. */
+  refHead: string;
+  /** The CLAIM_LOST message naming what raced the setup. */
+  lostError: string;
+}
+
+/**
+ * The claim protocol shared by both task kinds: the fenced claim first, then
+ * (new claims) the workspace ref, then one batch that records the claim while
+ * the fence is held and the kind's own guard still passes, writes the
+ * workspace row plus the kind's extra statements, and reads task and
+ * workspace back. A failed ref creation or a lost batch gives the claim back
+ * at once.
+ */
+async function claimTaskWorkspace(
+  cx: TaskContext,
+  deps: TaskDeps,
+  row: TaskDetailRow,
+  who: Claimant,
+  ttl: number,
+  plan: TaskClaimPlan,
+): Promise<ServiceResult<ClaimOutcome>> {
+  const id = row.id;
+  const db = cx.env.DB;
+  const { identity, reuse, spec } = plan;
+  const wsId = reuse?.id ?? spec.id;
+  const ref = reuse?.ref ?? spec.ref;
+
+  const now = Date.now();
+  const won = await claimFenced(db, { kind: FENCE_KIND, subject: id, owner: who.owner, identity, ttlMs: ttl * 1000, now });
+  if (!won.ok) {
+    if (won.code === 'CLAIM_DONE') return fail(409, `task ${id} was already completed`, 'TASK_COMPLETED');
+    const cur = won.current;
+    const holder = row.claimed_by ?? 'another agent';
+    const lease = cur?.expiresAt ? { until: iso(cur.expiresAt)!, generation: cur.generation, holder: row.claimed_by, expired: false } : null;
+    return fail(
+      409,
+      `task ${id} is claimed by ${holder}${lease ? ` until ${lease.until} (generation ${lease.generation})` : ''}; it can be claimed again once that lease expires`,
+      'CLAIMED',
+      { claimedBy: row.claimed_by, lease, retryAfterMs: won.retryAfterMs ?? 0 },
+    );
+  }
+  const generation = won.value.generation;
+  const until = won.value.expiresAt!;
+
+  if (!reuse) {
+    const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref, oldOid: ZERO_SHA, newOid: plan.refHead });
+    let created = pushed.status === 'ok';
+    if (pushed.status === 'unknown') created = (await liveRefs(cx, [ref])).get(ref) === plan.refHead;
+    if (!created) {
+      await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.owner });
+      return fail(502, `the task workspace ref could not be created (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''})`, 'REF_CREATE_FAILED');
+    }
+  }
+
+  // The claim is recorded only while this generation and owner still hold the fence and the task's own
+  // guard still passes: a takeover during the ref I/O leaves no trace. Each statement names the guard's
+  // placeholders explicitly (?17+ in the insert, ?5/?6/?2 in the reuse update) — no renumbering.
+  const landed = (taskPh: string, genPh: string, wsPh: string): string =>
+    `EXISTS (SELECT 1 FROM agent_tasks t WHERE t.id = ${taskPh} AND t.status = 'claimed' AND t.generation = ${genPh} AND t.claim_workspace_id = ${wsPh})`;
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE agent_tasks SET status = 'claimed', claimed_by = ?3, generation = ?4, lease_expires_at = ?5, claim_workspace_id = ?6, updated_at = ?7${plan.updateSet ?? ''}
+          WHERE repo_id = ?1 AND id = ?2 AND status IN ('open', 'claimed') AND generation < ?4
+            AND EXISTS (SELECT 1 FROM fenced_claims f WHERE f.kind = '${FENCE_KIND}' AND f.subject = ?2 AND f.generation = ?4 AND f.owner = ?8 AND f.state = 'claimed')${plan.updateWhere ?? ''}`,
+      )
+      .bind(cx.repo.id, id, who.agent, generation, until, wsId, now, who.owner, ...(plan.updateParams ?? [])),
+    reuse
+      ? db
+          .prepare(
+            `UPDATE workspaces SET agent = ?3, updated_at = ?4 WHERE repo_id = ?1 AND id = ?2 AND agent_id IS NULL
+               AND ${landed('?5', '?6', '?2')}`,
+          )
+          .bind(cx.repo.id, wsId, who.agent, now, id, generation)
+      : workspaceInsertStatement(
+          cx,
+          spec,
+          now,
+          plan.intent ?? null,
+          null,
+          { where: landed('?17', '?18', '?19'), params: [id, generation, wsId] },
+        ),
+    ...(plan.extras?.(now) ?? []),
+    detailSelect(db, cx.repo.id, id),
+    db.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, wsId),
+  ]);
+  const after = first<TaskDetailRow>(results[results.length - 2]);
+  const ws = first<WorkspaceRow>(results[results.length - 1]);
+  if (!results[0]?.meta.changes || !after || !ws) {
+    // The claim was taken over, or the task completed, was retired or lost its guard meanwhile.
+    await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.owner });
+    if (!reuse) {
+      const removed = await deps
+        .pusher(cx.env, cx.repo)
+        .updateRef({ ref, oldOid: plan.refHead, newOid: ZERO_SHA })
+        .catch((err: unknown) => ({ status: 'unknown' as const, reason: String(err).slice(0, 200) }));
+      if (removed.status !== 'ok') console.warn(JSON.stringify({ taskClaimRefLeft: { repo: cx.repo.id, task: id, ref, status: removed.status } }));
+    }
+    return (after && lifecycleRefusal(after)) ?? fail(409, plan.lostError, 'CLAIM_LOST', { currentGeneration: after?.generation ?? null });
+  }
+  const task = taskView(after, now);
+  return { ok: true, value: { task, workspace: workspaceView(ws, cx.repo, cx.origin, reuse ? undefined : plan.refHead), lease: task.lease! } };
+}
+
 /**
  * POST tasks/:id/claim. The fenced claim is taken first; the workspace ref
  * (new claims) is created only by the winner, and a failed ref creation
@@ -464,93 +583,24 @@ export function claimTask(cx: TaskContext, id: string, input: unknown, deps: Tas
     if (!reuse && cx.actor?.agent && !credentialMayUpdateRef(cx.actor, ref)) {
       return fail(403, 'this agent token may not create refs/heads/agents/<id>/ refs', 'AGENT_REF_FORBIDDEN');
     }
-
-    const now = Date.now();
-    const won = await claimFenced(db, { kind: FENCE_KIND, subject: id, owner: who.value.owner, identity: row.head_sha, ttlMs: ttl.value * 1000, now });
-    if (!won.ok) {
-      if (won.code === 'CLAIM_DONE') return fail(409, `task ${id} was already completed`, 'TASK_COMPLETED');
-      const cur = won.current;
-      const holder = row.claimed_by ?? 'another agent';
-      const lease = cur?.expiresAt ? { until: iso(cur.expiresAt)!, generation: cur.generation, holder: row.claimed_by, expired: false } : null;
-      return fail(
-        409,
-        `task ${id} is claimed by ${holder}${lease ? ` until ${lease.until} (generation ${lease.generation})` : ''}; it can be claimed again once that lease expires`,
-        'CLAIMED',
-        { claimedBy: row.claimed_by, lease, retryAfterMs: won.retryAfterMs ?? 0 },
-      );
-    }
-    const generation = won.value.generation;
-    const until = won.value.expiresAt!;
-
-    if (!reuse) {
-      const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref, oldOid: ZERO_SHA, newOid: row.head_sha });
-      let created = pushed.status === 'ok';
-      if (pushed.status === 'unknown') created = (await liveRefs(cx, [ref])).get(ref) === row.head_sha;
-      if (!created) {
-        await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.value.owner });
-        return fail(502, `the task workspace ref could not be created (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''})`, 'REF_CREATE_FAILED');
-      }
-    }
-
-    // The claim is recorded only while this generation and owner still hold the fence and the task still
-    // names the change head the workspace was made at: a takeover during the ref I/O leaves no trace.
-    const landed = `EXISTS (SELECT 1 FROM agent_tasks t WHERE t.id = ?17 AND t.status = 'claimed' AND t.generation = ?18 AND t.claim_workspace_id = ?19)`;
-    const results = await db.batch([
-      db
-        .prepare(
-          `UPDATE agent_tasks SET status = 'claimed', claimed_by = ?3, generation = ?4, lease_expires_at = ?5, claim_workspace_id = ?6, updated_at = ?7
-            WHERE repo_id = ?1 AND id = ?2 AND status IN ('open', 'claimed') AND generation < ?4 AND head_sha = ?9
-              AND EXISTS (SELECT 1 FROM fenced_claims f WHERE f.kind = '${FENCE_KIND}' AND f.subject = ?2 AND f.generation = ?4 AND f.owner = ?8 AND f.state = 'claimed')
-              AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = agent_tasks.change_set_id AND c.state = 'conflicted' AND c.head_sha = ?9)`,
-        )
-        .bind(cx.repo.id, id, who.value.agent, generation, until, wsId, now, who.value.owner, row.head_sha),
-      reuse
-        ? db
-            .prepare(
-              `UPDATE workspaces SET agent = ?3, updated_at = ?4 WHERE repo_id = ?1 AND id = ?2 AND agent_id IS NULL
-                 AND ${landed.replace('?17', '?5').replace('?18', '?6').replace('?19', '?2')}`,
-            )
-            .bind(cx.repo.id, wsId, who.value.agent, now, id, generation)
-        : workspaceInsertStatement(
-            cx,
-            {
-              id: wsId,
-              ref,
-              task: `resolve-conflict #${row.change_number} (task ${id})`,
-              agent: who.value.agent,
-              base: row.change_base_ref,
-              baseSha: row.base_sha ?? row.head_sha,
-              headSha: row.head_sha,
-            },
-            now,
-            null,
-            null,
-            { where: landed, params: [id, generation, wsId] },
-          ),
-      detailSelect(db, cx.repo.id, id),
-      db.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, wsId),
-    ]);
-    const after = first<TaskDetailRow>(results[2]);
-    const ws = first<WorkspaceRow>(results[3]);
-    if (!results[0]?.meta.changes || !after || !ws) {
-      // The claim was taken over, or the task completed, was retired or followed a new head meanwhile.
-      await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.value.owner });
-      if (!reuse) {
-        const removed = await deps
-          .pusher(cx.env, cx.repo)
-          .updateRef({ ref, oldOid: row.head_sha, newOid: ZERO_SHA })
-          .catch((err: unknown) => ({ status: 'unknown' as const, reason: String(err).slice(0, 200) }));
-        if (removed.status !== 'ok') console.warn(JSON.stringify({ taskClaimRefLeft: { repo: cx.repo.id, task: id, ref, status: removed.status } }));
-      }
-      return (
-        (after && lifecycleRefusal(after)) ??
-        fail(409, `task ${id} was claimed again or changed while this claim was being set up; claim it again`, 'CLAIM_LOST', {
-          currentGeneration: after?.generation ?? null,
-        })
-      );
-    }
-    const task = taskView(after, now);
-    return { ok: true, value: { task, workspace: workspaceView(ws, cx.repo, cx.origin, reuse ? undefined : row.head_sha), lease: task.lease! } };
+    return claimTaskWorkspace(cx, deps, row, who.value, ttl.value, {
+      identity: row.head_sha,
+      reuse,
+      spec: {
+        id: wsId,
+        ref,
+        task: `resolve-conflict #${row.change_number} (task ${id})`,
+        agent: who.value.agent,
+        base: row.change_base_ref,
+        baseSha: row.base_sha ?? row.head_sha,
+        headSha: row.head_sha,
+      },
+      updateWhere: ` AND head_sha = ?9
+            AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = agent_tasks.change_set_id AND c.state = 'conflicted' AND c.head_sha = ?9)`,
+      updateParams: [row.head_sha],
+      refHead: row.head_sha,
+      lostError: `task ${id} was claimed again or changed while this claim was being set up; claim it again`,
+    });
   });
 }
 
@@ -862,83 +912,22 @@ async function claimIssueTask(
     // stored paths are informational
   }
 
-  const now = Date.now();
-  const won = await claimFenced(db, { kind: FENCE_KIND, subject: id, owner: who.owner, identity: `issue:${issue}`, ttlMs: ttl * 1000, now });
-  if (!won.ok) {
-    if (won.code === 'CLAIM_DONE') return fail(409, `task ${id} was already completed`, 'TASK_COMPLETED');
-    const cur = won.current;
-    const lease = cur?.expiresAt ? { until: iso(cur.expiresAt)!, generation: cur.generation, holder: row.claimed_by, expired: false } : null;
-    return fail(
-      409,
-      `task ${id} is claimed by ${row.claimed_by ?? 'another agent'}${lease ? ` until ${lease.until} (generation ${lease.generation})` : ''}; it can be claimed again once that lease expires`,
-      'CLAIMED',
-      { claimedBy: row.claimed_by, lease, retryAfterMs: won.retryAfterMs ?? 0 },
-    );
-  }
-  const generation = won.value.generation;
-  const until = won.value.expiresAt!;
-
-  if (!reuse) {
-    const pushed = await deps.pusher(cx.env, cx.repo).updateRef({ ref, oldOid: ZERO_SHA, newOid: tip! });
-    let created = pushed.status === 'ok';
-    if (pushed.status === 'unknown') created = (await liveRefs(cx, [ref])).get(ref) === tip;
-    if (!created) {
-      await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.owner });
-      return fail(502, `the task workspace ref could not be created (${pushed.status}${pushed.reason ? `: ${pushed.reason}` : ''})`, 'REF_CREATE_FAILED');
-    }
-  }
-
-  const landed = `EXISTS (SELECT 1 FROM agent_tasks t WHERE t.id = ?17 AND t.status = 'claimed' AND t.generation = ?18 AND t.claim_workspace_id = ?19)`;
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE agent_tasks SET status = 'claimed', claimed_by = ?3, generation = ?4, lease_expires_at = ?5, claim_workspace_id = ?6, updated_at = ?7,
-                base_sha = COALESCE(?9, base_sha)
-          WHERE repo_id = ?1 AND id = ?2 AND kind = '${FIX_ISSUE}' AND status IN ('open', 'claimed') AND generation < ?4
-            AND EXISTS (SELECT 1 FROM fenced_claims f WHERE f.kind = '${FENCE_KIND}' AND f.subject = ?2 AND f.generation = ?4 AND f.owner = ?8 AND f.state = 'claimed')
-            AND EXISTS (SELECT 1 FROM issues i WHERE i.repo_id = ?1 AND i.number = ?10 AND i.state = 'open')`,
-      )
-      .bind(cx.repo.id, id, who.agent, generation, until, wsId, now, who.owner, tip, issue),
-    reuse
-      ? db
-          .prepare(
-            `UPDATE workspaces SET agent = ?3, updated_at = ?4 WHERE repo_id = ?1 AND id = ?2 AND agent_id IS NULL
-               AND ${landed.replace('?17', '?5').replace('?18', '?6').replace('?19', '?2')}`,
-          )
-          .bind(cx.repo.id, wsId, who.agent, now, id, generation)
-      : workspaceInsertStatement(
-          cx,
-          { id: wsId, ref, task: `fix-issue #${issue} (task ${id})`, agent: who.agent, base: cx.repo.default_branch, baseSha: tip!, headSha: tip! },
-          now,
-          intent,
-          null,
-          { where: landed, params: [id, generation, wsId] },
-        ),
-    workspaceIssueStatement(db, cx.repo.id, wsId, issue, who.agent, now),
-    ...(intent && !reuse ? [declaredInsertStatement(db, cx.repo.id, wsId, intent)] : []),
-    detailSelect(db, cx.repo.id, id),
-    db.prepare(`${WORKSPACE_SELECT} WHERE w.repo_id = ? AND w.id = ?`).bind(cx.repo.id, wsId),
-  ]);
-  const after = first<TaskDetailRow>(results[results.length - 2]);
-  const ws = first<WorkspaceRow>(results[results.length - 1]);
-  if (!results[0]?.meta.changes || !after || !ws) {
-    await releaseFenced(db, { kind: FENCE_KIND, subject: id, generation, owner: who.owner });
-    if (!reuse) {
-      const removed = await deps
-        .pusher(cx.env, cx.repo)
-        .updateRef({ ref, oldOid: tip!, newOid: ZERO_SHA })
-        .catch((err: unknown) => ({ status: 'unknown' as const, reason: String(err).slice(0, 200) }));
-      if (removed.status !== 'ok') console.warn(JSON.stringify({ taskClaimRefLeft: { repo: cx.repo.id, task: id, ref, status: removed.status } }));
-    }
-    return (
-      (after && lifecycleRefusal(after)) ??
-      fail(409, `task ${id} was claimed again, completed or its issue closed while this claim was being set up`, 'CLAIM_LOST', {
-        currentGeneration: after?.generation ?? null,
-      })
-    );
-  }
-  const task = taskView(after, now);
-  return { ok: true, value: { task, workspace: workspaceView(ws, cx.repo, cx.origin, reuse ? undefined : tip!), lease: task.lease! } };
+  return claimTaskWorkspace(cx, deps, row, who, ttl, {
+    identity: `issue:${issue}`,
+    reuse,
+    spec: { id: wsId, ref, task: `fix-issue #${issue} (task ${id})`, agent: who.agent, base: cx.repo.default_branch, baseSha: tip!, headSha: tip! },
+    updateSet: `,
+                base_sha = COALESCE(?9, base_sha)`,
+    updateWhere: ` AND kind = '${FIX_ISSUE}' AND EXISTS (SELECT 1 FROM issues i WHERE i.repo_id = ?1 AND i.number = ?10 AND i.state = 'open')`,
+    updateParams: [tip, issue],
+    intent,
+    extras: (n) => [
+      workspaceIssueStatement(db, cx.repo.id, wsId, issue, who.agent, n),
+      ...(intent && !reuse ? [declaredInsertStatement(db, cx.repo.id, wsId, intent)] : []),
+    ],
+    refHead: tip!,
+    lostError: `task ${id} was claimed again, completed or its issue closed while this claim was being set up`,
+  });
 }
 
 /**

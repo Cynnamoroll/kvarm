@@ -17,6 +17,7 @@
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
 import { RESERVED_LOGINS, validateOrgLogin } from './orgs';
+import { fail, isUniqueViolation } from './result';
 import { loginCandidate, loginFromEmail, toUserRow, UNLINKED_WORKOS_PREFIX, type UserRow } from '../db/users';
 import type { WorkOSIdentity } from '../auth/workos';
 
@@ -26,9 +27,6 @@ export const WORKOS_USER_ID_RE = /^user_[A-Za-z0-9]{8,64}$/;
 
 type RawUser = Omit<UserRow, 'is_admin'> & { is_admin: unknown };
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 export function verifiedEmailLinking(env: Env): boolean {
   return (env.WORKOS_LINK_VERIFIED_EMAIL ?? '').trim().toLowerCase() === 'true';
@@ -148,7 +146,7 @@ export async function provisionSessionUser(
       };
     } catch (err) {
       const message = String(err);
-      if (!message.includes('UNIQUE')) throw err;
+      if (!isUniqueViolation(err)) throw err;
       // A concurrent first sign-in of the same person won the insert.
       if (message.includes('workos_user_id')) {
         const raced = await byWorkOSId(env.DB, identity.id);
@@ -190,7 +188,7 @@ export async function linkWorkOSIdentity(
       env.DB.prepare('SELECT * FROM users WHERE login = ?1').bind(login),
     ]);
   } catch (err) {
-    if (String(err).includes('UNIQUE')) {
+    if (isUniqueViolation(err)) {
       return fail(409, 'that WorkOS user already has an account', 'WORKOS_USER_TAKEN');
     }
     throw err;

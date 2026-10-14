@@ -13,9 +13,10 @@
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkout, CliError, parseRepo } from './checkout.js';
+import { checkout, CliError } from './checkout.js';
 import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution } from './executor.js';
-import { text } from './http.js';
+import { isTreeMode, parseRepoPath } from './guards.js';
+import { requestJson } from './http.js';
 import { materialize, openWorkdir } from './workdir.js';
 
 export { executeShell } from './executor.js';
@@ -37,6 +38,9 @@ const MAX_DELTA_READ_BYTES = 64 * 1024 * 1024;
 /** The platform's own CI bounds (services/ciConfig.ts) that a claimed job's fields are held to. */
 const JOB_TIMEOUT_MAX_SECONDS = 3_600;
 const JOB_TIMEOUT_DEFAULT_SECONDS = 900;
+/** The platform's claim lease; heartbeats fire at a third of it, well before the lease lapses. */
+const CLAIM_LEASE_MS = 120_000;
+const HEARTBEAT_MS = Math.floor(CLAIM_LEASE_MS / 3);
 const utf8 = new TextEncoder();
 
 /** @param {unknown} value */
@@ -131,8 +135,11 @@ class ApiError extends CliError {
 /**
  * The job the claim returned, with every field the runner dereferences
  * validated: id, sha and command must be strings, generation a positive
- * integer, and an out-of-range timeoutSeconds falls back to the platform's
- * own default. Anything else is the same malformed claim a bad id always
+ * integer, an out-of-range timeoutSeconds falls back to the platform's
+ * own default, and name falls back to the id when it is not a string.
+ * The other dereferenced field, provenance, needs no shape check: it
+ * feeds the trust decision and trustOf already fails closed on whatever
+ * it is given. Anything else is the same malformed claim a bad id always
  * was — retried, never a crash.
  * @param {any} body
  */
@@ -147,7 +154,7 @@ function parseClaim(body) {
     Number.isInteger(job.timeoutSeconds) && job.timeoutSeconds >= 1 && job.timeoutSeconds <= JOB_TIMEOUT_MAX_SECONDS
       ? job.timeoutSeconds
       : JOB_TIMEOUT_DEFAULT_SECONDS;
-  return { ...job, timeoutSeconds };
+  return { ...job, name: typeof job.name === 'string' ? job.name : job.id, timeoutSeconds };
 }
 
 /** How long a failed container-runtime probe is remembered. */
@@ -195,9 +202,7 @@ const jittered = (ms) => Math.floor(ms * (0.5 + Math.random() / 2));
  * @param {string} repo
  */
 function repoApiPath(repo) {
-  const { owner, name } = parseRepo(repo);
-  // Like workdir.js slotPaths: a `.`/`..` name would resolve outside the repo.
-  if (name === '.' || name === '..') throw new CliError(`invalid repository "${repo}", expected <owner>/<repo>`, 2);
+  const { owner, name } = parseRepoPath(repo);
   return `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 }
 
@@ -210,20 +215,14 @@ function repoApiPath(repo) {
  * @param {typeof fetch} apiFetch
  */
 async function post(baseUrl, reposUrl, pat, path, body, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${pat}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (res.status === 204) return { status: 204, body: null };
-  let json;
-  try {
-    json = JSON.parse(await text(res));
-  } catch {
-    json = {};
+  const reply = await requestJson(apiFetch, `${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, { pat, method: 'POST', body });
+  if (reply.status === 204) return { status: 204, body: null };
+  const json = reply.json === undefined ? {} : reply.json;
+  if (!reply.ok) {
+    const err = json !== null && typeof json === 'object' ? /** @type {Record<string, unknown>} */ (json) : {};
+    throw new ApiError(`${path}: ${err.error ?? `HTTP ${reply.status}`}${err.code ? ` (${err.code})` : ''}`, reply.status, reply.retryAfter);
   }
-  if (!res.ok) throw new ApiError(`${path}: ${json.error ?? `HTTP ${res.status}`}${json.code ? ` (${json.code})` : ''}`, res.status, res.headers.get('retry-after'));
-  return { status: res.status, body: json };
+  return { status: reply.status, body: json };
 }
 
 /**
@@ -235,20 +234,13 @@ async function post(baseUrl, reposUrl, pat, path, body, apiFetch) {
  * @returns {Promise<Record<string, unknown>>}
  */
 async function getJson(baseUrl, reposUrl, pat, path, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
-    headers: { Authorization: `Bearer ${pat}`, accept: 'application/json' },
-  });
-  let json;
-  try {
-    json = JSON.parse(await text(res));
-  } catch {
-    json = null;
-  }
-  if (!res.ok || json === null || typeof json !== 'object' || Array.isArray(json)) {
+  const reply = await requestJson(apiFetch, `${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, { pat, headers: { accept: 'application/json' } });
+  const json = reply.json === undefined ? null : reply.json;
+  if (!reply.ok || json === null || typeof json !== 'object' || Array.isArray(json)) {
     const err = /** @type {{error?: unknown, code?: unknown}} */ (json);
-    const detail = err !== null && typeof err === 'object' && typeof err.error === 'string' ? err.error : `HTTP ${res.status}`;
+    const detail = err !== null && typeof err === 'object' && typeof err.error === 'string' ? err.error : `HTTP ${reply.status}`;
     const code = err !== null && typeof err === 'object' && typeof err.code === 'string' ? ` (${err.code})` : '';
-    throw new ApiError(`${path.split('?')[0]}: ${detail}${code}`, res.status, res.headers.get('retry-after'));
+    throw new ApiError(`${path.split('?')[0]}: ${detail}${code}`, reply.status, reply.retryAfter);
   }
   return /** @type {Record<string, unknown>} */ (json);
 }
@@ -319,9 +311,6 @@ export function budgetDeltaReader(read, maxBytes = MAX_DELTA_READ_BYTES) {
   };
   return budgetedRead;
 }
-
-/** Tree modes as the compare API reports them (raw git never pads). @param {string|null} mode */
-const isTreeMode = (mode) => mode === '40000' || mode === '040000';
 
 /**
  * The changed paths between the recorded commit and the new head, fetched
@@ -537,12 +526,11 @@ export async function runRunner(options) {
         const plan = await planExecution({ trust, executor: executorMode, provenance: job.provenance, runtime });
         // Refused before any byte of the job's code reaches this machine.
         if (plan.run === null) throw new JobRefused(plan.reason);
-        const every = Math.max(10_000, Math.floor(120_000 / 3));
         heartbeat = setInterval(() => {
           void post(options.baseUrl, reposUrl, options.pat, `ci/jobs/${job.id}/heartbeat`, { runnerId, generation: job.generation }, apiFetch).catch((err) =>
             options.stderr(`heartbeat: ${err instanceof Error ? err.message : String(err)}`),
           );
-        }, every);
+        }, HEARTBEAT_MS);
         heartbeat.unref();
         const isolated = plan.run === 'container';
         const slot = isolated

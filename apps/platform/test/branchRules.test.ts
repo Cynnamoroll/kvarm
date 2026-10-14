@@ -1,4 +1,4 @@
-import { env as cfEnv, exports } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { pktLine, readPktLines, ZERO_OID } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
@@ -13,9 +13,15 @@ import {
   type BranchRule,
   ruleFromRow,
 } from '../src/services/branchRules';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = (path: string, init: RequestInit = {}) => request(env, path, init);
+const seedUser = (login: string, admin = false) => seedUserBase(env, login, { admin });
+const seedRepo = async (owner: string, name: string, visibility: 'public' | 'private' = 'private') =>
+  seedRepoBase(env, name, { owner, visibility, register: false });
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -32,10 +38,6 @@ const logins: Record<Who, string> = {
 const pat = {} as Record<Who, string>;
 const REPO = `${logins.owner}/protected`;
 const PLAIN = `${logins.owner}/plain`;
-
-function call(path: string, init: RequestInit = {}): Promise<Response> {
-  return exports.default.fetch(new Request(`${ORIGIN}${path}`, init));
-}
 
 function as(who: Who, init: RequestInit & { json?: unknown } = {}): RequestInit {
   const headers: Record<string, string> = { Authorization: `Bearer ${pat[who]}` };
@@ -92,33 +94,6 @@ async function reportStatus(res: Response): Promise<string[]> {
     pkts = readPktLines(joined).filter((p) => !p.flush);
   }
   return pkts.map((p) => new TextDecoder().decode(p.data).trim());
-}
-
-async function seedUser(login: string, admin = false): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(owner: string, name: string, visibility: 'public' | 'private'): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'main', ?7)`,
-  )
-    .bind(
-      crypto.randomUUID(),
-      owner,
-      name,
-      `${owner}--${name}`,
-      `https://artifacts.invalid/git/default/${owner}--${name}.git`,
-      visibility,
-      Date.now(),
-    )
-    .run();
 }
 
 interface RuleJson {

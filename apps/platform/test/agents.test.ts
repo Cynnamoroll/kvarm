@@ -1,9 +1,16 @@
-import { env as cfEnv, exports } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { pktLine, readPktLines, sha256Hex, ZERO_OID } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { gateReceivePack } from '../src/services/receivePackGate';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = (path: string, init: RequestInit = {}) => request(env, path, init);
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (owner: string, name: string, visibility: 'public' | 'private' = 'private') =>
+  seedRepoBase(env, name, { owner, visibility, register: false });
 
 const env = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -20,10 +27,6 @@ const logins: Record<Who, string> = {
   outsider: 'agt-outsider',
 };
 const pat = {} as Record<Who, string>;
-
-function call(path: string, init: RequestInit = {}): Promise<Response> {
-  return exports.default.fetch(new Request(`${ORIGIN}${path}`, init));
-}
 
 function bearer(token: string, init: RequestInit & { json?: unknown } = {}): RequestInit {
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
@@ -101,34 +104,6 @@ async function reportStatus(res: Response): Promise<string[]> {
     pkts = readPktLines(joined).filter((p) => !p.flush);
   }
   return pkts.map((p) => new TextDecoder().decode(p.data).trim());
-}
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(owner: string, name: string, visibility: 'public' | 'private'): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, created_at, owner_org_id)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'main', ?7, (SELECT id FROM orgs WHERE login = ?2))`,
-  )
-    .bind(
-      crypto.randomUUID(),
-      owner,
-      name,
-      `${owner}--${name}`,
-      `https://artifacts.invalid/git/default/${owner}--${name}.git`,
-      visibility,
-      Date.now(),
-    )
-    .run();
 }
 
 async function createAgent(who: Who, body: Record<string, unknown>): Promise<Response> {

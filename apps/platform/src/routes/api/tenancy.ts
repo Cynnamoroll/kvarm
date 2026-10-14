@@ -13,12 +13,15 @@ import {
   repoJson,
   requireActor,
   type App,
+  failJson,
+  jsonBody,
 } from '../api';
-import type { ServiceResult } from '../../repos/service';
 import { isOrgRole, isRepoNeed } from '../../services/authz';
 import * as orgs from '../../services/orgs';
 import * as orgRepos from '../../services/orgRepos';
 import * as grants from '../../services/grants';
+
+const bodyOf = async <T>(c: Context<App>): Promise<Partial<T> | Response> => (await jsonBody(c)) as Partial<T> | Response;
 
 export const tenancyApi = new Hono<App>();
 
@@ -30,17 +33,9 @@ function orgJson(o: orgs.OrgRow) {
   return { login: o.login, name: o.name, createdAt: iso(o.created_at) };
 }
 
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
-
 function pageParams(c: Context<App>): { cursor?: string; limit?: number } {
   const limit = Number(c.req.query('limit'));
   return { cursor: c.req.query('cursor') || undefined, limit: Number.isFinite(limit) && limit > 0 ? limit : undefined };
-}
-
-async function jsonBody<T>(c: Context<App>): Promise<Partial<T>> {
-  return ((await c.req.json().catch(() => ({}))) ?? {}) as Partial<T>;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,7 +45,8 @@ async function jsonBody<T>(c: Context<App>): Promise<Partial<T>> {
 tenancyApi.post('/orgs', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const body = await jsonBody<{ login: string; name: string }>(c);
+  const body = await bodyOf<{ login: string; name: string }>(c);
+  if (body instanceof Response) return body;
   const res = await orgs.createOrg(c.env, actor, {
     login: typeof body.login === 'string' ? body.login : '',
     name: typeof body.name === 'string' ? body.name : null,
@@ -88,7 +84,8 @@ tenancyApi.get('/orgs/:org/members', async (c) => {
 tenancyApi.put('/orgs/:org/members/:login', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const body = await jsonBody<{ role: string }>(c);
+  const body = await bodyOf<{ role: string }>(c);
+  if (body instanceof Response) return body;
   if (!isOrgRole(body.role)) {
     return c.json({ error: 'role must be owner, maintainer or member', code: 'INVALID_ROLE' }, 400);
   }
@@ -126,7 +123,8 @@ tenancyApi.get('/orgs/:org/repos', async (c) => {
 tenancyApi.post('/orgs/:org/repos', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const body = await jsonBody<{ name: string; description: string; visibility: string; defaultBranch: string }>(c);
+  const body = await bodyOf<{ name: string; description: string; visibility: string; defaultBranch: string }>(c);
+  if (body instanceof Response) return body;
   const res = await orgRepos.createOrgRepo(c.env, actor, c.req.param('org'), {
     name: typeof body.name === 'string' ? body.name : '',
     description: typeof body.description === 'string' ? body.description : null,
@@ -154,7 +152,8 @@ tenancyApi.put('/repos/:owner/:repo/grants/:login', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
-  const body = await jsonBody<{ role: string }>(c);
+  const body = await bodyOf<{ role: string }>(c);
+  if (body instanceof Response) return body;
   if (!isRepoNeed(body.role)) {
     return c.json({ error: 'role must be read, write or admin', code: 'INVALID_ROLE' }, 400);
   }
