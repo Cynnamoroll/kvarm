@@ -172,6 +172,36 @@ describe('change pages', () => {
     expect(response.text).toContain('1 pending');
   });
 
+  it('returns one latest check per name for the current change head', async () => {
+    const { head } = await seedChange('check-run-dedupe');
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds['check-run-dedupe']).first<{ id: string }>();
+    const now = Date.now() + 10_000;
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, attempt, created_at)
+         VALUES (?, ?, ?, ?, 'kvarm/guard', 'failure', 'failure', 1, ?)`,
+      ).bind(crypto.randomUUID(), repoIds['check-run-dedupe'], change!.id, '0'.repeat(40), now + 3),
+      env.DB.prepare(
+        `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, attempt, created_at)
+         VALUES (?, ?, ?, ?, 'example/check', 'failure', 'failure', 1, ?)`,
+      ).bind(crypto.randomUUID(), repoIds['check-run-dedupe'], change!.id, head, now + 1),
+      env.DB.prepare(
+        `INSERT INTO check_runs (id, repo_id, change_set_id, head_sha, name, status, conclusion, attempt, created_at)
+         VALUES (?, ?, ?, ?, 'example/check', 'success', 'success', 2, ?)`,
+      ).bind(crypto.randomUUID(), repoIds['check-run-dedupe'], change!.id, head, now + 2),
+    ]);
+
+    const response = await request('GET', `/api/v1/repos/${OWNER}/check-run-dedupe/changes/1/checks`, { token: ownerToken });
+    expect(response.status).toBe(200);
+    const guard = response.json.checks.filter((check: { name: string }) => check.name === 'kvarm/guard');
+    const example = response.json.checks.filter((check: { name: string }) => check.name === 'example/check');
+    expect(guard).toHaveLength(1);
+    expect(guard[0].headSha).toBe(head);
+    expect(example).toHaveLength(1);
+    expect(example[0]).toMatchObject({ status: 'success', attempt: 2, headSha: head });
+  });
+
   it('renders an unmapped review error with a safe code fallback', async () => {
     await seedChange('unmapped-error');
     await env.DB.prepare(
@@ -369,11 +399,18 @@ describe('change pages', () => {
       token: suggestedToken,
       json: { headSha: head },
     })).status).toBe(201);
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds['reviewer-panel']).first<{ id: string }>();
+    await env.DB.prepare('UPDATE change_reviews SET head_sha = ? WHERE change_set_id = ? AND principal = ?')
+      .bind('0'.repeat(40), change!.id, `user:${suggestedId}`).run();
 
     const browser = await browserSession(REVIEWER);
     const page = await browser(`/${OWNER}/reviewer-panel/changes/1`);
     expect(page.status).toBe(200);
     expect(page.text).toContain('Policy & reviewers');
+    expect(page.text).toContain('class="k-list reviewer-suggestions"');
+    expect(page.text).toContain('class="reviewer-suggestion-identity"');
+    expect(page.text).toContain('class="inline reviewer-request-form reviewer-suggestion-request"');
     expect(page.text).toContain('cp-suggested');
     expect(page.text).toContain('Request review');
     expect(page.text).toContain('cp-reviewer');

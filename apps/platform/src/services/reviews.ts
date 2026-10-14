@@ -305,6 +305,7 @@ export async function suggestedReviewers(
   changeSetId: string,
   changedPaths: readonly string[],
   authorPrincipal: string | null,
+  currentHeadSha: string | null,
 ): Promise<SuggestedReviewer[]> {
   const paths = [...new Set(changedPaths)].slice(0, 2_000);
   const rows = await env.DB.prepare(
@@ -331,10 +332,17 @@ export async function suggestedReviewers(
        LEFT JOIN users u ON p.principal = 'user:' || u.id
        LEFT JOIN agents a ON p.principal = 'agent:' || a.id
       WHERE (?3 IS NULL OR p.principal <> ?3)
+        AND NOT EXISTS (
+          SELECT 1 FROM change_reviews current_review
+           WHERE current_review.change_set_id = ?1
+             AND current_review.principal = p.principal
+             AND current_review.head_sha = ?4
+             AND current_review.verdict = 'approve'
+        )
       ORDER BY (q.principal IS NOT NULL) DESC, COALESCE(v.reviewed_paths, 0) DESC,
                MAX(COALESCE(q.requested_at, 0), COALESCE(v.reviewed_at, 0)) DESC
       LIMIT ${REVIEW_LIMITS.candidatesMax}`,
-  ).bind(changeSetId, JSON.stringify(paths), authorPrincipal).all<{
+  ).bind(changeSetId, JSON.stringify(paths), authorPrincipal, currentHeadSha).all<{
     principal: string;
     user_login: string | null;
     agent_name: string | null;

@@ -343,6 +343,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
       row.id,
       coverage?.map?.units.map((unit) => unit.path) ?? [],
       reviewPacket.author.principal,
+      reviewPacket.headSha,
     ),
   ]);
   reviewPacket.suggestedReviewers = suggestedReviewers;
@@ -464,9 +465,13 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
           <p class="muted">Agent approvals: ${reviewPacket.policy.agentApprovals === 'low-risk' ? 'different-family agents may count when the head has no scrutinize files.' : 'off; agent approvals do not count toward protected-branch approvals.'}</p>
           <h3>Suggested reviewers</h3>
           ${reviewPacket.suggestedReviewers.filter((reviewer) => reviewer.reason !== 'requested').length
-            ? raw(html`<ul class="k-list">${raw(reviewPacket.suggestedReviewers.filter((reviewer) => reviewer.reason !== 'requested').map((reviewer) => html`
-                <li><strong>${reviewer.login}</strong> · ${reviewer.reviewedPaths} overlapping path(s)
-                  ${writable ? raw(html`<form method="post" action="${raw(`${path}/review-requests`)}" class="inline reviewer-request-form">
+            ? raw(html`<ul class="k-list reviewer-suggestions">${raw(reviewPacket.suggestedReviewers.filter((reviewer) => reviewer.reason !== 'requested').map((reviewer) => html`
+                <li class="reviewer-suggestion">
+                  <div class="reviewer-suggestion-copy">
+                    <div class="reviewer-suggestion-identity"><strong>${reviewer.login}</strong><span class="tag">${reviewer.kind}</span></div>
+                    <span class="reviewer-suggestion-reason muted">Reviewed these paths · ${reviewer.reviewedPaths} overlapping ${reviewer.reviewedPaths === 1 ? 'path' : 'paths'}</span>
+                  </div>
+                  ${writable ? raw(html`<form method="post" action="${raw(`${path}/review-requests`)}" class="inline reviewer-request-form reviewer-suggestion-request">
                     ${raw(csrf)}
                     <input type="hidden" name="principal" value="${reviewer.principal}" />
                     <button class="btn" type="submit">Request review</button>

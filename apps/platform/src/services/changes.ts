@@ -387,20 +387,31 @@ export async function readChange(env: Env, repoId: string, number: number): Prom
 }
 
 /** One batch: the change and its newest check runs (bounded), so the cost is the same for any number of runs. */
+function latestChecksByName(rows: readonly CheckRunRow[]): CheckRunView[] {
+  const seen = new Set<string>();
+  const checks: CheckRunView[] = [];
+  for (const row of rows) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    checks.push(checkRunView(row));
+  }
+  return checks;
+}
+
 async function readChangeWithChecks(env: Env, repoId: string, number: number): Promise<{ row: ChangeRow; checks: CheckRunView[] } | null> {
   const [change, checks] = await env.DB.batch([
     changeSelect(env.DB, repoId, number),
     env.DB.prepare(
       `SELECT ${CHECK_RUN_COLUMNS}
-         FROM check_runs k
-        WHERE k.change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2)
+         FROM check_runs k JOIN change_sets c ON c.id = k.change_set_id
+        WHERE c.repo_id = ?1 AND c.number = ?2 AND k.head_sha = c.head_sha
         ORDER BY k.created_at DESC, k.id DESC
         LIMIT ${CHANGE_LIMITS.checksMax}`,
     ).bind(repoId, number),
   ]);
   const row = (change?.results as ChangeRow[] | undefined)?.[0];
   if (!row) return null;
-  return { row, checks: ((checks?.results as CheckRunRow[] | undefined) ?? []).map(checkRunView) };
+  return { row, checks: latestChecksByName((checks?.results as CheckRunRow[] | undefined) ?? []) };
 }
 
 export interface ChangePage {
@@ -785,7 +796,7 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
   });
 }
 
-/** GET changes/:number/checks — the change's check runs, newest first (bounded). */
+/** GET changes/:number/checks — the newest run per name for the current head (bounded). */
 export async function listChangeChecks(env: Env, repo: RepoRow, rawNumber: string): Promise<ServiceResult<{ number: number; headSha: string | null; checks: CheckRunView[] }>> {
   const number = parseNumber(rawNumber);
   const found = number === null ? null : await readChangeWithChecks(env, repo.id, number);

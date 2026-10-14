@@ -523,8 +523,8 @@ describe('persisted reviewer routing', () => {
   it('ranks requested reviewers first, then overlap and recency, excluding the author and revoked agents', async () => {
     await setup('review-suggestion-routing');
     await createChange('review-suggestion-routing', 'b1');
-    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
-      .bind(repoIds['review-suggestion-routing']).first<{ id: string }>();
+    const change = await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds['review-suggestion-routing']).first<{ id: string; head_sha: string }>();
     const requested = await call('POST', api('review-suggestion-routing', '/changes/1/review-requests'), tok.owner, {
       principal: `user:${userIds['rv-human3']}`,
     });
@@ -535,6 +535,12 @@ describe('persisted reviewer routing', () => {
     for (const token of [tok.human2, tok.human3, live.token, revoked.token]) {
       expect((await approve('review-suggestion-routing', 1, token)).status).toBe(201);
     }
+    await env.DB.prepare(
+      'UPDATE change_reviews SET head_sha = ? WHERE change_set_id = ? AND principal IN (?, ?)',
+    ).bind('0'.repeat(40), change!.id, `user:${userIds['rv-human2']}`, `user:${userIds['rv-human3']}`).run();
+    expect(await env.DB.prepare(
+      "SELECT 1 AS found FROM change_reviews WHERE change_set_id = ? AND principal = ? AND head_sha = ? AND verdict = 'approve'",
+    ).bind(change!.id, `agent:${live.id}`, change!.head_sha).first<{ found: number }>()).not.toBeNull();
     await env.DB.prepare('UPDATE agents SET revoked_at = ? WHERE id = ?').bind(Date.now(), revoked.id).run();
 
     const principalReview = async (principal: string) =>
@@ -563,17 +569,17 @@ describe('persisted reviewer routing', () => {
       change!.id,
       ['a.ts', 'b.ts', 'c.ts'],
       `user:${userIds[OWNER]}`,
+      change!.head_sha,
     );
     expect(suggestions.map(({ principal }) => principal)).toEqual([
       `user:${userIds['rv-human3']}`,
-      `agent:${live.id}`,
       `user:${userIds['rv-human2']}`,
     ]);
     expect(suggestions).toEqual(expect.arrayContaining([
       expect.objectContaining({ principal: `user:${userIds['rv-human3']}`, reason: 'requested', reviewedPaths: 1 }),
-      expect.objectContaining({ principal: `agent:${live.id}`, reason: 'reviewed-these-paths', reviewedPaths: 3 }),
       expect.objectContaining({ principal: `user:${userIds['rv-human2']}`, reviewedPaths: 2 }),
     ]));
+    expect(suggestions.some(({ principal }) => principal === `agent:${live.id}`)).toBe(false);
     expect(suggestions.some(({ principal }) => principal === `agent:${revoked.id}`)).toBe(false);
     expect(suggestions.some(({ principal }) => principal === `user:${userIds[OWNER]}`)).toBe(false);
   });

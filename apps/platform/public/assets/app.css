@@ -211,6 +211,25 @@ body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.
 body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > textarea { flex: 1 0 100%; min-width: 0; }
 body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > .btn { min-width: 0; flex: 1 1 auto; width: calc(50% - var(--s2)); white-space: normal; }
 body.k-app:not(.k-landing) .change-review-side .reviewer-request-form { display: inline-flex; flex-wrap: wrap; gap: var(--s2); max-width: 100%; }
+body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestions > li.reviewer-suggestion {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s2);
+  min-width: 0;
+}
+body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestion-copy { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestion-identity { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; }
+body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestion-identity strong,
+body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestion-reason { min-width: 0; overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestion-request { display: flex; width: 100%; max-width: 100%; min-width: 0; }
+body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestion-request > .btn {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 body.k-app:not(.k-landing) .remaining-list { list-style: none; margin: 0; padding: 0; }
 body.k-app:not(.k-landing) .remaining-row {
   display: grid;
