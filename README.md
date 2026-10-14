@@ -156,7 +156,7 @@ Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Pai
    curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://kvarm-platform.<your-subdomain>.workers.dev/   # 200 text/html; charset=utf-8
    ```
 
-   **Containers must be enabled on the account.** Three Durable Object classes run on Cloudflare Containers (public beta): `CiRunnerSandbox` (the hosted CI lane), and `EnvironmentBuilder` and `AgentSandbox` (fleet environments and sandboxes). The deploy creates them, so an account without Containers cannot deploy this configuration. `scripts/bootstrap.mjs` does not provision or check Containers. Locally, `wrangler dev` builds container images with Docker; without Docker, pass `--enable-containers=false`. Pages, the API and MCP still run, but sandboxes, environment builds and the hosted CI lane cannot start a container.
+   **Containers need the Workers Paid plan.** Three Durable Object classes run on Cloudflare Containers: `CiRunnerSandbox` (the hosted CI lane), and `EnvironmentBuilder` and `AgentSandbox` (fleet environments and sandboxes). Containers is included in the Workers Paid plan and needs no separate enablement; the deploy creates these classes, and `scripts/bootstrap.mjs` does not check the plan. Locally, `wrangler dev` builds container images with Docker; without Docker, pass `--enable-containers=false`. Pages, the API and MCP still run, but sandboxes, environment builds and the hosted CI lane cannot start a container.
 
 7. **Secrets.** None are required. Without the WorkOS secrets every `/auth/*` route answers `503`, session cookies are ignored and personal access tokens are the way in. To let people sign in to the web UI through WorkOS AuthKit:
 
