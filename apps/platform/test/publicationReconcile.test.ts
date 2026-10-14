@@ -27,32 +27,20 @@ import {
   type TrainDeps,
   type TrainEvent,
 } from '../src/services/queue';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, lsRefsPrefixes, restoreFetch } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, installFakeGitRemote, lsRefsPrefixes, restoreFetch } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, recordingEvents, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string) => (await seedRepoBase(env, name, { owner: OWNER, visibility: 'private', repoIds })).repo;
+const call = (method: string, path: string, body?: unknown) => apiCall(env, method, path, { token: tok.owner, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'pr-owner';
 const MAIN = 'refs/heads/main';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
-const sent: Array<{ body: any; delaySeconds?: number }> = [];
-const fakeEvents = {
-  async send(body: unknown, opts?: { delaySeconds?: number }) {
-    sent.push({ body, ...(opts?.delaySeconds !== undefined ? { delaySeconds: opts.delaySeconds } : {}) });
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push({ body: m.body });
-  },
-};
 
 const env = {
   ...baseEnv,
@@ -64,32 +52,6 @@ const env = {
 const tok = { owner: '' };
 const repoIds: Record<string, string> = {};
 const savedAlarmEnv = mergeLockAlarm.env;
-
-async function seedRepo(name: string): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  return repo;
-}
-
-async function call(method: string, path: string, body?: unknown): Promise<{ status: number; json: Record<string, any> }> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { Authorization: `Bearer ${tok.owner}` };
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  return { status: res.status, json: text ? (JSON.parse(text) as Record<string, any>) : {} };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 const getChange = async (repo: string, n: number) => (await call('GET', api(repo, `/changes/${n}`))).json;
@@ -300,10 +262,7 @@ async function expectConsistent(name: string, repo: FakeRepo, numbers: number[])
 
 beforeAll(async () => {
   installFakeGitRemote();
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
-    .run();
+  const id = await seedUser(OWNER);
   tok.owner = (await mintPAT(env, id, 'owner', FULL)).token;
   // The lease alarm's kick goes to the recording queue, so a test can deliver it.
   mergeLockAlarm.env = (e) => ({ ...e, EVENTS: fakeEvents as unknown as Env['EVENTS'] });

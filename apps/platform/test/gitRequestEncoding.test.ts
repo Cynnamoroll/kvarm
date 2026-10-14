@@ -14,6 +14,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { internalKey, writeCachedJson } from '../src/cache/internal';
 import worker from '../src/index';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
 const env = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -68,19 +69,9 @@ async function uploadPack(body: BodyInit, encoding?: string): Promise<{ status: 
 }
 
 beforeAll(async () => {
-  const userId = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
-    .run();
+  const userId = await seedUserBase(env, OWNER);
   token = (await mintPAT(env, userId, 'enc', FULL)).token;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, created_at) VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, REPO, ARTIFACTS_NAME, REMOTE, Date.now())
-    .run();
+  await seedRepoBase(env, REPO, { owner: OWNER, visibility: 'private', artifactsName: ARTIFACTS_NAME, artifactsRemote: REMOTE, register: false });
   await writeCachedJson(internalKey('gittoken', ARTIFACTS_NAME, 'read'), { token: 'fake', expiresAt: Date.now() + 86_400_000 }, 86_400);
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {

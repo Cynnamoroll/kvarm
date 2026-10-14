@@ -18,7 +18,15 @@ import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/met
 import { PUSH_EFFECTS } from '../src/services/events';
 import { branchPushUpdates, FAST_PATH_CHANGE_LIMIT } from '../src/services/pushFastPath';
 import worker from '../src/index';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, recordingEvents, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string) => (await seedRepoBase(env, name, { owner: OWNER, visibility: 'public', repoIds })).repo;
+const call = (method: string, path: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -27,86 +35,18 @@ const FULL: Scope[] = ['read', 'write', 'api'];
 const MAIN = 'refs/heads/main';
 const ZERO = ZERO_OID;
 
-class FakeWorkflow {
-  instances = new Set<string>();
-  async create(opts: { id?: string }) {
-    const id = opts.id ?? crypto.randomUUID();
-    if (this.instances.has(id)) throw new Error(`instance.already_exists: ${id}`);
-    this.instances.add(id);
-    return { id };
-  }
-  async get(id: string) {
-    if (!this.instances.has(id)) throw new Error(`instance.not_found: ${id}`);
-    return { id };
-  }
-}
-
 /** Kicks and other queue sends recorded instead of delivered. */
-const sent: Array<{ body: any; delaySeconds?: number }> = [];
-const fakeEvents = {
-  async send(body: unknown, opts?: { delaySeconds?: number }) {
-    sent.push({ body, ...(opts?.delaySeconds !== undefined ? { delaySeconds: opts.delaySeconds } : {}) });
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push({ body: m.body });
-  },
-};
 
 const env = {
   ...baseEnv,
   ARTIFACTS: fakeArtifacts,
   EVENTS: fakeEvents as unknown as Env['EVENTS'],
-  SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
-  CI_PIPELINE: new FakeWorkflow() as unknown as Env['CI_PIPELINE'],
+  SNAPSHOT_BUILDER: new FakeWorkflow(true) as unknown as Env['SNAPSHOT_BUILDER'],
+  CI_PIPELINE: new FakeWorkflow(true) as unknown as Env['CI_PIPELINE'],
 } as Env;
 
 let token = '';
 const repoIds: Record<string, string> = {};
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  return repo;
-}
-
-interface Reply {
-  status: number;
-  json: Record<string, any>;
-}
-
-async function call(method: string, path: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, json };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 
