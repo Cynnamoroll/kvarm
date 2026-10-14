@@ -131,8 +131,11 @@ class ApiError extends CliError {
 /**
  * The job the claim returned, with every field the runner dereferences
  * validated: id, sha and command must be strings, generation a positive
- * integer, and an out-of-range timeoutSeconds falls back to the platform's
- * own default. Anything else is the same malformed claim a bad id always
+ * integer, an out-of-range timeoutSeconds falls back to the platform's
+ * own default, and name falls back to the id when it is not a string.
+ * The other dereferenced field, provenance, needs no shape check: it
+ * feeds the trust decision and trustOf already fails closed on whatever
+ * it is given. Anything else is the same malformed claim a bad id always
  * was — retried, never a crash.
  * @param {any} body
  */
@@ -147,7 +150,7 @@ function parseClaim(body) {
     Number.isInteger(job.timeoutSeconds) && job.timeoutSeconds >= 1 && job.timeoutSeconds <= JOB_TIMEOUT_MAX_SECONDS
       ? job.timeoutSeconds
       : JOB_TIMEOUT_DEFAULT_SECONDS;
-  return { ...job, timeoutSeconds };
+  return { ...job, name: typeof job.name === 'string' ? job.name : job.id, timeoutSeconds };
 }
 
 /** How long a failed container-runtime probe is remembered. */
