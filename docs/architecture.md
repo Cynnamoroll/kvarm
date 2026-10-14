@@ -139,7 +139,7 @@ The platform adds no avoidable wall-clock latency to merge, validation or CI pat
 ## 4. Platform modules (`apps/platform/src`)
 
 - **Access:** `services/access.ts` (credential and repository resolution, `resolveRepoAccess`, `authorizeRoute`), `services/authz.ts` (the shared policy), `services/orgs.ts`, `services/orgRepos.ts`, `services/grants.ts`, `services/agents.ts`, `services/branchRules.ts` (§11.1).
-- **Reading code:** `services/compare.ts` resolves refs to commits and trees, diffs trees over the Artifacts binding, adds per-file stats, per-file diffs and risk from `packages/review`, and caches by content (§2.3, §9). `services/contents.ts` serves trees and files; `services/snapshots.ts` and `workflows/snapshotBuilder.ts` build and serve snapshot tarballs (§11.5).
+- **Reading code:** `services/compare.ts` resolves refs to commits and trees, diffs trees over the Artifacts binding, adds per-file stats, per-file diffs and risk from `packages/review`, and caches by content (§2.3, §9). `services/contents.ts` serves trees and files; `services/history.ts` answers per-path history from a lazily built index (§11.9); `services/snapshots.ts` and `workflows/snapshotBuilder.ts` build and serve snapshot tarballs (§11.5).
 - **Changes:** `services/changes.ts` implements change requests over `change_sets`: create, list, get, update, close, head refresh on push, risk rating, mergeability and the merge endpoint that honors the merge policy (§2.5, §5).
 - **Checks and CI:** `services/checks.ts` (check runs with tree identity, the `kvarm/guard` evaluation and the commit status rollup) and `services/ci.ts` with `workflows/ciPipeline.ts` (`.kvarm/ci.json` at the immutable head becomes queued check runs and fenced runner jobs). Both register as checks-gate producers (§0.3).
 - **Merging:** `services/merge.ts` plans a fast-forward or a two-parent merge commit over `merge3` outside any lease, asks the checks gate about the exact tree, and publishes the one target ref through the `GitPusher` with the target as expected old value; a moved target is `STALE_TARGET` and is re-planned. `services/conflicts.ts` records conflict state and dispatches `resolve-conflict` tasks.
@@ -193,6 +193,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0021_ci_jobs` | user-owned CI runner jobs with generation and owner fencing |
 | `0023_push_event_aliases` | pairing of a push ingested at the git gate with its Artifacts delivery (§11.5) |
 | `0024_push_events_succession` | the lookup that orders a push after the position it leaves (§11.5) |
+| `0025_path_history` | the lazily built per-path history index of the default branch (§11.9) |
 
 ## 7. Testing
 
@@ -277,3 +278,13 @@ Four further experiments (contract capsules, semantic packets, hotspot suggestio
 ### 11.8 Scale evidence
 
 Scale claims rest on one measured live run of 100 workspaces through the train, recorded in [`docs/benchmarks/fleet-100.md`](benchmarks/fleet-100.md), plus the per-endpoint counters. The drivers are bounded (one driver, at most 3 git children and 5 HTTP requests in flight, a 10,000-request campaign ceiling) and honor rate limits. These measurements do not support claims of universal thousand-agent throughput or a monetary bill.
+
+### 11.9 Path history
+
+`GET history?path=` (`get_path_history`, `kvarm file history`) answers which commits on the default branch's first-parent chain changed a path, newest first, without a clone (`services/history.ts`, the per-commit diff in gitops `history.ts`).
+
+- **Derived data, built lazily.** The index lives in D1 (`0025_path_history`): one state row per repository, one row per indexed commit (author, commit time, summary) and one row per changed leaf path. Nothing is computed on push; a request that finds the index behind the branch head, or not yet at the root commit, does one bounded step: forward from the newest indexed commit to the head, then backward toward the root with what is left (at most 50 commits, 500 tree reads and 5,000 path rows per step, one `log` call for up to 1,000 first-parent commits). Every answer carries `index.current`, `index.rootReached`, `index.gaps` and `index.complete`, so a partial index is never mistaken for a complete history; repeating the call advances it.
+- **Gaps, not silent drops.** A commit with more than 2,000 changed paths, or one that cannot be diffed within a step's budget on its own, is recorded as a gap: it is listed nowhere and counts against `complete`.
+- **Concurrency.** A step is one compare-and-swap on the state row (a fresh writer token); its commit and path rows are inserted in the same D1 batch only if that swap applied, so racing requests never interleave partial steps.
+- **Epochs.** When the indexed head is no longer within the newest 1,000 commits of the chain (a rewritten or renamed default branch, or a very stale index), the index restarts in a new epoch from the current head. Older epochs are never served, a cursor from one answers `409 STALE_CURSOR`, and their rows are deleted 500 at a time by later steps. Deleting the repository deletes the index.
+- **Cost.** A read of a current index makes no Artifacts call and one D1 batch after the authority lookup (`d1 ≤ 2`); a request that advances the index adds one write batch, one or two `log` calls and its bounded tree reads.

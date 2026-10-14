@@ -18,6 +18,7 @@ import { changeCleanupStatements } from '../services/changes';
 import { workspaceCleanupStatements } from '../services/workspaces';
 import { arenaCleanupStatements } from '../services/candidates';
 import { compositionCleanupStatements } from '../services/compositions';
+import { historyCleanupStatements } from '../services/history';
 
 export type ServiceResult<T> =
   | { ok: true; value: T }
@@ -163,6 +164,7 @@ export async function deleteRepo(
     ...arenaCleanupStatements(env.DB, repo.id),
     ...workspaceCleanupStatements(env.DB, repo.id),
     ...changeCleanupStatements(env.DB, repo.id),
+    ...historyCleanupStatements(env.DB, repo.id),
   ];
   const results = await env.DB.batch<{ r2_key: string }>([
     ...before,

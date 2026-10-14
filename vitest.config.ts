@@ -13,6 +13,9 @@ export default defineConfig({
           name: 'packages',
           include: ['packages/**/test/**/*.test.ts', 'scripts/test/**/*.test.ts', 'apps/cli/test/**/*.test.ts'],
           environment: 'node',
+          // The parity tests spawn hundreds of real git processes; their wall
+          // time depends on machine load, not on the code under test.
+          testTimeout: 30_000,
         },
       },
       {

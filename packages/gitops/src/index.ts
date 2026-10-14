@@ -26,6 +26,7 @@ export * from './compose';
 export * from './notes';
 export * from './resolve';
 export * from './virtualBase';
+export * from './history';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
