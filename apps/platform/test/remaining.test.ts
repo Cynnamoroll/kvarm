@@ -120,6 +120,22 @@ describe('remainingFor', () => {
     expect(readOnly.map((item) => item.you)).toEqual([false, false, false]);
   });
 
+  it('assigns guided-review blockers to the author', () => {
+    const items = remainingFor(input({
+      blockers: [
+        { code: 'FINDINGS_OPEN', error: 'Blocking review findings remain open' },
+        { code: 'GUIDE_REQUIRED', error: 'the repository requires a review guide for the current head' },
+        { code: 'CONTRACT_UNDECLARED', error: '1 changed contract surface is undeclared' },
+      ],
+      viewer: { principal: 'user:author', login: 'author', kind: 'human', writeAccess: true },
+    }));
+    expect(items).toEqual([
+      { code: 'FINDINGS_OPEN', who: 'author', summary: 'Blocking review findings remain open', you: true },
+      { code: 'GUIDE_REQUIRED', who: 'author', summary: 'the repository requires a review guide for the current head', you: true },
+      { code: 'CONTRACT_UNDECLARED', who: 'author', summary: '1 changed contract surface is undeclared', you: true },
+    ]);
+  });
+
   it('identifies ready, queued and unknown states without inventing readiness for terminal changes', () => {
     expect(remainingFor(input()).map((item) => item.code)).toEqual(['READY']);
     expect(remainingFor(input({ change: { ...input().change, queueState: 'queued' } })).map((item) => item.code)).toEqual(['QUEUED']);

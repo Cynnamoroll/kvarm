@@ -163,6 +163,15 @@ export function remainingFor(input: RemainingInput): RemainingItem[] {
       you: viewer.writeAccess && Boolean(viewer.principal) && !author,
     });
   }
+  for (const blocker of input.blockers.filter((item) =>
+    item.code === 'FINDINGS_OPEN' || item.code === 'GUIDE_REQUIRED' || item.code === 'CONTRACT_UNDECLARED')) {
+    items.push({
+      code: blocker.code,
+      who: 'author',
+      summary: shorten(blocker.error ?? 'Resolve the review requirement before merging.'),
+      you: author,
+    });
+  }
 
   const knownConflict = change.state === 'conflicted' || mergeability?.status === 'conflicts' || conflicts.length > 0;
   const terminalReason =

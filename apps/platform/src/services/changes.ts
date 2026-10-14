@@ -103,6 +103,7 @@ import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from '
 import { actorName, changeLinkStatements, mergeCloseStatement, refreshPathLinks, retireIssueTasksStatement } from './issues';
 import { headCoverage, recordHeadTier } from './reviewCoverage';
 import { publishRepoEvent } from './live';
+import { enqueueReviewNudge } from './reviewNudges';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -145,6 +146,7 @@ export interface ChangeRow {
   created_at: number;
   updated_at: number | null;
   merge_policy: MergePolicy;
+  nudge_after_minutes: number | null;
   risk_score: number | null;
   risk_level: string | null;
   risk_reasons: string | null;
@@ -160,7 +162,9 @@ export interface ChangeRow {
 
 const CHANGE_SELECT = `SELECT c.id, c.repo_id, c.number, c.title, c.body, c.base_ref, c.head_ref, c.head_sha, c.base_sha,
        c.state, c.author_id, u.login AS author_login, c.agent_meta, c.merge_commit, c.merged_at, c.created_at,
-       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.conflicts,
+       c.updated_at, c.merge_policy,
+       (SELECT p.nudge_after_minutes FROM review_policies p WHERE p.repo_id = c.repo_id) AS nudge_after_minutes,
+       c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.conflicts,
        (SELECT q.state FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queue_state,
        (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1) AS workspace_id
   FROM change_sets c LEFT JOIN users u ON u.id = c.author_id`;
@@ -960,6 +964,9 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       }
     }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
+    if (row.state === 'open' && row.head_sha && row.nudge_after_minutes !== null) {
+      await enqueueReviewNudge(cx.env, cx.repo.id, row.id, row.head_sha);
+    }
     await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks } };
   });
@@ -1095,6 +1102,9 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
       );
     }
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
+    if ((p.state === 'open' || p.mergePolicy !== undefined) && row.state === 'open' && row.head_sha && row.nudge_after_minutes !== null) {
+      await enqueueReviewNudge(cx.env, cx.repo.id, row.id, row.head_sha);
+    }
     await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: changeView(row) };
   });
@@ -1683,6 +1693,7 @@ export interface ChangeOnRef {
   state?: ChangeState;
   policy: MergePolicy;
   headSha: string | null;
+  nudgeAfterMinutes?: number | null;
   /** The head its active merge-queue entry approved, when the change is queued. */
   queuedHead?: string | null;
 }
@@ -1726,6 +1737,11 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
     await refreshPathLinks(e.env, e.repoId, e.change.id, e.headSha);
   },
   (e) => carryApprovals(e),
+  async (e) => {
+    if (e.change.nudgeAfterMinutes !== null && e.change.nudgeAfterMinutes !== undefined) {
+      await enqueueReviewNudge(e.env, e.repoId, e.change.id, e.headSha);
+    }
+  },
   async (e) => {
     await publishRepoEvent(e.env, e.repoId, { type: 'change.head', changeNumber: e.change.number, headSha: e.headSha });
   },

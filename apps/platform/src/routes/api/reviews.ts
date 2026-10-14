@@ -21,6 +21,9 @@ import { actorJson, authorizeRoute, denyJson, type App, failJson,
   jsonBody} from '../api';
 import type { ChangeContext } from '../../services/changes';
 import * as reviews from '../../services/reviews';
+import * as guide from '../../services/reviewGuide';
+import * as impact from '../../services/reviewImpact';
+import * as analytics from '../../services/reviewAnalytics';
 
 export const reviewsApi = new Hono<App>();
 
@@ -39,6 +42,21 @@ async function writeContext(
     waitUntil: (p) => c.executionCtx.waitUntil(p),
   };
   return { cx };
+}
+
+async function readContext(c: Context<App>, branchRules = false): Promise<{ denied: Response } | { cx: ChangeContext }> {
+  const d = await authorizeRoute(c, 'read', { branchRules });
+  if (!d.ok) return { denied: denyJson(c, d) };
+  return {
+    cx: {
+      env: c.env,
+      repo: d.repo,
+      actor: d.actor,
+      writeAccess: d.role === 'write' || d.role === 'admin',
+      ...(branchRules ? { branchRules: d.branchRules ?? [] } : {}),
+      waitUntil: (p) => c.executionCtx.waitUntil(p),
+    },
+  };
 }
 
 reviewsApi.get('/repos/:owner/:repo/review-policy', async (c) => {
@@ -119,6 +137,78 @@ reviewsApi.post('/repos/:owner/:repo/changes/:number/escalations/:id/resolve', a
   const w = await writeContext(c, { requireActor: true, allowAgent: true });
   if ('denied' in w) return w.denied;
   const r = await reviews.resolveEscalation(w.cx, c.req.param('number'), c.req.param('id'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/review/analytics', async (c) => {
+  const d = await authorizeRoute(c, 'read');
+  if (!d.ok) return denyJson(c, d);
+  const r = await analytics.getReviewAnalytics(c.env, d.repo, c.req.query('days'));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/changes/:number/review-guide', async (c) => {
+  const rctx = await readContext(c, true);
+  if ('denied' in rctx) return rctx.denied;
+  const r = await guide.getGuide(rctx.cx, c.req.param('number'), {
+    since: c.req.query('since'),
+    unacked: c.req.query('unacked'),
+    include: c.req.query('include'),
+  });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/changes/:number/review/impact', async (c) => {
+  const rctx = await readContext(c);
+  if ('denied' in rctx) return rctx.denied;
+  const r = await impact.getReviewImpact(rctx.cx, c.req.param('number'));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.post('/repos/:owner/:repo/changes/:number/review-guide', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.submitGuide(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value, r.value.created ? 201 : 200);
+});
+
+reviewsApi.post('/repos/:owner/:repo/changes/:number/review-acks', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.ackUnits(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.get('/repos/:owner/:repo/changes/:number/findings', async (c) => {
+  const rctx = await readContext(c);
+  if ('denied' in rctx) return rctx.denied;
+  const r = await guide.listFindings(rctx.cx, c.req.param('number'), {
+    status: c.req.query('status'),
+    limit: c.req.query('limit'),
+    cursor: c.req.query('cursor'),
+  });
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.post('/repos/:owner/:repo/changes/:number/findings', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.submitFindings(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value, r.value.created.length ? 201 : 200);
+});
+
+reviewsApi.patch('/repos/:owner/:repo/changes/:number/findings/:id', async (c) => {
+  const w = await writeContext(c);
+  if ('denied' in w) return w.denied;
+  const r = await guide.updateFinding(w.cx, c.req.param('number'), c.req.param('id'), await jsonBody(c));
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

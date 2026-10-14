@@ -41,6 +41,16 @@ export const compareKeys = {
   // v2 adds the whitespaceOnly/generated hints risk relies on.
   numstat: (oldBlob: string | null, newBlob: string | null) =>
     key(`numstat/v2/${oldBlob ?? NONE}/${newBlob ?? NONE}`),
+  reviewmap: (baseTree: string, headTree: string, configSha: string) =>
+    key(`reviewmap/v2/${baseTree}/${headTree}`, { config: configSha }),
+  reviewmapHead: (changeId: string, baseSha: string, headSha: string) =>
+    key(`reviewmap-head/v2/${changeId}/${baseSha}/${headSha}`),
+  reviewStack: (changeId: string, headSha: string, parentsSha: string) =>
+    key(`review-stack/v1/${changeId}/${headSha}/${parentsSha}`),
+  reviewFiles: (headTree: string) => key(`review-files/v1/${headTree}`),
+  imports: (blobSha: string) => key(`imports/v1/${blobSha}`),
+  reviewImpact: (baseTree: string, headTree: string, configSha: string) =>
+    key(`review-impact/v1/${baseTree}/${headTree}/${configSha}`),
   commit: (repoId: string, sha: string) => key('commit/v1', { repo: repoId, sha }),
   ref: (repoId: string, gen: string, name: string) => key('ref/v1', { repo: repoId, gen, name }),
   refgen: (repoId: string) => key('refgen/v1', { repo: repoId }),
