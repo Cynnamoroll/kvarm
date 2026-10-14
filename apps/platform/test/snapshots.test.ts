@@ -70,11 +70,21 @@ class Runner implements StepRunner {
   steps: string[] = [];
   attempts: string[] = [];
   gates = new Map<string, Promise<void>>();
+  private gateArrived = new Map<string, () => void>();
   onAttempt?: (name: string, attempt: number) => void;
 
   constructor(private readonly retries = 0) {}
 
+  /** Holds step `name` until `release()`; `reached` settles when the step arrives at the gate. */
+  pauseAt(name: string): { reached: Promise<void>; release: () => void } {
+    let release!: () => void;
+    const reached = new Promise<void>((r) => this.gateArrived.set(name, r));
+    this.gates.set(name, new Promise<void>((r) => (release = r)));
+    return { reached, release };
+  }
+
   async do<T>(name: string, fn: (ctx?: { attempt: number }) => Promise<T>): Promise<T> {
+    this.gateArrived.get(name)?.();
     await this.gates.get(name);
     this.steps.push(name);
     for (let attempt = 0; ; attempt++) {
@@ -575,15 +585,14 @@ describe('SnapshotBuilder', () => {
     const { id, repo } = await seedRepo('wait');
     const x = await commit(repo, SMALL);
     const y = await commit(repo, SMALL, [x.sha]);
-    let release!: () => void;
     const slow = new Runner();
-    slow.gates.set('batch-1', new Promise<void>((r) => (release = r)));
+    const gate = slow.pauseAt('batch-1');
     const xBuild = buildSnapshot(env, { repoId: id, sha: x.sha, instanceId: 'snap-wait-x' }, slow);
-    await new Promise((r) => setTimeout(r, 50));
+    await gate.reached;
     const yOut = await buildSnapshot(env, { repoId: id, sha: y.sha, instanceId: 'snap-wait-y' }, new Runner());
     expect(yOut.reason).toBe('waiting on snap-wait-x');
     expect((await commitRow(id, y.sha))!.state).toBe('building');
-    release();
+    gate.release();
     await xBuild;
     expect(await commitRow(id, y.sha)).toMatchObject({ state: 'ready', reused: 1 });
     expect(await objectKeys(id)).toHaveLength(1);
@@ -592,7 +601,10 @@ describe('SnapshotBuilder', () => {
   it('marks the commit and tree failed when the build cannot finish', async () => {
     const { id, repo } = await seedRepo('broken');
     const c = await commit(repo, { 'a.txt': 'a\n', 'b.txt': 'gone\n' });
-    for (const [hash, o] of repo.objects) if (o.type === 'blob' && new TextDecoder().decode(o.content) === 'gone\n') repo.objects.delete(hash);
+    const goneDecoder = new TextDecoder();
+    for (const [hash, o] of repo.objects) {
+      if (o.type === 'blob' && goneDecoder.decode(o.content) === 'gone\n') repo.objects.delete(hash);
+    }
     const runner = new Runner(1);
     await expect(buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-broken' }, runner)).rejects.toThrow(/not found/);
     expect(runner.steps).toEqual(['resolve', 'batch-1', 'fail']);
@@ -605,15 +617,17 @@ describe('SnapshotBuilder', () => {
     const { id, repo } = await seedRepo('waitfail');
     const x = await commit(repo, { 'a.txt': 'a\n', 'b.txt': 'doomed\n' });
     const y = await commit(repo, { 'a.txt': 'a\n', 'b.txt': 'doomed\n' }, [x.sha]);
-    let release!: () => void;
     const slow = new Runner();
-    slow.gates.set('batch-1', new Promise<void>((r) => (release = r)));
+    const gate = slow.pauseAt('batch-1');
     const xBuild = buildSnapshot(env, { repoId: id, sha: x.sha, instanceId: 'snap-waitfail-x' }, slow);
-    await new Promise((r) => setTimeout(r, 50));
+    await gate.reached;
     const yOut = await buildSnapshot(env, { repoId: id, sha: y.sha, instanceId: 'snap-waitfail-y' }, new Runner());
     expect(yOut.reason).toBe('waiting on snap-waitfail-x');
-    for (const [hash, o] of repo.objects) if (o.type === 'blob' && new TextDecoder().decode(o.content) === 'doomed\n') repo.objects.delete(hash);
-    release();
+    const doomedDecoder = new TextDecoder();
+    for (const [hash, o] of repo.objects) {
+      if (o.type === 'blob' && doomedDecoder.decode(o.content) === 'doomed\n') repo.objects.delete(hash);
+    }
+    gate.release();
     await expect(xBuild).rejects.toThrow(/not found/);
     expect(await commitRow(id, x.sha)).toMatchObject({ state: 'failed' });
     expect(await commitRow(id, y.sha)).toMatchObject({ state: 'failed' });
@@ -624,11 +638,10 @@ describe('SnapshotBuilder', () => {
     const c = await commit(repo, { 'a.txt': 'takeover a\n', 'b.txt': 'takeover b\n' });
     repo.refs.set('refs/heads/main', c.sha);
     const base = snapshotInstanceId(id, c.sha);
-    let releaseOld!: () => void;
     const oldRunner = new Runner();
-    oldRunner.gates.set('batch-1', new Promise<void>((r) => (releaseOld = r)));
+    const oldGate = oldRunner.pauseAt('batch-1');
     const oldBuild = buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: base, trigger: 'push' }, oldRunner);
-    await new Promise((r) => setTimeout(r, 50));
+    await oldGate.reached;
     expect(await commitRow(id, c.sha)).toMatchObject({ state: 'building', instance_id: base, tree: c.tree });
 
     // The old attempt looks dead: a demand takes over with -r1.
@@ -641,21 +654,20 @@ describe('SnapshotBuilder', () => {
     const successor = `${base}-r1`;
     expect(builder.creates.at(-1)).toBe(successor);
     builder.ran.add(successor);
-    let releaseNew!: () => void;
     const newRunner = new Runner();
-    newRunner.gates.set('batch-1', new Promise<void>((r) => (releaseNew = r)));
+    const newGate = newRunner.pauseAt('batch-1');
     const newBuild = buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: successor, trigger: 'demand' }, newRunner);
-    await new Promise((r) => setTimeout(r, 50));
+    await newGate.reached;
     const claimed = await env.DB.prepare('SELECT builder FROM snapshot_trees WHERE repo_id = ? AND tree = ?').bind(id, c.tree).first();
     expect(claimed).toEqual({ builder: successor });
 
     // The old attempt now fails.
     repo.failBlobOnce.add(await blobHash('takeover a\n'));
-    releaseOld();
+    oldGate.release();
     await expect(oldBuild).rejects.toThrow(/transient/);
     expect(await commitRow(id, c.sha)).toMatchObject({ state: 'building', instance_id: successor, error: null });
 
-    releaseNew();
+    newGate.release();
     await expect(newBuild).resolves.toMatchObject({ outcome: 'built' });
     const ready = await call(snap('takeover', 'main'), { token: tok.owner });
     expect(ready.status).toBe(200);
@@ -666,22 +678,20 @@ describe('SnapshotBuilder', () => {
   it('a repo deleted during its build leaves no completed tarball behind', async () => {
     const { id, repo } = await seedRepo('vanish');
     const c = await commit(repo, SMALL);
-    let releaseBatch!: () => void;
-    let releaseFinish!: () => void;
     const runner = new Runner();
-    runner.gates.set('batch-1', new Promise<void>((r) => (releaseBatch = r)));
-    runner.gates.set('finish', new Promise<void>((r) => (releaseFinish = r)));
+    const batch = runner.pauseAt('batch-1');
+    const finishGate = runner.pauseAt('finish');
     const seen: { del?: number; keysAfterDelete?: number; keysBeforeFinish?: number; outcome?: string } = {};
     const logs = await builderLogs('snap-vanish', async () => {
       const build = buildSnapshot(env, { repoId: id, sha: c.sha, instanceId: 'snap-vanish' }, runner);
-      await new Promise((r) => setTimeout(r, 50));
+      await batch.reached;
       // The repo goes while the build holds its tree claim and no object exists yet.
       seen.del = (await call(`/api/v1/repos/${OWNER}/vanish`, { method: 'DELETE', token: tok.owner })).status;
       seen.keysAfterDelete = (await objectKeys(id)).length;
-      releaseBatch();
+      batch.release();
       await vi.waitFor(async () => expect(await objectKeys(id)).toHaveLength(1), { timeout: 2000 });
       seen.keysBeforeFinish = (await objectKeys(id)).length;
-      releaseFinish();
+      finishGate.release();
       seen.outcome = (await build).outcome;
     });
     expect(seen).toEqual({ del: 200, keysAfterDelete: 0, keysBeforeFinish: 1, outcome: 'built' });

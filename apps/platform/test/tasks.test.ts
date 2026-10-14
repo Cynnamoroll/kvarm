@@ -9,7 +9,7 @@
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { decode } from '@kvarm/gitops';
+import { decode, parseTree } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
@@ -47,6 +47,9 @@ const env = {
 const tok = { owner: '', reader: '', outsider: '' };
 const userIds: Record<string, string> = {};
 const repoIds: Record<string, string> = {};
+
+/** Waits out a `ttlSeconds: 1` claim lease, with margin, for the reclaim tests. */
+const expiredLease = () => new Promise((r) => setTimeout(r, 1100));
 
 async function seedUser(login: string): Promise<string> {
   const id = crypto.randomUUID();
@@ -143,17 +146,7 @@ function fileAt(repo: FakeRepo, sha: string, path: string): string | null {
   let tree = commitOf(repo, sha).tree;
   const parts = path.split('/');
   for (const [i, part] of parts.entries()) {
-    const c = repo.objects.get(tree)!.content;
-    let off = 0;
-    let found: string | null = null;
-    while (off < c.length) {
-      const sp = c.indexOf(0x20, off);
-      const nul = c.indexOf(0, sp);
-      const name = decode(c.subarray(sp + 1, nul));
-      const hash = [...c.subarray(nul + 1, nul + 21)].map((b) => b.toString(16).padStart(2, '0')).join('');
-      if (name === part) found = hash;
-      off = nul + 21;
-    }
+    const found = parseTree(repo.objects.get(tree)!.content).find((e) => e.name === part)?.hash;
     if (!found) return null;
     if (i === parts.length - 1) return decode(repo.objects.get(found)!.content);
     tree = found;
@@ -285,7 +278,7 @@ describe('dead agents cannot strand a task', () => {
     const { repo, main, feature, task } = await dispatched('reclaim', 'review');
     const first = await claim('reclaim', task.id, { agent: 'claude-code-1', ttlSeconds: 1 });
     expect(first.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 1100));
+    await expiredLease();
 
     const got = await getTask('reclaim', task.id);
     expect(got.json).toMatchObject({ status: 'open', claimedBy: 'claude-code-1', lease: { generation: 1, expired: true } });
@@ -330,7 +323,7 @@ describe('agent tokens', () => {
     expect(first.json.task.claimedBy).toBe('td-agent-a');
     expect(first.json.workspace).toMatchObject({ agentId: a.agentId, agent: 'td-agent-a', headSha: feature.sha });
     expect((await claim('agents', task.id, {}, b.token)).json.code).toBe('CLAIMED');
-    await new Promise((r) => setTimeout(r, 1100));
+    await expiredLease();
 
     const second = await claim('agents', task.id, {}, b.token);
     expect(second.status, JSON.stringify(second.json)).toBe(200);
@@ -582,7 +575,7 @@ describe('claims are fenced across the workspace ref creation', () => {
     const [slow] = pauseCreations(repo, 1);
     const first = claim('claim-takeover', task.id, { agent: 'claude-code-1', ttlSeconds: 1 });
     await slow!.at;
-    await new Promise((r) => setTimeout(r, 1100));
+    await expiredLease();
     const second = await claim('claim-takeover', task.id, { agent: 'claude-code-2', ttlSeconds: 120 });
     expect(second.status, JSON.stringify(second.json)).toBe(200);
     slow!.release();
@@ -599,7 +592,7 @@ describe('claims are fenced across the workspace ref creation', () => {
     const [a, b] = pauseCreations(repo, 2);
     const first = claim('claim-order', task.id, { agent: 'claude-code-1', ttlSeconds: 1 });
     await a!.at;
-    await new Promise((r) => setTimeout(r, 1100));
+    await expiredLease();
     const second = claim('claim-order', task.id, { agent: 'claude-code-2', ttlSeconds: 120 });
     await b!.at;
     a!.release();

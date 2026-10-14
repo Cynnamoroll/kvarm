@@ -19,6 +19,7 @@ import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { markCache } from '../cost/meter';
 import { compareKeys, readJson, writeJson } from '../cache/compare';
 import type { ServiceResult } from '../repos/service';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { runPool } from './pool';
 import { fail, guarded as baseGuarded } from './result';
 import { RISK_BUDGETS, assessRisk, type ChangeRating, type FileRisk, type RiskInput, type RiskResult, type RiskStat } from './risk';
@@ -546,16 +547,12 @@ export async function treePairRating(ctx: Ctx, baseTree: string, headTree: strin
 }
 
 function encodeCursor(offset: number, baseTree: string, headTree: string): string {
-  return btoa(`v1:${offset}:${baseTree.slice(0, 12)}${headTree.slice(0, 12)}`).replace(/=+$/, '');
+  return encodeCursorPayload(`v1:${offset}:${baseTree.slice(0, 12)}${headTree.slice(0, 12)}`);
 }
 
 function decodeCursor(cursor: string, baseTree: string, headTree: string): number | null {
-  let raw: string;
-  try {
-    raw = atob(cursor);
-  } catch {
-    return null;
-  }
+  const raw = decodeCursorPayload(cursor);
+  if (raw === null) return null;
   const m = /^v1:(\d+):([0-9a-f]{24})$/.exec(raw);
   if (!m || m[2] !== `${baseTree.slice(0, 12)}${headTree.slice(0, 12)}`) return null;
   return Number(m[1]);

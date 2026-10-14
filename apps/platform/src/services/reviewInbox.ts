@@ -25,6 +25,7 @@ import { splitFacts, type RepoFactsRow } from './access';
 import { authorizeRepo, type Actor } from './authz';
 import { parseNumber, type ChangeContext } from './changes';
 import { changeDecisionTask, recordDecision, type DecisionView } from './decisions';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import type { EscalationReason } from './reviewGate';
 import { changeAuthorPrincipal, getReviewPacket, LIVE_FOR_REVIEW, pendingAcross, REVIEW_LIMITS, resolveEscalation, submitReview, type PendingChange, type ReviewVerdict } from './reviews';
 
@@ -71,12 +72,14 @@ export interface ReviewInbox {
 
 
 function encodeCursor(c: { at: number; id: string }): string {
-  return btoa(JSON.stringify([c.at, c.id])).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify([c.at, c.id]));
 }
 
 function decodeCursor(raw: string): { at: number; id: string } | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const v: unknown = JSON.parse(atob(raw));
+    const v: unknown = JSON.parse(text);
     if (Array.isArray(v) && v.length === 2 && Number.isSafeInteger(v[0]) && typeof v[1] === 'string' && v[1].length <= 64) {
       return { at: v[0] as number, id: v[1] };
     }

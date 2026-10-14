@@ -19,6 +19,7 @@ import type { ServiceResult } from '../repos/service';
 import { fail, type Fail } from './result';
 import type { Actor } from './authz';
 import { evidenceFromRow } from './attribution';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { submitterOf, type Evidence, type EvidenceLevel } from './provenance';
 
 export const AUDIT_LIMITS = {
@@ -168,12 +169,14 @@ function parseTime(raw: string | undefined, name: string): number | null | Fail 
 const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as Fail).ok === false;
 
 function encodeCursor(at: number, seq: number): string {
-  return btoa(JSON.stringify([at, seq])).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify([at, seq]));
 }
 
 function decodeCursor(raw: string): { at: number; seq: number } | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const v: unknown = JSON.parse(atob(raw));
+    const v: unknown = JSON.parse(text);
     if (Array.isArray(v) && v.length === 2 && Number.isSafeInteger(v[0]) && Number.isSafeInteger(v[1])) return { at: v[0] as number, seq: v[1] as number };
   } catch {
     // not one of ours
