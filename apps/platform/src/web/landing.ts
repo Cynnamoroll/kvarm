@@ -104,24 +104,29 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
         <div class="trainstrip hud" aria-hidden="true"><span class="car ok"></span><span class="car ok"></span><span class="car run"></span><span class="car hot"></span><span class="car"></span></div>
         <div class="field-body">
           <div class="territory" aria-label="Example codebase paths and advisory overlap">
-            <div class="t t-xl k3"><b>packages/gitops/</b><span>Example declared paths</span></div>
-            <div class="t k2"><b>apps/platform/src/</b><span>Example observed paths</span></div>
-            <div class="t"><b>packages/ops/</b><span>Example workspace</span></div>
-            <div class="t"><b>docs/</b><span>Example workspace</span></div>
-            <div class="t t-sm"><b>scripts/</b><span>Example paths</span></div>
+            <div class="t t-xl k3"><b>packages/gitops/</b><span>Example paths · possible overlap</span></div>
+            <div class="t t-l k1"><b>apps/platform/</b><span>Example declared paths</span></div>
+            <div class="t t-m k0"><b>packages/ops/</b><span>Example candidate paths</span></div>
+            <div class="t t-m k2"><b>services/api/</b><span>Example paths · review overlap</span></div>
+            <div class="t t-s"><b>docs/</b><span>Example</span></div>
+            <div class="t t-s k0"><b>apps/cli/</b><span>Example</span></div>
+            <div class="t t-s"><b>packages/diffcore/</b><span>Example</span></div>
+            <div class="t t-s"><b>scripts/</b><span>Example</span></div>
+            <div class="t t-s"><b>packages/ui/</b><span>Example</span></div>
           </div>
-          <aside class="field-side">
+          <aside class="app-side field-side">
             <section class="panel">
               <div class="panel-head hud"><b>Example intents</b><span>example/api</span></div>
-              <ul class="intent-list">
-                <li><b>Example agent A</b><span>packages/gitops/ · declared</span></li>
-                <li><b>Example agent B</b><span>apps/platform/src/ · declared</span></li>
-                <li><b>Example agent C</b><span>packages/ops/ · declared</span></li>
+              <ul class="intents">
+                <li><span class="st st4">04</span><div><b>Example request validation</b><span class="hud">packages/gitops/** · declared paths</span></div></li>
+                <li><span class="st st3">03</span><div><b>Example stream comparison</b><span class="hud">packages/diffcore/ · declared paths</span></div></li>
+                <li><span class="st st2">02</span><div><b>Example lease renewal</b><span class="hud">services/api/ · declared paths</span></div></li>
+                <li><span class="st st5">05</span><div><b>Example snapshot route</b><span class="hud">apps/platform/ · declared paths</span></div></li>
               </ul>
             </section>
             <section class="panel">
-              <div class="panel-head hud"><b>Forecast</b><span>Example · advisory</span></div>
-              <p class="panel-copy">Possible path overlap is shown for review. It does not lock paths or guarantee a conflict.</p>
+              <div class="panel-head hud"><b>Example escalations</b><span>Illustrative · advisory</span></div>
+              <p class="needs">Possible overlap is a cue to coordinate and inspect the files. Forecasts do not reserve paths or block a write.</p>
             </section>
           </aside>
         </div>
@@ -129,57 +134,88 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
       <p class="screen-cap">Declared and observed paths help people and agents coordinate; forecasts are advisory.</p>
     </div>
 
-    <div class="split">
-      <div class="m-human">
-        <p class="screen-label hud"><span class="tag">Example</span> Intent · example/worker</p>
-        <div class="mock frame">
-          <div class="mock-bar hud">example/worker <span class="tag">Example</span></div>
-          <div class="intent-body">
-            <section class="intent-main">
-              <p class="hud">Example request</p>
-              <h3>Update request validation</h3>
-              <p class="mono steel">packages/gitops/</p>
-              <div class="mock-rule"><span>Declared paths</span><b>packages/gitops/</b></div>
-              <div class="mock-rule"><span>Forecast</span><b>Possible overlap to review</b></div>
-              <p class="sub">Illustrative forecast output · advisory, not a lock.</p>
-            </section>
-            <aside class="decision-card"><span class="hud">Example prior decision</span><b>Retain the shared parser</b><span>Reason recorded for context</span></aside>
+    <div class="m-human">
+      <p class="screen-label hud"><span class="tag">Example</span> Intent · example/api</p>
+      <div class="app frame">
+        <i class="c-tr"></i><i class="c-bl"></i>
+        <div class="app-head">
+          <div>
+            <p class="hud"><span class="tag">Example · composition</span> <span class="steel">·</span> area <span class="mono ink-hi">packages/gitops</span> <span class="steel">·</span> asked by <span class="bone">Example A</span></p>
+            <h3 class="app-title">Make example conflicts claimable tasks</h3>
+          </div>
+          <div class="app-actions"><button class="btn" type="button">Ask for another attempt</button><button class="btn btn-primary" type="button">Ship the combination</button></div>
+        </div>
+        <div class="h-intent">
+          <div>
+            <div class="rec"><p class="hud">Kvarm recommends · example</p><p>Example combination: use the merge logic and tests from Example A with the conflict and task changes from Example B. The check results below are illustrative, not live results.</p></div>
+            <ul class="attempts" aria-label="Example attempts">
+              <li><div><b>Example A</b><span>Used: merge logic and its tests</span></div><span class="tag tag-ok">Example · 6/6 checks · used</span></li>
+              <li><div><b>Example B</b><span>Used: conflict handling and task records</span></div><span class="tag tag-ok">Example · 6/6 checks · used</span></li>
+              <li class="no"><div><b>Example C</b><span>Not used: illustrative candidate removes existing tests</span></div><span class="tag tag-fail">Example · 5/6 checks · rejected</span></li>
+            </ul>
+          </div>
+          <aside class="app-side">
+            <div class="panel"><div class="panel-head hud"><span class="bone">Before anyone wrote code</span><span>Example</span></div><p class="needs">Example declared paths showed possible overlap before work began. Teams can coordinate on separate files; forecasts are advisory.</p></div>
+            <div class="panel"><div class="panel-head hud"><span class="bone">Past decision</span><span>Example</span></div><p class="needs">An earlier example kept the shared parser: <b>“callers need a recoverable plan.”</b> This is illustrative context, not a live repository decision.</p></div>
+          </aside>
+        </div>
+      </div>
+    </div>
+
+    <div class="m-agent">
+      <p class="screen-label hud"><span class="tag">Example</span> Intent · example/api</p>
+      <div class="app frame">
+        <i class="c-tr"></i><i class="c-bl"></i>
+        <div class="app-head">
+          <div>
+            <p class="hud"><span class="tag">Example · composition</span> <span class="steel">·</span> scope <span class="mono ink-hi">packages/gitops/**</span> <span class="steel">·</span> declared by <span class="bone">Example A</span></p>
+            <h3 class="app-title">Make example conflicts claimable tasks</h3>
           </div>
         </div>
-        <p class="screen-cap">Declare an intent and inspect forecast evidence before starting work.</p>
-      </div>
-      <div class="m-agent">
-        <p class="screen-label hud"><span class="tag">Example</span> Intent · example/api</p>
-        <div class="mock frame">
-          <div class="mock-bar hud">example/api <span class="tag">Example</span></div>
-          <div class="matrix">
-            <div class="mx-h"><span>Candidate</span><span>Intent</span><span>Files</span><span>Forecast</span></div>
-            <div class="mx-row"><b>Example A</b><span>Request validation</span><span class="mono">packages/gitops/</span><span class="ok">Review</span></div>
-            <div class="mx-row"><b>Example B</b><span>Request validation</span><span class="mono">apps/platform/</span><span class="ok">Review</span></div>
-            <div class="mx-row"><b>Example C</b><span>Request validation</span><span class="mono">packages/ops/</span><span class="warn">Overlap?</span></div>
+        <div class="intent-body">
+          <div class="matrix-scroll">
+            <table class="table matrix">
+              <caption class="hud">Example pieces by path × attempt · illustrative composition</caption>
+              <thead><tr><th>Path</th><th>Example A</th><th>Example B</th><th>Example C</th><th>Composed</th></tr></thead>
+              <tbody>
+                <tr><td class="mono">src/merge3.ts</td><td><span class="pc pick">+212 −48</span></td><td><span class="pc">+188 −61</span></td><td><span class="pc bad">+640 −402</span></td><td class="ink-hi">A</td></tr>
+                <tr><td class="mono">src/conflicts.ts</td><td><span class="pc">+40</span></td><td><span class="pc pick">+66 −4</span></td><td class="steel">—</td><td class="ink-hi">B</td></tr>
+                <tr><td class="mono">src/tasks.ts</td><td class="steel">—</td><td><span class="pc pick">+31</span></td><td><span class="pc">+29</span></td><td class="ink-hi">B</td></tr>
+                <tr><td class="mono">test/merge3.test.ts</td><td><span class="pc pick">+90</span></td><td><span class="pc">+52</span></td><td><span class="pc bad">−38 tests</span></td><td class="ink-hi">A</td></tr>
+              </tbody>
+              <tfoot><tr><td class="hud">Example checks</td><td><span class="tag tag-ok">6/6</span></td><td><span class="tag tag-ok">6/6</span></td><td><span class="tag tag-fail">5/6 · guard</span></td><td><span class="tag">6/6 composed</span></td></tr></tfoot>
+            </table>
           </div>
+          <aside class="app-side">
+            <div class="panel"><div class="panel-head hud"><span class="bone">Example forecast</span><span>Advisory</span></div><p class="needs">Possible overlap is shown for review before writing. This example does not lock paths or predict a guaranteed conflict.</p></div>
+            <div class="panel"><div class="panel-head hud"><span class="bone">Ledger context</span><span class="mono">get_context</span></div><p class="needs"><span class="steel">Example ·</span> Kept “return a plan” in the merge example: <b>“callers need a recoverable path.”</b></p></div>
+          </aside>
         </div>
-        <p class="screen-cap">Example comparison. Inspect evidence and candidate changes before composing.</p>
       </div>
+      <p class="screen-cap">Example composition. Inspect the evidence and exact combined changes before deciding.</p>
     </div>
 
     <div class="split">
       <div class="m-human">
         <p class="screen-label hud"><span class="tag">Example</span> Escalation · example/api</p>
-        <div class="mock frame">
-          <div class="mock-bar hud">example/api · review <span class="tag">Example</span></div>
-          <div class="esc-body">
-            <section class="esc-main">
-              <p class="hud">Example decision</p>
-              <h3>Review the composed request-validation change</h3>
-              <p>Two example candidates differ in how they handle an invalid request.</p>
-              <div class="diff"><span class="del">− return error;</span><span class="add">+ return validationError();</span><span class="add">+ record the decision reason</span></div>
-            </section>
-            <aside class="esc-side">
-              <span class="hud">Example checks</span><b>Inspect required checks</b>
-              <span class="hud">Example review</span><b>A person chooses the outcome</b>
-            </aside>
+        <div class="esc frame">
+          <i class="c-tr"></i><i class="c-bl"></i>
+          <div class="esc-q">
+            <p class="hud"><span class="tag">Example decision</span> <span class="steel">·</span> illustrative review</p>
+            <h3 class="h2">Ship the example combination of Example A and Example B?</h3>
+            <ul class="evidence">
+              <li><span class="ink-hi">■</span> Example check results are shown for review, not as live status</li>
+              <li><span class="ink-hi">■</span> Example reviewer input is illustrative, not an actual approval</li>
+              <li><span class="thermal-text">■</span> Example C is left out of this composition</li>
+              <li><span class="silver">□</span> Review the example diff and repository policy before shipping</li>
+            </ul>
           </div>
+          <div class="esc-a">
+            <button class="btn btn-primary" type="button">Ship the combination</button>
+            <button class="btn" type="button">Pick one attempt</button>
+            <button class="btn" type="button">Send back with a note</button>
+          </div>
+          <p class="esc-note"><span class="hud">Example ledger note</span> An example decision and reason can be recorded for future context.</p>
         </div>
         <p class="screen-cap">Illustrative escalation: a person reviews the evidence and records a reason.</p>
       </div>
@@ -253,7 +289,7 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
 
       <div class="rail" aria-hidden="true"><div class="rail-track"><i></i><i></i><i></i><i></i><i></i></div></div>
 
-      <div class="ft-mark" aria-hidden="true"><svg class="mark"><use href="#mark"/></svg><span class="wordmark-foot">KVARM</span></div>
+      <div class="ft-mark" aria-hidden="true"><svg class="mark"><use href="#mark"/></svg><div class="ft-word"><span class="wordmark-foot">KVARM</span></div></div>
       <div class="ft-cols">
         <nav aria-label="Product"><p class="hud">Product</p><a href="#how">How it works</a><a href="#product">Example screens</a><a href="#agents">Any agent</a></nav>
         <nav aria-label="For agents"><p class="hud">For agents</p><a href="#connect">Connection details</a><a href="/mcp">MCP endpoint</a><a href="/auth/login">Human sign in</a></nav>
