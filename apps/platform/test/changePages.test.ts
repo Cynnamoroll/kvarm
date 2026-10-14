@@ -9,6 +9,7 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { newSessionPayload, sessionCookie } from '../src/auth/workos';
 import { toUserRow } from '../src/db/users';
 import worker from '../src/index';
+import { requestOrigin } from '../src/web/render';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -86,7 +87,7 @@ interface Reply {
 async function request(
   method: string,
   path: string,
-  opts: { token?: string; json?: unknown; headers?: Record<string, string> } = {},
+  opts: { token?: string; json?: unknown; headers?: Record<string, string>; environment?: Env } = {},
 ): Promise<Reply> {
   const ctx = createExecutionContext();
   const headers: Record<string, string> = { ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}), ...opts.headers };
@@ -97,7 +98,7 @@ async function request(
   }
   const res = await worker.fetch!(
     new Request(`${ORIGIN}${path}`, { method, headers, ...(body ? { body } : {}), redirect: 'manual' }) as Request<unknown, IncomingRequestCfProperties>,
-    env,
+    opts.environment ?? env,
     ctx,
   );
   const text = await res.text();
@@ -150,6 +151,31 @@ beforeAll(async () => {
 afterAll(() => restoreFetch());
 
 describe('change pages', () => {
+  it('shows and copies a full clone command, falls back to request origin, and includes Agent checkout', async () => {
+    await seedChange('clone-command');
+    const fallback = await request('GET', `/${OWNER}/clone-command`, {
+      token: ownerToken,
+      environment: { ...env, APP_ORIGIN: '' } as unknown as Env,
+    });
+    const command = `git clone ${ORIGIN}/${OWNER}/clone-command.git`;
+    expect(fallback.status).toBe(200);
+    expect(fallback.text).toContain(command);
+    expect(fallback.text).toContain(`data-copy="${command}"`);
+    expect(fallback.text).toContain('kvarm checkout cp-owner/clone-command main &lt;dir&gt;');
+    expect(fallback.text).not.toContain('http://localhost:8787');
+
+    const shell = await request('GET', `/${OWNER}/clone-command/commits`, {
+      token: ownerToken,
+      environment: { ...env, APP_ORIGIN: '' } as unknown as Env,
+    });
+    expect(shell.status).toBe(200);
+    expect(shell.text).toContain(command);
+    expect(shell.text).toContain(`data-copy="${command}"`);
+
+    const configuredEnv = { ...env, APP_ORIGIN: 'https://demo.example.test/path' } as unknown as Env;
+    expect(requestOrigin(configuredEnv, ORIGIN)).toBe('https://demo.example.test');
+  });
+
   it('renders a seeded change in the changes list', async () => {
     await seedChange('list');
     await request('PUT', `/api/v1/repos/${OWNER}/list/review-policy`, { token: ownerToken, json: { requiredReviews: 1 } });

@@ -105,7 +105,12 @@ describe('operation registry', () => {
     expect(findOperation('list_pending_reviews')).toMatchObject({ command: ['review', 'pending'], path: '/repos/{repo}/reviews/pending', readOnly: true });
     expect(findOperation('list_pending_reviews')?.params.map((p) => p.name)).toContain('ready');
     expect(findOperation('assign_reviewer')).toMatchObject({ command: ['review', 'assign'], path: '/repos/{repo}/changes/{number}/reviewers/assign' });
-    expect(findOperation('resolve_escalation')).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });
+    const resolveEscalation = findOperation('resolve_escalation');
+    expect(resolveEscalation).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });
+    expect(resolveEscalation?.params.map((param) => param.name)).toEqual(['repo', 'number', 'id', 'note']);
+    expect(resolveEscalation?.description).toMatch(/required note recorded as the reason/i);
+    const retiredAction = ['acknow', 'ledge'].join('');
+    expect(JSON.stringify(resolveEscalation ?? {})).not.toMatch(new RegExp(retiredAction, 'i'));
     expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');

@@ -205,13 +205,13 @@ beforeAll(async () => {
   )
     .bind(crypto.randomUUID(), repoIds.gamma, ids[OWNER], NOW, ids[OWNER], NOW)
     .run();
-  // gamma#1: its protected-path escalation was acknowledged, yet the human approval is still missing;
+  // gamma#1: its protected-path escalation was resolved, yet the human approval is still missing;
   // its one reviewer approved an older head and then the current one, so nothing is stale.
-  await seedChange('acknowledged', 'gamma', 1, { title: 'Acknowledged but unapproved', author: OTHER, headSha: head, createdAt: NOW - 200_000 });
-  await seedEscalation('acknowledged', 'protected-path', head);
-  await env.DB.prepare("UPDATE change_escalations SET state = 'resolved', resolution = 'acknowledge' WHERE change_set_id = ?").bind(changeIds.acknowledged).run();
-  await seedReview('acknowledged', { headSha: OLD_HEAD, login: 'ib-writer', verdict: 'approve', at: NOW - 190_000 });
-  await seedReview('acknowledged', { headSha: head, login: 'ib-writer', verdict: 'approve', at: NOW - 180_000 });
+  await seedChange('resolved', 'gamma', 1, { title: 'Resolved but unapproved', author: OTHER, headSha: head, createdAt: NOW - 200_000 });
+  await seedEscalation('resolved', 'protected-path', head);
+  await env.DB.prepare("UPDATE change_escalations SET state = 'resolved', resolution = 'resolve' WHERE change_set_id = ?").bind(changeIds.resolved).run();
+  await seedReview('resolved', { headSha: OLD_HEAD, login: 'ib-writer', verdict: 'approve', at: NOW - 190_000 });
+  await seedReview('resolved', { headSha: head, login: 'ib-writer', verdict: 'approve', at: NOW - 180_000 });
   // gamma#2: the protected-path escalation was never recorded.
   await seedChange('unrecorded', 'gamma', 2, { title: 'Unrecorded protected target', author: OTHER, headSha: head, createdAt: NOW - 210_000 });
 
@@ -289,10 +289,16 @@ describe('review inbox', () => {
       expect(at, title).toBeGreaterThan(0);
       return r.text.slice(r.text.lastIndexOf('<article', at), r.text.indexOf('</article>', at));
     };
-    const acknowledged = item('Acknowledged but unapproved');
-    expect(acknowledged).toContain('Awaiting approval');
-    expect(acknowledged).toContain('human 0/1');
-    expect(acknowledged).not.toContain('tag-stale');
+    const disagreement = item('Fix the parser for nested quotes');
+    expect(disagreement).toContain('What changed, or why it&#39;s safe to proceed');
+    expect(disagreement).toContain('Required. Recorded in the ledger as the reason.');
+    expect(disagreement.match(/>Resolve<\/button>/g)).toHaveLength(1);
+    const retiredAction = ['acknow', 'ledge'].join('');
+    expect(disagreement).not.toMatch(new RegExp(retiredAction, 'i'));
+    const resolved = item('Resolved but unapproved');
+    expect(resolved).toContain('Awaiting approval');
+    expect(resolved).toContain('human 0/1');
+    expect(resolved).not.toContain('tag-stale');
     const unrecorded = item('Unrecorded protected target');
     expect(unrecorded).toContain('Protected target');
   });
@@ -334,6 +340,12 @@ describe('change page', () => {
     expect(r.text).toContain(`action="/${OWNER}/alpha/changes/1/review"`);
     expect(r.text).toContain(`action="/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve"`);
     expect(r.text).toMatch(/<textarea[^>]*name="note"[^>]*required/);
+    expect(r.text).toContain("What changed, or why it's safe to proceed");
+    expect(r.text).toContain('Required. Recorded in the ledger as the reason.');
+    expect(r.text).toContain('name="resolution" value="resolve">Resolve</button>');
+    expect(r.text.match(/>Resolve<\/button>/g)).toHaveLength(1);
+    const retiredAction = ['acknow', 'ledge'].join('');
+    expect(r.text).not.toMatch(new RegExp(retiredAction, 'i'));
     expect(r.text).toContain('Escalations');
     // The open change is the current repository tab.
     expect(r.text).toContain('aria-current="page">changes</a>');
@@ -472,20 +484,20 @@ describe('deciding from the page', () => {
     const missingNote = await call(
       `/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`,
       tok.owner,
-      form({ resolution: 'resolve', note: '', back: 'change' }),
+      form({ note: '', back: 'change' }),
     );
     expect(missingNote.location).toBe(`/${OWNER}/alpha/changes/1?error=NOTE_REQUIRED#escalations`);
     const inboxMissingNote = await call(
       `/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`,
       tok.owner,
-      form({ resolution: 'resolve', note: '', back: 'inbox', cursor: 'abc' }),
+      form({ note: '', back: 'inbox', cursor: 'abc' }),
     );
     const key = `ch/${OWNER}/alpha/1`;
     expect(inboxMissingNote.location).toBe(`/inbox?error=NOTE_REQUIRED&cursor=abc&item=${encodeURIComponent(key)}#${key}`);
     const r = await call(
       `/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`,
       tok.owner,
-      form({ resolution: 'resolve', note: 'boreas is right; atlas reworks the quotes', back: 'inbox' }),
+      form({ note: 'boreas is right; atlas reworks the quotes', back: 'inbox' }),
     );
     expect(r.status).toBe(303);
     expect(r.location).toBe(`/inbox?done=resolve&item=${encodeURIComponent(key)}#${key}`);
@@ -493,9 +505,13 @@ describe('deciding from the page', () => {
     expect(esc).toEqual({ state: 'resolved', resolution: 'resolve', note: 'boreas is right; atlas reworks the quotes', resolved_by_login: OWNER });
     const decision = await env.DB.prepare("SELECT chosen_candidate FROM agent_decisions WHERE repo_id = ? AND task_id = 'change:1'").bind(repoIds.alpha).first<{ chosen_candidate: string }>();
     expect(decision?.chosen_candidate).toBe('resolve:reviewer-disagreement');
+    const changePage = await call(`/${OWNER}/alpha/changes/1`, tok.owner);
+    expect(changePage.text).toContain('Resolved by ib-owner');
+    expect(changePage.text).toContain('boreas is right; atlas reworks the quotes');
+    expect(changePage.text).not.toContain('resolve:reviewer-disagreement');
     // A settled escalation no longer tells the reader to act on it.
     expect((await call(`/${OWNER}/alpha/changes/1`, tok.owner)).text).not.toContain('One reviewer approved the head another asked to change.');
-    const again = await call(`/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`, tok.owner, form({ resolution: 'resolve', note: 'twice', back: 'change' }));
+    const again = await call(`/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`, tok.owner, form({ note: 'twice', back: 'change' }));
     expect(again.location).toBe(`/${OWNER}/alpha/changes/1?error=ESCALATION_RESOLVED#escalations`);
   });
 

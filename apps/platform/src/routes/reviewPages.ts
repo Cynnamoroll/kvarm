@@ -56,7 +56,6 @@ const DONE_TEXT: Record<string, string> = {
   ship: 'Approved and queued to ship.',
   'request-changes': 'Changes requested. The decision and your note are on the record.',
   resolve: 'Escalation resolved. The decision and your note are on the record.',
-  acknowledge: 'Escalation acknowledged. The decision and your note are on the record.',
 };
 
 const short = (sha: string | null): string => (sha ? sha.slice(0, 10) : '—');
@@ -111,11 +110,11 @@ function staleTag(r: ReviewView, stale: ReadonlySet<ReviewView>): string {
   return !stale.has(r) ? '' : html`<span class="tag tag-stale" title="Reviewed ${short(r.headSha)}; the head has moved, so this no longer counts">stale · ${short(r.headSha)}</span>`;
 }
 
-function noteField(id: string, label: string, required = true): string {
+function noteField(id: string, label: string, required = true, placeholder = 'Add a note: overrides and change requests record why.'): string {
   return html`
     <div class="k-field">
       <label for="${id}">${label}${required ? raw(html` <span class="k-req">required</span>`) : ''}</label>
-      <textarea id="${id}" name="note" rows="3" ${raw(required ? 'required' : '')} maxlength="${INBOX_LIMITS.noteMax}" placeholder="Add a note: overrides and change requests record why."></textarea>
+      <textarea id="${id}" name="note" rows="3" ${raw(required ? 'required' : '')} maxlength="${INBOX_LIMITS.noteMax}" placeholder="${placeholder}"></textarea>
     </div>`;
 }
 
@@ -145,10 +144,10 @@ function resolveForm(owner: string, name: string, n: number, e: EscalationView, 
       ${raw(csrf)}
       ${raw(cursorField(cursor))}
       <input type="hidden" name="back" value="${back}" />
-      ${raw(noteField(`${idBase}-${e.id}`, `Resolution note: ${REASON_LABEL[e.reason]}`))}
+      ${raw(noteField(`${idBase}-${e.id}`, 'Resolution note', true, "What changed, or why it's safe to proceed"))}
+      <p class="muted k-resolution-help">Required. Recorded in the ledger as the reason.</p>
       <div class="actions">
         <button class="btn" type="submit" name="resolution" value="resolve">Resolve</button>
-        <button class="btn" type="submit" name="resolution" value="acknowledge">Acknowledge</button>
       </div>
     </form>`;
 }
@@ -407,12 +406,7 @@ async function decide(c: Context<App>, toDecision: (form: Record<string, unknown
 reviewPages.post('/changes/:number/escalations/:id/resolve', (c) =>
   decide(
     c,
-    (form) => {
-      // A missing value is the REST default (`resolve`); anything else outside the enum is refused, not reinterpreted.
-      const resolution = form.resolution === undefined ? 'resolve' : form.resolution;
-      if (resolution !== 'resolve' && resolution !== 'acknowledge') return 'INVALID_RESOLUTION';
-      return { kind: 'resolve', escalationId: c.req.param('id') ?? '', resolution };
-    },
-    (d) => (d.kind === 'resolve' ? d.resolution : 'resolve'),
+    () => ({ kind: 'resolve', escalationId: c.req.param('id') ?? '' }),
+    () => 'resolve',
   ),
 );

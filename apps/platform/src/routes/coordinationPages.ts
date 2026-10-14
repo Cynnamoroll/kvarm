@@ -55,6 +55,7 @@ function errorCard(c: PageContext, resolved: Resolved, tab: 'activity' | 'train'
     { repo: resolved.repo, ref: resolved.repo.default_branch || 'main', tab, title },
     resolved.viewer?.user.login ?? null,
     html`<div class="flash err"><strong>${title}</strong> ${r.error} <code>${r.code}</code></div>`,
+    c.req.url,
   );
   return respond(c, page, r.status as number);
 }
@@ -284,7 +285,7 @@ async function activityPage(c: PageContext): Promise<Response> {
       ${raw(arenas || '<p class="muted">no arenas yet</p>')}
     </div>
   `;
-  const page = repoPage(c.env, { repo, ref: repo.default_branch || 'main', tab: 'activity', title: 'Activity' }, viewerLogin, body);
+  const page = repoPage(c.env, { repo, ref: repo.default_branch || 'main', tab: 'activity', title: 'Activity' }, viewerLogin, body, c.req.url);
   return respond(c, page);
 }
 
@@ -474,13 +475,13 @@ coordinationPages.get('/candidates', async (c) => {
     ),
   ];
   if (ids.length === 0) {
-    return respond(c, repoPage(c.env, { repo, ref, tab: 'activity', title: 'Candidates' }, viewerLogin, candidatesForm(repo, baseQ, null)));
+    return respond(c, repoPage(c.env, { repo, ref, tab: 'activity', title: 'Candidates' }, viewerLogin, candidatesForm(repo, baseQ, null), c.req.url));
   }
   const r = await candidates.candidates(candidatesCx(c, resolved), { base: baseQ, workspaces: ids.join(',') });
   if (!r.ok) {
     return respond(
       c,
-      repoPage(c.env, { repo, ref, tab: 'activity', title: 'Candidates' }, viewerLogin, candidatesForm(repo, baseQ, r.error)),
+      repoPage(c.env, { repo, ref, tab: 'activity', title: 'Candidates' }, viewerLogin, candidatesForm(repo, baseQ, r.error), c.req.url),
       r.status as number,
     );
   }
@@ -491,7 +492,7 @@ coordinationPages.get('/candidates', async (c) => {
     </div>
     ${raw(comparisonBody(r.value, { repo, canSelect: false, arenaId: '' }))}
   `;
-  return respond(c, repoPage(c.env, { repo, ref, tab: 'activity', title: 'Candidates' }, viewerLogin, body));
+  return respond(c, repoPage(c.env, { repo, ref, tab: 'activity', title: 'Candidates' }, viewerLogin, body, c.req.url));
 });
 
 // ---------------------------------------------------------------------------
@@ -531,7 +532,7 @@ coordinationPages.get('/arenas', async (c) => {
     ? raw(`<div class="pager"><a class="btn" href="${base}/arenas?cursor=${encodeURIComponent(r.value.nextCursor)}">Older arenas</a></div>`)
     : '';
   const body = html`<div class="card"><div class="card-title">Arenas</div>${raw(rows || '<p class="muted">no arenas yet</p>')}${next}</div>`;
-  return respond(c, repoPage(c.env, { repo, ref, tab: 'activity', title: 'Arenas' }, viewerLogin, body));
+  return respond(c, repoPage(c.env, { repo, ref, tab: 'activity', title: 'Arenas' }, viewerLogin, body, c.req.url));
 });
 
 function arenaBody(arena: ArenaView, res: candidates.ArenaCandidatesResponse, opts: ComparisonOptions): string {
@@ -580,6 +581,7 @@ async function arenaPage(c: PageContext, resolved: Resolved, flash: string | nul
       { repo, ref: repo.default_branch || 'main', tab: 'activity', title: `Arena ${arena.value.brief.slice(0, 60)}` },
       resolved.viewer?.user.login ?? null,
       body,
+      c.req.url,
     ),
   );
 }
@@ -708,7 +710,7 @@ coordinationPages.get('/train', async (c) => {
   `;
   return respond(
     c,
-    repoPage(c.env, { repo, ref: repo.default_branch || 'main', tab: 'train', title: 'Train' }, resolved.viewer?.user.login ?? null, body),
+    repoPage(c.env, { repo, ref: repo.default_branch || 'main', tab: 'train', title: 'Train' }, resolved.viewer?.user.login ?? null, body, c.req.url),
     200,
     { refresh: TRAIN_REFRESH_SECONDS },
   );

@@ -13,7 +13,7 @@
  *   POST changes/:number/approve                {headSha?, body?}
  *   POST changes/:number/request-changes        {headSha?, body?}
  *   POST changes/:number/reviewers/assign       {candidates?}
- *   POST changes/:number/escalations/:id/resolve {resolution?, note?}
+ *   POST changes/:number/escalations/:id/resolve {note?}
  */
 
 import { Hono, type Context } from 'hono';

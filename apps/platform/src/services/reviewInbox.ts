@@ -52,7 +52,6 @@ export const DECISION_ERROR_TEXT: Record<string, string> = {
   ESCALATION_RESOLVED: 'Someone already resolved that escalation.',
   ESCALATION_NOT_FOUND: 'That escalation no longer exists.',
   INVALID_VERDICT: 'Pick approve or request changes.',
-  INVALID_RESOLUTION: 'Pick resolve or acknowledge.',
   SELF_RESOLVE: 'You authored this change, so another human resolves its escalations.',
   DECISION_NOT_RECORDED: "Your review landed, but its decision note wasn't recorded. Record it with record_decision.",
   SHIP_REQUIRES_APPROVE: 'Approve & ship requires an approval.',
@@ -263,7 +262,7 @@ export async function reviewInbox(env: Env, actor: Actor, q: { limit?: string; c
 
 export type PageDecision =
   | { kind: 'review'; verdict: ReviewVerdict; headSha: string | null; ship?: boolean }
-  | { kind: 'resolve'; escalationId: string; resolution: 'resolve' | 'acknowledge' };
+  | { kind: 'resolve'; escalationId: string };
 
 export interface PageDecisionOutcome {
   /** Null when the review or resolution landed but storing the decision row failed. */
@@ -325,9 +324,9 @@ export async function decideFromPage(cx: ChangeContext, rawNumber: string, d: Pa
     if (n !== null && cx.actor && (await changeAuthorPrincipal(cx.env, cx.repo.id, n)) === `user:${cx.actor.user.id}`) {
       return fail(409, 'SELF_RESOLVE', 'the author of a change cannot resolve its escalations; another human must');
     }
-    const r = await resolveEscalation(cx, rawNumber, d.escalationId, { resolution: d.resolution, note: note.value! });
+    const r = await resolveEscalation(cx, rawNumber, d.escalationId, { note: note.value! });
     if (!r.ok) return r;
-    chosen = `${d.resolution}:${r.value.escalation.reason}`;
+    chosen = `resolve:${r.value.escalation.reason}`;
     state = r.value.packet.state;
     number = r.value.packet.number;
   }

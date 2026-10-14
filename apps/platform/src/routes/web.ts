@@ -15,7 +15,7 @@ import { listReposForOwner } from '../db/repos';
 import type { UserRow } from '../db/users';
 import { csrfTokenValid, isSameOriginRequest, type SessionInfo } from '../auth/workos';
 import { mintPAT, parseScopes, revokePAT, SCOPES, type Scope } from '../auth/pat';
-import { csrfInput, layout, publicOrigin, type PageOptions } from '../web/render';
+import { csrfInput, layout, requestOrigin, type PageOptions } from '../web/render';
 import { CSRF_REFUSED } from './pageCsrf';
 import * as svc from '../repos/service';
 import * as agents from '../services/agents';
@@ -129,7 +129,7 @@ function iso(ms: number | null): string {
 
 web.get('/', async (c) => {
   const ctx = await pageCtx(c);
-  const origin = publicOrigin(c.env) ?? new URL(c.req.url).origin;
+  const origin = requestOrigin(c.env, c.req.url);
   if (!ctx.user) {
     const body = landingPage(origin);
     return page(c, ctx, 'Kvarm', body, 200, {

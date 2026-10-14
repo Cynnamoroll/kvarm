@@ -1460,7 +1460,7 @@ describe('lifecycle', () => {
       expect(handed).toEqual([{ type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN }]);
       expect(await intentsOf(name)).toEqual([expect.objectContaining({ mergeCommit, ref: MAIN })]);
 
-      // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried, not acknowledged.
+      // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried.
       sent.length = 0;
       const early = await deliverRaw(handed[0]);
       expect(early.explicitAcks).toEqual([]);
@@ -1511,12 +1511,12 @@ describe('lifecycle', () => {
       expect(await states(name, [...older, auto])).toEqual(Array(3).fill('satisfied'));
       expect((await getChange(name, autoN)).json.state).toBe('open');
       expect(await wakeMarks(name)).toBe(1);
-      // Not done: the delivery hands the displaced mark on (successor continuation and the kept intent) before it is acknowledged.
+      // Not done: the delivery hands the displaced mark on (successor continuation and the kept intent) before it settles.
       expect(first.explicitAcks).toHaveLength(1);
       expect(settleSends()).toEqual([msg]);
       expect(await intentsOf(name)).toHaveLength(1);
 
-      // The successor runs under a fresh owner token: the live claim is held, so its delivery is retried, not acknowledged.
+      // The successor runs under a fresh owner token: the live claim is held, so its delivery is retried.
       sent.length = 0;
       const held = await deliverRaw(msg);
       expect(held.explicitAcks).toEqual([]);

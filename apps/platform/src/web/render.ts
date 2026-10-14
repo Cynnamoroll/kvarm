@@ -41,6 +41,10 @@ export function publicOrigin(env: Env): string | null {
   }
 }
 
+export function requestOrigin(env: Env, requestUrl: string): string {
+  return publicOrigin(env) ?? new URL(requestUrl).origin;
+}
+
 /** Hidden CSRF field for a session's state-changing forms; empty without a session. */
 export function csrfInput(token: string | null | undefined): string {
   return token ? `<input type="hidden" name="_csrf" value="${escapeHtml(token)}" />` : '';

@@ -22,7 +22,7 @@ import { clientIp, requestCredential, requestSession, type ApiActor, type App } 
 import { csrfTokenValid } from '../auth/workos';
 import { csrfInput, layout } from '../web/render';
 import { CSRF_REFUSED } from './pageCsrf';
-import { repoPage } from '../render/repoShell';
+import { cloneBox, repoPage } from '../render/repoShell';
 import {
   commitAt,
   isCommitRef,
@@ -272,7 +272,7 @@ async function renderTreeView(
   const subject = tree.commit.message.split('\n', 1)[0] ?? '';
   const author = tree.commit.author.name || tree.commit.committer.name;
   const branchCount = refs?.branches.length;
-  const cloneUrl = `${c.env.APP_ORIGIN || 'http://localhost:8787'}/${resolved.repo.owner_login}/${resolved.repo.name}.git`;
+  const clone = cloneBox(c.env, c.req.url, resolved.repo, ref, 'repo-clone-url');
   const body = html`
     <div class="repo-overview">
       <main class="repo-overview-main">
@@ -296,7 +296,7 @@ async function renderTreeView(
         ${resolved.repo.description ? raw(html`<section class="card repo-about"><h2>About</h2><p>${resolved.repo.description}</p></section>`) : ''}
         <section class="card repo-sidebar-clone">
           <div class="panel-head hud"><b>Clone</b></div>
-          <div class="clone-box"><code>${cloneUrl}</code><button class="btn" type="button" data-copy="${cloneUrl}">Copy</button></div>
+          ${raw(clone)}
         </section>
         <section class="card repo-facts">
           <div><span class="hud">Branches</span><b>${branchCount === undefined ? 'Unavailable' : branchCount}</b></div>
@@ -316,6 +316,7 @@ async function renderTreeView(
     { repo: resolved.repo, ref, path, tab: 'code', branches: refs?.branches, showClone: false },
     viewerLogin,
     body,
+    c.req.url,
   );
   return finish(
     c,
@@ -398,7 +399,7 @@ async function renderBlob(
     return finish(
       c,
       new Response(
-        repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body),
+        repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body, c.req.url),
         { status: 200, headers },
       ),
     );
@@ -416,7 +417,7 @@ async function renderBlob(
     return finish(
       c,
       new Response(
-        repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body),
+        repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body, c.req.url),
         { status: 200, headers },
       ),
     );
@@ -463,7 +464,7 @@ async function renderBlob(
   return finish(
     c,
     new Response(
-      repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body),
+      repoPage(c.env, { repo: resolved.repo, ref, path, tab: 'code' }, viewerLogin, body, c.req.url),
       { status: 200, headers },
     ),
   );
@@ -565,7 +566,7 @@ repoPages.get('/commits', async (c) => {
   return finish(
     c,
     new Response(
-      repoPage(c.env, { repo: resolved.repo, ref, tab: 'commits' }, viewerLogin, body),
+      repoPage(c.env, { repo: resolved.repo, ref, tab: 'commits' }, viewerLogin, body, c.req.url),
       { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
     ),
   );
@@ -628,6 +629,7 @@ repoPages.get('/commit/:sha', async (c) => {
         },
         viewerLogin,
         body,
+        c.req.url,
       ),
       { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
     ),
@@ -680,6 +682,7 @@ repoPages.get('/branches', async (c) => {
         },
         viewerLogin,
         body,
+        c.req.url,
       ),
       { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
     ),
@@ -724,7 +727,7 @@ repoPages.get('/settings', async (c) => {
   return finish(
     c,
     new Response(
-      repoPage(c.env, { repo, ref: repo.default_branch, tab: 'settings' }, viewerLogin, body),
+      repoPage(c.env, { repo, ref: repo.default_branch, tab: 'settings' }, viewerLogin, body, c.req.url),
       { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
     ),
   );

@@ -727,7 +727,7 @@ describe('merge', () => {
     expect(escalated.json.review.openEscalations).toEqual(['protected-path']);
     const packet = await call('GET', `/api/v1/repos/${OWNER}/rules/changes/1/reviews`, tok.owner);
     const esc = packet.json.escalations.find((e: { reason: string }) => e.reason === 'protected-path');
-    expect((await call('POST', `/api/v1/repos/${OWNER}/rules/changes/1/escalations/${esc.id}/resolve`, tok.owner, { resolution: 'acknowledge' })).status).toBe(200);
+    expect((await call('POST', `/api/v1/repos/${OWNER}/rules/changes/1/escalations/${esc.id}/resolve`, tok.owner, { note: 'Reviewed the remaining risk.' })).status).toBe(200);
     const pending = await merge('rules', 1);
     expect([pending.status, pending.json.code]).toEqual([409, 'REQUIRED_CHECKS_PENDING']);
     expect(repo.refs.get('refs/heads/main')).toBe(main.sha);

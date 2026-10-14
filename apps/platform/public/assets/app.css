@@ -31,8 +31,9 @@ body.k-app:not(.k-landing) .badge, body.k-app:not(.k-landing) .chip, body.k-app:
 body.k-app:not(.k-landing) .tag-ready, body.k-app:not(.k-landing) .signal { color: var(--signal-hi); }
 body.k-app:not(.k-landing) .warn { color: var(--heat-4); }
 body.k-app:not(.k-landing) .repo-head { padding: var(--s5); border-bottom: 1px solid var(--hairline); }
-body.k-app:not(.k-landing) .clone-box { display: flex; align-items: stretch; max-width: 100%; border: 1px solid var(--hairline-2); background: var(--void); }
-body.k-app:not(.k-landing) .clone-box code { flex: 1 1 auto; min-width: 0; padding: 9px; overflow: visible; overflow-wrap: anywhere; white-space: normal; font: 400 11px/1.5 var(--f-mono); }
+body.k-app:not(.k-landing) .clone-box { display: flex; flex-wrap: wrap; align-items: stretch; max-width: 100%; border: 1px solid var(--hairline-2); background: var(--void); }
+body.k-app:not(.k-landing) .clone-box code { flex: 1 1 auto; min-width: 0; padding: 9px; overflow-x: auto; overflow-y: hidden; overflow-wrap: normal; white-space: pre; font: 400 11px/1.5 var(--f-mono); }
+body.k-app:not(.k-landing) .clone-box .clone-cli { flex: 1 0 100%; border-top: 1px solid var(--hairline); }
 body.k-app:not(.k-landing) .tabs { display: flex; align-items: center; gap: 0; max-width: 100%; overflow-x: auto; border-bottom: 1px solid var(--hairline); }
 body.k-app:not(.k-landing) .tab { flex: none; padding: 11px var(--s3); border-bottom: 2px solid transparent; color: var(--steel); text-transform: capitalize; }
 body.k-app:not(.k-landing) .tab.active { border-bottom-color: var(--signal); color: var(--bone); }
@@ -100,7 +101,7 @@ body.k-app:not(.k-landing) .repo-about h2 { margin: 0 0 var(--s2); color: var(--
 body.k-app:not(.k-landing) .repo-about p { margin: 0; color: var(--silver); }
 body.k-app:not(.k-landing) .repo-sidebar-clone .panel-head { border-bottom: 1px solid var(--hairline); }
 body.k-app:not(.k-landing) .repo-sidebar-clone .clone-box { margin: var(--s3); }
-body.k-app:not(.k-landing) .repo-sidebar-clone .clone-box code { flex: 1 1 auto; overflow: visible; overflow-wrap: anywhere; padding: 8px; white-space: normal; font: 400 11px/1.5 var(--f-mono); }
+body.k-app:not(.k-landing) .repo-sidebar-clone .clone-box code { flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; overflow-wrap: normal; padding: 8px; white-space: pre; font: 400 11px/1.5 var(--f-mono); }
 body.k-app:not(.k-landing) .repo-sidebar-clone .clone-box .btn { padding-inline: 8px; font-size: 10px; }
 body.k-app:not(.k-landing) .repo-facts { display: grid; gap: var(--s3); padding: var(--s4) !important; }
 body.k-app:not(.k-landing) .repo-facts > div { display: grid; gap: 5px; }
@@ -208,8 +209,10 @@ body.k-app:not(.k-landing) .change-review-side .k-list > li > span:first-child {
 body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li { display: flex; flex-direction: column; align-items: stretch; }
 body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline { display: flex; flex-wrap: wrap; gap: var(--s2); width: 100%; }
 body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > label,
-body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > textarea { flex: 1 0 100%; min-width: 0; }
-body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > .btn { min-width: 0; flex: 1 1 auto; width: calc(50% - var(--s2)); white-space: normal; }
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > textarea,
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > .k-resolution-help { flex: 1 0 100%; min-width: 0; }
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > .k-resolution-help { margin: 0; }
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > .btn { min-width: 0; flex: 0 1 auto; width: auto; white-space: normal; }
 body.k-app:not(.k-landing) .change-review-side .reviewer-request-form { display: inline-flex; flex-wrap: wrap; gap: var(--s2); max-width: 100%; }
 body.k-app:not(.k-landing) .change-review-side #reviewers .reviewer-suggestions > li.reviewer-suggestion {
   display: flex;

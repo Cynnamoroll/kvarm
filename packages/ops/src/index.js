@@ -673,15 +673,14 @@ export const OPERATIONS = Object.freeze([
     name: 'resolve_escalation',
     command: ['review', 'resolve'],
     family: 'reviews',
-    description: 'Close an open escalation as a human (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.',
+    description: 'Resolve an open escalation as a human with a required note recorded as the reason (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.',
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve',
     params: [
       REPO,
       CHANGE,
       pathArg('id', 'Escalation id from get_reviews'),
-      body('resolution', 'string', 'How the escalation was handled (default resolve)', { enum: ['acknowledge', 'resolve'] }),
-      body('note', 'string', 'Note recorded with the resolution'),
+      body('note', 'string', 'Required note recorded with the resolution'),
     ],
   }),
   define({

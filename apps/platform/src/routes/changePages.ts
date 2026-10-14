@@ -49,6 +49,7 @@ async function page(c: Context<App>, resolved: Resolved, title: string, body: st
     },
     resolved.viewer?.user.login ?? null,
     `<div data-live-repo="${escapeHtml(`${resolved.repo.owner_login}/${resolved.repo.name}`)}" data-live-root>${body}</div>`,
+    c.req.url,
   );
   return finish(c, new Response(content, { headers: HTML }));
 }
@@ -58,7 +59,6 @@ function queryFlash(c: Context<App>): string {
   const notice = c.req.query('notice');
   const done = c.req.query('done');
   const notices: Record<string, string> = {
-    acknowledge: 'Escalation acknowledged.',
     approve: 'Review submitted.',
     'request-changes': 'Change request submitted.',
     'review-requested': 'Reviewer requested.',
@@ -493,14 +493,14 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
         ${raw(provenancePanel(provenance, { heading: `Provenance · head ${reviewPacket.headSha?.slice(0, 10) ?? '—'}` }))}
         <section class="card" id="escalations"><div class="card-title">Escalations</div>
           ${reviewPacket.escalations.length
-            ? raw(html`<ul class="k-list">${raw(reviewPacket.escalations.map((item) => html`<li><span class="tag ${item.state === 'open' ? 'err' : 'muted'}">${item.state}</span> ${item.reason}${item.detail ? ` · ${item.detail}` : ''}${raw(item.state === 'open' && canResolve ? html`
+            ? raw(html`<ul class="k-list">${raw(reviewPacket.escalations.map((item) => html`<li><span class="tag ${item.state === 'open' ? 'err' : 'muted'}">${item.state}</span> ${item.reason}${item.detail ? ` · ${item.detail}` : ''}${raw(item.state === 'resolved' ? html`<p class="k-resolution-history">Resolved by ${item.resolvedBy ?? 'unknown'}${item.note ? ` · ${item.note}` : ''}</p>` : '')}${raw(item.state === 'open' && canResolve ? html`
                 <form method="post" action="${raw(`${path}/escalations/${encodeURIComponent(item.id)}/resolve`)}" class="inline">
                   ${raw(csrf)}
                   <input type="hidden" name="back" value="change" />
                   <label for="resolution-${item.id}">Resolution note</label>
-                  <textarea id="resolution-${item.id}" name="note" rows="2" required maxlength="4000" placeholder="Add a note: overrides and change requests record why."></textarea>
+                  <textarea id="resolution-${item.id}" name="note" rows="2" required maxlength="4000" placeholder="What changed, or why it's safe to proceed"></textarea>
+                  <p class="muted k-resolution-help">Required. Recorded in the ledger as the reason.</p>
                   <button class="btn" type="submit" name="resolution" value="resolve">Resolve</button>
-                  <button class="btn" type="submit" name="resolution" value="acknowledge">Acknowledge</button>
                 </form>` : '')}</li>`).join(''))}</ul>`)
             : raw(html`<p class="muted">No escalations.</p>`)}
         </section>

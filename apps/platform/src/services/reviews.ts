@@ -818,8 +818,8 @@ export interface ResolveOutcome {
 }
 
 /**
- * POST changes/:number/escalations/:id/resolve {resolution?, note?} — a human
- * closes one open escalation (`acknowledge` or `resolve`). One batch after
+ * POST changes/:number/escalations/:id/resolve {note?} — a human
+ * closes one open escalation. One batch after
  * authority: the guarded update, the escalation read-back and the packet.
  */
 export interface ReviewRequestOutcome {
@@ -900,11 +900,9 @@ export function resolveEscalation(cx: ChangeContext, rawNumber: string, id: stri
     if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     if (!cx.actor || cx.actor.agent) return fail(403, 'only a human principal resolves an escalation', 'HUMAN_REQUIRED');
     if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
-      return fail(400, 'body must be a JSON object {resolution?, note?}', 'INVALID_BODY');
+      return fail(400, 'body must be a JSON object {note?}', 'INVALID_BODY');
     }
     const b = (input ?? {}) as Record<string, unknown>;
-    const resolution = b.resolution ?? 'resolve';
-    if (resolution !== 'acknowledge' && resolution !== 'resolve') return fail(422, 'resolution must be acknowledge or resolve', 'INVALID_RESOLUTION');
     let note: string | null = null;
     if (b.note !== undefined && b.note !== null) {
       if (typeof b.note !== 'string' || b.note.length > REVIEW_LIMITS.noteMax) return fail(422, `note must be a string of at most ${REVIEW_LIMITS.noteMax} characters`, 'INVALID_NOTE');
@@ -918,7 +916,7 @@ export function resolveEscalation(cx: ChangeContext, rawNumber: string, id: stri
           `UPDATE change_escalations SET state = 'resolved', resolution = ?4, note = ?5, resolved_by = ?6, resolved_by_login = ?7, resolved_at = ?8
             WHERE id = ?3 AND repo_id = ?1 AND change_set_id = ${CHANGE_ID} AND state = 'open'`,
         )
-        .bind(cx.repo.id, number, id, resolution, note, cx.actor.user.id, cx.actor.user.login, now),
+        .bind(cx.repo.id, number, id, 'resolve', note, cx.actor.user.id, cx.actor.user.login, now),
       db
         .prepare(
           `SELECT e.id, e.change_number, e.reason, e.state, e.head_sha, e.detail, e.opened_by, e.opened_at, e.resolved_by_login, e.resolution,

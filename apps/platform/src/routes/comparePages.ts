@@ -113,6 +113,7 @@ async function compareForm(c: PageContext, resolved: Resolved, error: string | n
     { repo, ref: repo.default_branch || 'main', tab: 'compare', title: 'Compare' },
     resolved.viewer?.user.login ?? null,
     body,
+    c.req.url,
   );
   return finish(
     c,
@@ -209,6 +210,7 @@ async function renderCompare(c: PageContext, resolved: Resolved, range: { base: 
       { repo, ref: repo.default_branch || 'main', tab: 'compare', title: 'Compare' },
       resolved.viewer?.user.login ?? null,
       html`<div class="flash err"><strong>Compare unavailable</strong> ${r.error} <code>${r.code}</code></div>`,
+      c.req.url,
     );
     return finish(c, new Response(page, { status: r.status as number, headers: { ...HTML, 'cache-control': 'no-store' } }));
   }
@@ -272,6 +274,7 @@ async function renderCompare(c: PageContext, resolved: Resolved, range: { base: 
     { repo, ref: repo.default_branch || 'main', tab: 'compare', title: `Compare ${range.base}...${range.head}`, head: DIFF_CLIENT_TAG },
     viewerLogin,
     body,
+    c.req.url,
   );
   return finish(c, new Response(page, { status: 200, headers: HTML }));
 }

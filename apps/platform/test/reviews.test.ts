@@ -758,7 +758,7 @@ describe('escalations', () => {
     expect((await merge('disagree', 1)).json.state).toBe('merged');
   });
 
-  it('a lone request-changes is a block a human acknowledges; a later disagreement escalates again', async () => {
+  it('a lone request-changes is a block a human resolves; a later disagreement escalates again', async () => {
     await setup('blocked');
     const claude = await agent('blocked', 'blk-claude', 'claude');
     const gpt = await agent('blocked', 'blk-gpt', 'gpt');
@@ -770,10 +770,9 @@ describe('escalations', () => {
     const m = await merge('blocked', 1);
     expect(m.json.review.blockers.map((b: any) => b.code)).toEqual(['ESCALATION_OPEN', 'REVIEWS_REQUIRED']);
 
-    expect((await resolve('blocked', 1, esc!.id, tok.human2, { resolution: 'nope' })).json.code).toBe('INVALID_RESOLUTION');
-    const ack = await resolve('blocked', 1, esc!.id, tok.human2, { resolution: 'acknowledge', note: 'addressed offline' });
-    expect(ack.status).toBe(200);
-    expect(ack.json.escalation).toMatchObject({ state: 'resolved', resolution: 'acknowledge', resolvedBy: 'rv-human2', note: 'addressed offline' });
+    const resolution = await resolve('blocked', 1, esc!.id, tok.human2, { note: 'addressed offline' });
+    expect(resolution.status).toBe(200);
+    expect(resolution.json.escalation).toMatchObject({ state: 'resolved', resolution: 'resolve', resolvedBy: 'rv-human2', note: 'addressed offline' });
     expect((await resolve('blocked', 1, esc!.id, tok.human2)).json.code).toBe('ESCALATION_RESOLVED');
     expect((await resolve('blocked', 1, 'nope', tok.human2)).json.code).toBe('ESCALATION_NOT_FOUND');
     expect((await merge('blocked', 1)).json.code).toBe('REVIEWS_REQUIRED');

@@ -2,7 +2,7 @@
 
 import { escapeHtml, html, raw } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
-import { layout, type PageOptions } from '../web/render';
+import { layout, requestOrigin, type PageOptions } from '../web/render';
 import type { GitRef } from '@kvarm/gitops';
 
 const COPY_JS = `document.addEventListener('click',e=>{const b=e.target.closest('[data-copy]');if(!b)return;navigator.clipboard.writeText(b.dataset.copy).then(()=>{const o=b.textContent;b.textContent='copied';setTimeout(()=>b.textContent=o,1200)})});`;
@@ -62,7 +62,17 @@ function breadcrumbs(repo: RepoRow, ref: string, path: string): string {
   ].join(' <span class="muted">/</span> ');
 }
 
-export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null, body: string): string {
+export function cloneBox(env: Env, requestUrl: string, repo: RepoRow, ref: string, id?: string): string {
+  const cloneCommand = `git clone ${requestOrigin(env, requestUrl)}/${repo.owner_login}/${repo.name}.git`;
+  const checkoutCommand = `kvarm checkout ${repo.owner_login}/${repo.name} ${ref} <dir>`;
+  return html`<div class="clone-box">
+    <code ${raw(id ? `id="${escapeHtml(id)}"` : '')}>${cloneCommand}</code>
+    <button class="btn" type="button" data-copy="${cloneCommand}">Copy</button>
+    <code class="clone-cli m-agent">${checkoutCommand}</code>
+  </div>`;
+}
+
+export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null, body: string, requestUrl: string): string {
   const { repo } = opts;
   const ref = opts.ref;
   const branchList = (opts.branches ?? [])
@@ -82,7 +92,6 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
     )
     .join('');
 
-  const cloneUrl = `${env.APP_ORIGIN || 'http://localhost:8787'}/${repo.owner_login}/${repo.name}.git`;
   const description = repo.description ? html`<p class="lede">${repo.description}</p>` : '';
   const crumbs =
     opts.path !== undefined && opts.tab !== 'settings' && opts.tab !== 'environments'
@@ -90,10 +99,7 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
       : '';
   const clone = opts.showClone === false
     ? ''
-    : html`<div class="clone-box">
-        <code id="clone-url">${cloneUrl}</code>
-        <button class="btn" type="button" data-copy="${cloneUrl}">Copy</button>
-      </div>`;
+    : cloneBox(env, requestUrl, repo, ref, 'clone-url');
 
   const shellBody = html`
 <header class="k-head repo-page-head">
