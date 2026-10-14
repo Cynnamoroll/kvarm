@@ -40,6 +40,7 @@ import {
 import { defaultChecksGate } from './checksGate';
 import { resolveCommitish } from './refs';
 import { carryView, storeReviewFingerprint, type CarryView, type CarryViewReview } from './approvalCarry';
+import { publishRepoEvent } from './live';
 import {
   HUMAN_MODEL_FAMILY,
   parseReviewFacts,
@@ -634,6 +635,7 @@ export function submitReview(cx: ChangeContext, rawNumber: string, input: unknow
     if (p.verdict === 'approve') await storeReviewFingerprint(cx.env, cx.repo, { base: target.base_ref }, headSha, mine.id);
     let packet = buildPacket(await withRecordedEscalations(cx.env, cx.repo.id, read));
     packet = await proceedPerPolicy(cx, number, packet);
+    publishRepoEvent(cx.env, cx.repo.id, { type: 'review.submitted', changeNumber: number }, cx.waitUntil);
     return { ok: true, value: { created: mine.created_at === now, review: reviewView(mine, headSha, packet.author), packet } };
   });
 }
@@ -702,6 +704,7 @@ export function resolveEscalation(cx: ChangeContext, rawNumber: string, id: stri
     if (!esc) return fail(404, 'escalation not found', 'ESCALATION_NOT_FOUND');
     if (!results[0]?.meta.changes) return fail(409, `the escalation is already ${esc.state}`, 'ESCALATION_RESOLVED');
     const packet = await proceedPerPolicy(cx, number, buildPacket(read));
+    publishRepoEvent(cx.env, cx.repo.id, { type: 'escalation.updated', changeNumber: number }, cx.waitUntil);
     return { ok: true, value: { escalation: escalationView(esc), packet } };
   });
 }

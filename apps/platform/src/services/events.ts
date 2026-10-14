@@ -39,6 +39,7 @@ import { requestEnvironmentBuild } from './environments';
 import { commitCloseStatement, commitClosingRefs, guardScanStatements, pushedCommits, retireIssueTasksStatement } from './issues';
 import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
 import type { RepoRow } from '../db/repos';
+import { publishRepoEvent } from './live';
 
 export interface PushEvent {
   namespace: string;
@@ -523,6 +524,7 @@ interface MessageResult {
 async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
   if (isTrainMessage(msg.body)) {
     const run = await runTrain(env, msg.body.repoId, msg.body.ref);
+    await publishRepoEvent(env, msg.body.repoId, { type: 'train.updated', ref: msg.body.ref, state: run.state });
     return { outcome: 'train', train: { reason: msg.body.reason, ...run } };
   }
   if (isSettleMessage(msg.body)) {

@@ -112,7 +112,8 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
     ? html`<header class="k-top">
         <a class="brand" href="/" aria-label="${name} home"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><img class="wordmark-sm" src="/assets/brand/wordmark.svg" alt="" /></a>
         <div class="k-mid"><div class="k-ws"><i>${initial}</i><span>${login}</span></div></div>
-        <div class="k-right">
+          <div class="k-right">
+          <span class="live-indicator" data-live-status data-state="offline" hidden>OFFLINE</span>
           <a class="k-needs" href="/fleet#approvals"><span>Needs you</span>${raw(needsYou)}</a>
           <div class="mode" role="group" aria-label="Show this app for">
             <button type="button" data-mode-set="human" aria-pressed="true"><svg aria-hidden="true"><use href="#g-node"/></svg>Human</button>
@@ -133,7 +134,7 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
         </header>`
       : html`<header class="k-top k-top-slim">
           <a class="brand" href="/" aria-label="${name} home"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><img class="wordmark-sm" src="/assets/brand/wordmark.svg" alt="" /></a>
-          <div class="k-right"><a class="btn btn-primary k-signin" href="/auth/login">Sign in</a></div>
+          <div class="k-right"><span class="live-indicator" data-live-status data-state="offline" hidden>OFFLINE</span><a class="btn btn-primary k-signin" href="/auth/login">Sign in</a></div>
         </header>`;
   const pageBody = opts.contentInset ? html`<div class="k-legacy-content">${raw(body)}</div>` : body;
   const content = signedIn
@@ -174,6 +175,7 @@ ${previewImage ? raw(`<meta property="og:image" content="${escapeHtml(previewIma
 ${raw(headStyles)}
 ${raw(opts.head ?? '')}
 <script src="/assets/mode.js" type="module"></script>
+<script src="/assets/live.js" type="module"></script>
 ${raw(customScripts)}
 </head>
 <body class="${bodyClass}">

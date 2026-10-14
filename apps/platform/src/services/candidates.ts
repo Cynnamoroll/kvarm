@@ -31,6 +31,7 @@ import { ADVISORY_NOTE, setOverlap, setOverlapStatements, type SetOverlap, type 
 import { runPool } from './pool';
 import { RefStoreUnavailable, resolveCommitish, type ResolveContext } from './refs';
 import { finalSelectionEscalation } from './reviewGate';
+import { publishRepoEvent } from './live';
 import {
   WORKSPACE_ID_RE,
   arenaWorkspacesStatement,
@@ -775,6 +776,7 @@ export async function selectArena(cx: CandidatesContext, id: string, input: unkn
       arena: arenaView(row, (rows?.results as WorkspaceRow[] | undefined) ?? a.workspaces, cx),
     });
   }
+  publishRepoEvent(cx.env, cx.repo.id, { type: 'escalation.updated' }, cx.waitUntil);
   return { ok: true, value: arenaView(row, (rows?.results as WorkspaceRow[] | undefined) ?? a.workspaces, cx) };
 }
 
@@ -820,4 +822,3 @@ export function arenaCandidates(cx: CandidatesContext, id: string): Promise<Serv
 export function arenaCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
   return [db.prepare('DELETE FROM arenas WHERE repo_id = ?').bind(repoId)];
 }
-

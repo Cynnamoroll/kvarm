@@ -388,6 +388,8 @@ describe('review policy', () => {
       body: 'looks right',
     });
     expect(first.json.packet).toMatchObject({ approvals: { count: 1, required: 2 }, satisfied: false, author: { kind: 'user', modelFamily: 'human' } });
+    const liveEvents = await env.REPO_EVENTS.get(env.REPO_EVENTS.idFromName(repoIds['n-distinct']!)).fetch('https://repo-events/since?seq=0');
+    expect(await liveEvents.json()).toMatchObject({ events: [expect.objectContaining({ type: 'change.updated' }), expect.objectContaining({ type: 'review.submitted', changeNumber: 1 })] });
     const again = await approve('n-distinct', 1, claude.token);
     expect([again.status, again.json.created, again.json.packet.approvals.count]).toEqual([200, false, 1]);
     expect((await merge('n-distinct', 1)).json.code).toBe('REVIEWS_REQUIRED');
@@ -840,7 +842,7 @@ describe('pending reviews and budgets', () => {
     expect(Object.hasOwn(p.json, 'remaining')).toBe(false);
     const pend = await call('GET', api('budget', '/reviews/pending'), tok.owner);
     const assign = await call('POST', api('budget', '/changes/1/reviewers/assign'), tok.owner, {});
-    expect(a.cost).toMatchObject({ art: 0, do: 0 });
+    expect(a.cost).toMatchObject({ art: 0, do: 1 });
     expect(a.cost.d1).toBeLessThanOrEqual(4);
     for (const r of [p, pend, assign]) {
       expect(r.cost).toMatchObject({ art: 0, do: 0, rw: 0 });

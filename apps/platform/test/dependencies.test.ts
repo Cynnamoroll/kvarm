@@ -828,7 +828,7 @@ describe('lifecycle', () => {
       const landed = await merge('settle-many', a.change!);
       expect(landed.status).toBe(200);
       // Within one invocation's budget: no settlement intent, no continuation.
-      expect(landed.cost.do).toBe(0);
+      expect(landed.cost.do).toBe(1);
       expect(await intentsOf('settle-many')).toEqual([]);
       for (const d of pinned) expect((await listDeps('settle-many', d.id)).json.dependencies, d.id).toEqual([expect.objectContaining({ state: 'satisfied' })]);
       expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-landed' }));
@@ -888,7 +888,7 @@ describe('lifecycle', () => {
         { type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN },
       ]);
       const first = continuations()[0];
-      expect(landed.cost.do).toBe(1);
+      expect(landed.cost.do).toBe(2);
       const [intent] = await intentsOf(name);
       expect(intent).toMatchObject({ repoId: repoIds[name], changeSetId: first.changeSetId, mergedAt: first.mergedAt, mergeCommit, ref: MAIN });
       expect(await alarmOf(name)).toBe(intent!.deadline);
@@ -1048,7 +1048,7 @@ describe('lifecycle', () => {
       const landed = await merge(name, a.change!);
       expect(landed.status, JSON.stringify(landed.json)).toBe(200);
       const mergeCommit = landed.json.merge.mergeCommit as string;
-      expect(landed.cost.do).toBe(1);
+      expect(landed.cost.do).toBe(2);
       expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
       expect(await states(name, dependents)).toEqual([...Array(4).fill('satisfied'), ...Array(5).fill('stale')]);
 
@@ -1192,7 +1192,7 @@ describe('lifecycle', () => {
     sent.length = 0;
     const landed = await merge(name, a.change!);
     expect(landed.status).toBe(200);
-    expect(landed.cost.do).toBe(0);
+    expect(landed.cost.do).toBe(1);
     expect(await wakeMarks(name)).toBe(0);
     expect(await intentsOf(name)).toEqual([]);
     expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);

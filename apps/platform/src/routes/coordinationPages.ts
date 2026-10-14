@@ -685,6 +685,7 @@ coordinationPages.get('/train', async (c) => {
 
   const limits = tv.train.limits;
   const body = html`
+    <div data-live-repo="${repo.owner_login}/${repo.name}" data-live-root><div data-live-region="train">
     <div class="card">
       <div class="card-title">
         Integration train
@@ -703,6 +704,7 @@ coordinationPages.get('/train', async (c) => {
       ${raw(tasks || '<p class="muted">no open resolve-conflict tasks</p>')}
       ${tv.tasks.nextCursor ? raw('<div class="muted">more tasks exist</div>') : ''}
     </div>
+    </div></div>
   `;
   return respond(
     c,

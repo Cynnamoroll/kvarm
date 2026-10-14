@@ -35,7 +35,7 @@ function page(c: Context<App>, resolved: Resolved, title: string, body: string, 
     c.env,
     { repo: resolved.repo, ref: resolved.repo.default_branch || 'main', tab: 'changes', title, head: tab === 'review' ? DIFF_CLIENT_TAG : undefined },
     resolved.viewer?.user.login ?? null,
-    body,
+    `<div data-live-repo="${escapeHtml(`${resolved.repo.owner_login}/${resolved.repo.name}`)}" data-live-root>${body}</div>`,
   );
   return finish(c, new Response(content, { headers: HTML }));
 }
@@ -132,6 +132,7 @@ changePages.get('/changes', async (c) => {
     ? html`<p><a class="btn" href="${raw(`${base(resolved.repo)}/changes?state=${state}&cursor=${listed.value.nextCursor}`)}">Older changes</a></p>`
     : '';
   return page(c, resolved, 'Changes', html`
+    <div data-live-region="changes">
     ${raw(queryFlash(c))}
     <section class="card review-pending">
       <div class="card-title">Needs your review</div>
@@ -145,7 +146,7 @@ changePages.get('/changes', async (c) => {
         <tbody>${raw(rows || '<tr><td colspan="6" class="muted">No changes in this state.</td></tr>')}</tbody>
       </table></div>
       ${raw(next)}
-    </section>`);
+    </section></div>`);
 });
 
 function stageStrip(change: changes.ChangeDetail, packet: reviews.ReviewPacket): string {
@@ -374,7 +375,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
         ${change.mergeability ? raw(stateTag(change.mergeability.status)) : html`<span class="tag muted">not evaluated</span>`}</p>
     </header>
     ${raw(stageStrip(change, reviewPacket))}
-    <div class="change-review-grid">
+    <div data-live-region="review"><div class="change-review-grid">
       <main class="change-review-main">
         <section class="card review-packet">
           <div class="card-title">Review packet <span class="tag ${change.rating?.level ?? 'muted'}">${change.rating ? `${change.rating.level} risk · ${change.rating.score}` : 'risk unavailable'}</span></div>
@@ -425,7 +426,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
             : raw(html`<p class="muted">No escalations.</p>`)}
         </section>
       </aside>
-    </div>`;
+    </div></div>`;
   return page(c, resolved, `#${change.number} · ${change.title}`, body, 'review');
 }
 

@@ -161,6 +161,9 @@ describe('change pages', () => {
     const response = await request('GET', `/${OWNER}/list/changes`);
     expect(response.status).toBe(200);
     expect(response.text).toContain('Guide-driven change');
+    expect(response.text).toContain('data-live-repo="cp-owner/list"');
+    expect(response.text).toContain('data-live-region="changes"');
+    expect(response.text).toContain('data-live-status');
     expect(response.text).toContain('Needs your review');
     expect(response.text).toContain('<p class="muted">No changes ready for review.</p>');
     expect(response.text).not.toContain('&lt;p class="muted"&gt;No changes ready for review.');
@@ -183,6 +186,9 @@ describe('change pages', () => {
     const page = await browser(`/${OWNER}/detail/changes/1`);
     expect(page.status).toBe(200);
     expect(page.text).toContain('Guide-driven change');
+    expect(page.text).toContain('data-live-repo="cp-owner/detail"');
+    expect(page.text).toContain('data-live-region="review"');
+    expect(page.text).toContain('data-live-status');
     expect(page.text).toContain('What’s left');
     expect(page.text).toContain('example/check');
     expect(page.text).toContain('Generated guide');

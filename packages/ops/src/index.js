@@ -258,6 +258,15 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, LIMIT(100), CURSOR],
   }),
   define({
+    name: 'list_repo_events',
+    command: ['events', 'list'],
+    family: 'content',
+    description: 'Live repository state events after an event sequence cursor.',
+    method: 'GET',
+    path: '/repos/{repo}/events',
+    params: [REPO, query('since', 'integer', 'Event sequence cursor (default 0)')],
+  }),
+  define({
     name: 'get_snapshot',
     command: ['snapshot', 'get'],
     family: 'content',

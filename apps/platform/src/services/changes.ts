@@ -97,6 +97,7 @@ import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
 import { actorName, changeLinkStatements, mergeCloseStatement, refreshPathLinks, retireIssueTasksStatement } from './issues';
 import { headCoverage, recordHeadTier } from './reviewCoverage';
+import { publishRepoEvent } from './live';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -967,6 +968,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       }
     }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
+    await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks } };
   });
 }
@@ -1100,6 +1102,7 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
       );
     }
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
+    await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: changeView(row) };
   });
 }
@@ -1612,7 +1615,9 @@ export function mergeChange(
     // A pinned dependency lands first: the explicit merge of a dependent waits for its source like the train does.
     const pinned = dependencyRefusal(pins);
     if (pinned) return pinned;
-    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
+    const result = await performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
+    if (result.ok) await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: 'merged' }, cx.waitUntil);
+    return result;
   });
 }
 
@@ -1714,6 +1719,9 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
     await refreshPathLinks(e.env, e.repoId, e.change.id, e.headSha);
   },
   (e) => carryApprovals(e),
+  async (e) => {
+    await publishRepoEvent(e.env, e.repoId, { type: 'change.head', changeNumber: e.change.number, headSha: e.headSha });
+  },
 ];
 
 async function repoWithRules(env: Env, repoId: string): Promise<{ repo: RepoRow; rules: BranchRule[] } | null> {

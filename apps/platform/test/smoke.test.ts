@@ -25,7 +25,7 @@ describe('worker smoke', () => {
     expect(METERED_BINDINGS).not.toHaveProperty('REALTIME');
     expect((env as unknown as Record<string, unknown>).REALTIME).toBeUndefined();
     expect(Object.keys(METERED_BINDINGS).filter((name) => METERED_BINDINGS[name] === 'do').sort()).toEqual(
-      ['AGENT_SANDBOX', 'CI_SANDBOX', 'ENV_BUILDER', 'MERGE_LOCK', 'RATE_LIMIT', 'TOKENS'],
+      ['AGENT_SANDBOX', 'CI_SANDBOX', 'ENV_BUILDER', 'MERGE_LOCK', 'RATE_LIMIT', 'REPO_EVENTS', 'TOKENS'],
     );
   });
 

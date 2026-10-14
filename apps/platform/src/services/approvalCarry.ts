@@ -1,6 +1,7 @@
 import type { RepoRow } from '../db/repos';
 import { compareChange, type ChangeDiffTarget } from './changeDiff';
 import type { HeadMoved } from './changes';
+import { publishRepoEvent } from './live';
 
 export interface FingerprintFile {
   path: string;
@@ -260,7 +261,7 @@ export async function carryApprovals(e: HeadMoved): Promise<void> {
       if (currentRows.has(review.principal)) continue;
       const id = crypto.randomUUID();
       const now = Date.now();
-      await e.env.DB.batch([
+      const results = await e.env.DB.batch([
         e.env.DB.prepare(
           `INSERT INTO change_reviews (id, repo_id, change_set_id, head_sha, principal, user_id, user_login, agent_id, agent_name,
                                        token_id, model_family, verdict, body, created_at, updated_at, carried_from_head, carried_from_review)
@@ -276,6 +277,9 @@ export async function carryApprovals(e: HeadMoved): Promise<void> {
           ).bind(id, file.path, file.oldPath, file.oldHash, file.newHash, review.id),
         ),
       ]);
+      if ((results[0]?.meta.changes ?? 0) > 0) {
+        await publishRepoEvent(e.env, e.repoId, { type: 'review.carried', changeNumber: found.change.number, headSha: e.headSha });
+      }
     }
   } catch {
     // A failed optional carry must not fail the head push.

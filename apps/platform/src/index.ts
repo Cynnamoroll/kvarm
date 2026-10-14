@@ -36,7 +36,7 @@ import { changePages } from './routes/changePages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
-export { TokenCache, RateLimiter, MergeLock } from './do';
+export { TokenCache, RateLimiter, MergeLock, RepoEvents } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
 export { EnvironmentBuild } from './workflows/environmentBuild';
 export { CiRunnerSandbox } from './containers/ciRunnerSandbox';
