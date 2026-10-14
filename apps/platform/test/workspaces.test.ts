@@ -280,8 +280,10 @@ describe('pushes and change sets', () => {
     // The change view links back to its workspace, so the create reply and a later read agree exactly.
     expect(opened.json.workspace).toBe(ws.id);
     const read = await getChange('change', 1);
-    expect(Object.keys(read.json)).toEqual(Object.keys(opened.json));
-    expect({ ...read.json, mergeability: null }).toEqual({ ...opened.json, mergeability: null });
+    const { remaining, ...readView } = read.json;
+    expect(remaining).toEqual([expect.objectContaining({ code: 'READY' })]);
+    expect(Object.keys(readView)).toEqual(Object.keys(opened.json));
+    expect({ ...readView, mergeability: null }).toEqual({ ...opened.json, mergeability: null });
     const again = await openChange('change', ws.id, { title: 'twice' });
     expect([again.status, again.json.code]).toEqual([409, 'CHANGE_SET_EXISTS']);
 

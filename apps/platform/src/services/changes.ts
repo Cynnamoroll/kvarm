@@ -39,6 +39,7 @@ import {
 } from './checks';
 import { defaultChecksGate, type ChecksGate, type ChecksSubject, type RequiredChecks } from './checksGate';
 import { treePairBody, treePairRating, type CompareBody } from './compare';
+import { carryApprovals } from './approvalCarry';
 import {
   blockFromRows,
   changeDependenciesStatement,
@@ -61,6 +62,7 @@ import {
   reconcileConflicts,
   retireConflictTaskStatement,
   transitionStatements,
+  RESOLVE_CONFLICT,
   type ConflictView,
 } from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
@@ -90,9 +92,12 @@ import {
   type ReviewFactsRow,
 } from './reviewGate';
 import type { ChangeRating } from './risk';
+import { remainingFor, type RemainingItem } from './remaining';
 import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
 import { actorName, changeLinkStatements, mergeCloseStatement, refreshPathLinks, retireIssueTasksStatement } from './issues';
+import { headCoverage, recordHeadTier } from './reviewCoverage';
+import { publishRepoEvent } from './live';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -205,7 +210,10 @@ export interface ChangeDetail extends ChangeView {
   rating: ChangeRating | null;
   mergeability: MergeabilityView | null;
   checks: CheckRunView[];
+  remaining: RemainingItem[];
 }
+
+export type CreatedChangeDetail = Omit<ChangeDetail, 'remaining'>;
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
 
@@ -290,6 +298,8 @@ export interface ChangeContext {
   env: Env;
   repo: RepoRow;
   actor: Actor | null;
+  /** Whether the authority check granting this read also allows repository writes. */
+  writeAccess?: boolean;
   /** The repo's branch rules, when the caller read them in its authority batch. */
   branchRules?: BranchRule[];
   waitUntil(p: Promise<unknown>): void;
@@ -377,20 +387,31 @@ export async function readChange(env: Env, repoId: string, number: number): Prom
 }
 
 /** One batch: the change and its newest check runs (bounded), so the cost is the same for any number of runs. */
+function latestChecksByName(rows: readonly CheckRunRow[]): CheckRunView[] {
+  const seen = new Set<string>();
+  const checks: CheckRunView[] = [];
+  for (const row of rows) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    checks.push(checkRunView(row));
+  }
+  return checks;
+}
+
 async function readChangeWithChecks(env: Env, repoId: string, number: number): Promise<{ row: ChangeRow; checks: CheckRunView[] } | null> {
   const [change, checks] = await env.DB.batch([
     changeSelect(env.DB, repoId, number),
     env.DB.prepare(
       `SELECT ${CHECK_RUN_COLUMNS}
-         FROM check_runs k
-        WHERE k.change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2)
+         FROM check_runs k JOIN change_sets c ON c.id = k.change_set_id
+        WHERE c.repo_id = ?1 AND c.number = ?2 AND k.head_sha = c.head_sha
         ORDER BY k.created_at DESC, k.id DESC
         LIMIT ${CHANGE_LIMITS.checksMax}`,
     ).bind(repoId, number),
   ]);
   const row = (change?.results as ChangeRow[] | undefined)?.[0];
   if (!row) return null;
-  return { row, checks: ((checks?.results as CheckRunRow[] | undefined) ?? []).map(checkRunView) };
+  return { row, checks: latestChecksByName((checks?.results as CheckRunRow[] | undefined) ?? []) };
 }
 
 export interface ChangePage {
@@ -625,27 +646,115 @@ async function reconciled(cx: ChangeContext, row: ChangeRow, m: Mergeability): P
   return { ...row, ...after };
 }
 
+export interface RemainingAux {
+  dependency: ReturnType<typeof blockFromRows>;
+  resolveConflictTaskOpen: boolean;
+}
+
+function remainingAuxStatements(
+  db: D1Database,
+  repoId: string,
+  change: { id?: string; number: number },
+): [D1PreparedStatement, D1PreparedStatement] {
+  const byId = change.id !== undefined;
+  const taskChange = byId ? 't.change_set_id = ?2' : 't.change_set_id = (SELECT c.id FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2)';
+  const bindings = byId ? [repoId, change.id] : [repoId, change.number];
+  return [
+    byId
+      ? changeDependenciesStatement(db, repoId, change.id!)
+      : changeNumberDependenciesStatement(db, repoId, change.number),
+    db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM agent_tasks t
+          WHERE t.repo_id = ?1 AND ${taskChange} AND t.kind = '${RESOLVE_CONFLICT}' AND t.status IN ('open', 'claimed')) AS task_open`,
+      )
+      .bind(...bindings),
+  ];
+}
+
+function remainingAuxFromRows(dependencies: DependencyRow[] | undefined, tasks: Array<{ task_open: number }> | undefined): RemainingAux {
+  return {
+    dependency: blockFromRows(dependencies ?? [], 'publish'),
+    resolveConflictTaskOpen: Boolean(tasks?.[0]?.task_open),
+  };
+}
+
+export async function readRemainingAux(env: Env, repoId: string, number: number): Promise<RemainingAux> {
+  const rows = await env.DB.batch(remainingAuxStatements(env.DB, repoId, { number }));
+  return remainingAuxFromRows(
+    rows[0]?.results as DependencyRow[] | undefined,
+    rows[1]?.results as Array<{ task_open: number }> | undefined,
+  );
+}
+
+async function remainingForRow(cx: ChangeContext, row: ChangeRow, mergeability: MergeabilityView | null): Promise<RemainingItem[]> {
+  const [facts, rules, dependencies, tasks] = await cx.env.DB.batch([
+    reviewFactsSelectById(cx.env.DB, row.id),
+    repoBranchRulesSelect(cx.env.DB, cx.repo.id),
+    ...remainingAuxStatements(cx.env.DB, cx.repo.id, { id: row.id, number: row.number }),
+  ]);
+  const branchRules = ((rules?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow);
+  const policy = effectivePolicy(branchRules, branchRef(row.base_ref));
+  const gate = reviewGate(parseReviewFacts((facts?.results as ReviewFactsRow[] | undefined)?.[0]), policy);
+  const aux = remainingAuxFromRows(
+    dependencies?.results as DependencyRow[] | undefined,
+    tasks?.results as Array<{ task_open: number }> | undefined,
+  );
+  const actor = cx.actor;
+  const principal = actor ? (actor.agent ? `agent:${actor.agent.agentId}` : `user:${actor.user.id}`) : null;
+  const agent = parseAgent(row.agent_meta);
+  const authorPrincipal = agent ? `agent:${agent.id}` : row.author_id ? `user:${row.author_id}` : null;
+  return remainingFor({
+    change: {
+      state: row.state,
+      mergePolicy: row.merge_policy,
+      author: { principal: authorPrincipal, login: row.author_login, agentId: agent?.id ?? null },
+      queueState: row.queue_state,
+      conflicts: storedConflicts(row).conflicts,
+    },
+    blockers: gate.blockers,
+    approvals: gate.block?.review.approvals ?? null,
+    agentApprovals: policy.agentApprovals,
+    mergeability,
+    dependency: aux.dependency,
+    resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
+    viewer: {
+      principal,
+      login: actor?.user.login ?? null,
+      kind: actor ? (actor.agent ? 'agent' : 'human') : null,
+      writeAccess: cx.writeAccess === true,
+    },
+  });
+}
+
 /** GET changes/:number — the change, its rating and mergeability (open changes) and check runs. */
-export function getChange(cx: ChangeContext, rawNumber: string): Promise<ServiceResult<ChangeDetail>> {
+export function getChange(
+  cx: ChangeContext,
+  rawNumber: string,
+  options: { includeRemaining?: boolean } = {},
+): Promise<ServiceResult<ChangeDetail>> {
   return guarded(async () => {
     const number = parseNumber(rawNumber);
     if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const found = await readChangeWithChecks(cx.env, cx.repo.id, number);
     if (!found) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const { row, checks } = found;
-    if (!isLive(row)) return { ok: true, value: { ...changeView(row), rating: storedRating(row), mergeability: null, checks } };
+    if (!isLive(row)) return { ok: true, value: { ...changeView(row), rating: storedRating(row), mergeability: null, checks, remaining: [] } };
     return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const live = await liveState(resolveCtx(cx, artifacts), defaultChecksGate(cx.env), row);
       const current = live.mergeability ? await reconciled(cx, row, live.mergeability) : row;
       const view = changeView(current);
+      const mergeability = live.mergeability ? mergeabilityView(live.mergeability) : null;
+      const remaining = options.includeRemaining === false ? [] : await remainingForRow(cx, current, mergeability);
       return {
         ok: true,
         value: {
           ...view,
           baseSha: live.baseSha ?? view.baseSha,
           rating: live.rating,
-          mergeability: live.mergeability ? mergeabilityView(live.mergeability) : null,
+          mergeability,
           checks,
+          remaining,
         },
       };
     });
@@ -657,6 +766,7 @@ export interface MergeabilityResponse {
   number: number;
   state: ChangeState;
   mergeability: MergeabilityView | null;
+  remaining: RemainingItem[];
 }
 
 export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<ServiceResult<MergeabilityResponse>> {
@@ -664,7 +774,13 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
     const number = parseNumber(rawNumber);
     const row = number === null ? null : await readChange(cx.env, cx.repo.id, number);
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
-    if (!isLive(row) || !row.head_sha) return { ok: true, value: { number: row.number, state: row.state, mergeability: null } };
+    if (!isLive(row)) return { ok: true, value: { number: row.number, state: row.state, mergeability: null, remaining: [] } };
+    if (!row.head_sha) {
+      return {
+        ok: true,
+        value: { number: row.number, state: row.state, mergeability: null, remaining: await remainingForRow(cx, row, null) },
+      };
+    }
     return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx(cx, artifacts);
       const baseName = branchRef(row.base_ref);
@@ -673,12 +789,14 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
       if (!base) return fail(409, `base branch ${row.base_ref} no longer exists`, 'BASE_NOT_FOUND');
       const m = await mergeabilityFor(ctx, defaultChecksGate(cx.env), base.sha, row.head_sha!, row.id);
       const current = await reconciled(cx, row, m);
-      return { ok: true, value: { number: row.number, state: current.state, mergeability: mergeabilityView(m) } };
+      const mergeability = mergeabilityView(m);
+      const remaining = await remainingForRow(cx, current, mergeability);
+      return { ok: true, value: { number: row.number, state: current.state, mergeability, remaining } };
     });
   });
 }
 
-/** GET changes/:number/checks — the change's check runs, newest first (bounded). */
+/** GET changes/:number/checks — the newest run per name for the current head (bounded). */
 export async function listChangeChecks(env: Env, repo: RepoRow, rawNumber: string): Promise<ServiceResult<{ number: number; headSha: string | null; checks: CheckRunView[] }>> {
   const number = parseNumber(rawNumber);
   const found = number === null ? null : await readChangeWithChecks(env, repo.id, number);
@@ -732,7 +850,7 @@ export interface CreateChangeOptions {
   kind?: 'change' | 'revert';
 }
 
-export function createChange(cx: ChangeContext, input: unknown, opts: CreateChangeOptions = {}): Promise<ServiceResult<ChangeDetail>> {
+export function createChange(cx: ChangeContext, input: unknown, opts: CreateChangeOptions = {}): Promise<ServiceResult<CreatedChangeDetail>> {
   return guarded(async () => {
     const parsed = parseCreate(input);
     if (!parsed.ok) return parsed;
@@ -768,6 +886,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
     const now = Date.now();
     const id = crypto.randomUUID();
     const agentMeta = cx.actor?.agent ? JSON.stringify({ agentId: cx.actor.agent.agentId, agentName: cx.actor.agent.agentName }) : null;
+    const initialCoverage = await headCoverage(cx.env, cx.repo, { id, base: p.base }, headSha, cx.waitUntil);
     // The head watermark is tied to the ref position: a push ingested since the
     // observation (newer event) is adopted outright; the push that produced the
     // observed head lends its event time; otherwise the observation time, so a
@@ -806,16 +925,33 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now, changed),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
       ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
-      // A change into a ref covered by a branch rule asks a human from the start.
-      ...(cx.branchRules && effectivePolicy(cx.branchRules, branchRef(p.base)).protected
-        ? [recordMissingEscalation(cx.env.DB, id, 'protected-path', now)]
-        : []),
       guardRunInsert(cx.env.DB, { repoId: cx.repo.id, changeId: id, headSha, treeSha: headTree, summary: guard, startedAt: guardStarted, now }),
       cx.env.DB.prepare(`SELECT ${CHECK_RUN_COLUMNS} FROM check_runs k WHERE k.change_set_id = ? ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHANGE_LIMITS.checksMax}`).bind(id),
       cx.env.DB.prepare(`${CHANGE_SELECT} WHERE c.id = ?`).bind(id),
     ]);
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(500, 'change could not be created', 'CREATE_FAILED');
+    const tier = row.head_sha
+      ? await recordHeadTier(
+          cx.env,
+          cx.repo,
+          { id: row.id, base: row.base_ref },
+          row.head_sha,
+          row.head_sha === headSha ? initialCoverage : undefined,
+          cx.waitUntil,
+        )
+      : { maxTier: 'scrutinize' as const, truncated: false, recorded: false };
+    const targetPolicy = effectivePolicy(cx.branchRules ?? [], branchRef(p.base));
+    if (
+      targetPolicy.protected &&
+      !(targetPolicy.agentApprovals === 'low-risk' && (tier.maxTier === 'read' || tier.maxTier === 'receipt'))
+    ) {
+      try {
+        await cx.env.DB.batch([recordMissingEscalation(cx.env.DB, row.id, 'protected-path', now)]);
+      } catch {
+        // Review publication records any missing escalation before applying the gate.
+      }
+    }
     let checks = ((results[results.length - 2]?.results as CheckRunRow[] | undefined) ?? []).map(checkRunView);
     if (row.head_sha && row.head_sha !== headSha) {
       // The insert adopted a push newer than the evaluated head; that push's hooks ran before the change existed.
@@ -843,6 +979,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       }
     }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
+    await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks } };
   });
 }
@@ -976,6 +1113,7 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
       );
     }
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
+    await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: changeView(row) };
   });
 }
@@ -1488,7 +1626,9 @@ export function mergeChange(
     // A pinned dependency lands first: the explicit merge of a dependent waits for its source like the train does.
     const pinned = dependencyRefusal(pins);
     if (pinned) return pinned;
-    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
+    const result = await performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
+    if (result.ok) await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: 'merged' }, cx.waitUntil);
+    return result;
   });
 }
 
@@ -1569,12 +1709,29 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
     await recordGuard(e.env, e.repoId, e.change.id, e.headSha);
   },
   async (e) => {
+    try {
+      const [repoRead, changeRead] = await e.env.DB.batch([
+        e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId),
+        e.env.DB.prepare('SELECT id, base_ref FROM change_sets WHERE id = ? AND repo_id = ?').bind(e.change.id, e.repoId),
+      ]);
+      const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
+      const change = (changeRead?.results as { id: string; base_ref: string }[] | undefined)?.[0];
+      if (repo && change) await recordHeadTier(e.env, repo, { id: change.id, base: change.base_ref }, e.headSha);
+    } catch {
+      // A head-tier cache failure must not fail the push hook.
+    }
+  },
+  async (e) => {
     const repo = await e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId).first<RepoRow>();
     if (repo) await queueChangeCi(e.env, repo, e.change.id, e.headSha);
   },
   // Issue proposals from paths follow the new head (advice only; never fails the push).
   async (e) => {
     await refreshPathLinks(e.env, e.repoId, e.change.id, e.headSha);
+  },
+  (e) => carryApprovals(e),
+  async (e) => {
+    await publishRepoEvent(e.env, e.repoId, { type: 'change.head', changeNumber: e.change.number, headSha: e.headSha });
   },
 ];
 
@@ -1774,6 +1931,7 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM merge_admission WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM agent_tasks WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_reviews WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM change_head_tiers WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
     db.prepare('DELETE FROM change_escalations WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM review_policies WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),

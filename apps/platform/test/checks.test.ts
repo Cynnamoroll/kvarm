@@ -516,7 +516,7 @@ describe('reported check runs', () => {
     const six = await call('GET', `${R('detail-cost')}/changes/2`, tok.owner);
     expect(six.json.mergeability.checks.required).toHaveLength(6);
     expect(one.cost.d1).toBe(six.cost.d1);
-    expect(six.cost.d1).toBeLessThanOrEqual(3);
+    expect(six.cost.d1).toBeLessThanOrEqual(4);
   });
 });
 

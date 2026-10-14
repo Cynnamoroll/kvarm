@@ -8,7 +8,7 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import { toUserRow } from '../src/db/users';
@@ -16,7 +16,7 @@ import worker from '../src/index';
 import { mintAgentToken } from '../src/services/agents';
 import { validateOrgLogin } from '../src/services/orgs';
 import { INBOX_LIMITS } from '../src/services/reviewInbox';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
 const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts } as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -30,6 +30,7 @@ const changeIds: Record<string, string> = {};
 const esc: Record<string, string> = {};
 const tok: Record<string, string> = {};
 let head = '';
+const git = new FakeRepo();
 
 async function call(path: string, token?: string, init: RequestInit = {}): Promise<{ status: number; text: string; location: string | null; d1: number }> {
   const ctx = createExecutionContext();
@@ -70,6 +71,7 @@ async function seedRepo(owner: string, name: string, orgId: string | null = null
     .bind(id, owner, name, `${owner}--${name}`, `https://artifacts.invalid/git/default/${owner}--${name}.git`, NOW, NOW, orgId)
     .run();
   repoIds[name] = id;
+  fakeRepos.set(`${owner}--${name}`, git);
 }
 
 async function seedChange(key: string, repo: string, n: number, o: { title: string; author: string; headRef?: string; base?: string; agent?: { id: string; name: string } }): Promise<void> {
@@ -97,6 +99,7 @@ async function seedEscalation(key: string, change: string, reason: string, note:
 const count = async (sql: string, ...bind: unknown[]): Promise<number> => (await env.DB.prepare(sql).bind(...bind).first<{ n: number }>())?.n ?? -1;
 
 beforeAll(async () => {
+  installFakeGitRemote();
   for (const login of [OWNER, 'sx-author', 'sx-revoked', 'sx-exmember', 'sx-stranger']) await seedUser(login);
   await seedRepo(OWNER, 'core');
   for (const login of ['sx-author', 'sx-revoked']) {
@@ -113,8 +116,6 @@ beforeAll(async () => {
     .bind(repoIds.orgrepo, ids['sx-exmember'], ids[OWNER], NOW, NOW)
     .run();
 
-  const git = new FakeRepo();
-  fakeRepos.set(`${OWNER}--core`, git);
   const base = await commit(git, { 'README.md': 'readme\n' });
   head = (await commit(git, { 'README.md': 'changed\n' }, [base.sha], 'Change')).sha;
   git.refs.set('refs/heads/main', base.sha);
@@ -165,6 +166,8 @@ beforeAll(async () => {
   tok.agent = minted.value.token;
 });
 
+afterAll(() => restoreFetch());
+
 describe('concealment', () => {
   it('lists nothing and conceals the change page after a grant is revoked or an org membership ends', async () => {
     for (const login of ['sx-revoked', 'sx-exmember', 'sx-stranger']) {
@@ -213,21 +216,15 @@ describe('tampered decide posts', () => {
     expect(await count('SELECT COUNT(*) AS n FROM change_reviews WHERE change_set_id = ?', changeIds.own)).toBe(0);
   });
 
-  it('refuses a resolution outside the enum instead of reading it as resolve', async () => {
-    const r = await call(`/${OWNER}/core/changes/1/escalations/${esc.own}/resolve`, tok[OWNER], post({ resolution: 'approve', note: 'tampered' }));
-    expect(r.location).toBe(`/${OWNER}/core/changes/1?error=INVALID_RESOLUTION#escalations`);
-    expect(await count("SELECT COUNT(*) AS n FROM change_escalations WHERE id = ? AND state = 'open'", esc.own)).toBe(1);
-  });
-
   it('refuses a verdict outside the enum, an oversized note and an escalation of another change', async () => {
     const verdict = await call(`/${OWNER}/core/changes/1/review`, tok[OWNER], post({ verdict: 'merge', headSha: head, note: 'x' }));
     expect(verdict.location).toBe(`/${OWNER}/core/changes/1?error=INVALID_VERDICT#decide`);
     const long = await call(`/${OWNER}/core/changes/1/review`, tok[OWNER], post({ verdict: 'approve', headSha: head, note: 'x'.repeat(INBOX_LIMITS.noteMax + 1) }));
     expect(long.location).toBe(`/${OWNER}/core/changes/1?error=INVALID_NOTE#decide`);
     // change 1's URL with change 2's escalation, and another repository's escalation.
-    const mismatch = await call(`/${OWNER}/core/changes/1/escalations/${esc.hostile}/resolve`, tok[OWNER], post({ resolution: 'resolve', note: 'wrong change' }));
+    const mismatch = await call(`/${OWNER}/core/changes/1/escalations/${esc.hostile}/resolve`, tok[OWNER], post({ note: 'wrong change' }));
     expect(mismatch.location).toBe(`/${OWNER}/core/changes/1?error=ESCALATION_NOT_FOUND#escalations`);
-    const foreign = await call(`/${OWNER}/core/changes/1/escalations/${esc.org}/resolve`, tok[OWNER], post({ resolution: 'resolve', note: 'other repo' }));
+    const foreign = await call(`/${OWNER}/core/changes/1/escalations/${esc.org}/resolve`, tok[OWNER], post({ note: 'other repo' }));
     expect(foreign.location).toBe(`/${OWNER}/core/changes/1?error=ESCALATION_NOT_FOUND#escalations`);
     expect(await count("SELECT COUNT(*) AS n FROM change_escalations WHERE state = 'open' AND id IN (?, ?)", esc.hostile, esc.org)).toBe(2);
     expect(await count('SELECT COUNT(*) AS n FROM change_reviews WHERE change_set_id = ?', changeIds.own)).toBe(0);
@@ -247,8 +244,8 @@ describe('tampered decide posts', () => {
   });
 
   it('lets another human resolve it, within the decide budget', async () => {
-    const r = await call(`/${OWNER}/core/changes/1/escalations/${esc.own}/resolve`, tok[OWNER], post({ resolution: 'acknowledge', note: 'seen; rework tracked' }));
-    expect(r.location).toBe(`/${OWNER}/core/changes/1?done=acknowledge`);
+    const r = await call(`/${OWNER}/core/changes/1/escalations/${esc.own}/resolve`, tok[OWNER], post({ note: 'seen; rework tracked' }));
+    expect(r.location).toBe(`/${OWNER}/core/changes/1?done=resolve`);
     expect(r.d1).toBeLessThanOrEqual(5);
     expect(await count("SELECT COUNT(*) AS n FROM agent_decisions WHERE repo_id = ? AND task_id = 'change:1'", repoIds.core)).toBe(1);
   });
@@ -282,9 +279,18 @@ describe('escaping', () => {
     for (const field of ['reason', 'chosen', 'rej', 'why', 'plain', 's', 'p', 'm', 'run', 'key', 'body']) expect(page.text, field).toContain(`${field}&lt;script&gt;`);
   });
 
-  it('echoes no free text from the query string', async () => {
+  it('renders unknown error codes as escaped code text', async () => {
     const probe = 'Your-session-expired-call-555';
-    for (const path of [`/inbox?error=${probe}`, `/inbox?error=${encodeURIComponent(XSS)}&item=${encodeURIComponent(XSS)}`, `/${OWNER}/core/changes/2?error=${probe}&done=${probe}`]) {
+    const unknown = await call(`/inbox?error=${probe}`, tok[OWNER]);
+    expect(unknown.status).toBe(200);
+    expect(unknown.text).toContain(`The decision was not recorded. <code>${probe}</code>`);
+
+    const escaped = await call(`/inbox?error=${encodeURIComponent('<script>alert(42)</script>')}&item=${encodeURIComponent(XSS)}`, tok[OWNER]);
+    expect(escaped.status).toBe(200);
+    expect(escaped.text).toContain('<code>&lt;script&gt;alert(42)&lt;/script&gt;</code>');
+    expect(unsafe(escaped.text)).toEqual([]);
+
+    for (const path of [`/inbox?item=${encodeURIComponent(XSS)}`, `/${OWNER}/core/changes/2?done=${probe}`]) {
       const r = await call(path, tok[OWNER]);
       expect(r.status, path).toBe(200);
       expect(r.text, path).not.toContain(probe);

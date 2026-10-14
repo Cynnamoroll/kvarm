@@ -8,14 +8,14 @@
  */
 
 import type { TreeChange } from '@kvarm/gitops';
-import { classifyFile, needsContent, rateChange, type ChangeRating, type RiskChange, type RiskContent } from '@kvarm/review';
+import { classifyFile, needsContent, rateChange, type ChangeRating, type RiskChange, type RiskContent, type RiskTag } from '@kvarm/review';
 import { runPool } from './pool';
 
 export type { ChangeRating } from '@kvarm/review';
 
 export interface FileRisk {
   score: number;
-  tags: string[];
+  tags: RiskTag[];
 }
 
 /** Line-count facts for one file; null entries mean nothing is known. */

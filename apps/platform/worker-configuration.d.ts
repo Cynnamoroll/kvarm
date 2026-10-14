@@ -19,6 +19,7 @@ interface __BaseEnv_Env {
 	CI_SANDBOX: DurableObjectNamespace<import("./src/index").CiRunnerSandbox>;
 	ENV_BUILDER: DurableObjectNamespace<import("./src/index").EnvironmentBuilder>;
 	AGENT_SANDBOX: DurableObjectNamespace<import("./src/index").AgentSandbox>;
+	REPO_EVENTS: DurableObjectNamespace<import("./src/index").RepoEvents>;
 	SNAPSHOT_BUILDER: Workflow<Parameters<import("./src/index").SnapshotBuilder['run']>[0]['payload']>;
 	CI_PIPELINE: Workflow<Parameters<import("./src/index").CiPipeline['run']>[0]['payload']>;
 	MERGE_WORKFLOW: Workflow<Parameters<import("./src/index").MergeWorkflow['run']>[0]['payload']>;
@@ -28,7 +29,7 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "TokenCache" | "RateLimiter" | "MergeLock" | "CiRunnerSandbox" | "EnvironmentBuilder" | "AgentSandbox";
+		durableNamespaces: "TokenCache" | "RateLimiter" | "MergeLock" | "CiRunnerSandbox" | "EnvironmentBuilder" | "AgentSandbox" | "RepoEvents";
 	}
 	interface Env extends __BaseEnv_Env {}
 }
