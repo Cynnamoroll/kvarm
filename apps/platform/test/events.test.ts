@@ -680,6 +680,41 @@ describe('git gate fast path and pairing', () => {
     expect(await refRow(repo.id, main)).toMatchObject({ sha: D });
   });
 
+  it('orders an Artifacts-only push that returns to an earlier commit after the gate push it follows', async () => {
+    const wf = new FakeWorkflow();
+    const env = envWith(wf);
+    const repo = await seedRepo('gate-then-return');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    await gate(env, repo, [[A, B, main]]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, B, A, iso(T0 + 1000)) }]);
+    const back = (await events(repo.id)).find((r) => r.before_sha === B && r.after_sha === A)!;
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: A, event_id: back.id });
+    // Not superseded: the effect ran (A's snapshot already existed from the first push).
+    expect((await effects(back.id)).snapshot).toEqual({ state: 'done', detail: `reused ${snapshotInstanceId(repo.id, A)}` });
+  });
+
+  it('orders an Artifacts-only deletion after a ref the gate created', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('gate-then-delete');
+    await gate(env, repo, [[ZERO, A, 'refs/heads/topic']]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, 'refs/heads/topic', A, ZERO, iso(T0)) }]);
+    expect(await refRow(repo.id, 'refs/heads/topic')).toMatchObject({ sha: ZERO });
+  });
+
+  it('does not let a second delivery of an old transition roll the ref back after A->B->C->A', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('old-redelivery');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, B, C, iso(T0 + 2000)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, C, A, iso(T0 + 3000)) }]);
+    // The A->B push again under a different identity (a source id this time).
+    const again = pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000));
+    (again as Record<string, unknown>).id = 'evt-redelivered';
+    await deliver(env, [{ body: again }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: A });
+  });
+
   it('does not let an older transition win when the ref came back to the same commit (A->B delivered after B->A)', async () => {
     const env = envWith(new FakeWorkflow());
     const repo = await seedRepo('aba-reorder');

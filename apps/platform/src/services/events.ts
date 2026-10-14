@@ -206,10 +206,12 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
     // Ordering across clocks. Gate rows carry Worker time and Artifacts rows
     // Artifacts time, so time alone cannot order a push after the one it
     // follows. An event that leaves the ledger's current position (before ==
-    // position) is therefore timed after that position, unless a successor of
-    // it (a row leaving its `after`) is already recorded at or after the
-    // position: then it is an older transition of a ref that came back to the
+    // position) is therefore timed after that position, unless a row from
+    // the same clock leaves the event's `after` later than the event itself:
+    // then the event is an older transition of a ref that came back to the
     // same commit (A->B delivered after B->A), and its own time decides.
+    // Only same-clock rows count as that evidence, since only their times
+    // are comparable with the event's.
     // A gate delivery records a row only as such a direct successor
     // (receive-pack confirmed old == before); anything else is left to the
     // Artifacts delivery.
@@ -220,9 +222,10 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
          SELECT ${eid('?1')}, r.id, ?3, ?4, ?5, r.id || ':' || ?3 || ':' || ?4 || ':' || ?5, ?6, ?7, ?7, 0,
                 CASE WHEN ?6 = '${GATE_SOURCE}'
                        THEN MAX(?8, COALESCE((SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3), 0))
-                     WHEN EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3 AND f.sha = ?4
-                                     AND NOT EXISTS (SELECT 1 FROM push_events s
-                                                      WHERE s.repo_id = r.id AND s.ref = ?3 AND s.before_sha = ?5 AND s.event_at >= f.event_at))
+                     WHEN EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3 AND f.sha = ?4)
+                      AND NOT EXISTS (SELECT 1 FROM push_events s
+                                       WHERE s.repo_id = r.id AND s.ref = ?3 AND s.before_sha = ?5 AND s.event_at > ?8
+                                         AND (s.source = '${GATE_SOURCE}') = (?6 = '${GATE_SOURCE}'))
                        THEN MAX(?8, (SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3))
                      ELSE ?8 END,
                 ?9
