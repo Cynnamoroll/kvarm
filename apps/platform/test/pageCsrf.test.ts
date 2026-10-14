@@ -12,6 +12,8 @@ import { mintPAT } from '../src/auth/pat';
 import { newSessionPayload, sessionCookie, type SessionPayload } from '../src/auth/workos';
 import { toUserRow } from '../src/db/users';
 import worker, { platformRoutes } from '../src/index';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 import { CSRF_REFUSED, csrfExempt, sessionCsrf } from '../src/routes/pageCsrf';
 import { mintAgentToken } from '../src/services/agents';
 import { RESERVED_LOGINS } from '../src/services/orgs';
@@ -43,13 +45,7 @@ let otherCsrf = '';
 let strangerPat = '';
 let agentId = '';
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `csrf:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
+const seedUser = (login: string) => seedUserBase(env, login, { workosUserId: `csrf:${login}` });
 
 async function signedIn(userId: string): Promise<SessionPayload> {
   const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first<Parameters<typeof toUserRow>[0]>();
@@ -60,13 +56,11 @@ async function signedIn(userId: string): Promise<SessionPayload> {
   });
 }
 
-async function send(path: string, init: RequestInit = {}) {
-  const ctx = createExecutionContext();
-  const req = new Request(`${ORIGIN}${path}`, { ...init, redirect: 'manual' });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  await waitOnExecutionContext(ctx);
-  return { status: res.status, text: await res.text() };
-}
+const send = async (path: string, init: RequestInit = {}) => {
+  const headers = Object.fromEntries(new Headers(init.headers));
+  const r = await apiCall(env, init.method ?? 'GET', path, { headers, rawBody: init.body ?? undefined, redirect: 'manual' });
+  return { status: r.status, text: r.text };
+};
 
 /** A same-origin browser request carrying the session cookie. */
 const browser = (path: string, init: RequestInit) =>
@@ -121,12 +115,7 @@ const unsafeMethods = (method: string) => (method === 'ALL' ? UNSAFE : [method])
 beforeAll(async () => {
   const ownerId = await seedUser(OWNER);
   const strangerId = await seedUser('csrf-stranger');
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, REPO, `${OWNER}--${REPO}`, `https://artifacts.invalid/git/default/${OWNER}--${REPO}.git`, Date.now())
-    .run();
+  await seedRepoBase(env, REPO, { owner: OWNER, visibility: 'private', register: false });
   agentId = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO agents (id, owner_kind, owner_id, owner_login, name, created_by, created_at) VALUES (?, 'user', ?, ?, 'csrf-agent', ?, ?)`,

@@ -9,16 +9,25 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
 import { newSessionPayload, sessionCookie } from '../src/auth/workos';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { type CostCounters } from '../src/cost/meter';
 import { toUserRow } from '../src/db/users';
-import worker from '../src/index';
 import { INBOX_LIMITS, parseDecisionNote } from '../src/services/reviewInbox';
 import { staleApprovals, type ReviewView } from '../src/services/reviews';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login, { userIds: ids });
+const seedRepo = async (owner: string, name: string, visibility: 'public' | 'private', pushedAt: number): Promise<string> =>
+  (await seedRepoBase(env, name, { owner, visibility, pushedAt, createdAt: NOW - 100_000, register: false, repoIds })).id;
+const call = async (path: string, token?: string, init: RequestInit = {}, e: Env = env): Promise<Read> => {
+  const headers = Object.fromEntries(new Headers(init.headers));
+  const r = await apiCall(e, init.method ?? 'GET', path, { token, headers, rawBody: init.body ?? undefined, redirect: init.redirect });
+  return { status: r.status, text: r.text, cost: r.cost, location: r.headers.get('location') };
+};
 
 const baseEnv = cfEnv as unknown as Env;
 const env = { ...baseEnv, ARTIFACTS: fakeArtifacts } as Env;
@@ -42,49 +51,11 @@ interface Read {
   location: string | null;
 }
 
-async function call(path: string, token?: string, init: RequestInit = {}, e: Env = env): Promise<Read> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await worker.fetch!(
-    new Request(`${ORIGIN}${path}`, { ...init, method: init.method ?? 'GET', headers, redirect: 'manual' }) as Request<unknown, IncomingRequestCfProperties>,
-    e,
-    ctx,
-  );
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  return { status: res.status, text, cost: cost!, location: res.headers.get('location') };
-}
-
 const form = (fields: Record<string, string>): RequestInit => ({
   method: 'POST',
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
   body: new URLSearchParams(fields).toString(),
 });
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, NOW)
-    .run();
-  ids[login] = id;
-  return id;
-}
-
-async function seedRepo(owner: string, name: string, visibility: 'public' | 'private', pushedAt: number): Promise<string> {
-  const id = crypto.randomUUID();
-  const artifactsName = `${owner}--${name}`;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at, pushed_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?, ?)`,
-  )
-    .bind(id, owner, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, NOW - 100_000, pushedAt)
-    .run();
-  repoIds[name] = id;
-  return id;
-}
 
 async function grant(repo: string, login: string, role: 'read' | 'write'): Promise<void> {
   await env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')

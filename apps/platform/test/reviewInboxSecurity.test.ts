@@ -7,19 +7,17 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import { toUserRow } from '../src/db/users';
-import worker from '../src/index';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 import { mintAgentToken } from '../src/services/agents';
 import { validateOrgLogin } from '../src/services/orgs';
 import { INBOX_LIMITS } from '../src/services/reviewInbox';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
 
 const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts } as Env;
-const ORIGIN = 'https://kvarm.test';
 const NOW = 1_760_000_000_000;
 const OWNER = 'sx-owner';
 const XSS = `<script>alert(1)</script>"'><img src=x onerror=alert(2)>`;
@@ -31,19 +29,11 @@ const esc: Record<string, string> = {};
 const tok: Record<string, string> = {};
 let head = '';
 
-async function call(path: string, token?: string, init: RequestInit = {}): Promise<{ status: number; text: string; location: string | null; d1: number }> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await worker.fetch!(
-    new Request(`${ORIGIN}${path}`, { ...init, method: init.method ?? 'GET', headers, redirect: 'manual' }) as Request<unknown, IncomingRequestCfProperties>,
-    env,
-    ctx,
-  );
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  return { status: res.status, text, location: res.headers.get('location'), d1: parseCostHeader(res.headers.get(COST_HEADER))?.d1 ?? -1 };
-}
+const call = async (path: string, token?: string, init: RequestInit = {}): Promise<{ status: number; text: string; location: string | null; d1: number }> => {
+  const headers = Object.fromEntries(new Headers(init.headers));
+  const r = await apiCall(env, init.method ?? 'GET', path, { token, headers, rawBody: init.body ?? undefined, redirect: 'manual' });
+  return { status: r.status, text: r.text, location: r.headers.get('location'), d1: r.cost.d1 };
+};
 
 const post = (fields: Record<string, string>): RequestInit => ({
   method: 'POST',
@@ -51,26 +41,15 @@ const post = (fields: Record<string, string>): RequestInit => ({
   body: new URLSearchParams(fields).toString(),
 });
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, NOW)
-    .run();
-  ids[login] = id;
+const seedUser = async (login: string): Promise<string> => {
+  const id = await seedUserBase(env, login, { createdAt: NOW, userIds: ids });
   tok[login] = (await mintPAT(env, id, `${login}-pat`, ['read', 'write', 'api'])).token;
   return id;
-}
+};
 
-async function seedRepo(owner: string, name: string, orgId: string | null = null): Promise<void> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at, pushed_at, owner_org_id)
-     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?, ?, ?)`,
-  )
-    .bind(id, owner, name, `${owner}--${name}`, `https://artifacts.invalid/git/default/${owner}--${name}.git`, NOW, NOW, orgId)
-    .run();
-  repoIds[name] = id;
-}
+const seedRepo = async (owner: string, name: string, orgId: string | null = null): Promise<void> => {
+  await seedRepoBase(env, name, { owner, visibility: 'private', createdAt: NOW, pushedAt: NOW, ownerOrgId: orgId, register: false, repoIds });
+};
 
 async function seedChange(key: string, repo: string, n: number, o: { title: string; author: string; headRef?: string; base?: string; agent?: { id: string; name: string } }): Promise<void> {
   const id = crypto.randomUUID();

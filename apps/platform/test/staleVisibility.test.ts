@@ -8,7 +8,7 @@
  * state before any of those is trusted or served.
  */
 
-import { env as cfEnv, exports } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, patHash, readPatCache, type Scope } from '../src/auth/pat';
 import { internalKey, readCachedJson, writeCachedJson } from '../src/cache/internal';
@@ -18,6 +18,13 @@ import { pageCacheKey } from '../src/cache/edge';
 import { infoRefsCacheKey } from '../src/routes/git';
 import { resolveRepoAccess } from '../src/services/access';
 import { repoViewGeneration } from '../src/services/pushFreshness';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = (path: string, init: RequestInit = {}) => request(env, path, init);
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private') =>
+  seedRepoBase(env, name, { owner: OWNER, visibility, artifactsRemote: remoteOf(name), description: MARK.meta, register: false });
 
 const env = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -36,10 +43,6 @@ const tok = { owner: '', outsider: '' };
 const upstreamCalls: string[] = [];
 const originalFetch = globalThis.fetch;
 
-function call(path: string, init: RequestInit = {}): Promise<Response> {
-  return exports.default.fetch(new Request(`${ORIGIN}${path}`, init));
-}
-
 function bearer(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
@@ -54,27 +57,8 @@ async function read(res: Response): Promise<{ status: number; text: string; cost
   return { status: res.status, text: await res.text(), cost: cost! };
 }
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
 function remoteOf(name: string): string {
   return `https://artifacts.invalid/git/default/${OWNER}--${name}.git`;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private'): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, description, created_at) VALUES (?, ?, ?, ?, ?, ?, 'main', ?, ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, name, `${OWNER}--${name}`, remoteOf(name), visibility, MARK.meta, Date.now())
-    .run();
 }
 
 async function repoRow(name: string): Promise<RepoRow> {

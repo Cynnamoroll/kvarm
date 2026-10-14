@@ -11,7 +11,17 @@ import { mintPAT, type Scope } from '../src/auth/pat';
 import { newSessionPayload, sessionCookie } from '../src/auth/workos';
 import { toUserRow } from '../src/db/users';
 import worker from '../src/index';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { commit, fakeArtifacts, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { seedRepoWithCommit, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+const seedRepo = async (name: string, visibility: 'public' | 'private' = 'public') => { const { repo, main } = await seedRepoWithCommit(env, name, { owner: OWNER, visibility: visibility, repoIds }); return { repo, main }; };
+interface Reply {
+  status: number;
+  text: string;
+  location: string | null;
+  json: Record<string, any>;
+}
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -22,39 +32,6 @@ const env = { ...baseEnv, ARTIFACTS: fakeArtifacts } as Env;
 const tok = { owner: '', reader: '' };
 const userIds: Record<string, string> = {};
 const repoIds: Record<string, string> = {};
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  userIds[login] = id;
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private' = 'public'): Promise<{ repo: FakeRepo; main: string }> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  const main = await commit(repo, { 'README.md': 'readme\n' });
-  repo.refs.set('refs/heads/main', main.sha);
-  return { repo, main: main.sha };
-}
-
-interface Reply {
-  status: number;
-  text: string;
-  location: string | null;
-  json: Record<string, any>;
-}
 
 async function request(method: string, path: string, opts: { token?: string; form?: Record<string, string>; json?: unknown; headers?: Record<string, string> } = {}): Promise<Reply> {
   const ctx = createExecutionContext();

@@ -12,10 +12,24 @@ import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FLUSH_PKT, buildBlob, buildCommit, buildTree, concat, decode, pktLine, parseTree, readPktLines, type TreeEntry } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { countingFetch, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import { newSessionPayload, sessionCookie } from '../src/auth/workos';
 import { toUserRow } from '../src/db/users';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private', withGit: boolean): Promise<string> => {
+  const { id, repo } = await seedRepoBase(env, name, { owner: OWNER, visibility, register: false });
+  if (withGit) repos.set(`${OWNER}--${name}`, repo);
+  return id;
+};
+const call = async (path: string, token?: string, init: RequestInit = {}): Promise<Read> => {
+  const headers = Object.fromEntries(new Headers(init.headers));
+  const r = await apiCall(env, init.method ?? 'GET', path, { token, headers, rawBody: init.body ?? undefined, redirect: init.redirect });
+  return { status: r.status, text: r.text, cost: r.cost, cacheControl: r.headers.get('cache-control'), refresh: r.headers.get('refresh'), location: r.headers.get('location') };
+};
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -157,32 +171,6 @@ const tok = { owner: '', outsider: '' };
 const ids = {} as { owner: string; coord: string; secret: string; quiet: string };
 const shas = {} as Record<string, string>;
 const NOW = 1_730_000_000_000;
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private', withGit: boolean): Promise<string> {
-  const repoId = crypto.randomUUID();
-  const artifactsName = `${OWNER}--${name}`;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(repoId, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, NOW - 100_000)
-    .run();
-  if (withGit) {
-    const repo = new FakeRepo();
-    repos.set(artifactsName, repo);
-  }
-  return repoId;
-}
 
 interface WorkspaceSeed {
   id: string;
@@ -427,29 +415,6 @@ interface Read {
   cacheControl: string | null;
   refresh: string | null;
   location: string | null;
-}
-
-async function call(path: string, token?: string, init: RequestInit = {}): Promise<Read> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await worker.fetch!(
-    new Request(`${ORIGIN}${path}`, { ...init, method: init.method ?? 'GET', headers }) as Request<unknown, IncomingRequestCfProperties>,
-    env,
-    ctx,
-  );
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  return {
-    status: res.status,
-    text,
-    cost: cost!,
-    cacheControl: res.headers.get('cache-control'),
-    refresh: res.headers.get('refresh'),
-    location: res.headers.get('location'),
-  };
 }
 
 const p = (repo: string, rest: string) => `/${OWNER}/${repo}/${rest}`;

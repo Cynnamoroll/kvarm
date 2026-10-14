@@ -8,15 +8,14 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import worker from '../src/index';
+import type { CostCounters } from '../src/cost/meter';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 import { INBOX_LIMITS } from '../src/services/reviewInbox';
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const OWNER = 'ibc-owner';
 const NOW = 1_760_000_000_000;
 const HEAD = 'c'.repeat(40);
@@ -28,37 +27,27 @@ const UNRELATED = 3000;
 const PAGE_ROWS = 1500;
 const tok = { owner: '', admin: '' };
 
-async function call(path: string, token: string): Promise<{ status: number; text: string; cost: CostCounters }> {
-  const ctx = createExecutionContext();
-  const res = await worker.fetch!(
-    new Request(`${ORIGIN}${path}`, { headers: { Authorization: `Bearer ${token}` }, redirect: 'manual' }) as Request<unknown, IncomingRequestCfProperties>,
-    env,
-    ctx,
-  );
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  return { status: res.status, text, cost: parseCostHeader(res.headers.get(COST_HEADER))! };
-}
+const call = async (path: string, token: string): Promise<{ status: number; text: string; cost: CostCounters }> => {
+  const r = await apiCall(env, 'GET', path, { token, redirect: 'manual' });
+  return { status: r.status, text: r.text, cost: r.cost };
+};
 
-async function seedUser(login: string, admin: boolean): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, NOW)
-    .run();
-  return id;
-}
+const seedUser = (login: string, admin: boolean) => seedUserBase(env, login, { admin, createdAt: NOW });
 
 beforeAll(async () => {
   const ownerId = await seedUser(OWNER, false);
   const otherId = await seedUser('ibc-other', false);
   const adminId = await seedUser('ibc-admin', true);
   const repoId = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at, pushed_at)
-     VALUES (?, ?, 'busy', ?, 'https://artifacts.invalid/busy', 'private', 'main', ?, ?)`,
-  )
-    .bind(repoId, OWNER, `${OWNER}--busy`, NOW, NOW)
-    .run();
+  await seedRepoBase(env, 'busy', {
+    id: repoId,
+    owner: OWNER,
+    visibility: 'private',
+    artifactsRemote: 'https://artifacts.invalid/busy',
+    createdAt: NOW,
+    pushedAt: NOW,
+    register: false,
+  });
   // A branch rule on another branch: no change into main is held by it.
   await env.DB.prepare(
     `INSERT INTO branch_rules (id, repo_id, pattern, required_approvals, created_by, created_at, updated_by, updated_at)
@@ -83,12 +72,14 @@ beforeAll(async () => {
     );
   }
   for (let i = 0; i < UNRELATED; i++) {
-    stmts.push(
-      env.DB.prepare(
-        `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at, pushed_at)
-         VALUES (?, 'ibc-other', ?, ?, 'https://artifacts.invalid/r', 'private', 'main', ?, ?)`,
-      ).bind(crypto.randomUUID(), `r${i}`, `ibc-other--r${i}`, NOW, NOW - 1 - i),
-    );
+    await seedRepoBase(env, `r${i}`, {
+      owner: 'ibc-other',
+      visibility: 'private',
+      artifactsRemote: 'https://artifacts.invalid/r',
+      createdAt: NOW,
+      pushedAt: NOW - 1 - i,
+      register: false,
+    });
   }
   for (let i = 0; i < stmts.length; i += 200) await env.DB.batch(stmts.slice(i, i + 200));
   tok.owner = (await mintPAT(env, ownerId, 'cost', ['read', 'write', 'api'])).token;
