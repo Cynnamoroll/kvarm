@@ -34,17 +34,33 @@ export interface CreateRepoParams {
   ownerOrgId?: string | null;
 }
 
-export async function createRepo(env: Env, p: CreateRepoParams): Promise<ServiceResult<RepoRow>> {
-  const name = p.name.trim();
+/**
+ * The creation prefix shared by create, import and fork: the requested name
+ * trimmed with a trailing `.git` stripped, validated, and checked against
+ * the owner's existing repos. Returns the normalized name and its Artifacts
+ * repository name so only the operation-specific steps differ per path.
+ */
+async function prepareRepoCreation(
+  env: Env,
+  ownerLogin: string,
+  requested: string,
+): Promise<ServiceResult<{ name: string; artifactsName: string }>> {
+  const name = requested.trim().replace(/\.git$/, '');
   if (!isValidRepoName(name)) {
     return { ok: false, status: 400, error: 'invalid name (letters, digits, dot, dash, underscore; max 100)', code: 'INVALID_REPO_NAME' };
   }
-  if (await getRepo(env.DB, p.ownerLogin, name)) {
+  if (await getRepo(env.DB, ownerLogin, name)) {
     return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
   }
+  return { ok: true, value: { name, artifactsName: artifactsRepoName(ownerLogin, name) } };
+}
+
+export async function createRepo(env: Env, p: CreateRepoParams): Promise<ServiceResult<RepoRow>> {
+  const prepared = await prepareRepoCreation(env, p.ownerLogin, p.name);
+  if (!prepared.ok) return prepared;
+  const { name, artifactsName } = prepared.value;
   const visibility = p.visibility === 'public' ? 'public' : 'private';
   const defaultBranch = (p.defaultBranch ?? 'main').replace(/[^a-zA-Z0-9._/-]+/g, '-') || 'main';
-  const artifactsName = artifactsRepoName(p.ownerLogin, name);
 
   let created;
   try {
@@ -81,14 +97,9 @@ export async function importRepo(env: Env, p: ImportRepoParams): Promise<Service
   if (!/^https:\/\/[^\s]+$/.test(url)) {
     return { ok: false, status: 400, error: 'url must be an HTTPS git remote', code: 'INVALID_URL' };
   }
-  const name = p.name.trim().replace(/\.git$/, '');
-  if (!isValidRepoName(name)) {
-    return { ok: false, status: 400, error: 'invalid repo name', code: 'INVALID_REPO_NAME' };
-  }
-  if (await getRepo(env.DB, p.ownerLogin, name)) {
-    return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
-  }
-  const artifactsName = artifactsRepoName(p.ownerLogin, name);
+  const prepared = await prepareRepoCreation(env, p.ownerLogin, p.name);
+  if (!prepared.ok) return prepared;
+  const { name, artifactsName } = prepared.value;
 
   let imported;
   try {
@@ -119,14 +130,9 @@ export async function forkRepo(
   ownerLogin: string,
   name: string,
 ): Promise<ServiceResult<RepoRow>> {
-  const forkName = name.trim();
-  if (!isValidRepoName(forkName)) {
-    return { ok: false, status: 400, error: 'invalid fork name', code: 'INVALID_REPO_NAME' };
-  }
-  if (await getRepo(env.DB, ownerLogin, forkName)) {
-    return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
-  }
-  const artifactsName = artifactsRepoName(ownerLogin, forkName);
+  const prepared = await prepareRepoCreation(env, ownerLogin, name);
+  if (!prepared.ok) return prepared;
+  const { name: forkName, artifactsName } = prepared.value;
   let forked;
   try {
     const handle = await env.ARTIFACTS.get(parent.artifacts_name);
