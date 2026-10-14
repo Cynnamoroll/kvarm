@@ -13,6 +13,7 @@
 import { RefStoreUnavailable, isFullSha, isValidRefName, lsRefs, readCommitInfo, type ResolveContext } from './refs';
 import { REF_TTL_SECONDS, refGeneration } from '../cache/compare';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
+import { streamAndStore } from '../cache/snapshot';
 import { snapshotInstanceId } from './events';
 import { STALE_BUILD_MS, type BuildCost, type SnapshotParams } from '../workflows/snapshotBuilder';
 
@@ -93,6 +94,53 @@ export function isReady(row: SnapshotRow | null): row is SnapshotRow & { r2_key:
 /** Does a full SHA name a commit in the repo? (commit cache, else one readCommit.) */
 export async function commitExists(ctx: ResolveContext, sha: string): Promise<boolean> {
   return (await readCommitInfo(ctx, sha)) !== null;
+}
+
+/** The stored tarball as a download serves it: the byte stream and its response metadata. */
+export interface StoredSnapshot {
+  body: ReadableStream<Uint8Array>;
+  /** Stored object bytes (compressed when the build encodes). */
+  size: number;
+  tree: string;
+  encoding: 'identity' | 'zstd';
+  /** Uncompressed tar bytes; equals size for an identity object. */
+  tarSize: number;
+}
+
+export type SnapshotDownload =
+  | { ok: true; stored: StoredSnapshot }
+  | { ok: false; error: string; code: 'SNAPSHOT_NOT_READY'; state: string }
+  | { ok: false; error: string; code: 'SNAPSHOT_MISSING' };
+
+/**
+ * The stored tarball for a snapshot row: the R2 object under the row's key,
+ * streamed to the caller and into the cache in step. A not-ready row or a
+ * missing object is reported rather than thrown; the route shapes the 409.
+ */
+export async function downloadSnapshot(
+  env: Env,
+  ctx: { waitUntil(promise: Promise<unknown>): void },
+  repoId: string,
+  sha: string,
+  row: SnapshotRow | null,
+): Promise<SnapshotDownload> {
+  if (!isReady(row)) {
+    return { ok: false, error: 'snapshot is not ready', code: 'SNAPSHOT_NOT_READY', state: row?.state ?? 'absent' };
+  }
+  const object = await env.SNAPSHOTS.get(row.r2_key);
+  if (!object) return { ok: false, error: 'snapshot bytes missing', code: 'SNAPSHOT_MISSING' };
+  const encoding: 'identity' | 'zstd' = row.encoding === 'zstd' ? 'zstd' : 'identity';
+  const tree = row.tree ?? sha;
+  return {
+    ok: true,
+    stored: {
+      body: streamAndStore(ctx, repoId, sha, tree, object, { encoding, tarSize: row.size }),
+      size: object.size,
+      tree,
+      encoding,
+      tarSize: row.size,
+    },
+  };
 }
 
 export interface SnapshotView {
