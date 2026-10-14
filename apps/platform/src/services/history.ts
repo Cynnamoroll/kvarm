@@ -2,7 +2,7 @@
  * Path history of the default branch (architecture §11.10): which commits on
  * the first-parent chain changed a path, newest first, without a clone.
  *
- * The index is derived data in D1 (migration 0037), built lazily by the
+ * The index is derived data in D1 (migration 0040), built lazily by the
  * requests that read it. Each request that finds work does one bounded step:
  * forward from the newest indexed commit to the branch head, then backward
  * toward the root with the budget that is left. A step is one compare-and-swap

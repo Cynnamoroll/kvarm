@@ -45,6 +45,7 @@ branchRulesApi.post('/repos/:owner/:repo/branch-rules', async (c) => {
     requiredChecks: body.requiredChecks,
     requiredApprovals: body.requiredApprovals,
     guardCompleteness: body.guardCompleteness,
+    agentApprovals: body.agentApprovals,
   });
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { rule: ruleJson(res.value) }, 201);
@@ -70,6 +71,7 @@ branchRulesApi.patch('/repos/:owner/:repo/branch-rules/:id', async (c) => {
     requiredChecks: body.requiredChecks,
     requiredApprovals: body.requiredApprovals,
     guardCompleteness: body.guardCompleteness,
+    agentApprovals: body.agentApprovals,
   });
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { rule: ruleJson(res.value) });

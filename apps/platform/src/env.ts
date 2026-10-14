@@ -33,6 +33,7 @@ declare global {
     READ_LIMITER: RateLimit;
     /** Workers Rate Limiting: 120 requests/min per key. */
     WRITE_LIMITER: RateLimit;
+    REPO_EVENTS: DurableObjectNamespace;
   }
 }
 

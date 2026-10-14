@@ -88,7 +88,7 @@ const base = (repo: RepoRow) => `/${repo.owner_login}/${repo.name}`;
 function page(c: Context<App>, r: Resolved, title: string, body: string, status = 200): Response {
   return finish(
     c,
-    new Response(repoPage(c.env, { repo: r.repo, ref: r.repo.default_branch, tab: 'issues', title }, r.viewer?.user.login ?? null, body), {
+    new Response(repoPage(c.env, { repo: r.repo, ref: r.repo.default_branch, tab: 'issues', title }, r.viewer?.user.login ?? null, body, c.req.url), {
       status,
       headers: HTML,
     }),

@@ -20,3 +20,12 @@ document.querySelectorAll('[data-mode-set]').forEach((button) => {
 });
 
 set(root.dataset.mode === 'agent' ? 'agent' : 'human', false);
+
+const clock = document.getElementById('ft-clock');
+if (clock) {
+  const updateClock = () => {
+    clock.textContent = new Date().toISOString().slice(11, 19);
+  };
+  updateClock();
+  setInterval(updateClock, 1000);
+}

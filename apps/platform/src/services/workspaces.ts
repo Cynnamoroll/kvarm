@@ -22,7 +22,7 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import type { BranchRule } from './branchRules';
-import { createChange, normalizeBranch, type ChangeDetail } from './changes';
+import { createChange, normalizeBranch, type CreatedChangeDetail } from './changes';
 import { RESOLVE_CONFLICT } from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
@@ -494,7 +494,7 @@ export function openChangeSet(
   input: unknown,
   /** Told the internal id of the change once the workspace link is won. */
   onLinked?: (change: { id: string; number: number }) => void,
-): Promise<ServiceResult<ChangeDetail & { workspace: string }>> {
+): Promise<ServiceResult<CreatedChangeDetail & { workspace: string }>> {
   return guarded(async () => {
     if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
     const b = input as Record<string, unknown>;

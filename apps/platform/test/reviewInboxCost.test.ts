@@ -2,24 +2,27 @@
  * Read bounds of the review inbox (services/reviewInbox.ts, migration 0036,
  * architecture §10): many live changes the gate does not hold, and many
  * repositories the viewer has nothing to do with, must not make one /inbox
- * read scan all of them. Before the bound one page here read
- * `d1=12;rr=35010`; the page is now `d1=5` and its rows read do not grow with
- * either count.
+ * read scan all of them. For three repositories and seven items the inbox
+ * costs `d1=6;rr=938;rw=1;art=6;sub=7` with readiness; before readiness it was
+ * `d1=6;rr=938;rw=1;art=0;sub=0`.
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import { INBOX_LIMITS } from '../src/services/reviewInbox';
+import { commit, fakeArtifacts, fakeRepos, FakeRepo, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
-const env = cfEnv as unknown as Env;
+const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts } as Env;
 const ORIGIN = 'https://kvarm.test';
 const OWNER = 'ibc-owner';
 const NOW = 1_760_000_000_000;
 const HEAD = 'c'.repeat(40);
+const PAGE_REPOS = 3;
+const PAGE_ITEMS = 7;
 /** Live changes nobody needs to act on, all newer than the one that waits. */
 const QUIET = 2000;
 /** Repositories of another account in the same instance. */
@@ -49,10 +52,12 @@ async function seedUser(login: string, admin: boolean): Promise<string> {
 }
 
 beforeAll(async () => {
+  installFakeGitRemote();
   const ownerId = await seedUser(OWNER, false);
   const otherId = await seedUser('ibc-other', false);
   const adminId = await seedUser('ibc-admin', true);
   const repoId = crypto.randomUUID();
+  const pageRepositories = new Map<string, { repo: FakeRepo; mainSha: string }>();
   await env.DB.prepare(
     `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at, pushed_at)
      VALUES (?, ?, 'busy', ?, 'https://artifacts.invalid/busy', 'private', 'main', ?, ?)`,
@@ -74,6 +79,36 @@ beforeAll(async () => {
     .bind(crypto.randomUUID(), repoId, HEAD, otherId, NOW - 10 * QUIET - 10)
     .run();
   const stmts: D1PreparedStatement[] = [];
+  const pageRepoIds = Array.from({ length: PAGE_REPOS }, () => crypto.randomUUID());
+  for (let i = 0; i < PAGE_REPOS; i++) {
+    const pageRepoId = pageRepoIds[i]!;
+    const artifactsName = `${OWNER}--page-${i}`;
+    const fakeRepo = new FakeRepo();
+    fakeRepos.set(artifactsName, fakeRepo);
+    const main = await commit(fakeRepo, { 'README.md': 'base\n' });
+    fakeRepo.refs.set('refs/heads/main', main.sha);
+    pageRepositories.set(pageRepoId, { repo: fakeRepo, mainSha: main.sha });
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at, pushed_at)
+         VALUES (?, ?, ?, ?, 'https://artifacts.invalid/page', 'private', 'main', ?, ?)`,
+      ).bind(pageRepoId, OWNER, `page-${i}`, artifactsName, NOW, NOW),
+      env.DB.prepare(
+        `INSERT INTO review_policies (repo_id, required_reviews, updated_by, updated_at) VALUES (?, 1, ?, ?)`,
+      ).bind(pageRepoId, ownerId, NOW),
+    );
+  }
+  for (let i = 0; i < PAGE_ITEMS; i++) {
+    const pageRepoId = pageRepoIds[i % PAGE_REPOS]!;
+    const pageRepository = pageRepositories.get(pageRepoId)!;
+    const head = await commit(pageRepository.repo, { 'README.md': `head ${i}\n` }, [pageRepository.mainSha]);
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO change_sets (id, repo_id, number, title, base_ref, head_ref, head_sha, state, author_id, merge_policy, created_at)
+         VALUES (?, ?, ?, ?, 'main', ?, ?, 'open', ?, 'review', ?)`,
+      ).bind(crypto.randomUUID(), pageRepoId, i + 1, `Page item ${i + 1}`, `agents/page-${i}/work`, head.sha, otherId, NOW + i + 1),
+    );
+  }
   for (let i = 0; i < QUIET; i++) {
     stmts.push(
       env.DB.prepare(
@@ -95,7 +130,19 @@ beforeAll(async () => {
   tok.admin = (await mintPAT(env, adminId, 'cost-admin', ['read', 'write', 'api'])).token;
 });
 
+afterAll(() => restoreFetch());
+
 describe('review inbox read bounds (architecture §10)', () => {
+  it('measures one page with three repositories and seven waiting items', async () => {
+    const r = await call('/inbox?limit=7', tok.owner);
+    expect(r.status).toBe(200);
+    expect((r.text.match(/class="k-inbox-item/g) ?? []).length).toBe(PAGE_ITEMS);
+    expect(r.cost).toMatchObject({ d1: 6, rw: 1, do: 0, r2a: 0, r2b: 0, q: 0, cache: 'none' });
+    expect(r.cost.rr).toBeLessThanOrEqual(939);
+    expect(r.cost.art).toBeLessThanOrEqual(6);
+    expect(r.cost.sub).toBeLessThanOrEqual(7);
+  });
+
   it('examines a bounded window of candidates per page and pages on to the change that waits', async () => {
     let path: string | null = '/inbox';
     let pages = 0;

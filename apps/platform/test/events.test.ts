@@ -613,4 +613,53 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     expect(owner.status).toBe(200);
     expect((owner.body.events as ApiEvent[]).length).toBe(1);
   });
+
+  it('serves an authorized instant cursor and conceals private repositories', async () => {
+    const target = baseEnv.REPO_EVENTS.get(baseEnv.REPO_EVENTS.idFromName(pub.id));
+    await target.fetch('https://repo-events/publish', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'change.updated', changeNumber: 7 }),
+    });
+    const cursor = await get('api-public/events?since=0', false);
+    expect(cursor.status).toBe(200);
+    expect(cursor.body).toMatchObject({
+      events: [{ seq: 1, type: 'change.updated', changeNumber: 7 }],
+      seq: 1,
+    });
+    expect(cursor.cost.do).toBe(1);
+    const privateCursor = await get('api-private/events?since=0', false);
+    expect(privateCursor.status).toBe(404);
+    expect(privateCursor.cost.do).toBe(0);
+  });
+
+  it('authorizes the WebSocket upgrade before forwarding it to RepoEvents', async () => {
+    const ctx = createExecutionContext();
+    const denied = await worker.fetch!(
+      new Request(`${ORIGIN}/api/v1/repos/${OWNER}/api-private/live`, { headers: { Upgrade: 'websocket' } }) as Request<
+        unknown,
+        IncomingRequestCfProperties
+      >,
+      baseEnv,
+      ctx,
+    );
+    expect(denied.status).toBe(404);
+    expect((denied as Response & { webSocket?: WebSocket | null }).webSocket ?? null).toBeNull();
+    await waitOnExecutionContext(ctx);
+
+    const authorizedContext = createExecutionContext();
+    const authorized = await worker.fetch!(
+      new Request(`${ORIGIN}/api/v1/repos/${OWNER}/api-private/live`, {
+        headers: { Upgrade: 'websocket', Authorization: `Bearer ${token}` },
+      }) as Request<unknown, IncomingRequestCfProperties>,
+      baseEnv,
+      authorizedContext,
+    );
+    expect(authorized.status).toBe(101);
+    const socket = (authorized as Response & { webSocket: WebSocket }).webSocket;
+    socket.accept();
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    socket.close(1000, 'test complete');
+    await waitOnExecutionContext(authorizedContext);
+  });
 });

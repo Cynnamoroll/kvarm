@@ -77,7 +77,8 @@
       { "name": "MERGE_LOCK", "class_name": "MergeLock" },
       { "name": "CI_SANDBOX", "class_name": "CiRunnerSandbox" },
       { "name": "ENV_BUILDER", "class_name": "EnvironmentBuilder" },
-      { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" }
+      { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" },
+      { "name": "REPO_EVENTS", "class_name": "RepoEvents" }
     ]
   },
   "migrations": [
@@ -96,6 +97,10 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["EnvironmentBuilder", "AgentSandbox"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["RepoEvents"]
     }
   ],
   // Container CI runner showcase (public beta). No image or dockerfile key:
