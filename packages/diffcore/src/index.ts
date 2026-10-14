@@ -559,3 +559,6 @@ export function limitHunks(hunks: Hunk[], limits: HunkLimits): { hunks: Hunk[]; 
   }
   return { hunks: out, truncated: false };
 }
+
+export { detectMoves } from './moves';
+export type { DetectedMove, MoveLocation } from './moves';
