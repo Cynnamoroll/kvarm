@@ -1,5 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
+import { revokeAgentTokenStatement, updateSandboxStatement } from '../db/sandboxes';
 import { runSandboxCommand, sandboxPath, tailText } from './fleetJob';
+import { instanceName } from './instances';
 
 const ENTRYPOINT = ['sleep', 'infinity'];
 const TOKEN_KEY = 'agent-token';
@@ -47,15 +49,12 @@ type SandboxResult<T> =
   | { ok: true; value: T }
   | { ok: false; status: number; code: string; error: string };
 
-function instanceName(instance: string): 'standard-1' | 'standard-2' | 'standard-3' | 'standard-4' {
-  return instance === 'basic' ? 'standard-1' : (instance as 'standard-1' | 'standard-2' | 'standard-3' | 'standard-4');
-}
-
 function fail<T>(status: number, code: string, error: string): SandboxResult<T> {
   return { ok: false, status, code, error };
 }
 
 export class AgentSandbox extends DurableObject<Env> {
+  /** Mutual exclusion over every mutating method: sleep/discard/readFile/writeFile too, so none can interleave with an in-flight start or exec. */
   private busy = false;
 
   async start(request: AgentSandboxStart): Promise<SandboxResult<{ started: true; localDiverged: boolean }>> {
@@ -100,11 +99,11 @@ export class AgentSandbox extends DurableObject<Env> {
       state.lastActiveAt = Date.now();
       await this.ctx.storage.put(STATE_KEY, state);
       await this.scheduleIdle(state);
-      await this.env.DB.prepare(
-        "UPDATE sandboxes SET status = 'running', last_active_at = ?2, error = NULL WHERE id = ?1 AND status IN ('starting','sleeping','running')",
-      )
-        .bind(state.sandboxId, state.lastActiveAt)
-        .run();
+      await updateSandboxStatement(this.env.DB, state.sandboxId, "status = 'running', last_active_at = ?2, error = NULL", [state.lastActiveAt], [
+        'starting',
+        'sleeping',
+        'running',
+      ]).run();
       return { ok: true, value: { started: true, localDiverged } };
     } catch (error) {
       const message = String(error instanceof Error ? error.message : error).slice(0, 4096);
@@ -116,8 +115,10 @@ export class AgentSandbox extends DurableObject<Env> {
   }
 
   async sleep(): Promise<SandboxResult<{ sleeping: true; snapshotId: string }>> {
-    const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
+    if (this.busy) return fail(409, 'SANDBOX_BUSY', 'sandbox is already handling a request');
+    this.busy = true;
     try {
+      const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
       if (!state) return fail(404, 'SANDBOX_NOT_FOUND', 'sandbox state is unavailable');
       const container = this.ctx.container;
       const snapshotId = container?.running ? (await container.snapshotContainer()).id : state.sleepSnapshotId ?? state.buildSnapshotId;
@@ -127,19 +128,30 @@ export class AgentSandbox extends DurableObject<Env> {
       if (container?.running) await container.destroy();
       await this.ctx.storage.delete(TOKEN_KEY);
       await this.env.DB.batch([
-        this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1').bind(state.tokenId, Date.now()),
-        this.env.DB.prepare(
-          "UPDATE sandboxes SET status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL WHERE id = ?1 AND status IN ('running','starting')",
-        ).bind(state.sandboxId, snapshotId),
+        revokeAgentTokenStatement(this.env.DB, state.tokenId, Date.now()),
+        updateSandboxStatement(this.env.DB, state.sandboxId, "status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL", [snapshotId], ['running', 'starting']),
       ]);
       await this.ctx.storage.setAlarm(state.expiresAt);
       return { ok: true, value: { sleeping: true, snapshotId } };
     } catch (error) {
       return fail(502, 'SANDBOX_SLEEP_FAILED', String(error instanceof Error ? error.message : error).slice(0, 1000));
+    } finally {
+      this.busy = false;
     }
   }
 
   async discard(): Promise<SandboxResult<{ stopped: true }>> {
+    if (this.busy) return fail(409, 'SANDBOX_BUSY', 'sandbox is already handling a request');
+    this.busy = true;
+    try {
+      return await this.discardNow();
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** discard() with the caller already holding `busy` (the alarm path). */
+  private async discardNow(): Promise<SandboxResult<{ stopped: true }>> {
     const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
     try {
       if (this.ctx.container?.running) await this.ctx.container.destroy();
@@ -148,10 +160,10 @@ export class AgentSandbox extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm();
       if (state) {
         await this.env.DB.batch([
-          this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1').bind(state.tokenId, Date.now()),
-          this.env.DB.prepare(
-            "UPDATE sandboxes SET status = 'stopped', token_id = NULL, sleep_snapshot_id = NULL, stopped_at = COALESCE(stopped_at, ?2) WHERE id = ?1",
-          ).bind(state.sandboxId, Date.now()),
+          revokeAgentTokenStatement(this.env.DB, state.tokenId, Date.now()),
+          updateSandboxStatement(this.env.DB, state.sandboxId, "status = 'stopped', token_id = NULL, sleep_snapshot_id = NULL, stopped_at = COALESCE(stopped_at, ?2)", [
+            Date.now(),
+          ]),
         ]);
       }
       return { ok: true, value: { stopped: true } };
@@ -170,35 +182,39 @@ export class AgentSandbox extends DurableObject<Env> {
     stderr: string;
     durationMs: number;
   }>> {
-    const active = await this.ensureActive();
-    if (!active.ok) return active;
     if (this.busy) return fail(409, 'SANDBOX_BUSY', 'sandbox is already handling a request');
     this.busy = true;
     try {
-      const result = await runSandboxCommand(active.container, request);
-      await this.touch(active.state);
-      return {
-        ok: true,
-        value: {
-          ...result,
-          stdout: tailText(result.stdout, OUTPUT_MAX),
-          stderr: tailText(result.stderr, OUTPUT_MAX),
-        },
-      };
-    } catch (error) {
-      await this.touch(active.state);
-      return fail(502, 'SANDBOX_EXEC_FAILED', String(error instanceof Error ? error.message : error).slice(0, 1000));
+      const active = await this.ensureActive();
+      if (!active.ok) return active;
+      try {
+        const result = await runSandboxCommand(active.container, request);
+        await this.touch(active.state);
+        return {
+          ok: true,
+          value: {
+            ...result,
+            stdout: tailText(result.stdout, OUTPUT_MAX),
+            stderr: tailText(result.stderr, OUTPUT_MAX),
+          },
+        };
+      } catch (error) {
+        await this.touch(active.state);
+        return fail(502, 'SANDBOX_EXEC_FAILED', String(error instanceof Error ? error.message : error).slice(0, 1000));
+      }
     } finally {
       this.busy = false;
     }
   }
 
   async readFile(request: { path: string }): Promise<SandboxResult<{ content: string; size: number }>> {
-    const active = await this.ensureActive();
-    if (!active.ok) return active;
-    const path = sandboxPath(active.state.repoDirectory, request.path);
-    if (!path) return fail(422, 'INVALID_PATH', 'file path must stay within /workspace');
+    if (this.busy) return fail(409, 'SANDBOX_BUSY', 'sandbox is already handling a request');
+    this.busy = true;
     try {
+      const active = await this.ensureActive();
+      if (!active.ok) return active;
+      const path = sandboxPath(active.state.repoDirectory, request.path);
+      if (!path) return fail(422, 'INVALID_PATH', 'file path must stay within /workspace');
       const process = await active.container.exec(['head', '-c', '1048577', '--', path]);
       const output = await process.output();
       if (output.exitCode !== 0) return fail(404, 'FILE_NOT_FOUND', 'sandbox file could not be read');
@@ -208,17 +224,21 @@ export class AgentSandbox extends DurableObject<Env> {
       return { ok: true, value: { content: new TextDecoder().decode(bytes), size: bytes.byteLength } };
     } catch (error) {
       return fail(502, 'SANDBOX_READ_FAILED', String(error instanceof Error ? error.message : error).slice(0, 1000));
+    } finally {
+      this.busy = false;
     }
   }
 
   async writeFile(request: { path: string; content: string }): Promise<SandboxResult<{ written: number }>> {
-    const active = await this.ensureActive();
-    if (!active.ok) return active;
-    const path = sandboxPath(active.state.repoDirectory, request.path);
-    if (!path) return fail(422, 'INVALID_PATH', 'file path must stay within /workspace');
-    const bytes = new TextEncoder().encode(request.content);
-    if (bytes.byteLength > 1_048_576) return fail(413, 'FILE_TOO_LARGE', 'sandbox files are limited to 1 MiB');
+    if (this.busy) return fail(409, 'SANDBOX_BUSY', 'sandbox is already handling a request');
+    this.busy = true;
     try {
+      const active = await this.ensureActive();
+      if (!active.ok) return active;
+      const path = sandboxPath(active.state.repoDirectory, request.path);
+      if (!path) return fail(422, 'INVALID_PATH', 'file path must stay within /workspace');
+      const bytes = new TextEncoder().encode(request.content);
+      if (bytes.byteLength > 1_048_576) return fail(413, 'FILE_TOO_LARGE', 'sandbox files are limited to 1 MiB');
       const process = await active.container.exec(
         [
           'python3',
@@ -234,6 +254,8 @@ export class AgentSandbox extends DurableObject<Env> {
       return { ok: true, value: { written: bytes.byteLength } };
     } catch (error) {
       return fail(502, 'SANDBOX_WRITE_FAILED', String(error instanceof Error ? error.message : error).slice(0, 1000));
+    } finally {
+      this.busy = false;
     }
   }
 
@@ -247,57 +269,61 @@ export class AgentSandbox extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
-    if (!state) return;
-    if (state.expiresAt <= Date.now()) {
-      await this.discard();
-      await this.env.DB.prepare(
-        "UPDATE sandboxes SET status = 'stopped', stopped_at = COALESCE(stopped_at, ?2) WHERE id = ?1 AND status IN ('starting','running','sleeping')",
-      )
-        .bind(state.sandboxId, Date.now())
-        .run();
+    if (this.busy) {
+      // A mutating call is in flight; retry shortly instead of interleaving
+      // with it (e.g. sleeping a container start() is still initializing).
+      await this.ctx.storage.setAlarm(Date.now() + 30_000);
       return;
     }
-    const idleAt = state.lastActiveAt + state.idleMinutes * 60_000;
-    if (state.runExpiresAt > Date.now() && idleAt > Date.now()) {
-      await this.ctx.storage.setAlarm(Math.min(idleAt, state.runExpiresAt, state.expiresAt));
-      return;
-    }
-    const container = this.ctx.container;
-    if (!container?.running) {
-      state.sleepSnapshotId ??= state.buildSnapshotId;
-      await this.ctx.storage.put(STATE_KEY, state);
-      await this.ctx.storage.delete(TOKEN_KEY);
-      await this.env.DB.batch([
-        this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
-          .bind(state.tokenId, Date.now()),
-        this.env.DB.prepare(
-          "UPDATE sandboxes SET status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL WHERE id = ?1 AND status = 'running'",
-        ).bind(state.sandboxId, state.sleepSnapshotId),
-      ]);
-      await this.ctx.storage.setAlarm(state.expiresAt);
-      return;
-    }
+    this.busy = true;
     try {
-      const snapshot = await container.snapshotContainer();
-      state.sleepSnapshotId = snapshot.id;
-      await this.ctx.storage.put(STATE_KEY, state);
-      await container.destroy();
-      await this.ctx.storage.delete(TOKEN_KEY);
-      await this.env.DB.prepare(
-        "UPDATE sandboxes SET status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL WHERE id = ?1 AND status = 'running'",
-      )
-        .bind(state.sandboxId, snapshot.id)
-        .run();
-      await this.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
-        .bind(state.tokenId, Date.now())
-        .run();
-      await this.ctx.storage.setAlarm(state.expiresAt);
-    } catch (error) {
-      await this.env.DB.prepare('UPDATE sandboxes SET error = ?2 WHERE id = ?1 AND status = \'running\'')
-        .bind(state.sandboxId, String(error instanceof Error ? error.message : error).slice(0, 1000))
-        .run();
-      await this.ctx.storage.setAlarm(Math.min(state.expiresAt, Date.now() + 60_000));
+      const state = await this.ctx.storage.get<SandboxState>(STATE_KEY);
+      if (!state) return;
+      if (state.expiresAt <= Date.now()) {
+        await this.discardNow();
+        await updateSandboxStatement(this.env.DB, state.sandboxId, "status = 'stopped', stopped_at = COALESCE(stopped_at, ?2)", [Date.now()], [
+          'starting',
+          'running',
+          'sleeping',
+        ]).run();
+        return;
+      }
+      const idleAt = state.lastActiveAt + state.idleMinutes * 60_000;
+      if (state.runExpiresAt > Date.now() && idleAt > Date.now()) {
+        await this.ctx.storage.setAlarm(Math.min(idleAt, state.runExpiresAt, state.expiresAt));
+        return;
+      }
+      const container = this.ctx.container;
+      if (!container?.running) {
+        state.sleepSnapshotId ??= state.buildSnapshotId;
+        await this.ctx.storage.put(STATE_KEY, state);
+        await this.ctx.storage.delete(TOKEN_KEY);
+        await this.env.DB.batch([
+          revokeAgentTokenStatement(this.env.DB, state.tokenId, Date.now()),
+          updateSandboxStatement(this.env.DB, state.sandboxId, "status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL", [state.sleepSnapshotId], ['running']),
+        ]);
+        await this.ctx.storage.setAlarm(state.expiresAt);
+        return;
+      }
+      try {
+        const snapshot = await container.snapshotContainer();
+        state.sleepSnapshotId = snapshot.id;
+        await this.ctx.storage.put(STATE_KEY, state);
+        await container.destroy();
+        await this.ctx.storage.delete(TOKEN_KEY);
+        await this.env.DB.batch([
+          revokeAgentTokenStatement(this.env.DB, state.tokenId, Date.now()),
+          updateSandboxStatement(this.env.DB, state.sandboxId, "status = 'sleeping', sleep_snapshot_id = ?2, token_id = NULL", [snapshot.id], ['running']),
+        ]);
+        await this.ctx.storage.setAlarm(state.expiresAt);
+      } catch (error) {
+        await updateSandboxStatement(this.env.DB, state.sandboxId, 'error = ?2', [String(error instanceof Error ? error.message : error).slice(0, 1000)], [
+          'running',
+        ]).run();
+        await this.ctx.storage.setAlarm(Math.min(state.expiresAt, Date.now() + 60_000));
+      }
+    } finally {
+      this.busy = false;
     }
   }
 
@@ -412,11 +438,7 @@ export class AgentSandbox extends DurableObject<Env> {
     state.lastActiveAt = Date.now();
     await this.ctx.storage.put(STATE_KEY, state);
     await this.scheduleIdle(state);
-    await this.env.DB.prepare(
-      "UPDATE sandboxes SET status = 'running', last_active_at = ?2 WHERE id = ?1 AND status IN ('running','sleeping')",
-    )
-      .bind(state.sandboxId, state.lastActiveAt)
-      .run();
+    await updateSandboxStatement(this.env.DB, state.sandboxId, "status = 'running', last_active_at = ?2", [state.lastActiveAt], ['running', 'sleeping']).run();
   }
 
   private async scheduleIdle(state: SandboxState): Promise<void> {
