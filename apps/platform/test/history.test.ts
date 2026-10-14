@@ -250,6 +250,25 @@ describe('GET /repos/:o/:r/history', () => {
     expect(r.json).toMatchObject({ headSha: null, commits: [], nextCursor: null, index: { gaps: 0, complete: true } });
   });
 
+  it('does not let a cached head mask a deletion the push ledger has recorded', async () => {
+    const repo = await seedRepo('deleted-cached');
+    const { shas } = await linear(repo, 3);
+    await setMain(repo, shas[2]!);
+    await settle('deleted-cached', 'f0.txt');
+    // Deleted elsewhere: this location's ref cache still answers the old head, the ledger knows.
+    const gen = await refGeneration(repo.id);
+    await writeJson(compareKeys.ref(repo.id, gen, 'refs/heads/main'), JSON.stringify({ sha: shas[2], tree: treeOf(repo, shas[2]!) }));
+    repo.fake.refs.delete('refs/heads/main');
+    await env.DB.prepare(
+      `INSERT INTO repo_refs (repo_id, ref, sha, event_id, event_at, updated_at) VALUES (?, 'refs/heads/main', ?, 'evt-delete', ?, ?)`,
+    )
+      .bind(repo.id, '0'.repeat(40), Date.now(), Date.now())
+      .run();
+    const r = await get(H('deleted-cached', 'path=f0.txt'));
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
+  });
+
   it('keeps the index when a stale cached head is older than the indexed one', async () => {
     const repo = await seedRepo('stale-head');
     const { shas, tree } = await linear(repo, 3);

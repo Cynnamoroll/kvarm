@@ -17,7 +17,7 @@
  * backward walk as one gap.
  */
 
-import { HistoryReadError, indexCommits, type HistoryCommit } from '@kvarm/gitops';
+import { HistoryReadError, indexCommits, ZERO_OID, type HistoryCommit } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
@@ -278,9 +278,22 @@ export async function pathHistory(
       const ctx = resolveCtx({ env, repo, waitUntil }, artifacts);
       let headSha = (await storage('head', () => resolveCommitish(ctx, [ref]))).get(ref)?.sha ?? null;
 
-      const [stateRes, pageRes] = await db.batch([stateStatement(db, repo.id), pageStatement(db, repo.id, path, cursor?.seq ?? null, limit)]);
+      const [stateRes, pageRes, ledgerRes] = await db.batch([
+        stateStatement(db, repo.id),
+        pageStatement(db, repo.id, path, cursor?.seq ?? null, limit),
+        db.prepare('SELECT sha FROM repo_refs WHERE repo_id = ? AND ref = ?').bind(repo.id, ref),
+      ]);
       let state = (stateRes?.results as StateRow[] | undefined)?.[0] ?? null;
       let page = (pageRes?.results as PageRow[] | undefined) ?? [];
+      // The ref cache is per location; the push ledger is not. When the
+      // ledger disagrees with a cached head (a deletion or a push this
+      // location has not seen), the head is read again without the cache.
+      const ledger = (ledgerRes?.results as Array<{ sha: string }> | undefined)?.[0]?.sha;
+      let confirmed = false;
+      if (ledger !== undefined && (ledger === ZERO_OID ? headSha !== null : ledger !== headSha)) {
+        headSha = (await storage('head', () => resolveCommitish({ ...ctx, bypass: true }, [ref]))).get(ref)?.sha ?? null;
+        confirmed = true;
+      }
       if (cursor && state && cursor.epoch !== state.epoch) {
         return fail(409, 'the history index was rebuilt since this cursor was issued; start from the first page', 'STALE_CURSOR');
       }
@@ -291,7 +304,7 @@ export async function pathHistory(
       if (headSha !== null && needsWork && !cursor) {
         const h = await storage('repository', () => artifacts.get());
         let step = await planStep(h, state, ref, headSha);
-        if (step?.newEpoch && state?.ref === ref && state.head_sha) {
+        if (step?.newEpoch && !confirmed && state?.ref === ref && state.head_sha) {
           // The cached head may predate the indexed one (another colo saw a
           // newer push); confirm the head before discarding the index.
           const fresh = (await storage('head', () => resolveCommitish({ ...ctx, bypass: true }, [ref]))).get(ref)?.sha ?? null;
