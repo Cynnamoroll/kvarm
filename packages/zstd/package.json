@@ -1,0 +1,10 @@
+{
+  "name": "@kvarm/zstd",
+  "version": "0.1.0",
+  "description": "zstd frame splitting for stored snapshot objects (RFC 8878), shared by the CLI and the Worker",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  }
+}

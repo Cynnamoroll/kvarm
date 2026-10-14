@@ -6,6 +6,6 @@
     "allowJs": true,
     "checkJs": true
   },
-  "include": ["bin", "src", "test", "../../packages/ops/src", "../../packages/ops/test"],
+  "include": ["bin", "src", "test", "../../packages/ops/src", "../../packages/ops/test", "../../packages/zstd/src"],
   "exclude": []
 }
