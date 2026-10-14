@@ -15,9 +15,10 @@
  * Criss-cross histories (several merge bases) merge against a virtual base
  * tree, the bases merged recursively as git's ort strategy does (gitops
  * virtualBase.ts, architecture §3.1). More bases or deeper recursion than
- * the budgets allow, or bases that conflict in a way the virtual tree cannot
- * hold, are refused as `MULTIPLE_MERGE_BASES` with the reason, never merged
- * against an arbitrary base.
+ * the budgets allow, bases that conflict in a way the virtual tree cannot
+ * hold, and merges whose renames git could pair differently from the
+ * exact-rename model are refused as `MULTIPLE_MERGE_BASES` with the reason,
+ * never merged against an arbitrary base or to a tree git would not write.
  *
  * Three-way merges run gitops' deterministic resolution stage (resolve.ts):
  * besides what git merges, a hunk whose two sides differ only in whitespace
@@ -85,6 +86,7 @@ const CRISS_CROSS_REFUSALS = new Map<string, string>([
   ['maxMergeBases', 'the head and the target have more merge bases than the maxMergeBases budget'],
   ['maxVirtualDepth', 'merging the merge bases recurses deeper than the maxVirtualDepth budget'],
   ['virtualConflict', 'the merge bases conflict in a way a virtual merge base cannot represent (rename, file/directory or type change)'],
+  ['ambiguousRenames', "git's rename detection could pair the changed paths differently than an exact-rename merge would"],
 ]);
 
 /** Whether an `unknown` plan is a criss-cross the request path refuses; like a budget stop, it depends only on the two commits. */
@@ -339,7 +341,11 @@ export type VirtualBaseOutcome =
  */
 export async function crissCrossBase(trees: SharedTrees, commits: CommitCache, bases: readonly string[], b: typeof MERGE_BUDGETS): Promise<VirtualBaseOutcome> {
   const reader: MergeSources = { readCommit: (sha) => commits.readCommit(sha), readTree: (h) => trees.readTree(h), readBlob: (h) => trees.readBlob(h) };
-  const v = await virtualMergeBase(reader, bases, { ...b, mayReadCommit: (sha) => commits.has(sha) || commits.reads < b.maxCommitReads });
+  const v = await virtualMergeBase(reader, bases, {
+    ...b,
+    mayReadCommit: (sha) => commits.has(sha) || commits.reads < b.maxCommitReads,
+    refuseAmbiguousRenames: true,
+  });
   const work = { blobReads: v.blobReads, bytes: v.objects.reduce((n, o) => n + o.raw.length + o.store.length, 0) };
   if (v.truncated || v.treeHash === null) return { ok: false, reason: v.truncatedReason ?? 'readError', work };
   return { ok: true, treeHash: v.treeHash, sources: overlaySources(reader, new Map(v.objects.map((o) => [o.hash, o]))), objects: v.objects, work };
@@ -411,6 +417,8 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
     maxMergedBytes: b.maxMergedBytes - virtualWork.bytes,
     contentConcurrency: b.contentConcurrency,
     resolver,
+    // Over a virtual base the result must be git's; refuse what the exact-rename model cannot vouch for.
+    refuseAmbiguousRenames: bases.length > 1,
   });
   const mergeWork = { commitReads: commits.reads, treeReads: shared ? shared.fetched() : m.treeReads, blobReads: virtualWork.blobReads + m.blobReads };
   if (m.truncated) return { ...unknown(m.truncatedReason ?? 'readError', { mergeBase: base, ...several }), work: mergeWork };

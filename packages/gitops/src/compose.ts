@@ -27,6 +27,8 @@ export interface ComposePiece {
   headTree: string;
   /** Selected paths (a trailing `/` selects a directory prefix); omitted: the whole head. */
   paths?: readonly string[];
+  /** Fold this piece with `refuseAmbiguousRenames` (its base is a virtual merge base, so the result must be git's). */
+  refuseAmbiguousRenames?: boolean;
 }
 
 export interface ComposeConflict extends MergeConflict {
@@ -267,7 +269,11 @@ export async function composeTrees(
       overlay.add(sel.objects);
       theirs = sel.treeHash;
     }
-    const m = await merge3(overlay, piece.baseTree, acc, theirs, { ...options, maxTreeReads: budget() });
+    const m = await merge3(overlay, piece.baseTree, acc, theirs, {
+      ...options,
+      maxTreeReads: budget(),
+      ...(piece.refuseAmbiguousRenames ? { refuseAmbiguousRenames: true } : {}),
+    });
     treeReads += m.treeReads;
     blobReads += m.blobReads;
     if (m.truncated) {
