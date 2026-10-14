@@ -131,20 +131,27 @@ export function parseGuardCompleteness(input: unknown): GuardCompleteness | null
   return typeof input === 'string' && (GUARD_COMPLETENESS as readonly string[]).includes(input) ? (input as GuardCompleteness) : null;
 }
 
-function parseStoredChecks(json: string): string[] {
+/** A check name nothing can report, standing in for a required_checks row that failed to parse. */
+const CORRUPT_CHECKS_SENTINEL = 'kvarm/corrupt-required-checks';
+
+function parseStoredChecks(json: string, ruleId: string): string[] {
   try {
     const parsed: unknown = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === 'string');
   } catch {
-    return [];
+    // falls through to the fail-closed path
   }
+  // Fails closed like guard_completeness below: a corrupt stored row must not
+  // silently relax the rule to 'no required checks' and open the merge gate.
+  console.warn(JSON.stringify({ branchRuleCorruptChecks: { rule: ruleId, value: json.slice(0, 200) } }));
+  return [CORRUPT_CHECKS_SENTINEL];
 }
 
 export function ruleFromRow(row: BranchRuleRow): BranchRule {
   return {
     id: row.id,
     pattern: row.pattern,
-    requiredChecks: parseStoredChecks(row.required_checks),
+    requiredChecks: parseStoredChecks(row.required_checks, row.id),
     requiredApprovals: Number(row.required_approvals) || 0,
     // Fails closed: a statement that forgot the column must not relax a required rule.
     guardCompleteness: row.guard_completeness === 'advisory' ? 'advisory' : 'required',
