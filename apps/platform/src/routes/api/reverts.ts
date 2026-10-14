@@ -13,7 +13,6 @@
 import { Hono, type Context } from 'hono';
 import { actorJson, authorizeRoute, clientIp, denyJson, type App, failJson } from '../api';
 import { readBodyCapped } from '../../requestBody';
-import type { ServiceResult } from '../../repos/service';
 import * as incidents from '../../services/incidents';
 import * as reverts from '../../services/reverts';
 
