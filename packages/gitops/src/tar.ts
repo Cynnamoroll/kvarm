@@ -30,6 +30,11 @@ const encoder = new TextEncoder();
 /** Largest value an 11-digit octal ustar numeric field can hold. */
 const MAX_OCTAL_11 = 0o77777777777;
 
+/** Byte width of the ustar `name` field; the `linkname` field is the same width. */
+const USTAR_NAME_MAX = 100;
+/** Byte width of the ustar `prefix` field. */
+const USTAR_PREFIX_MAX = 155;
+
 const TYPEFLAG: Record<TarEntryType, string> = { file: '0', dir: '5', symlink: '2' };
 
 /** Zero bytes needed after `size` content bytes to reach a block boundary. */
@@ -83,14 +88,14 @@ function writeOctal(block: Uint8Array, offset: number, length: number, value: nu
  * bytes) at a slash, or returns null when no split fits.
  */
 function splitUstarPath(path: Uint8Array): { prefix: Uint8Array; name: Uint8Array } | null {
-  if (path.length <= 100) return { prefix: new Uint8Array(0), name: path };
+  if (path.length <= USTAR_NAME_MAX) return { prefix: new Uint8Array(0), name: path };
   if (path.length > 256) return null;
   for (let i = path.length - 1; i > 0; i--) {
     if (path[i] !== 0x2f) continue;
     const prefixLen = i;
     const nameLen = path.length - i - 1;
-    if (nameLen > 100) return null;
-    if (prefixLen <= 155 && nameLen > 0) return { prefix: path.subarray(0, i), name: path.subarray(i + 1) };
+    if (nameLen > USTAR_NAME_MAX) return null;
+    if (prefixLen <= USTAR_PREFIX_MAX && nameLen > 0) return { prefix: path.subarray(0, i), name: path.subarray(i + 1) };
   }
   return null;
 }
@@ -114,19 +119,19 @@ function ustarBlock(fields: {
   linkname: Uint8Array;
 }): Uint8Array {
   const h = new Uint8Array(TAR_BLOCK);
-  writeString(h, 0, 100, fields.name);
+  writeString(h, 0, USTAR_NAME_MAX, fields.name);
   writeOctal(h, 100, 8, fields.mode);
   writeOctal(h, 108, 8, 0);
   writeOctal(h, 116, 8, 0);
   writeOctal(h, 124, 12, fields.size);
   writeOctal(h, 136, 12, fields.mtime);
   h[156] = fields.typeflag.charCodeAt(0);
-  writeString(h, 157, 100, fields.linkname);
+  writeString(h, 157, USTAR_NAME_MAX, fields.linkname);
   h.set(encoder.encode('ustar\0'), 257);
   h.set(encoder.encode('00'), 263);
   writeOctal(h, 329, 8, 0);
   writeOctal(h, 337, 8, 0);
-  writeString(h, 345, 155, fields.prefix);
+  writeString(h, 345, USTAR_PREFIX_MAX, fields.prefix);
   // Checksum: the sum of all header bytes with the checksum field read as spaces.
   h.fill(0x20, 148, 156);
   let sum = 0;
@@ -153,9 +158,9 @@ export function tarHeader(entry: TarEntry): Uint8Array {
   let split = isAscii(pathBytes) ? splitUstarPath(pathBytes) : null;
   if (!split) {
     records.push(paxRecord('path', fullPath));
-    split = { prefix: new Uint8Array(0), name: pathBytes.subarray(0, 100) };
+    split = { prefix: new Uint8Array(0), name: pathBytes.subarray(0, USTAR_NAME_MAX) };
   }
-  if (linkBytes.length > 100 || !isAscii(linkBytes)) records.push(paxRecord('linkpath', entry.linkname ?? ''));
+  if (linkBytes.length > USTAR_NAME_MAX || !isAscii(linkBytes)) records.push(paxRecord('linkpath', entry.linkname ?? ''));
   if (size > MAX_OCTAL_11) records.push(paxRecord('size', String(size)));
 
   const header = ustarBlock({
@@ -165,7 +170,7 @@ export function tarHeader(entry: TarEntry): Uint8Array {
     size: size > MAX_OCTAL_11 ? 0 : size,
     mtime: entry.mtime,
     typeflag: TYPEFLAG[entry.type],
-    linkname: linkBytes.subarray(0, 100),
+    linkname: linkBytes.subarray(0, USTAR_NAME_MAX),
   });
   if (records.length === 0) return header;
 
