@@ -27,17 +27,17 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+// Small vocabulary on purpose: duplicate lines stress the matcher.
+const VOCAB = ['alpha', 'beta', 'gamma', 'delta', 'x = 1', '}', '{', 'if (x) {'];
+
 function makeCase(seed: number): string[] {
   const rng = mulberry32(seed);
-  // Small vocabulary on purpose: duplicate lines stress the matcher.
-  const vocab = ['alpha', 'beta', 'gamma', 'delta', 'x = 1', '}', '{', 'if (x) {'];
   const len = Math.floor(rng() * 60);
-  return Array.from({ length: len }, () => vocab[Math.floor(rng() * vocab.length)]!);
+  return Array.from({ length: len }, () => VOCAB[Math.floor(rng() * VOCAB.length)]!);
 }
 
 function mutate(lines: string[], seed: number): string[] {
   const rng = mulberry32(seed * 7919 + 13);
-  const vocab = ['alpha', 'beta', 'gamma', 'delta', 'x = 1', '}', '{', 'if (x) {'];
   const out = [...lines];
   const edits = Math.floor(rng() * 8);
   for (let e = 0; e < edits; e++) {
@@ -47,7 +47,7 @@ function mutate(lines: string[], seed: number): string[] {
     if (kind < 0.4) {
       out.splice(at, run);
     } else if (kind < 0.8) {
-      const ins = Array.from({ length: run }, () => vocab[Math.floor(rng() * vocab.length)]!);
+      const ins = Array.from({ length: run }, () => VOCAB[Math.floor(rng() * VOCAB.length)]!);
       out.splice(at, 0, ...ins);
     } else {
       out.splice(at, run, ...Array.from({ length: run }, () => `edited-${Math.floor(rng() * 10)}`));
