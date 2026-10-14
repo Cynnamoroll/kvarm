@@ -662,6 +662,50 @@ describe('git gate fast path and pairing', () => {
     expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows[3]!.id });
   });
 
+  it('orders an Artifacts-only push after the gate push it follows, even with an earlier Artifacts clock', async () => {
+    const wf = new FakeWorkflow();
+    const env = envWith(wf);
+    const repo = await seedRepo('gate-then-artifacts');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    // The gate row is timed by the Worker clock (now, far after T0) ...
+    await gate(env, repo, [[A, B, main]]);
+    // ... and a platform write B -> C arrives only from Artifacts, stamped earlier than that.
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, B, C, iso(T0 + 1000)) }]);
+    const rows = await events(repo.id);
+    const c = rows.find((r) => r.after_sha === C)!;
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: C, event_id: c.id });
+    expect((await effects(c.id)).snapshot).toEqual({ state: 'done', detail: `created ${snapshotInstanceId(repo.id, C)}` });
+    // The next gate push follows C as usual.
+    await gate(env, repo, [[C, D, main]]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: D });
+  });
+
+  it('does not let an older transition win when the ref came back to the same commit (A->B delivered after B->A)', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('aba-reorder');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    // Real order: A -> B, then B -> A. B -> A is delivered first.
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, B, A, iso(T0 + 2000)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000)) }]);
+    const rows = await events(repo.id);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: A, event_id: rows.find((r) => r.before_sha === B)!.id });
+    expect((await effects(rows.find((r) => r.before_sha === A && r.after_sha === B)!.id)).snapshot).toEqual({ state: 'skipped', detail: 'superseded' });
+  });
+
+  it('does not let a gate push adopt an older push of the same transition', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('gate-no-old-pair');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(T0 + 1000)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, B, A, iso(T0 + 2000)) }]);
+    // A new A -> B at the gate is its own push, not the first one again.
+    await gate(env, repo, [[A, B, main]]);
+    const rows = await events(repo.id);
+    expect(rows).toHaveLength(4);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows[3]!.id });
+    expect(rows[3]!.deliveries).toBe(1);
+  });
+
   it('does not pair with a gate row older than the pairing window', async () => {
     const env = envWith(new FakeWorkflow());
     const repo = await seedRepo('gate-window');

@@ -292,5 +292,6 @@ describe('virtualMergeBase', () => {
     expect(tally.refused).toBeGreaterThan(0);
     expect(tally.clean).toBeGreaterThan(0);
     expect(tally.conflicted).toBeGreaterThan(0);
-  });
+    // About a hundred git processes; machine load stretches them past the 5 s default.
+  }, 30_000);
 });

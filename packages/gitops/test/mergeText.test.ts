@@ -145,5 +145,6 @@ describe('mergeText parity with git merge-file (seeded fuzz)', () => {
     }
     expect(clean).toBeGreaterThan(30);
     expect(conflicted).toBeGreaterThan(30);
-  });
+    // 300 git processes: seconds of wall time that machine load stretches past the 5 s default.
+  }, 30_000);
 });

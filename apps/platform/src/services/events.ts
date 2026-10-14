@@ -196,20 +196,34 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
             AND (p.source = '${GATE_SOURCE}') != (?7 = '${GATE_SOURCE}')
             AND p.received_at >= ?6 - ?8
             AND NOT EXISTS (SELECT 1 FROM push_event_aliases x WHERE x.event_id = p.id)
+            -- The gate just confirmed this push, so the only Artifacts row it
+            -- can be is the one now holding the ref at its result.
+            AND (?7 != '${GATE_SOURCE}'
+                 OR EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3 AND f.event_id = p.id AND f.sha = ?5))
           ORDER BY p.event_at, p.id LIMIT 1`,
       )
       .bind(id, ev.repoName, ev.ref, ev.before, ev.after, now, ev.source, PAIRING_WINDOW_MS),
-    // A gate delivery records a row only as the direct successor of the
-    // ledger's position (receive-pack confirmed old == before), timed after
-    // that position, so it orders correctly whatever the two clocks say.
-    // Anything else is left to the Artifacts delivery.
+    // Ordering across clocks. Gate rows carry Worker time and Artifacts rows
+    // Artifacts time, so time alone cannot order a push after the one it
+    // follows. An event that leaves the ledger's current position (before ==
+    // position) is therefore timed after that position, unless a successor of
+    // it (a row leaving its `after`) is already recorded at or after the
+    // position: then it is an older transition of a ref that came back to the
+    // same commit (A->B delivered after B->A), and its own time decides.
+    // A gate delivery records a row only as such a direct successor
+    // (receive-pack confirmed old == before); anything else is left to the
+    // Artifacts delivery.
     db
       .prepare(
         `INSERT OR IGNORE INTO push_events (id, repo_id, ref, before_sha, after_sha, transition_key, source,
            first_delivery_id, last_delivery_id, deliveries, event_at, received_at)
          SELECT ${eid('?1')}, r.id, ?3, ?4, ?5, r.id || ':' || ?3 || ':' || ?4 || ':' || ?5, ?6, ?7, ?7, 0,
                 CASE WHEN ?6 = '${GATE_SOURCE}'
-                     THEN MAX(?8, COALESCE((SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3), 0))
+                       THEN MAX(?8, COALESCE((SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3), 0))
+                     WHEN EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3 AND f.sha = ?4
+                                     AND NOT EXISTS (SELECT 1 FROM push_events s
+                                                      WHERE s.repo_id = r.id AND s.ref = ?3 AND s.before_sha = ?5 AND s.event_at >= f.event_at))
+                       THEN MAX(?8, (SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3))
                      ELSE ?8 END,
                 ?9
            FROM repos r WHERE r.artifacts_name = ?2
@@ -510,10 +524,12 @@ async function processPushEvent(env: Env, event: PushEvent, identity: string, de
 }
 
 /**
- * Ordering key of a message within one batch. Messages of one repository
- * keep their delivery order; different repositories run concurrently. Ingest
- * is already order-independent (event time decides), so the key only avoids
- * needless contention between effects of one repository.
+ * Ordering key of a message within one batch. Push events of one repository
+ * keep their delivery order, and so do train and settlement messages of one
+ * repository; different keys run concurrently. Push events are keyed by the
+ * Artifacts name and train messages by the repo id, so a push and a train run
+ * of one repository may overlap (train runs are claim-fenced). Ingest is
+ * order-independent anyway; the key only avoids needless contention.
  */
 export function batchKey(body: unknown): string {
   if (isTrainMessage(body)) return `repo-id:${body.repoId}`;
@@ -546,8 +562,8 @@ async function handleOne(env: Env, msg: Message<unknown>): Promise<Handled> {
 
 /**
  * Queue consumer for `kvarm-events`. Each message runs under its own cost
- * meter and logs one `{cost: …}` line, in batch order. Messages of one
- * repository run in delivery order; repositories run concurrently. A message
+ * meter and logs one `{cost: …}` line, in batch order. Messages with one
+ * `batchKey` run in delivery order; different keys run concurrently. A message
  * whose effects did not all complete is retried with backoff; everything else
  * (including malformed messages and unknown repos) is acked.
  */

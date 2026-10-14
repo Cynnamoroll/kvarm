@@ -1831,8 +1831,9 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
       .prepare(
         `UPDATE merge_queue SET head_sha = ?2, state = 'queued', generation = generation + 1, attempts = 0, base_sha = NULL, tree_sha = NULL,
                 checks_state = NULL, updated_at = ?3
-          WHERE repo_id = ?4 AND id = (${active}) RETURNING target_ref`,
+          WHERE repo_id = ?4 AND id = (${active}) AND head_sha IS NOT ?2 RETURNING target_ref`,
       )
+      // Idempotent per head: a second delivery of the same push (gate and Artifacts) must not reset the train's progress.
       .bind(e.change.id, e.headSha, now, e.repoId)
       .first<{ target_ref: string }>();
     ref = row?.target_ref ?? null;
