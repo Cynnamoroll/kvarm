@@ -4,20 +4,26 @@
  *
  * When two tips have two best common ancestors, git merges those ancestors
  * into a virtual commit and uses its tree as the merge base. This module does
- * the same for exactly two bases whose own merge base is unique, and only when
- * merging them is clean under git's rules (no resolver): a clean merge of the
- * bases is the tree git itself would use, so the outer merge then matches
- * `git merge-tree --write-tree`. Three or more bases, bases with several
- * merge bases of their own, unrelated bases and bases that conflict with each
- * other are refused (git would write conflict markers into the virtual base,
- * which Kvarm never publishes).
+ * the same for exactly two bases whose own merge base is unique, and only
+ * where merge3's model provably agrees with git's: no side of the inner
+ * merge leaves room for a similarity rename (`refuseAmbiguousRenames`), and
+ * no path needs a line-level merge (git's xdiff could conflict where
+ * mergeText does not, and would then put conflict markers in the virtual
+ * base). Paths changed on one side only, or identically on both, merge the
+ * same way in git, so the virtual tree is the one git uses. Three or more
+ * bases, bases with several merge bases of their own, unrelated bases and
+ * anything else are refused; the caller reports several merge bases.
+ *
+ * Budgets: the inner merge gets the caller's per-merge limits; the caller
+ * subtracts its reads and bytes from the outer merge's, while `maxChanges`
+ * (per side) and `nodeBudget` (per line diff) apply to each stage alone.
  */
 
 import { mergeBase, type CommitReader, type MergeBaseTruncation } from './mergebase';
 import { merge3, type Merge3Options, type Merge3Truncation, type MergeReader } from './merge3';
 import { parseTree, type GitObject } from './index';
 
-export type VirtualBaseRefusal = 'too-many-bases' | 'nested-criss-cross' | 'unrelated-bases' | 'bases-conflict';
+export type VirtualBaseRefusal = 'too-many-bases' | 'nested-criss-cross' | 'unrelated-bases' | 'bases-conflict' | 'bases-ambiguous';
 
 export interface VirtualBaseOptions extends Omit<Merge3Options, 'resolver'> {
   /** Max distinct readCommit calls for the bases' own merge base (default 2_000). */
@@ -78,9 +84,15 @@ export async function virtualMergeBase(
   const [root, c1, c2] = commits;
   if (!root || !c1 || !c2) return refuse('missingCommit');
 
-  const m = await merge3(reader, root.treeHash, c1.treeHash, c2.treeHash, { ...opts, resolver: undefined });
+  const m = await merge3(reader, root.treeHash, c1.treeHash, c2.treeHash, { ...opts, resolver: undefined, refuseAmbiguousRenames: true });
   if (m.truncated) return refuse(m.truncatedReason ?? 'missingObject', m.treeReads, m.blobReads);
+  if (m.refused) return refuse('bases-ambiguous', m.treeReads, m.blobReads);
   if (!m.clean || !m.treeHash) return refuse('bases-conflict', m.treeReads, m.blobReads);
+  // A line-level merge may be clean here where git's xdiff conflicts, and git
+  // would then carry conflict markers into its virtual base.
+  if (m.resolved.some((r) => r.rule !== 'identical-change' && r.rule !== 'add-add-identical')) {
+    return refuse('bases-ambiguous', m.treeReads, m.blobReads);
+  }
   return { ok: true, treeHash: m.treeHash, objects: m.objects, bases: [b1, b2], commitReads, treeReads: m.treeReads, blobReads: m.blobReads };
 }
 

@@ -13,9 +13,11 @@
  * `STALE_TARGET` (re-plan).
  *
  * Criss-cross histories with two merge bases merge over git's virtual base
- * (gitops virtualBase.ts) when the bases merge cleanly; anything else with
- * several merge bases is refused as `MULTIPLE_MERGE_BASES` rather than
- * merged against an arbitrary base.
+ * (gitops virtualBase.ts) when the result provably matches git's: the bases
+ * merge without line-level merges, and no side of either merge leaves room
+ * for a similarity rename. Anything else with several merge bases is
+ * refused as `MULTIPLE_MERGE_BASES` rather than merged against an arbitrary
+ * base or to a tree git would not write.
  *
  * Three-way merges run gitops' deterministic resolution stage (resolve.ts):
  * besides what git merges, a hunk whose two sides differ only in whitespace
@@ -317,7 +319,12 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
     used.blobReads = virtual.blobReads;
     const vwork = { commitReads: commits.reads, treeReads: used.treeReads, blobReads: used.blobReads };
     if (!virtual.ok) {
-      const refused = virtual.reason === 'too-many-bases' || virtual.reason === 'nested-criss-cross' || virtual.reason === 'unrelated-bases' || virtual.reason === 'bases-conflict';
+      const refused =
+        virtual.reason === 'too-many-bases' ||
+        virtual.reason === 'nested-criss-cross' ||
+        virtual.reason === 'unrelated-bases' ||
+        virtual.reason === 'bases-conflict' ||
+        virtual.reason === 'bases-ambiguous';
       return { ...unknown(refused ? 'criss-cross' : virtual.reason), work: vwork };
     }
     used.bytes = objectBytes(virtual.objects);
@@ -356,8 +363,11 @@ async function plan(sources: MergeSources, targetSha: string, headSha: string, b
     maxMergedBytes: b.maxMergedBytes - used.bytes,
     contentConcurrency: b.contentConcurrency,
     resolver,
+    // Over a virtual base the result must be git's own; refuse what the exact-rename model cannot vouch for.
+    refuseAmbiguousRenames: virtual?.ok === true,
   });
   const mergeWork = { commitReads: commits.reads, treeReads: used.treeReads + m.treeReads, blobReads: used.blobReads + m.blobReads };
+  if (m.refused) return { ...unknown('criss-cross'), work: mergeWork };
   const virtualBase = virtual?.ok ? { bases: virtual.bases, treeSha: virtual.treeHash } : undefined;
   const extra = virtualBase ? { virtualBase } : {};
   if (m.truncated) return { ...unknown(m.truncatedReason ?? 'readError', { mergeBase: base }), ...extra, work: mergeWork };

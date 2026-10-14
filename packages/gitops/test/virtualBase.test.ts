@@ -53,10 +53,19 @@ class Store implements CommitReader, MergeReader {
 
   async tree(files: Files): Promise<string> {
     const entries = [];
-    for (const name of Object.keys(files).sort()) {
-      const blob = this.add(await buildBlob(encode(files[name]!)));
-      entries.push({ mode: '100644', name, hash: blob.hash });
+    const dirs = new Map<string, Files>();
+    for (const path of Object.keys(files).sort()) {
+      const slash = path.indexOf('/');
+      if (slash >= 0) {
+        const sub = dirs.get(path.slice(0, slash)) ?? {};
+        sub[path.slice(slash + 1)] = files[path]!;
+        dirs.set(path.slice(0, slash), sub);
+        continue;
+      }
+      const blob = this.add(await buildBlob(encode(files[path]!)));
+      entries.push({ mode: '100644', name: path, hash: blob.hash });
     }
+    for (const [name, sub] of dirs) entries.push({ mode: '40000', name, hash: await this.tree(sub) });
     return this.add(await buildTree(entries)).hash;
   }
 
@@ -110,7 +119,7 @@ async function ourMerge(store: Store, ours: string, theirs: string) {
   const v = await virtualMergeBase(store, mb.bases);
   if (!v.ok) return { virtual: v } as const;
   const [o, t] = await Promise.all([store.readCommit(ours), store.readCommit(theirs)]);
-  const m = await merge3(readerWith(store, v.objects), v.treeHash, o!.treeHash, t!.treeHash);
+  const m = await merge3(readerWith(store, v.objects), v.treeHash, o!.treeHash, t!.treeHash, { refuseAmbiguousRenames: true });
   return { virtual: v, merge: m } as const;
 }
 
@@ -191,8 +200,8 @@ describe('virtualMergeBase', () => {
       store,
       ROOT,
       (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 2, 'X') }),
-      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 10, 'Y') }),
-      (f) => ({ ...f, 'a.txt': edit(edit(f['a.txt']!, 2, 'X'), 10, 'Y') }),
+      (f) => ({ ...f, 'b.txt': edit(f['b.txt']!, 10, 'Y') }),
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 2, 'X'), 'b.txt': edit(f['b.txt']!, 10, 'Y') }),
       (f) => f,
       (f) => f,
     );
@@ -200,6 +209,57 @@ describe('virtualMergeBase', () => {
     const a = await virtualMergeBase(store, bases);
     const b = await virtualMergeBase(store, [...bases].reverse());
     expect(a.ok && b.ok && a.treeHash === b.treeHash).toBe(true);
+  });
+
+  it('refuses bases that need a line-level merge of one file', async () => {
+    const store = new Store();
+    const { ours, theirs } = await crissCross(
+      store,
+      ROOT,
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 2, 'X') }),
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 10, 'Y') }),
+      (f) => ({ ...f, 'a.txt': edit(edit(f['a.txt']!, 2, 'X'), 10, 'Y') }),
+      (f) => ({ ...f, 'b.txt': edit(f['b.txt']!, 1, 'O') }),
+      (f) => ({ ...f, 'c.txt': edit(f['c.txt']!, 1, 'T') }),
+    );
+    const got = await ourMerge(store, ours, theirs);
+    expect(got.virtual).toMatchObject({ ok: false, reason: 'bases-ambiguous' });
+  });
+
+  it('refuses bases where git could detect a similarity rename', async () => {
+    const store = new Store();
+    // x renames a.txt with an edit (git pairs it, the exact model does not); y edits c.txt.
+    const { ours, theirs } = await crissCross(
+      store,
+      ROOT,
+      ({ 'a.txt': a, ...rest }) => ({ ...rest, 'moved.txt': edit(a!, 3, 'X') }),
+      (f) => ({ ...f, 'c.txt': edit(f['c.txt']!, 9, 'Y') }),
+      ({ 'a.txt': a, ...rest }) => ({ ...rest, 'moved.txt': edit(a!, 3, 'X'), 'c.txt': edit(rest['c.txt']!, 9, 'Y') }),
+      (f) => f,
+      (f) => ({ ...f, 'b.txt': edit(f['b.txt']!, 1, 'T') }),
+    );
+    const got = await ourMerge(store, ours, theirs);
+    expect(got.virtual).toMatchObject({ ok: false, reason: 'bases-ambiguous' });
+  });
+
+  it('marks an outer merge refused when a side removes and adds paths under refuseAmbiguousRenames', async () => {
+    const store = new Store();
+    const base = await store.tree(ROOT);
+    // ours renames b.txt with an edit; theirs deletes b.txt. git: rename/delete conflict; the exact model: clean.
+    const { 'b.txt': b, ...rest } = ROOT;
+    const oursTree = await store.tree({ ...rest, 'renamed.txt': edit(b!, 0, 'O') });
+    const theirsTree = await store.tree({ ...rest, 'c.txt': edit(ROOT['c.txt']!, 5, 'T') });
+    const theirsDeleting = await store.tree({ 'a.txt': ROOT['a.txt']!, 'c.txt': edit(ROOT['c.txt']!, 5, 'T') });
+    expect((await merge3(store, base, oursTree, theirsDeleting)).clean).toBe(true);
+    expect(await merge3(store, base, oursTree, theirsDeleting, { refuseAmbiguousRenames: true })).toMatchObject({
+      clean: false,
+      treeHash: null,
+      conflicts: [],
+      refused: 'ambiguousRenames',
+    });
+    // A plain edit on both sides is not refused.
+    const oursEdit = await store.tree({ ...ROOT, 'a.txt': edit(ROOT['a.txt']!, 1, 'O') });
+    expect(await merge3(store, base, oursEdit, theirsTree, { refuseAmbiguousRenames: true })).toMatchObject({ clean: true });
   });
 
   it('refuses bases that conflict with each other', async () => {
@@ -288,9 +348,69 @@ describe('virtualMergeBase', () => {
     }
     expect(mismatches).toEqual([]);
     // The corpus must exercise acceptance, refusal and both outer outcomes.
-    expect(tally.accepted).toBeGreaterThan(10);
+    expect(tally.accepted).toBeGreaterThan(5);
     expect(tally.refused).toBeGreaterThan(0);
     expect(tally.clean).toBeGreaterThan(0);
     expect(tally.conflicted).toBeGreaterThan(0);
+  });
+
+  it('never publishes a tree git would not write on a corpus with deletes, renames and adds', async () => {
+    const tally = { refused: 0, clean: 0, conflicted: 0 };
+    const mismatches: unknown[] = [];
+    for (let seed = 1; seed <= 120; seed++) {
+      let s = seed * 7919;
+      const rand = () => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return s / 2 ** 32;
+      };
+      const pick = <T,>(xs: T[]) => xs[Math.floor(rand() * xs.length)]!;
+      const names = Object.keys(ROOT);
+      const fresh = (name: string) => text(lines(12, name));
+      // Each op is fixed when drawn and tolerates a missing file.
+      const randomOp = (tag: string): ((f: Files) => Files) => {
+        const name = pick(names);
+        const at = Math.floor(rand() * 12);
+        const r = rand();
+        const value = `${tag}${seed}`;
+        if (r < 0.5) return (f) => ({ ...f, [name]: edit(f[name] ?? fresh(name), at, value) });
+        if (r < 0.62) {
+          return (f) => {
+            const { [name]: _, ...rest } = f;
+            return rest;
+          };
+        }
+        const to = `${pick(['', 'd/'])}${name}.${tag}`;
+        if (r < 0.86) {
+          const edited = r >= 0.74;
+          return (f) => {
+            const moved = f[name];
+            if (moved === undefined) return f;
+            const { [name]: _, ...rest } = f;
+            return { ...rest, [to]: edited ? edit(moved, at, value) : moved };
+          };
+        }
+        return (f) => ({ ...f, [`d/new-${tag}.txt`]: fresh(value) });
+      };
+      const store = new Store();
+      const x = randomOp('X');
+      const y = randomOp('Y');
+      const { ours, theirs } = await crissCross(store, ROOT, x, y, (f) => y(x(f)), randomOp('O'), randomOp('T'));
+      const mb = await mergeBase(store, ours, theirs);
+      if (mb.bases.length !== 2) continue;
+      const got = await ourMerge(store, ours, theirs);
+      const m = got.merge;
+      if (!m || m.refused) {
+        tally.refused++;
+        continue;
+      }
+      const git = await gitMergeTree(store, ours, theirs);
+      if (m.clean) tally.clean++;
+      else tally.conflicted++;
+      // A conflict where git merges is safe (nothing is published); the reverse, or a different tree, is not.
+      if ((m.clean && !git.clean) || (m.clean && m.treeHash !== git.tree)) mismatches.push({ seed, ours: m.treeHash, git });
+    }
+    expect(mismatches).toEqual([]);
+    expect(tally.refused).toBeGreaterThan(0);
+    expect(tally.clean).toBeGreaterThan(0);
   });
 });

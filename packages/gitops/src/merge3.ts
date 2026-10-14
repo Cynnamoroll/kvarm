@@ -18,11 +18,14 @@
  *    and a directory is a `file-directory` conflict.
  *
  * Renames are exact only: git also pairs files that are at least 50%
- * similar, so a rename-with-edits on one side is reported here as
- * modify/delete where git would merge it (never the reverse direction of a
- * clean merge git would refuse, except rename+delete, which merges to the
- * same tree git writes). Several merge bases (criss-cross) are the caller's
- * concern: pass one base tree.
+ * similar. A rename-with-edits on one side is then usually reported here as
+ * modify/delete where git would merge it, but not always on the safe side:
+ * when the other side deletes the source too, adds under the renamed
+ * directory, or the rename changes the file's type, this model can merge
+ * cleanly to a tree git would not write, or where git reports a conflict.
+ * `refuseAmbiguousRenames` declines every merge where a side's diff leaves
+ * room for such a pairing. Several merge bases (criss-cross) are the
+ * caller's concern: pass one base tree.
  *
  * Budgeted: tree reads, blob reads, blob size, diff work and the total size
  * of the objects the merge creates are bounded, and content merges run one
@@ -109,6 +112,13 @@ export interface Merge3Options {
   contentConcurrency?: number;
   /** Resolves conflicting hunks beyond git's rules (default none: git's result exactly). */
   resolver?: HunkResolver;
+  /**
+   * Refuse (`refused: 'ambiguousRenames'`) instead of merging when git's
+   * similarity rename detection could pair paths differently from the exact
+   * model here: a side that removes a path (or changes its type) and also
+   * adds one. Callers that must match git's tree exactly set this.
+   */
+  refuseAmbiguousRenames?: boolean;
 }
 
 export type Merge3Truncation = TreeDiffTruncation | 'maxBlobReads' | 'maxBlobBytes' | 'maxMergedBytes' | 'diffBudget' | 'missingObject';
@@ -126,6 +136,8 @@ export interface Merge3Result {
   resolved: MergeResolution[];
   truncated: boolean;
   truncatedReason?: Merge3Truncation;
+  /** Set when `refuseAmbiguousRenames` declined the merge; no tree and no conflicts. */
+  refused?: 'ambiguousRenames';
   /** The missing object id or failed read message. */
   truncatedDetail?: string;
   treeReads: number;
@@ -142,6 +154,7 @@ const DEFAULTS = {
   maxMergedBytes: 16 * 1024 * 1024,
   contentConcurrency: 1,
   resolver: undefined as HunkResolver | undefined,
+  refuseAmbiguousRenames: false,
 };
 
 /** Upper bound of an object's raw plus deflated size (deflate's stored-block overhead included). */
@@ -162,6 +175,8 @@ interface SideOps {
   /** Base entries of the paths this side touched. */
   base: Map<string, Entry>;
   renames: Array<[string, string]>;
+  /** A path left (removed, renamed away or retyped) and a path appeared: git might pair them. */
+  renameCandidates: boolean;
 }
 
 class Stop extends Error {
@@ -206,8 +221,14 @@ class Limiter {
 }
 
 function sideOps(changes: TreeChange[]): SideOps {
-  const ops: SideOps = { src: new Map(), adds: new Map(), base: new Map(), renames: [] };
+  const ops: SideOps = { src: new Map(), adds: new Map(), base: new Map(), renames: [], renameCandidates: false };
+  let left = false;
+  let appeared = false;
   for (const c of changes) {
+    if (c.status === 'renamed') left = appeared = true;
+    else if (c.status === 'removed') left = true;
+    else if (c.status === 'added') appeared = true;
+    else if (c.oldMode && c.newMode && typeOf(c.oldMode) !== typeOf(c.newMode)) left = appeared = true;
     const oldEntry = c.oldMode && c.oldHash ? { mode: c.oldMode, hash: c.oldHash } : undefined;
     const newEntry = c.newMode && c.newHash ? { mode: c.newMode, hash: c.newHash } : undefined;
     if (c.status === 'added') ops.adds.set(c.path, { entry: newEntry! });
@@ -225,6 +246,7 @@ function sideOps(changes: TreeChange[]): SideOps {
       ops.base.set(c.path, oldEntry!);
     }
   }
+  ops.renameCandidates = left && appeared;
   return ops;
 }
 
@@ -379,6 +401,9 @@ class Merge {
   async run(baseTree: string, oursTree: string, theirsTree: string): Promise<Merge3Result> {
     const ours = await this.diffSide(baseTree, oursTree);
     const theirs = await this.diffSide(baseTree, theirsTree);
+    if (this.opts.refuseAmbiguousRenames && (ours.renameCandidates || theirs.renameCandidates)) {
+      return this.result({ refused: 'ambiguousRenames' });
+    }
     const consumed = { ours: new Set<string>(), theirs: new Set<string>() };
 
     const basePaths = [...new Set([...ours.src.keys(), ...theirs.src.keys()])].sort();

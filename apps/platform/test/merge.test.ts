@@ -527,24 +527,47 @@ describe('criss-cross histories', () => {
   const A = lines('a');
   const B = lines('b');
 
-  /** root; x and y edit a.txt (same line when `clash`); m1 = merge(x, y), m2 = merge(y, x); main and head grow from them. */
-  async function crissCross(store: Store, clash: boolean) {
+  /**
+   * root; x edits a.txt, y edits b.txt (`disjoint`), the same line of a.txt
+   * (`clash`) or another line of a.txt (`same-file`); m1 = merge(x, y),
+   * m2 = merge(y, x); main and head grow from them.
+   */
+  async function crissCross(store: Store, shape: 'disjoint' | 'clash' | 'same-file') {
     const root = await store.commit([], { 'a.txt': text(A), 'b.txt': text(B) });
     const xa = set(A, 1, 'X');
-    const ya = set(A, clash ? 1 : 8, 'Y');
+    const ya = shape === 'disjoint' ? A : set(A, shape === 'clash' ? 1 : 8, 'Y');
+    const yb = shape === 'disjoint' ? set(B, 8, 'Y') : B;
     const x = await store.commit([root], { 'a.txt': text(xa), 'b.txt': text(B) }, 'x');
-    const y = await store.commit([root], { 'a.txt': text(ya), 'b.txt': text(B) }, 'y');
-    const ma = clash ? set(A, 1, 'XY') : set(set(A, 1, 'X'), 8, 'Y');
-    const m1 = await store.commit([x, y], { 'a.txt': text(ma), 'b.txt': text(B) }, 'm1');
-    const m2 = await store.commit([y, x], { 'a.txt': text(ma), 'b.txt': text(B) }, 'm2');
-    const main = await store.commit([m1], { 'a.txt': text(set(ma, 4, 'MAIN')), 'b.txt': text(B) }, 'main');
-    const head = await store.commit([m2], { 'a.txt': text(ma), 'b.txt': text(set(B, 2, 'HEAD')) }, 'head');
-    return { x, y, main, head, merged: { 'a.txt': text(set(ma, 4, 'MAIN')), 'b.txt': text(set(B, 2, 'HEAD')) } };
+    const y = await store.commit([root], { 'a.txt': text(ya), 'b.txt': text(yb) }, 'y');
+    const ma = shape === 'clash' ? set(A, 1, 'XY') : shape === 'same-file' ? set(set(A, 1, 'X'), 8, 'Y') : xa;
+    const m1 = await store.commit([x, y], { 'a.txt': text(ma), 'b.txt': text(yb) }, 'm1');
+    const m2 = await store.commit([y, x], { 'a.txt': text(ma), 'b.txt': text(yb) }, 'm2');
+    const main = await store.commit([m1], { 'a.txt': text(set(ma, 4, 'MAIN')), 'b.txt': text(yb) }, 'main');
+    const head = await store.commit([m2], { 'a.txt': text(ma), 'b.txt': text(set(yb, 2, 'HEAD')) }, 'head');
+    return { x, y, m2, ma, yb, main, head, merged: { 'a.txt': text(set(ma, 4, 'MAIN')), 'b.txt': text(set(yb, 2, 'HEAD')) } };
   }
+
+  it('refuses bases that need a line-level merge as MULTIPLE_MERGE_BASES', async () => {
+    const store = new Store();
+    const { main, head } = await crissCross(store, 'same-file');
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({ status: 'unknown', unknownReason: 'criss-cross', mergeable: false });
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'merge' })).toMatchObject({ ok: false, code: 'MULTIPLE_MERGE_BASES' });
+  });
+
+  it('refuses an outer merge where git could see a similarity rename as MULTIPLE_MERGE_BASES', async () => {
+    const store = new Store();
+    const { m2, ma, yb, main } = await crissCross(store, 'disjoint');
+    // The head renames b.txt with an edit: git pairs it as a rename, the exact model as delete + add.
+    const head = await store.commit([m2], { 'a.txt': text(ma), 'moved.txt': text(set(yb, 2, 'HEAD')) }, 'head');
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({ status: 'unknown', unknownReason: 'criss-cross', mergeable: false });
+    expect(await prepareMerge(store, { targetSha: main, headSha: head, message: 'merge' })).toMatchObject({ ok: false, code: 'MULTIPLE_MERGE_BASES' });
+  });
 
   it('merges over the virtual base when the two bases merge cleanly', async () => {
     const store = new Store();
-    const { x, y, main, head, merged } = await crissCross(store, false);
+    const { x, y, main, head, merged } = await crissCross(store, 'disjoint');
     const [first, second] = [x, y].sort();
     const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
     expect(m).toMatchObject({
@@ -562,7 +585,7 @@ describe('criss-cross histories', () => {
 
   it('publishes a merge commit whose tree is closed over the store and the pack', async () => {
     const store = new Store();
-    const { main, head } = await crissCross(store, false);
+    const { main, head } = await crissCross(store, 'disjoint');
     const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'merge' });
     expect(prepared.ok).toBe(true);
     if (!prepared.ok) return;
@@ -586,7 +609,7 @@ describe('criss-cross histories', () => {
 
   it('refuses bases that conflict with each other as MULTIPLE_MERGE_BASES', async () => {
     const store = new Store();
-    const { main, head } = await crissCross(store, true);
+    const { main, head } = await crissCross(store, 'clash');
     const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
     expect(m).toMatchObject({ status: 'unknown', unknownReason: 'criss-cross', mergeable: false });
     expect(m.virtualBase).toBeUndefined();
@@ -596,7 +619,7 @@ describe('criss-cross histories', () => {
 
   it('charges the virtual base against the merge budgets', async () => {
     const store = new Store();
-    const { main, head } = await crissCross(store, false);
+    const { main, head } = await crissCross(store, 'disjoint');
     const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head, budgets: { maxTreeReads: 2 } });
     expect(m).toMatchObject({ status: 'unknown', unknownReason: 'maxTreeReads', mergeable: false });
     expect(m.work.treeReads).toBeLessThanOrEqual(2);
