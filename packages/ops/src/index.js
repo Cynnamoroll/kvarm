@@ -258,6 +258,17 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, LIMIT(100), CURSOR],
   }),
   define({
+    name: 'get_path_history',
+    command: ['file', 'history'],
+    family: 'content',
+    description:
+      'Commits on the default branch that changed a path, newest first (first-parent history, like git log --first-parent -- <path>). ' +
+      'The index is built on demand in bounded steps; index.complete says whether the list is the whole history, and repeating the call advances an incomplete index.',
+    method: 'GET',
+    path: '/repos/{repo}/history',
+    params: [REPO, query('path', 'string', 'File path', { required: true, positional: true }), LIMIT(100), CURSOR],
+  }),
+  define({
     name: 'get_snapshot',
     command: ['snapshot', 'get'],
     family: 'content',

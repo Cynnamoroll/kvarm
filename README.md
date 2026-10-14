@@ -288,7 +288,7 @@ Details (warm working directories, extraction safety, exit codes): [`apps/cli/RE
 
 `POST /mcp` is a stateless Streamable HTTP MCP server (`@modelcontextprotocol/sdk`). Authenticate with `Authorization: Bearer <token>`: a personal access token with the `api` scope or an agent token. Every tool runs the same service code and the same authorization as REST.
 
-The 130 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`set_attribution`, `get_attribution`, `record_decision`, `get_context`), `provenance` (`get_audit`, `list_provenance_keys`, `add_provenance_key`, `revoke_provenance_key`), `branch-rules`, `issues`, `environments`, `sandboxes`, `ci` (runner jobs, flakes, hosted CI), `webhooks` and `reverts` (`create_revert`, `get_incident_webhook`, `rotate_incident_secret`, `delete_incident_webhook`). `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
+The 131 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`set_attribution`, `get_attribution`, `record_decision`, `get_context`), `provenance` (`get_audit`, `list_provenance_keys`, `add_provenance_key`, `revoke_provenance_key`), `branch-rules`, `issues`, `environments`, `sandboxes`, `ci` (runner jobs, flakes, hosted CI), `webhooks` and `reverts` (`create_revert`, `get_incident_webhook`, `rotate_incident_secret`, `delete_incident_webhook`). `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
 
 Setup guides for Claude Code, Codex CLI, Cursor and generic MCP clients, the agent workflow and an `AGENTS.md` template are in [`docs/agents/`](docs/agents/README.md).
 
@@ -306,7 +306,7 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | --- | --- |
 | user and tokens | `GET /user`, `GET/POST /user/tokens`, `DELETE /user/tokens/:id` |
 | repositories | `GET/POST /repos`, `POST /import`, `GET/PATCH/DELETE /repos/:owner/:repo`, `POST …/forks` |
-| content | `GET …/tree`, `GET …/contents` (path and `ref` as query parameters), `GET …/events` |
+| content | `GET …/tree`, `GET …/contents` (path and `ref` as query parameters), `GET …/events`, `GET …/history?path=` (default-branch history of one path) |
 | compare | `GET …/compare/:base...:head` (`order=path\|risk`, `limit`, `cursor`), `GET …/compare/:base...:head/file?path=`, `GET …/commits/:sha/diff` |
 | snapshots | `GET/POST …/snapshots/:ref`, `GET …/snapshots/:sha/download` (zstd-compressed tar; `Accept: application/zstd` serves stored bytes, otherwise the Worker decompresses) |
 | changes | `POST/GET …/changes`, `GET/PATCH …/changes/:n`, `POST …/changes/:n/merge`, `GET …/changes/:n/mergeability`, `GET …/changes/:n/checks` |
