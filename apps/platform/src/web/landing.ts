@@ -18,7 +18,7 @@ export function landingPage(origin: string): string {
     </div>
     <div class="app frame" role="img" aria-label="Home screen for cynthia/zod showing review requests, agent workspaces, and recorded decisions"><i class="c-tr"></i><i class="c-bl"></i>
       <div class="app-bar"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><span class="mono crumbs"><span class="steel">cynthia /</span> <b class="bone">zod</b></span><span class="spacer"></span><span class="avatar hud">CY</span></div>
-      <div class="screen-hud hud"><span class="tag">Public</span><span>Home · cynthia/zod</span></div>
+      <div class="screen-hud hud"><span class="tag">Demo</span><span>Home · cynthia/zod</span></div>
       <div class="ship"><span class="dot"></span><b>Live in cynthia/zod:</b> a flagged test deletion needs a decision, an agent widens datetime coverage, and the docs fix is already merged.</div>
       <div class="hfield">
         <section class="hcol">
@@ -53,7 +53,7 @@ export function landingPage(origin: string): string {
         </section>
       </div>
     </div>
-    <p class="screen-cap">cynthia/zod is a live import of colinhacks/zod on this deployment — browse the <a href="/cynthia/zod">repository</a> and its <a href="/cynthia/zod/changes">changes</a>.</p>
+    <p class="screen-cap">cynthia/zod is the demo import of colinhacks/zod on this deployment — browse the <a href="/cynthia/zod">repository</a> and its <a href="/cynthia/zod/changes">changes</a>.</p>
   </section>
 
   <section class="hero-x wrap m-agent" aria-labelledby="ha-title">
