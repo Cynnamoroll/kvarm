@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { findCommand } from '@kvarm/ops';
 import { CliError, checkout } from './checkout.js';
+import { requireBaseUrl } from './guards.js';
 import { commandHelp, commandUsage, groupCommands, operationsOverview, runOperation } from './ops.js';
 import { STATUS_HELP, runStatus } from './status.js';
 import { runRunner } from './runner.js';
@@ -185,9 +186,7 @@ async function runCheckout(args, io) {
   }
   if (positionals.length !== 3) throw new CliError('expected <owner/repo> <ref> <dir>', 2);
   const [repo, ref, dir] = /** @type {[string, string, string]} */ (positionals);
-  const baseUrl = io.env.KVARM_BASE_URL;
-  if (!baseUrl) throw new CliError('KVARM_BASE_URL is not set (e.g. https://kvarm.example.com)', 2);
-  if (!/^https?:\/\//.test(baseUrl)) throw new CliError(`KVARM_BASE_URL must be an http(s) URL, got "${baseUrl}"`, 2);
+  const baseUrl = requireBaseUrl(io.env);
   await checkout({ baseUrl, pat: io.env.KVARM_PAT || undefined, repo, ref, dir, env: io.env, stdout: io.stdout, stderr: io.stderr, fetch: io.fetch });
   return 0;
 }

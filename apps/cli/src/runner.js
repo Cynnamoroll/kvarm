@@ -13,9 +13,10 @@
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkout, CliError, parseRepo } from './checkout.js';
+import { checkout, CliError } from './checkout.js';
 import { DEFAULT_IMAGE, TRUNCATED, bounded, containerName, detectRuntime, executeContainer, executeShell, planExecution } from './executor.js';
-import { text } from './http.js';
+import { isTreeMode, parseRepoPath } from './guards.js';
+import { requestJson } from './http.js';
 import { materialize, openWorkdir } from './workdir.js';
 
 export { executeShell } from './executor.js';
@@ -201,9 +202,7 @@ const jittered = (ms) => Math.floor(ms * (0.5 + Math.random() / 2));
  * @param {string} repo
  */
 function repoApiPath(repo) {
-  const { owner, name } = parseRepo(repo);
-  // Like workdir.js slotPaths: a `.`/`..` name would resolve outside the repo.
-  if (name === '.' || name === '..') throw new CliError(`invalid repository "${repo}", expected <owner>/<repo>`, 2);
+  const { owner, name } = parseRepoPath(repo);
   return `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 }
 
@@ -216,20 +215,14 @@ function repoApiPath(repo) {
  * @param {typeof fetch} apiFetch
  */
 async function post(baseUrl, reposUrl, pat, path, body, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${pat}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (res.status === 204) return { status: 204, body: null };
-  let json;
-  try {
-    json = JSON.parse(await text(res));
-  } catch {
-    json = {};
+  const reply = await requestJson(apiFetch, `${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, { pat, method: 'POST', body });
+  if (reply.status === 204) return { status: 204, body: null };
+  const json = reply.json === undefined ? {} : reply.json;
+  if (!reply.ok) {
+    const err = json !== null && typeof json === 'object' ? /** @type {Record<string, unknown>} */ (json) : {};
+    throw new ApiError(`${path}: ${err.error ?? `HTTP ${reply.status}`}${err.code ? ` (${err.code})` : ''}`, reply.status, reply.retryAfter);
   }
-  if (!res.ok) throw new ApiError(`${path}: ${json.error ?? `HTTP ${res.status}`}${json.code ? ` (${json.code})` : ''}`, res.status, res.headers.get('retry-after'));
-  return { status: res.status, body: json };
+  return { status: reply.status, body: json };
 }
 
 /**
@@ -241,20 +234,13 @@ async function post(baseUrl, reposUrl, pat, path, body, apiFetch) {
  * @returns {Promise<Record<string, unknown>>}
  */
 async function getJson(baseUrl, reposUrl, pat, path, apiFetch) {
-  const res = await apiFetch(`${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, {
-    headers: { Authorization: `Bearer ${pat}`, accept: 'application/json' },
-  });
-  let json;
-  try {
-    json = JSON.parse(await text(res));
-  } catch {
-    json = null;
-  }
-  if (!res.ok || json === null || typeof json !== 'object' || Array.isArray(json)) {
+  const reply = await requestJson(apiFetch, `${baseUrl.replace(/\/+$/, '')}${reposUrl}/${path}`, { pat, headers: { accept: 'application/json' } });
+  const json = reply.json === undefined ? null : reply.json;
+  if (!reply.ok || json === null || typeof json !== 'object' || Array.isArray(json)) {
     const err = /** @type {{error?: unknown, code?: unknown}} */ (json);
-    const detail = err !== null && typeof err === 'object' && typeof err.error === 'string' ? err.error : `HTTP ${res.status}`;
+    const detail = err !== null && typeof err === 'object' && typeof err.error === 'string' ? err.error : `HTTP ${reply.status}`;
     const code = err !== null && typeof err === 'object' && typeof err.code === 'string' ? ` (${err.code})` : '';
-    throw new ApiError(`${path.split('?')[0]}: ${detail}${code}`, res.status, res.headers.get('retry-after'));
+    throw new ApiError(`${path.split('?')[0]}: ${detail}${code}`, reply.status, reply.retryAfter);
   }
   return /** @type {Record<string, unknown>} */ (json);
 }
@@ -325,9 +311,6 @@ export function budgetDeltaReader(read, maxBytes = MAX_DELTA_READ_BYTES) {
   };
   return budgetedRead;
 }
-
-/** Tree modes as the compare API reports them (raw git never pads). @param {string|null} mode */
-const isTreeMode = (mode) => mode === '40000' || mode === '040000';
 
 /**
  * The changed paths between the recorded commit and the new head, fetched

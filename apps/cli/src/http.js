@@ -47,6 +47,39 @@ export async function text(res, cap = MAX_RESPONSE_BYTES) {
 }
 
 /**
+ * One JSON request/response through `doFetch`: the Bearer token and a JSON
+ * body on the request, the reply read once through `text` (bounded) and
+ * parsed when it is JSON — `json` stays `undefined` on a non-JSON reply.
+ * The runner's claim/report loop and the operation layer share this so
+ * auth, body encoding and Retry-After handling live in one place.
+ * @param {typeof fetch} doFetch
+ * @param {string | URL} url
+ * @param {{ pat?: string, method?: string, headers?: Record<string, string>, body?: unknown }} [init]
+ * @returns {Promise<{ ok: boolean, status: number, json: unknown, text: string, retryAfter: string | null }>}
+ */
+export async function requestJson(doFetch, url, init = {}) {
+  /** @type {Record<string, string>} */
+  const headers = { ...init.headers };
+  if (init.pat) headers.authorization = `Bearer ${init.pat}`;
+  if (init.body !== undefined) headers['content-type'] = 'application/json';
+  const res = await doFetch(url, {
+    method: init.method ?? 'GET',
+    headers,
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+  });
+  const raw = await text(res);
+  /** @type {unknown} */
+  let json;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    // non-JSON reply
+  }
+  const ok = typeof res.ok === 'boolean' ? res.ok : res.status >= 200 && res.status < 300;
+  return { ok, status: res.status, json, text: raw, retryAfter: res.headers.get('retry-after') };
+}
+
+/**
  * @typedef {object} HttpResponse
  * @property {number} status
  * @property {{ get(name: string): string | null }} headers
