@@ -76,6 +76,62 @@ body.k-app:not(.k-landing) .md { max-width: 100%; color: var(--silver); overflow
 body.k-app:not(.k-landing) .md h1, body.k-app:not(.k-landing) .md h2, body.k-app:not(.k-landing) .md h3 { color: var(--bone); border-bottom: 1px solid var(--hairline); padding-bottom: var(--s2); }
 body.k-app:not(.k-landing) .md img { max-width: 100%; height: auto; }
 body.k-app:not(.k-landing) .md pre, body.k-app:not(.k-landing) .md table { display: block; max-width: 100%; overflow: auto; }
+body.k-app:not(.k-landing) .repo-overview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); align-items: start; gap: var(--s4); }
+body.k-app:not(.k-landing) .repo-overview-main, body.k-app:not(.k-landing) .repo-overview-side { display: grid; align-content: start; gap: var(--s4); min-width: 0; }
+body.k-app:not(.k-landing) .repo-overview .card { margin: 0; padding: 0; }
+body.k-app:not(.k-landing) .repo-head-commit { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px var(--s3); padding: var(--s3) var(--s4) !important; }
+body.k-app:not(.k-landing) .repo-head-sha { grid-row: span 2; color: var(--signal-hi); font: 400 12px/1.5 var(--f-mono); }
+body.k-app:not(.k-landing) .repo-head-subject { min-width: 0; color: var(--bone); overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .repo-head-meta { font-size: 10px; }
+body.k-app:not(.k-landing) .repo-files-panel .panel-head { min-height: 38px; }
+body.k-app:not(.k-landing) .repo-file-scroll { max-width: 100%; overflow-x: auto; }
+body.k-app:not(.k-landing) .repo-file-table { width: 100%; border-collapse: collapse; text-align: left; }
+body.k-app:not(.k-landing) .repo-file-table td { padding: 8px var(--s3); border-bottom: 1px solid var(--hairline); }
+body.k-app:not(.k-landing) .repo-file-table tr:last-child td { border-bottom: 0; }
+body.k-app:not(.k-landing) .repo-file-name a, body.k-app:not(.k-landing) .repo-file-up a { display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--bone); overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .repo-file-name a:hover, body.k-app:not(.k-landing) .repo-file-up a:hover { color: var(--signal-hi); }
+body.k-app:not(.k-landing) .repo-file-icon { display: inline-grid; flex: 0 0 16px; place-items: center; width: 16px; height: 16px; color: var(--steel); }
+body.k-app:not(.k-landing) .repo-file-icon.directory { color: var(--signal-hi); }
+body.k-app:not(.k-landing) .repo-file-icon svg { display: block; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1; stroke-linecap: square; stroke-linejoin: miter; }
+body.k-app:not(.k-landing) .repo-file-type { width: 1%; color: var(--steel); text-align: right; font-size: 10px; white-space: nowrap; }
+body.k-app:not(.k-landing) .repo-file-up td { padding-block: 5px; }
+body.k-app:not(.k-landing) .repo-about { padding: var(--s4) !important; }
+body.k-app:not(.k-landing) .repo-about h2 { margin: 0 0 var(--s2); color: var(--bone); font: 400 var(--t-hud)/1.4 var(--f-hud); text-transform: uppercase; }
+body.k-app:not(.k-landing) .repo-about p { margin: 0; color: var(--silver); }
+body.k-app:not(.k-landing) .repo-sidebar-clone .panel-head { border-bottom: 1px solid var(--hairline); }
+body.k-app:not(.k-landing) .repo-sidebar-clone .clone-box { margin: var(--s3); }
+body.k-app:not(.k-landing) .repo-sidebar-clone .clone-box code { padding: 8px; font-size: 10px; }
+body.k-app:not(.k-landing) .repo-sidebar-clone .clone-box .btn { padding-inline: 8px; font-size: 10px; }
+body.k-app:not(.k-landing) .repo-facts { display: grid; gap: var(--s3); padding: var(--s4) !important; }
+body.k-app:not(.k-landing) .repo-facts > div { display: grid; gap: 5px; }
+body.k-app:not(.k-landing) .repo-facts .hud { font-size: 10px; }
+body.k-app:not(.k-landing) .repo-facts b { color: var(--bone); font-size: 13px; font-weight: 400; }
+body.k-app:not(.k-landing) .repo-shortcuts { display: grid; padding: 0 !important; }
+body.k-app:not(.k-landing) .repo-shortcuts a { display: flex; justify-content: space-between; padding: 10px var(--s4); border-bottom: 1px solid var(--hairline); color: var(--silver); }
+body.k-app:not(.k-landing) .repo-shortcuts a:last-child { border-bottom: 0; }
+body.k-app:not(.k-landing) .repo-shortcuts a:hover { color: var(--signal-hi); }
+body.k-app:not(.k-landing) .readme-doc { overflow: hidden; }
+body.k-app:not(.k-landing) .readme-head { padding: 10px var(--s4); border-bottom: 1px solid var(--hairline); font-size: 10px; }
+body.k-app:not(.k-landing) .readme-body { width: min(calc(100% - 2 * var(--s5)), 72ch); margin: 0 auto; padding: var(--s5) 0; color: var(--silver); font-size: var(--t-md); line-height: 1.75; }
+body.k-app:not(.k-landing) .readme-body h1, body.k-app:not(.k-landing) .readme-body h2, body.k-app:not(.k-landing) .readme-body h3 { margin: 1.6em 0 .7em; color: var(--bone); font-weight: 500; }
+body.k-app:not(.k-landing) .readme-body h1 { font-size: var(--t-2xl); }
+body.k-app:not(.k-landing) .readme-body h2 { font-size: var(--t-xl); }
+body.k-app:not(.k-landing) .readme-body h3 { font-size: var(--t-lg); }
+body.k-app:not(.k-landing) .readme-body p, body.k-app:not(.k-landing) .readme-body ul, body.k-app:not(.k-landing) .readme-body ol { margin: 0 0 1em; }
+body.k-app:not(.k-landing) .readme-body blockquote { margin: 1.5em 0; padding: var(--s2) var(--s4); border-left: 2px solid var(--signal); background: var(--signal-ghost); color: var(--silver); }
+body.k-app:not(.k-landing) .readme-body pre { padding: var(--s3); border: 1px solid var(--hairline); background: var(--void); color: var(--silver); font: 400 12px/1.7 var(--f-mono); }
+body.k-app:not(.k-landing) .readme-body :not(pre) > code { padding: 2px 4px; background: var(--void); color: var(--signal-hi); font: 400 .9em/1.4 var(--f-mono); }
+body.k-app:not(.k-landing) .readme-body table { width: 100%; border-collapse: collapse; }
+body.k-app:not(.k-landing) .readme-body th, body.k-app:not(.k-landing) .readme-body td { padding: 8px 10px; border: 1px solid var(--hairline); text-align: left; }
+body.k-app:not(.k-landing) .readme-body th { color: var(--steel); font: 400 10px/1.4 var(--f-hud); text-transform: uppercase; }
+body.k-app:not(.k-landing) .blob-card { padding: 0 !important; overflow: hidden; }
+body.k-app:not(.k-landing) .blob-head { display: flex; align-items: center; gap: var(--s3); min-width: 0; padding: 9px var(--s3); border-bottom: 1px solid var(--hairline); }
+body.k-app:not(.k-landing) .blob-path { flex: 1; min-width: 0; color: var(--bone); overflow-wrap: anywhere; font: 400 12px/1.5 var(--f-mono); }
+body.k-app:not(.k-landing) .blob-head .hud { white-space: nowrap; font-size: 10px; }
+body.k-app:not(.k-landing) .blob-card > img { display: block; margin: var(--s4); }
+body.k-app:not(.k-landing) .blob-card > p { padding: 0 var(--s4); }
+body.k-app:not(.k-landing) .blob-card .codeview { margin: 0; border: 0; }
+body.k-app:not(.k-landing) .blob-card .ln { color: var(--steel); font: 400 11px/1.6 var(--f-mono); text-align: right; }
 body.k-app:not(.k-landing) .pager, body.k-app:not(.k-landing) .compare-form, body.k-app:not(.k-landing) .issue-filters, body.k-app:not(.k-landing) .ws-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
 body.k-app:not(.k-landing) .k-approval-list { padding: 0; }
 body.k-app:not(.k-landing) .k-approval-list > p { margin: 0; padding: var(--s3); }
@@ -83,6 +139,9 @@ body.k-app:not(.k-landing) .k-approval-row { display: grid; grid-template-column
 body.k-app:not(.k-landing) .k-approval-row:first-child { border-top: 0; }
 body.k-app:not(.k-landing) .k-approval-repo { color: var(--steel); font: 400 var(--t-hud)/1.4 var(--f-hud); overflow-wrap: anywhere; }
 body.k-app:not(.k-landing) .k-approval-command { min-width: 0; color: var(--silver); font: 400 12px/1.5 var(--f-mono); overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  body.k-app:not(.k-landing) .repo-overview { grid-template-columns: minmax(0, 1fr); }
+}
 @media (max-width: 640px) {
   body.k-app:not(.k-landing) .repo-head { padding: var(--s4) 0; }
   body.k-app:not(.k-landing) .repo-row, body.k-app:not(.k-landing) .tree-row, body.k-app:not(.k-landing) .commit-row, body.k-app:not(.k-landing) .issue-row, body.k-app:not(.k-landing) .ws-row { align-items: flex-start; flex-direction: column; }

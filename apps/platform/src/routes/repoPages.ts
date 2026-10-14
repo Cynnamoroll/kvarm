@@ -30,6 +30,7 @@ import {
   readCommit,
   readTreeAtPath,
   README_CANDIDATES,
+  withLazyRepo,
 } from '../artifacts/repo';
 import { renderMarkdown } from '../render/markdown';
 import { edgeCachedPage } from '../cache/edge';
@@ -39,6 +40,7 @@ import * as svc from '../repos/service';
 import type { RepoNeed, RepoRole } from '../services/authz';
 import { resolveRepoAccess } from '../services/access';
 import { repoViewGeneration } from '../services/pushFreshness';
+import { readCommitInfo } from '../services/refs';
 
 export const repoPages = new Hono<App>();
 
@@ -180,6 +182,19 @@ async function renderTreeView(
   }
   if (!tree) return notFound(c);
 
+  const headInfo = await withLazyRepo(c.env, resolved.repo.artifacts_name, (artifacts) =>
+    readCommitInfo(
+      {
+        env: c.env,
+        repo: resolved.repo,
+        artifacts,
+        bypass: false,
+        waitUntil: (p) => c.executionCtx.waitUntil(p),
+      },
+      tree.commit.hash,
+    ).catch(() => null),
+  );
+  const refs = await listRefs(c.env, resolved.repo).catch(() => null);
   const sorted = [...tree.entries].sort((a, b) => {
     const aDir = a.mode === '40000' ? 0 : 1;
     const bDir = b.mode === '40000' ? 0 : 1;
@@ -192,20 +207,25 @@ async function renderTreeView(
   const dirPrefix = path ? `${encodePath(path)}/` : '';
   const rows = sorted
     .map((e) => {
-      const isDir = e.mode === '40000';
+      const isDir = e.mode === '40000' || e.type === 'tree';
+      const kind = isDir ? 'directory' : e.mode === '160000' ? 'submodule' : 'file';
       const href = `${base}/${isDir ? 'tree' : 'blob'}/${encRef}/${dirPrefix}${encodeURIComponent(e.name)}`;
-      return html`
-        <div class="tree-row">
-          <a class="${isDir ? 'dir' : 'file'}" href="${raw(href)}">${isDir ? '▸' : '≡'} ${e.name}</a>
-        </div>
-      `;
+      const icon = isDir
+        ? '<svg aria-hidden="true" viewBox="0 0 16 16"><path d="M1.5 4.5h5l1.5 1.5h6.5v7.5h-13z"/><path d="M1.5 4.5v-1h5l1.5 1.5"/></svg>'
+        : '<svg aria-hidden="true" viewBox="0 0 16 16"><path d="M3 1.5h7l3 3v10H3z"/><path d="M10 1.5v3h3M5 8h6M5 10.5h6M5 13h4"/></svg>';
+      return html`<tr>
+        <td class="repo-file-name"><a href="${raw(href)}"><span class="repo-file-icon ${isDir ? 'directory' : 'file'}">${raw(icon)}</span><span>${e.name}</span></a></td>
+        <td class="repo-file-type hud">${kind}</td>
+      </tr>`;
     })
     .join('');
 
   const upHref = path
     ? `${base}/tree/${encRef}${path.includes('/') ? `/${encodePath(path.split('/').slice(0, -1).join('/'))}` : ''}`
     : '';
-  const upRow = upHref ? html`<div class="tree-row"><a href="${raw(upHref)}">..</a></div>` : '';
+  const upRow = upHref
+    ? html`<tr class="repo-file-up"><td colspan="2"><a href="${raw(upHref)}"><span class="repo-file-icon directory" aria-hidden="true">↑</span>..</a></td></tr>`
+    : '';
 
   // README below the tree, rendered once per blob content and cached by SHA.
   let readmeHtml = '';
@@ -238,27 +258,59 @@ async function renderTreeView(
       c.executionCtx.waitUntil(cache.put(mdKey, rendered.clone()).catch(() => undefined));
     }
     readmeHtml = html`
-      <div class="card md">
-        <div class="card-title">${entry.name}</div>
-        ${raw(await rendered.text())}
-      </div>
+      <section class="card readme-doc">
+        <div class="readme-head hud">${entry.name}</div>
+        <article class="md readme-body">${raw(await rendered.text())}</article>
+      </section>
     `;
     break;
   }
 
+  const subject = tree.commit.message.split('\n', 1)[0] ?? '';
+  const author = tree.commit.author.name || tree.commit.committer.name;
+  const branchCount = refs?.branches.length;
+  const cloneUrl = `${c.env.APP_ORIGIN || 'http://localhost:8787'}/${resolved.repo.owner_login}/${resolved.repo.name}.git`;
   const body = html`
-    <div class="card">
-      <div class="tree-list">
-        ${raw(upRow)}
-        ${raw(rows || '<p class="muted">empty directory</p>')}
-      </div>
+    <div class="repo-overview">
+      <main class="repo-overview-main">
+        <section class="card repo-head-commit">
+          <a class="repo-head-sha mono" href="${raw(`${base}/commit/${headInfo?.sha ?? tree.commit.hash}`)}">${(headInfo?.sha ?? tree.commit.hash).slice(0, 10)}</a>
+          <div class="repo-head-subject">${subject}</div>
+          <div class="repo-head-meta hud">${author} · ${timeAgo(tree.commit.authoredAt * 1000)}</div>
+        </section>
+        <section class="card repo-files-panel">
+          <div class="panel-head hud"><b>Files</b><span>${sorted.length} entries</span></div>
+          <div class="repo-file-scroll">
+            <table class="repo-file-table"><tbody>
+              ${raw(upRow)}
+              ${raw(rows || '<tr><td colspan="2" class="muted">empty directory</td></tr>')}
+            </tbody></table>
+          </div>
+        </section>
+        ${raw(readmeHtml)}
+      </main>
+      <aside class="repo-overview-side">
+        ${resolved.repo.description ? raw(html`<section class="card repo-about"><h2>About</h2><p>${resolved.repo.description}</p></section>`) : ''}
+        <section class="card repo-sidebar-clone">
+          <div class="panel-head hud"><b>Clone</b></div>
+          <div class="clone-box"><code>${cloneUrl}</code><button class="btn" type="button" data-copy="${cloneUrl}">Copy</button></div>
+        </section>
+        <section class="card repo-facts">
+          <div><span class="hud">Branches</span><b>${branchCount === undefined ? 'Unavailable' : branchCount}</b></div>
+          <div><span class="hud">Default branch</span><b><code>${resolved.repo.default_branch || 'main'}</code></b></div>
+        </section>
+        <nav class="card repo-shortcuts" aria-label="Repository views">
+          <a href="${raw(`${base}/changes`)}">Changes <span aria-hidden="true">→</span></a>
+          <a href="${raw(`${base}/train`)}">Train <span aria-hidden="true">→</span></a>
+          <a href="${raw(`${base}/activity`)}">Activity <span aria-hidden="true">→</span></a>
+        </nav>
+      </aside>
     </div>
-    ${raw(readmeHtml)}
   `;
 
   const page = repoPage(
     c.env,
-    { repo: resolved.repo, ref, path, tab: 'code' },
+    { repo: resolved.repo, ref, path, tab: 'code', branches: refs?.branches, showClone: false },
     viewerLogin,
     body,
   );
@@ -330,9 +382,16 @@ async function renderBlob(
   const isMarkdown = /\.(md|markdown|mdx)$/i.test(name);
   const rawBase = `/${resolved.repo.owner_login}/${resolved.repo.name}/raw/${encodeURIComponent(ref)}/${encodePath(path)}`;
   const headers = { 'content-type': 'text/html; charset=utf-8' };
+  const fileHeader = (size: number) => html`
+    <div class="blob-head">
+      <code class="blob-path">${path}</code>
+      <span class="hud">${formatBytes(size)}</span>
+      <a class="btn" href="${raw(rawBase)}">Raw</a>
+    </div>
+  `;
 
   if (isImage) {
-    const body = html`<div class="card"><img src="${rawBase}" alt="${name}" style="max-width:100%"></div>`;
+    const body = html`<section class="card blob-card">${raw(fileHeader(blob.size))}<img src="${rawBase}" alt="${name}" style="max-width:100%"></section>`;
     return finish(
       c,
       new Response(
@@ -346,9 +405,9 @@ async function renderBlob(
   const binary = buf.slice(0, 8000).includes(0);
   if (binary) {
     const body = html`
-      <div class="card">
+      <div class="card blob-card">
+        ${raw(fileHeader(buf.length))}
         <p>This file is binary (${formatBytes(buf.length)}).</p>
-        <p><a class="btn" href="${raw(rawBase)}">Download raw</a></p>
       </div>
     `;
     return finish(
@@ -387,17 +446,13 @@ async function renderBlob(
           ${from > 1 ? raw(`<a class="btn" href="?from=${Math.max(1, from - WINDOW_LINES)}">Previous</a>`) : ''}
           <span class="muted">lines ${from}–${to} of ${totalLines}</span>
           ${to < totalLines ? raw(`<a class="btn" href="?from=${to + 1}">Next</a>`) : ''}
-          <a class="btn" href="${raw(rawBase)}">Raw</a>
         </div>
       `
-    : html`<div class="pager"><a class="btn" href="${raw(rawBase)}">Raw</a></div>`;
+    : '';
 
   const body = html`
-    <div class="card">
-      <div class="card-title">
-        ${name}
-        <span class="muted">${formatBytes(buf.length)} · ${totalLines} lines</span>
-      </div>
+    <div class="card blob-card">
+      ${raw(fileHeader(buf.length))}
       ${raw(pagerHtml)}
       ${raw(contentHtml)}
     </div>

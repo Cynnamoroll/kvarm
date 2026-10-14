@@ -18,6 +18,7 @@ export interface ShellOptions {
   title?: string;
   /** Extra <head> content (a module script for pages with a client). */
   head?: string;
+  showClone?: boolean;
 }
 
 function tabHref(repo: RepoRow, tab: RepoTab, ref: string): string {
@@ -83,8 +84,14 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
   const description = repo.description ? html`<p class="lede">${repo.description}</p>` : '';
   const crumbs =
     opts.path !== undefined && opts.tab !== 'settings' && opts.tab !== 'environments'
-      ? `<div class="crumbs">${breadcrumbs(repo, ref, opts.path)}</div>`
+      ? `<div class="crumbs hud">${breadcrumbs(repo, ref, opts.path)}</div>`
       : '';
+  const clone = opts.showClone === false
+    ? ''
+    : html`<div class="clone-box">
+        <code id="clone-url">${cloneUrl}</code>
+        <button class="btn" type="button" data-copy="${cloneUrl}">Copy</button>
+      </div>`;
 
   const shellBody = html`
 <header class="k-head repo-page-head">
@@ -94,10 +101,7 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
     ${raw(description)}
   </div>
   <div class="k-head-side">
-  <div class="clone-box">
-    <code id="clone-url">${cloneUrl}</code>
-    <button class="btn" type="button" data-copy="${cloneUrl}">Copy</button>
-  </div>
+    ${raw(clone)}
   </div>
 </header>
 <nav class="tabs k-tabs">${raw(tabHtml)}
