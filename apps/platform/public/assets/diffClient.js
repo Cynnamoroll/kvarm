@@ -22,6 +22,18 @@ export const OVERSCAN = 24;
 export const VIEWPORT_ROWS = 30;
 /** Pool size; must cover a full window (viewport + both overscans). */
 export const POOL_SIZE = VIEWPORT_ROWS + 2 * OVERSCAN + 18;
+/**
+ * Diffs up to this many rows render inline: every row present in the DOM,
+ * lines wrapping inside the card, no horizontal scrolling and no
+ * virtualized geometry. Larger diffs keep the virtualized viewport, whose
+ * fixed row heights are what a 1M-line file can afford.
+ */
+export const INLINE_MAX_ROWS = 2000;
+
+/** Whether a diff of `total` rows renders inline (wrapped) or virtualized. */
+export function inlineOf(total) {
+  return total <= INLINE_MAX_ROWS;
+}
 
 /**
  * @typedef {Object} ClientHunk
@@ -236,6 +248,36 @@ function mountViewport(doc, body, rows, maxChars) {
 }
 
 /**
+ * Builds a file's wrapped inline diff into `body`: one row per line, grid
+ * columns for the two line numbers and the wrapping text. Rows keep their
+ * natural heights, so nothing ever scrolls sideways.
+ *
+ * @param {any} doc
+ * @param {any} body
+ * @param {RenderRow[]} rows
+ */
+function mountInline(doc, body, rows) {
+  const list = doc.createElement('div');
+  list.className = 'diff-inline';
+  for (const r of rows) {
+    const div = doc.createElement('div');
+    div.className = 'diff-row ' + (r.kind === 'hunk' ? 'hunk-row' : r.op);
+    for (const [cls, text] of [
+      ['ln old', r.oldNo === null ? '' : String(r.oldNo)],
+      ['ln new', r.newNo === null ? '' : String(r.newNo)],
+      ['line-text', r.text],
+    ]) {
+      const span = doc.createElement('span');
+      span.className = cls;
+      span.textContent = text;
+      div.appendChild(span);
+    }
+    list.appendChild(div);
+  }
+  body.appendChild(list);
+}
+
+/**
  * Attaches expand/collapse behavior to one file row.
  *
  * @param {any} details
@@ -314,7 +356,11 @@ function attachFile(details, fileApi) {
           body.appendChild(notice(details.ownerDocument, 'muted', 'no changed lines'));
           return;
         }
-        mountViewport(details.ownerDocument, body, model.rows, model.maxChars);
+        if (inlineOf(model.total)) {
+          mountInline(details.ownerDocument, body, model.rows);
+        } else {
+          mountViewport(details.ownerDocument, body, model.rows, model.maxChars);
+        }
       })
       .catch((err) => {
         if (thisEpoch !== epoch) return; // superseded by a reopen or close

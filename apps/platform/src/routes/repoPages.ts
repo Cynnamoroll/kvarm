@@ -16,7 +16,7 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { escapeHtml, formatBytes, html, raw, timeAgo } from '@kvarm/ui';
+import { escapeHtml, formatBytes, highlightLines, html, raw, timeAgo } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
 import { clientIp, requestCredential, requestSession, type ApiActor, type App } from './api';
 import { csrfTokenValid } from '../auth/workos';
@@ -435,10 +435,16 @@ async function renderBlob(
   if (isMarkdown && !needsWindow) {
     contentHtml = renderMarkdown(text);
   } else {
-    const rows = lines
-      .map((lineText, i) => {
+    // One HTML string per line: token spans from the language highlighter,
+    // everything escaped. A window highlights only its slice, so a block
+    // comment opened before the window renders plain — the honest price of
+    // the line budget. `path` names the file, so the language follows the
+    // extension; over-budget text degrades to escaped plain lines inside.
+    const lineHtml = highlightLines(path, lines.join('\n'));
+    const rows = lineHtml
+      .map((line, i) => {
         const no = from + i;
-        return `<div class="code-row" id="L${no}"><span class="ln">${no}</span><span class="cl">${escapeHtml(lineText)}</span></div>`;
+        return `<div class="code-row" id="L${no}"><span class="ln">${no}</span><span class="code-line">${line}</span></div>`;
       })
       .join('');
     contentHtml = `<div class="codeview">${rows}</div>`;
