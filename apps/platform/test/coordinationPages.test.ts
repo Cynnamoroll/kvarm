@@ -479,6 +479,8 @@ describe('train page', () => {
     expect(r.refresh).toBe('10');
     expect(r.cacheControl).toBe('no-store');
     expect(r.text).toContain('→ <code>main</code>');
+    expect(r.text).toContain('data-live-region="train"');
+    expect(r.text).toContain('data-live-status');
     expect(r.text).toContain('checking');
     expect(r.text).toContain('queued');
     expect(r.text).toContain('attempt');

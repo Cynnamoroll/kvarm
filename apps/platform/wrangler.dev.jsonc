@@ -68,7 +68,8 @@
       { "name": "RATE_LIMIT", "class_name": "RateLimiter" },
       { "name": "MERGE_LOCK", "class_name": "MergeLock" },
       { "name": "ENV_BUILDER", "class_name": "EnvironmentBuilder" },
-      { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" }
+      { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" },
+      { "name": "REPO_EVENTS", "class_name": "RepoEvents" }
     ]
   },
   "migrations": [
@@ -83,6 +84,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["EnvironmentBuilder", "AgentSandbox"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["RepoEvents"]
     }
   ],
   "containers": [

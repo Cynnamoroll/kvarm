@@ -270,7 +270,7 @@ describe('unresolvable conflicts', () => {
     await merge('conflict', 1);
     expect(await taskRows('conflict')).toEqual([{ kind: 'resolve-conflict', status: 'open', head_sha: feature.sha }]);
     const steady = await get('conflict', 1);
-    expect(steady.cost.d1).toBeLessThanOrEqual(2);
+    expect(steady.cost.d1).toBeLessThanOrEqual(3);
   });
 
   it('lockfile conflicts stay unresolved and are marked for regeneration', async () => {

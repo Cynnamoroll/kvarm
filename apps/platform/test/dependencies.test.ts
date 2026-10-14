@@ -761,7 +761,7 @@ describe('lifecycle', () => {
       const landed = await merge('settle-many', a.change!);
       expect(landed.status).toBe(200);
       // Within one invocation's budget: no settlement intent, no continuation.
-      expect(landed.cost.do).toBe(0);
+      expect(landed.cost.do).toBe(1);
       expect(await intentsOf('settle-many')).toEqual([]);
       for (const d of pinned) expect((await listDeps('settle-many', d.id)).json.dependencies, d.id).toEqual([expect.objectContaining({ state: 'satisfied' })]);
       expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-landed' }));
@@ -821,7 +821,7 @@ describe('lifecycle', () => {
         { type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN },
       ]);
       const first = continuations()[0];
-      expect(landed.cost.do).toBe(1);
+      expect(landed.cost.do).toBe(2);
       const [intent] = await intentsOf(name);
       expect(intent).toMatchObject({ repoId: repoIds[name], changeSetId: first.changeSetId, mergedAt: first.mergedAt, mergeCommit, ref: MAIN });
       expect(await alarmOf(name)).toBe(intent!.deadline);
@@ -981,7 +981,7 @@ describe('lifecycle', () => {
       const landed = await merge(name, a.change!);
       expect(landed.status, JSON.stringify(landed.json)).toBe(200);
       const mergeCommit = landed.json.merge.mergeCommit as string;
-      expect(landed.cost.do).toBe(1);
+      expect(landed.cost.do).toBe(2);
       expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
       expect(await states(name, dependents)).toEqual([...Array(4).fill('satisfied'), ...Array(5).fill('stale')]);
 
@@ -1125,7 +1125,7 @@ describe('lifecycle', () => {
     sent.length = 0;
     const landed = await merge(name, a.change!);
     expect(landed.status).toBe(200);
-    expect(landed.cost.do).toBe(0);
+    expect(landed.cost.do).toBe(1);
     expect(await wakeMarks(name)).toBe(0);
     expect(await intentsOf(name)).toEqual([]);
     expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
@@ -1393,7 +1393,7 @@ describe('lifecycle', () => {
       expect(handed).toEqual([{ type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN }]);
       expect(await intentsOf(name)).toEqual([expect.objectContaining({ mergeCommit, ref: MAIN })]);
 
-      // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried, not acknowledged.
+      // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried.
       sent.length = 0;
       const early = await deliverRaw(handed[0]);
       expect(early.explicitAcks).toEqual([]);
@@ -1444,12 +1444,12 @@ describe('lifecycle', () => {
       expect(await states(name, [...older, auto])).toEqual(Array(3).fill('satisfied'));
       expect((await getChange(name, autoN)).json.state).toBe('open');
       expect(await wakeMarks(name)).toBe(1);
-      // Not done: the delivery hands the displaced mark on (successor continuation and the kept intent) before it is acknowledged.
+      // Not done: the delivery hands the displaced mark on (successor continuation and the kept intent) before it settles.
       expect(first.explicitAcks).toHaveLength(1);
       expect(settleSends()).toEqual([msg]);
       expect(await intentsOf(name)).toHaveLength(1);
 
-      // The successor runs under a fresh owner token: the live claim is held, so its delivery is retried, not acknowledged.
+      // The successor runs under a fresh owner token: the live claim is held, so its delivery is retried.
       sent.length = 0;
       const held = await deliverRaw(msg);
       expect(held.explicitAcks).toEqual([]);

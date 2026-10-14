@@ -40,7 +40,7 @@ import {
   resolveCtx,
   branchRef,
   type ChangeContext,
-  type ChangeDetail,
+  type CreatedChangeDetail,
   type MergePolicy,
 } from './changes';
 import { artifactsPusher, type GitPusher } from './gitwrite';
@@ -85,7 +85,7 @@ export interface RevertView {
 
 export interface RevertCreated {
   revert: RevertView;
-  change: ChangeDetail;
+  change: CreatedChangeDetail;
 }
 
 export interface RevertOrigin {
@@ -256,7 +256,7 @@ export function createRevert(cx: ChangeContext, input: unknown, deps: RevertDeps
 
     const title = p.title ?? message.split('\n', 1)[0]!.slice(0, CHANGE_LIMITS.titleMax);
     const body = [message.split('\n\n').slice(1).join('\n\n').trim(), origin.note].filter(Boolean).join('\n\n');
-    let change: ServiceResult<ChangeDetail>;
+    let change: ServiceResult<CreatedChangeDetail>;
     try {
       change = await createChange(cx, { title, body, base, head: branch, mergePolicy }, { kind: 'revert' });
     } catch (err) {

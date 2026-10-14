@@ -144,7 +144,7 @@ describe('POST reverts', () => {
     expect(queued.json.entry).toMatchObject({ number: change.number, state: 'queued', target: 'main' });
     const q = await call('GET', `${R('happy')}/queue`, tok.owner);
     expect(q.json.entries.map((e: any) => e.number)).toEqual([change.number]);
-    expect(r.cost.do).toBe(0);
+    expect(r.cost.do).toBe(1);
   });
 
   it('reverts a merged change set relative to the target it landed on, the same tree as reverting its merge commit with -m 1', async () => {

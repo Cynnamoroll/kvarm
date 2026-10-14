@@ -25,7 +25,7 @@ export { WORKSPACE_REF_PREFIX };
 import { fail, guarded as baseGuarded, objectBody } from './result';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import type { BranchRule } from './branchRules';
-import { createChange, normalizeBranch, type ChangeDetail } from './changes';
+import { createChange, normalizeBranch, type CreatedChangeDetail } from './changes';
 import { RESOLVE_CONFLICT } from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
@@ -483,7 +483,7 @@ export function openChangeSet(
   input: unknown,
   /** Told the internal id of the change once the workspace link is won. */
   onLinked?: (change: { id: string; number: number }) => void,
-): Promise<ServiceResult<ChangeDetail & { workspace: string }>> {
+): Promise<ServiceResult<CreatedChangeDetail & { workspace: string }>> {
   return guarded(async () => {
     const parsed = objectBody(input);
     if (!parsed.ok) return parsed;

@@ -260,7 +260,7 @@ describe('workspace-backed enqueue', () => {
 describe('workspace-backed publication window', () => {
   // A publication chain shares one lease and one push across its candidates,
   // so a candidate's stored share of those is at most the single-publication row.
-  const ROW = { d1: 3, rr: 12, rw: 8, art: 4, sub: 2 };
+  const ROW = { d1: 3, rr: 13, rw: 8, art: 4, sub: 2 };
   const within = (cost: CostCounters) =>
     cost.d1 <= ROW.d1 && cost.rr <= ROW.rr && cost.rw <= ROW.rw && cost.art <= ROW.art && cost.do <= 2 && cost.sub <= ROW.sub;
 

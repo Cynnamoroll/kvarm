@@ -563,9 +563,9 @@ describe('composition', () => {
       ],
     });
     expect(r.json.changeSet).toEqual(expect.any(Number));
-    // Budget row "POST …/candidates/compose (clean)": d1 ≤ 8, sub ≤ 3.
-    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(8);
-    expect(r.cost.sub).toBeLessThanOrEqual(3);
+    // Change creation now persists bounded review coverage and its per-head tier.
+    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(10);
+    expect(r.cost.sub).toBeLessThanOrEqual(4);
     expect(r.json.workspace).toMatchObject({ status: 'active', base: 'main', changeSet: r.json.changeSet });
     expect(repo.refs.get(r.json.workspace.ref)).toBe(r.json.commitSha);
     // The composed workspace's head is the composed commit, not the base, before its push event is consumed.
@@ -638,9 +638,9 @@ describe('composition', () => {
 
     const r = await call('POST', `${R(name)}/candidates/compose`, tok.owner, { base: 'main', workspaces: [a.id, b.id] });
     expect(r.status, JSON.stringify(r.json)).toBe(201);
-    // Budget row "POST …/candidates/compose (clean)" holds with the virtual merge base: its reads go to Artifacts, not D1.
-    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(8);
-    expect(r.cost.sub).toBeLessThanOrEqual(3);
+    // Change creation now persists bounded review coverage and its per-head tier.
+    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(10);
+    expect(r.cost.sub).toBeLessThanOrEqual(4);
     expect(r.json.treeSha).toBe(await writeTree(repo, { ...merged, 'src/a.ts': 'a\n', 'docs/b.md': 'b\n' }));
     expect(r.json.sources).toMatchObject([
       { workspace: a.id, mergeBase: [x1.sha, x2.sha].sort()[0], mergeBases: [x1.sha, x2.sha].sort() },

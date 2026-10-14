@@ -132,12 +132,12 @@ function trainDeps(over: Partial<TrainDeps> = {}): TrainDeps & { events: TrainEv
   };
 }
 
-async function entries(name: string): Promise<Array<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null }>> {
+async function entries(name: string): Promise<Array<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null; head_sha: string }>> {
   return (
     (
-      await env.DB.prepare('SELECT change_number, state, active, reason_code, generation, cost FROM merge_queue WHERE repo_id = ? ORDER BY seq')
+      await env.DB.prepare('SELECT change_number, state, active, reason_code, generation, cost, head_sha FROM merge_queue WHERE repo_id = ? ORDER BY seq')
         .bind(repoIds[name])
-        .all<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null }>()
+        .all<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null; head_sha: string }>()
     ).results ?? []
   );
 }
@@ -868,6 +868,43 @@ describe('integration train', () => {
     }
   });
 
+  it('keeps an equivalent non-auto queued entry active and re-points it after the head event', async () => {
+    const { repo, numbers } = await setup('equivalent-queue', 1);
+    const [n] = numbers as [number];
+    await enqueue('equivalent-queue', n);
+    const oldHead = repo.refs.get('refs/heads/b1')!;
+    const equivalent = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [oldHead]);
+    repo.refs.set('refs/heads/b1', equivalent.sha);
+    await deliver(pushBody('equivalent-queue', 'refs/heads/b1', oldHead, equivalent.sha, Date.now()));
+    expect((await entries('equivalent-queue')).map((entry) => [entry.state, entry.head_sha, entry.active, entry.reason_code])).toEqual([
+      ['queued', equivalent.sha, 1, null],
+    ]);
+  });
+
+  it('waits for an equivalent in-run head move, then publishes after the head event re-points the entry', async () => {
+    const { repo, main, numbers } = await setup('equivalent-live-head', 1);
+    const [n] = numbers as [number];
+    await enqueue('equivalent-live-head', n);
+    const oldHead = repo.refs.get('refs/heads/b1')!;
+    const equivalent = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [oldHead]);
+    const first = await runTrain(
+      env,
+      repoIds['equivalent-live-head']!,
+      MAIN,
+      preparing(async () => {
+        repo.refs.set('refs/heads/b1', equivalent.sha);
+      }),
+    );
+    expect(first.published).toEqual([]);
+    expect(first.ejected).toEqual([]);
+    expect(repo.refs.get(MAIN)).toBe(main);
+    expect((await entries('equivalent-live-head')).map((entry) => [entry.state, entry.active, entry.reason_code])).toEqual([['queued', 1, null]]);
+    await deliver(pushBody('equivalent-live-head', 'refs/heads/b1', oldHead, equivalent.sha, Date.now()));
+    const second = await runTrain(env, repoIds['equivalent-live-head']!, MAIN, trainDeps());
+    expect(second.published).toEqual([n]);
+    expect((await getChange('equivalent-live-head', n)).json.state).toBe('merged');
+  });
+
   it('a force-push of the head while the pack is prepared stops publication of the composed head', async () => {
     const { repo, main, numbers } = await setup('prep-head', 1);
     const [n] = numbers as [number];
@@ -1333,4 +1370,3 @@ async function deliver(body: unknown) {
   await waitOnExecutionContext(ctx);
   expect(result.explicitAcks).toHaveLength(1);
 }
-

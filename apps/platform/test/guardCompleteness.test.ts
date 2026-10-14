@@ -162,6 +162,7 @@ describe('guard completeness: branch rules', () => {
       pattern,
       requiredChecks: [],
       requiredApprovals: 0,
+      agentApprovals: 'never',
       guardCompleteness,
       createdBy: null,
       createdAt: 0,
@@ -182,7 +183,7 @@ describe('guard completeness: branch rules', () => {
 
   it('guard completeness: the refusal comes before pending required checks and names an unknown count plainly', () => {
     const policy = effectivePolicy(
-      [{ id: 'r', pattern: 'refs/heads/main', requiredChecks: ['ci/test'], requiredApprovals: 0, guardCompleteness: 'required', createdBy: null, createdAt: 0, updatedBy: null, updatedAt: 0 }],
+      [{ id: 'r', pattern: 'refs/heads/main', requiredChecks: ['ci/test'], requiredApprovals: 0, agentApprovals: 'never', guardCompleteness: 'required', createdBy: null, createdAt: 0, updatedBy: null, updatedAt: 0 }],
       MAIN,
     );
     const checks = {

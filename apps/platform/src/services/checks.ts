@@ -15,6 +15,7 @@
 import { guard, guardWants, type GuardChange, type GuardContent, type GuardResult, type GuardUninspected } from '@kvarm/review';
 import type { LazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
+import { publishRepoEvent } from './live';
 import type { ServiceResult } from '../repos/service';
 import { CHECKS_PRODUCERS, rollupState, type CheckState, type ChecksProducer, type ChecksSubject, type RequiredCheck } from './checksGate';
 import { treePairBody, type CompareBody } from './compare';
@@ -612,6 +613,7 @@ export async function reportCheckRun(ctx: ResolveContext, input: unknown): Promi
   const row = (runRead?.results as CheckRunRow[] | undefined)?.[0];
   if (!row) return { ok: false, status: 500, error: 'check run could not be recorded', code: 'CREATE_FAILED' };
   const c = (changeRead?.results as RunChangeRow[] | undefined)?.[0];
+  if (c) await publishRepoEvent(ctx.env, ctx.repo.id, { type: 'checks.updated', changeNumber: c.number, state: row.conclusion ?? row.status }, ctx.waitUntil);
   return {
     ok: true,
     value: { run: checkRunView(row), change: runChangeOf(c) },
@@ -673,6 +675,7 @@ export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input:
     return { ok: false, status: 404, error: 'check run not found', code: 'CHECK_RUN_NOT_FOUND' };
   }
   const c = (changeRead?.results as RunChangeRow[] | undefined)?.[0];
+  if (c) await publishRepoEvent(env, repo.id, { type: 'checks.updated', changeNumber: c.number, state: row.conclusion ?? row.status });
   return {
     ok: true,
     value: {
@@ -681,4 +684,3 @@ export async function updateCheckRun(env: Env, repo: RepoRow, id: string, input:
     },
   };
 }
-

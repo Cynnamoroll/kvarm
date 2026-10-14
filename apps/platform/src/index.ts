@@ -33,11 +33,12 @@ import { fleetPages, fleetRepoPages } from './routes/fleetPages';
 import { issuePages } from './routes/issuePages';
 import { coordinationPages } from './routes/coordinationPages';
 import { comparePages } from './routes/comparePages';
+import { changePages } from './routes/changePages';
 import { inboxPages, reviewPages } from './routes/reviewPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
-export { TokenCache, RateLimiter, MergeLock } from './do';
+export { TokenCache, RateLimiter, MergeLock, RepoEvents } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
 export { EnvironmentBuild } from './workflows/environmentBuild';
 export { CiRunnerSandbox } from './containers/ciRunnerSandbox';
@@ -120,7 +121,8 @@ app.route('/:owner/:repo', issuePages);
 app.route('/:owner/:repo', repoPages);
 app.route('/:owner/:repo', coordinationPages);
 app.route('/:owner/:repo', comparePages);
-// The change page and its decide posts (/changes/...), issue #8.
+app.route('/:owner/:repo', changePages);
+// Escalation resolution remains in reviewPages; change page and review posts live in changePages.
 app.route('/:owner/:repo', reviewPages);
 
 // Static assets (public/*) as the final fallback.
