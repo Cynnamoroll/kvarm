@@ -172,6 +172,18 @@ describe('change pages', () => {
     expect(response.text).toContain('1 pending');
   });
 
+  it('renders an unmapped review error with a safe code fallback', async () => {
+    await seedChange('unmapped-error');
+    await env.DB.prepare(
+      'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(repoIds['unmapped-error'], userIds[REVIEWER], 'write', userIds[OWNER], Date.now(), Date.now()).run();
+    const browser = await browserSession(REVIEWER);
+    const page = await browser(`/${OWNER}/unmapped-error/changes/1?error=UNMAPPED_REVIEW_CODE`);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('The decision was not recorded.');
+    expect(page.text).toContain('<code>UNMAPPED_REVIEW_CODE</code>');
+  });
+
   it('renders guide chapters, tiers, checks and a review form for a signed-in reviewer', async () => {
     await seedChange('detail');
     await request('PUT', `/api/v1/repos/${OWNER}/detail/review-policy`, { token: ownerToken, json: { requiredReviews: 1 } });
@@ -262,6 +274,18 @@ describe('change pages', () => {
     expect(page.text).not.toContain('protected-path');
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_escalations WHERE change_set_id = ? AND reason = ?')
       .bind(row!.id, 'protected-path').first<{ n: number }>()).toMatchObject({ n: 0 });
+    const packet = await request('GET', `/api/v1/repos/${OWNER}/${name}/changes/1/reviews`, { token: ownerToken });
+    expect(packet.status).toBe(200);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_escalations WHERE change_set_id = ? AND reason = ?')
+      .bind(row!.id, 'protected-path').first<{ n: number }>()).toMatchObject({ n: 0 });
+    const inbox = await browser('/inbox');
+    const itemAt = inbox.text.indexOf('Docs-only low-risk change');
+    expect(itemAt).toBeGreaterThan(-1);
+    const item = inbox.text.slice(inbox.text.lastIndexOf('<article', itemAt), inbox.text.indexOf('</article>', itemAt));
+    expect(item).toContain('Awaiting approval');
+    expect(item).not.toContain('Protected target');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_escalations WHERE change_set_id = ? AND reason = ?')
+      .bind(row!.id, 'protected-path').first<{ n: number }>()).toMatchObject({ n: 0 });
   });
 
   it('requires CSRF for a session approve and records the review', async () => {
@@ -273,14 +297,16 @@ describe('change pages', () => {
     const path = `/${OWNER}/csrf/changes/1/review`;
     const page = await browser(`/${OWNER}/csrf/changes/1`);
     const csrf = /name="_csrf" value="([^"]+)"/.exec(page.text)?.[1];
+    const headSha = /name="headSha" value="([^"]+)"/.exec(page.text)?.[1];
     expect(csrf).toBeTruthy();
+    expect(headSha).toBeTruthy();
     const headers = { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-origin' };
     const denied = await browser(path, { method: 'POST', headers, body: 'verdict=approve&body=looks+good' });
     expect(denied.status).toBe(403);
     const accepted = await browser(path, {
       method: 'POST',
       headers,
-      body: new URLSearchParams({ _csrf: csrf!, verdict: 'approve', body: 'looks good' }).toString(),
+      body: new URLSearchParams({ _csrf: csrf!, verdict: 'approve', body: 'looks good', headSha: headSha! }).toString(),
     });
     expect(accepted.status).toBe(303);
     expect(await env.DB.prepare('SELECT verdict FROM change_reviews WHERE repo_id = ?').bind(repoIds.csrf).first<{ verdict: string }>())

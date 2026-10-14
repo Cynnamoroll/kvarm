@@ -205,6 +205,10 @@ body.k-app:not(.k-landing) .change-review-side > * { margin-bottom: var(--s4); }
 body.k-app:not(.k-landing) .change-review-side { position: sticky; top: var(--s4); }
 body.k-app:not(.k-landing) .change-review-side .k-list > li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--s2); }
 body.k-app:not(.k-landing) .change-review-side .k-list > li > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li { display: flex; flex-direction: column; align-items: stretch; }
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > label,
+body.k-app:not(.k-landing) .change-review-side #escalations .k-list > li > form.inline > textarea { grid-column: 1 / -1; min-width: 0; }
 body.k-app:not(.k-landing) .remaining-list { list-style: none; margin: 0; padding: 0; }
 body.k-app:not(.k-landing) .remaining-row {
   display: grid;

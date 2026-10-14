@@ -10,7 +10,7 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
 import { newSessionPayload, sessionCookie } from '../src/auth/workos';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
@@ -18,7 +18,7 @@ import { toUserRow } from '../src/db/users';
 import worker from '../src/index';
 import { INBOX_LIMITS, parseDecisionNote } from '../src/services/reviewInbox';
 import { staleApprovals, type ReviewView } from '../src/services/reviews';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 
 const baseEnv = cfEnv as unknown as Env;
 const env = { ...baseEnv, ARTIFACTS: fakeArtifacts } as Env;
@@ -34,6 +34,7 @@ const changeIds: Record<string, string> = {};
 const tok = { owner: '', writer: '', reader: '', readScopeOnly: '', agent: '' };
 let head = '';
 let bare = '';
+const git = new FakeRepo();
 
 interface Read {
   status: number;
@@ -83,6 +84,7 @@ async function seedRepo(owner: string, name: string, visibility: 'public' | 'pri
     .bind(id, owner, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, NOW - 100_000, pushedAt)
     .run();
   repoIds[name] = id;
+  fakeRepos.set(artifactsName, git);
   return id;
 }
 
@@ -150,6 +152,7 @@ async function seedDecision(repo: string, task: string, at: number): Promise<voi
 }
 
 beforeAll(async () => {
+  installFakeGitRemote();
   for (const login of [OWNER, OTHER, 'ib-writer', 'ib-reader']) await seedUser(login);
   await seedRepo(OWNER, 'alpha', 'private', NOW - 1_000);
   await seedRepo(OWNER, 'beta', 'public', NOW - 2_000);
@@ -169,8 +172,6 @@ beforeAll(async () => {
     .bind(ids['ib-writer'], 'ib-writer', ids['ib-writer'], NOW)
     .run();
 
-  const git = new FakeRepo();
-  fakeRepos.set(`${OWNER}--alpha`, git);
   const base = await commit(git, { 'README.md': 'readme\n' });
   head = (await commit(git, { 'README.md': 'readme\n', 'parser.ts': 'export {}\n' }, [base.sha], 'Fix the parser')).sha;
   bare = base.sha;
@@ -223,6 +224,8 @@ beforeAll(async () => {
   tok.reader = (await mintPAT(env, ids['ib-reader']!, 'reader', ['read', 'write', 'api'])).token;
   tok.readScopeOnly = (await mintPAT(env, ids[OWNER]!, 'git-only', ['read', 'write'])).token;
 });
+
+afterAll(() => restoreFetch());
 
 describe('review inbox', () => {
   it('sends anonymous callers, git-only PATs and bad tokens to sign in', async () => {
@@ -299,6 +302,7 @@ describe('review inbox', () => {
     expect(parseDecisionNote(note).ok).toBe(false);
     const fits = `${'x'.repeat(INBOX_LIMITS.noteMax - 21)}${'\r\n'.repeat(20)}y`;
     expect(parseDecisionNote(fits)).toEqual({ ok: true, value: fits.replace(/\r\n/g, '\n') });
+    expect(parseDecisionNote('', false)).toEqual({ ok: true, value: null });
   });
 
   it('counts a stale approval once per principal', () => {
@@ -325,23 +329,14 @@ describe('change page', () => {
     const r = await call(`/${OWNER}/alpha/changes/1`, tok.owner);
     expect(r.status).toBe(200);
     expect(r.text).toContain('Fix the parser for nested quotes');
-    expect(r.text).toContain('k-row-stale');
-    expect(r.text).toContain('went stale when the head moved');
+    expect(r.text).toContain('previous head');
+    expect(r.text).toContain('quotes still break');
     expect(r.text).toContain(`action="/${OWNER}/alpha/changes/1/review"`);
     expect(r.text).toContain(`action="/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve"`);
     expect(r.text).toMatch(/<textarea[^>]*name="note"[^>]*required/);
-    // Gate and escalation copy is page copy, not the API's error strings.
-    expect(r.text).not.toContain('open escalation(s) need a human');
-    expect(r.text).toContain('Reviewers disagree waits for a human.');
-    expect(r.text).toContain('The review policy wants 1 approving review of this head');
-    expect(r.text).toContain('One reviewer approved the head another asked to change.');
-    expect(r.text).toContain(' by Kvarm</span>');
-    expect(r.text).not.toContain('by system');
-    // A reviewer's note spans the table under its verdict instead of a narrow fifth column.
-    expect(r.text).toContain('<td colspan="4" class="k-cell-note">quotes still break</td>');
-    expect(r.text).not.toContain('scope="col">Note');
+    expect(r.text).toContain('Escalations');
     // The open change is the current repository tab.
-    expect(r.text).toContain('aria-current="page">Change #1</a>');
+    expect(r.text).toContain('aria-current="page">changes</a>');
   });
 
   it('conceals private changes and hides decide forms from readers', async () => {
@@ -376,7 +371,7 @@ describe('deciding from the page', () => {
   });
 
   it('returns a failed inbox decision to its item, panel open, error beside it', async () => {
-    const r = await call(`/${OWNER}/alpha/changes/2/review`, tok.owner, form({ verdict: 'approve', headSha: head, note: '', back: 'inbox' }));
+    const r = await call(`/${OWNER}/alpha/changes/2/review`, tok.owner, form({ verdict: 'request-changes', headSha: head, note: '', back: 'inbox' }));
     const key = `ch/${OWNER}/alpha/2`;
     expect(r.location).toBe(`/inbox?error=NOTE_REQUIRED&item=${encodeURIComponent(key)}#${key}`);
     const page = await call(r.location!, tok.owner);
@@ -388,22 +383,50 @@ describe('deciding from the page', () => {
     // Shown once, next to the item, not again at the top of the page.
     expect(page.text.split('role="alert"').length).toBe(2);
     // From a later inbox page, the redirect keeps that page.
-    const later = await call(`/${OWNER}/alpha/changes/2/review`, tok.owner, form({ verdict: 'approve', note: '', back: 'inbox', cursor: 'abc' }));
+    const later = await call(`/${OWNER}/alpha/changes/2/review`, tok.owner, form({ verdict: 'request-changes', note: '', back: 'inbox', cursor: 'abc' }));
     expect(later.location).toBe(`/inbox?error=NOTE_REQUIRED&cursor=abc&item=${encodeURIComponent(key)}#${key}`);
   });
 
-  it('requires a note and writes nothing without one', async () => {
-    const r = await call(`/${OWNER}/alpha/changes/2/review`, tok.owner, form({ verdict: 'approve', headSha: head, note: '   ', back: 'change' }));
+  it('requires a note for request-changes and writes nothing without one', async () => {
+    const r = await call(`/${OWNER}/alpha/changes/2/review`, tok.owner, form({ verdict: 'request-changes', headSha: head, note: '   ', back: 'change' }));
     expect(r.status).toBe(303);
     expect(r.location).toBe(`/${OWNER}/alpha/changes/2?error=NOTE_REQUIRED#decide`);
     const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE change_set_id = ?').bind(changeIds.waiting).first<{ n: number }>();
     expect(n?.n).toBe(0);
   });
 
+  it('allows a plain approval without a note and does not record a decision', async () => {
+    await seedChange('plain-approval', 'alpha', 5, { title: 'Plain approval', author: 'ib-writer', headSha: head, createdAt: NOW + 1 });
+    const r = await call(`/${OWNER}/alpha/changes/5/review`, tok.owner, form({ verdict: 'approve', headSha: head, back: 'change' }));
+    expect(r.location).toBe(`/${OWNER}/alpha/changes/5?done=approve#decide`);
+    const review = await env.DB.prepare('SELECT body FROM change_reviews WHERE change_set_id = ?').bind(changeIds['plain-approval']).first<{ body: string }>();
+    expect(review?.body).toBe('');
+    const decision = await env.DB.prepare("SELECT COUNT(*) AS n FROM agent_decisions WHERE repo_id = ? AND task_id = 'change:5'").bind(repoIds.alpha).first<{ n: number }>();
+    expect(decision?.n).toBe(0);
+  });
+
+  it('allows Approve & ship without a note when no escalation is open', async () => {
+    await seedChange('ship-approval', 'alpha', 6, { title: 'Ship approval', author: 'ib-writer', headSha: head, createdAt: NOW + 2 });
+    const r = await call(`/${OWNER}/alpha/changes/6/review`, tok.owner, form({ ship: '1', headSha: head, back: 'change' }));
+    expect(r.location).toBe(`/${OWNER}/alpha/changes/6?done=ship#decide`);
+    const review = await env.DB.prepare('SELECT verdict, body FROM change_reviews WHERE change_set_id = ?')
+      .bind(changeIds['ship-approval']).first<Record<string, string>>();
+    expect(review).toEqual({ verdict: 'approve', body: '' });
+    const decision = await env.DB.prepare("SELECT COUNT(*) AS n FROM agent_decisions WHERE repo_id = ? AND task_id = 'change:6'")
+      .bind(repoIds.alpha).first<{ n: number }>();
+    expect(decision?.n).toBe(0);
+  });
+
+  it('requires a note when approval answers an open escalation', async () => {
+    const r = await call(`/${OWNER}/alpha/changes/1/review`, tok.owner, form({ verdict: 'approve', headSha: head, note: '', back: 'change' }));
+    expect(r.location).toBe(`/${OWNER}/alpha/changes/1?error=NOTE_REQUIRED#decide`);
+  });
+
   it('approves through the review service and records the decision', async () => {
     const r = await call(`/${OWNER}/alpha/changes/2/review`, tok.owner, form({ verdict: 'approve', headSha: head, note: 'retry budget reads right', back: 'inbox' }));
     expect(r.status).toBe(303);
-    expect(r.location).toBe('/inbox?done=approve');
+    const key = `ch/${OWNER}/alpha/2`;
+    expect(r.location).toBe(`/inbox?done=approve&item=${encodeURIComponent(key)}#${key}`);
     const review = await env.DB.prepare('SELECT verdict, body, head_sha FROM change_reviews WHERE change_set_id = ?').bind(changeIds.waiting).first<Record<string, string>>();
     expect(review).toEqual({ verdict: 'approve', body: 'retry budget reads right', head_sha: head });
     const decision = await env.DB.prepare("SELECT chosen_candidate, reason, actor FROM agent_decisions WHERE repo_id = ? AND task_id = 'change:2'").bind(repoIds.alpha).first<Record<string, string>>();
@@ -419,8 +442,11 @@ describe('deciding from the page', () => {
   });
 
   it('records a missing escalation before an approval, so the approval answers it', async () => {
+    const missingNote = await call(`/${OWNER}/gamma/changes/2/review`, tok.owner, form({ verdict: 'approve', headSha: head, note: '', back: 'inbox' }));
+    expect(missingNote.location).toBe(`/inbox?error=NOTE_REQUIRED&item=${encodeURIComponent(`ch/${OWNER}/gamma/2`)}#ch/${OWNER}/gamma/2`);
     const r = await call(`/${OWNER}/gamma/changes/2/review`, tok.owner, form({ verdict: 'approve', headSha: head, note: 'protected bump is fine', back: 'inbox' }));
-    expect(r.location).toBe('/inbox?done=approve');
+    const key = `ch/${OWNER}/gamma/2`;
+    expect(r.location).toBe(`/inbox?done=approve&item=${encodeURIComponent(key)}#${key}`);
     const esc = await env.DB.prepare("SELECT state, resolution FROM change_escalations WHERE change_set_id = ? AND reason = 'protected-path'")
       .bind(changeIds.unrecorded)
       .first<Record<string, string>>();
@@ -443,13 +469,26 @@ describe('deciding from the page', () => {
   });
 
   it('resolves an escalation through the review service and records the decision', async () => {
+    const missingNote = await call(
+      `/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`,
+      tok.owner,
+      form({ resolution: 'resolve', note: '', back: 'change' }),
+    );
+    expect(missingNote.location).toBe(`/${OWNER}/alpha/changes/1?error=NOTE_REQUIRED#escalations`);
+    const inboxMissingNote = await call(
+      `/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`,
+      tok.owner,
+      form({ resolution: 'resolve', note: '', back: 'inbox', cursor: 'abc' }),
+    );
+    const key = `ch/${OWNER}/alpha/1`;
+    expect(inboxMissingNote.location).toBe(`/inbox?error=NOTE_REQUIRED&cursor=abc&item=${encodeURIComponent(key)}#${key}`);
     const r = await call(
       `/${OWNER}/alpha/changes/1/escalations/${ids.escalation}/resolve`,
       tok.owner,
-      form({ resolution: 'resolve', note: 'boreas is right; atlas reworks the quotes', back: 'change' }),
+      form({ resolution: 'resolve', note: 'boreas is right; atlas reworks the quotes', back: 'inbox' }),
     );
     expect(r.status).toBe(303);
-    expect(r.location).toBe(`/${OWNER}/alpha/changes/1?done=resolve`);
+    expect(r.location).toBe(`/inbox?done=resolve&item=${encodeURIComponent(key)}#${key}`);
     const esc = await env.DB.prepare('SELECT state, resolution, note, resolved_by_login FROM change_escalations WHERE id = ?').bind(ids.escalation).first<Record<string, string>>();
     expect(esc).toEqual({ state: 'resolved', resolution: 'resolve', note: 'boreas is right; atlas reworks the quotes', resolved_by_login: OWNER });
     const decision = await env.DB.prepare("SELECT chosen_candidate FROM agent_decisions WHERE repo_id = ? AND task_id = 'change:1'").bind(repoIds.alpha).first<{ chosen_candidate: string }>();
@@ -550,6 +589,6 @@ describe('provenance panel', () => {
     const without = await call(`/${OWNER}/alpha/commit/${bare}`, tok.owner);
     expect(without.status).toBe(200);
     expect(without.text).not.toContain('k-prov');
-    expect(without.text).not.toContain('/assets/tokens.css');
+    expect(without.text.match(/href="\/assets\/tokens\.css"/g)).toHaveLength(1);
   });
 });

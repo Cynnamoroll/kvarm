@@ -2,14 +2,14 @@
 
 import { escapeHtml, html, raw } from '@kvarm/ui';
 import type { RepoRow } from '../db/repos';
-import { layout } from '../web/render';
+import { layout, type PageOptions } from '../web/render';
 import type { GitRef } from '@kvarm/gitops';
 
 const COPY_JS = `document.addEventListener('click',e=>{const b=e.target.closest('[data-copy]');if(!b)return;navigator.clipboard.writeText(b.dataset.copy).then(()=>{const o=b.textContent;b.textContent='copied';setTimeout(()=>b.textContent=o,1200)})});`;
 
 export type RepoTab = 'code' | 'changes' | 'commits' | 'branches' | 'issues' | 'environments' | 'compare' | 'activity' | 'train' | 'settings';
 
-export interface ShellOptions {
+export interface ShellOptions extends Pick<PageOptions, 'active' | 'needsYouCount' | 'inboxCount' | 'runningCount'> {
   repo: RepoRow;
   ref: string;
   path?: string;
@@ -127,6 +127,10 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
       script: COPY_JS,
       head: opts.head,
       repos: [{ ownerLogin: repo.owner_login, name: repo.name }],
+      active: opts.active,
+      needsYouCount: opts.needsYouCount,
+      inboxCount: opts.inboxCount,
+      runningCount: opts.runningCount,
     },
     shellBody,
   );

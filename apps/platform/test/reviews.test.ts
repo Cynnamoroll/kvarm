@@ -489,6 +489,17 @@ describe('agent approval head tiers', () => {
     expect(approval.json.packet.state).toBe('merged');
   });
 
+  it('records a protected-path escalation on packet read when agent approvals are off', async () => {
+    await setupDocs('agent-approvals-never-read');
+    expect((await createChange('agent-approvals-never-read', 'docs')).status).toBe(201);
+    expect(await openEscalation('agent-approvals-never-read', 1, 'protected-path')).toBeUndefined();
+    expect((await setBranchRule('agent-approvals-never-read', 'never')).status).toBe(201);
+    const result = await packet('agent-approvals-never-read', 1);
+    expect(result.json.escalations).toEqual([
+      expect.objectContaining({ reason: 'protected-path', state: 'open', openedBy: 'system' }),
+    ]);
+  });
+
   it('pre-seeds for a scrutinize creation and stores truncated coverage as scrutinize', async () => {
     const { repo, main } = await setupDocs('agent-scrutinize-create');
     const contract = await commit(repo, {

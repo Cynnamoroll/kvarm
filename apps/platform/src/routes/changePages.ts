@@ -8,16 +8,21 @@ import { escapeHtml, html, raw, timeAgo } from '@kvarm/ui';
 import { fallbackGuide, type CoverageMap, type ReviewTier } from '@kvarm/review';
 import type { RepoRow } from '../db/repos';
 import { repoPage } from '../render/repoShell';
+import { appLayoutCounts } from '../web/render';
 import { authorizeRoute, requestSession, type App } from './api';
 import { csrfInput } from '../web/render';
-import { resolveRepo, notFound, finish, sessionFormRefused, type Resolved } from './repoPages';
+import { resolveRepo, notFound, finish, type Resolved } from './repoPages';
 import * as changes from '../services/changes';
 import * as reviews from '../services/reviews';
 import * as compare from '../services/compare';
 import { headCoverage, recordHeadTier } from '../services/reviewCoverage';
+import { approvalNeedsDecisionNote, decisionErrorMessage, decideFromPage } from '../services/reviewInbox';
+import { forgetInboxCount } from '../services/inboxCount';
 import type { CarryView } from '../services/approvalCarry';
 import { remainingFor, type RemainingItem, type RemainingWho } from '../services/remaining';
 import { DIFF_CLIENT_TAG, renderCompareFileRow } from './comparePages';
+import { commitProvenance } from '../services/provenancePanel';
+import { provenancePanel } from '../render/provenance';
 
 export const changePages = new Hono<App>();
 
@@ -30,10 +35,18 @@ function base(repo: RepoRow): string {
   return `/${repo.owner_login}/${repo.name}`;
 }
 
-function page(c: Context<App>, resolved: Resolved, title: string, body: string, tab: 'changes' | 'review' = 'changes'): Response {
+async function page(c: Context<App>, resolved: Resolved, title: string, body: string, tab: 'changes' | 'review' = 'changes'): Promise<Response> {
+  const counts = await appLayoutCounts(c.env, { userId: resolved.viewer?.user.id ?? null });
   const content = repoPage(
     c.env,
-    { repo: resolved.repo, ref: resolved.repo.default_branch || 'main', tab: 'changes', title, head: tab === 'review' ? DIFF_CLIENT_TAG : undefined },
+    {
+      repo: resolved.repo,
+      ref: resolved.repo.default_branch || 'main',
+      tab: 'changes',
+      title,
+      head: tab === 'review' ? DIFF_CLIENT_TAG : undefined,
+      ...counts,
+    },
     resolved.viewer?.user.login ?? null,
     `<div data-live-repo="${escapeHtml(`${resolved.repo.owner_login}/${resolved.repo.name}`)}" data-live-root>${body}</div>`,
   );
@@ -43,16 +56,25 @@ function page(c: Context<App>, resolved: Resolved, title: string, body: string, 
 function queryFlash(c: Context<App>): string {
   const error = c.req.query('error');
   const notice = c.req.query('notice');
-  if (error) return html`<div class="flash err">${error.slice(0, 300)}</div>`;
-  if (notice) return html`<div class="flash ok">${notice.slice(0, 300)}</div>`;
+  const done = c.req.query('done');
+  const notices: Record<string, string> = {
+    acknowledge: 'Escalation acknowledged.',
+    approve: 'Review submitted.',
+    'request-changes': 'Change request submitted.',
+    resolve: 'Escalation resolved.',
+    ship: 'Change approved and queued to ship.',
+  };
+  const message = error
+    ? decisionErrorMessage(error).text
+    : done
+      ? Object.hasOwn(notices, done) ? notices[done] : undefined
+      : notice && Object.hasOwn(notices, notice) ? notices[notice] : undefined;
+  if (error) {
+    const detail = decisionErrorMessage(error);
+    return html`<div class="flash err">${detail.text}${detail.fallback ? raw(html` <code>${error}</code>`) : ''}</div>`;
+  }
+  if ((done || notice) && message) return html`<div class="flash ok">${message}</div>`;
   return '';
-}
-
-function redirect(c: Context<App>, url: string, value: { error?: string; notice?: string }): Response {
-  const query = new URLSearchParams();
-  if (value.error) query.set('error', value.error);
-  if (value.notice) query.set('notice', value.notice);
-  return finish(c, c.redirect(`${url}?${query.toString()}`, 303));
 }
 
 function stateTag(state: string): string {
@@ -311,6 +333,11 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   ]);
   if (!packet.ok) return notFound(c);
   const reviewPacket = packet.value;
+  const approvalNoteRequired = approvalNeedsDecisionNote(reviewPacket);
+  const provenance = await commitProvenance(c.env, resolved.repo, reviewPacket.headSha, {
+    admin: resolved.role === 'admin',
+    change: change.number,
+  });
   const viewerPrincipal = resolved.viewer
     ? resolved.viewer.agent
       ? `agent:${resolved.viewer.agent.agentId}`
@@ -357,6 +384,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   const checkTags = change.checks.map((check) => html`<span class="tag">${check.name}: ${check.conclusion ?? check.status}</span>`).join(' ');
   const reviewRows = reviewTimeline(reviewPacket);
   const writable = resolved.viewer !== null && (resolved.role === 'write' || resolved.role === 'admin');
+  const canResolve = writable && !resolved.viewer?.agent && viewerPrincipal !== reviewPacket.author.principal;
   const csrf = writable ? csrfInput((await requestSession(c))?.csrfToken) : '';
   const draft = change.mergePolicy === 'draft';
   const author =
@@ -389,13 +417,14 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
           <div class="card-title">Reviews</div>
           ${raw(reviewRows)}
         </section>
-        ${writable ? raw(html`<section class="card review-form-card">
+        ${writable ? raw(html`<section class="card review-form-card" id="decide">
           <div class="card-title">Submit a review</div>
           <form method="post" action="${raw(`${path}/review`)}">
             ${raw(csrf)}
             <input type="hidden" name="headSha" value="${change.headSha ?? ''}" />
             <label for="review-body">Review note</label>
-            <textarea id="review-body" name="body" rows="6" maxlength="65536"></textarea>
+            <textarea id="review-body" name="body" rows="6" maxlength="65536" ${raw(approvalNoteRequired ? 'required' : '')} placeholder="Add a note: overrides and change requests record why."></textarea>
+            <p class="muted">Required for change requests and approvals that answer an open escalation; optional for a plain approval.</p>
             <div class="review-actions">
               <button class="btn primary" type="submit" name="verdict" value="approve">Approve</button>
               <button class="btn primary" type="submit" name="ship" value="1"${draft ? ' disabled' : ''}>Approve &amp; ship</button>
@@ -420,9 +449,18 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
           <p class="muted">${reviewPacket.policy.protected ? 'Protected target' : 'No protected-target rule'} · ${reviewPacket.policy.branchRules.length} branch rule(s)</p>
           <p class="muted">Agent approvals: ${reviewPacket.policy.agentApprovals === 'low-risk' ? 'different-family agents may count when the head has no scrutinize files.' : 'off; agent approvals do not count toward protected-branch approvals.'}</p>
         </section>
-        <section class="card"><div class="card-title">Escalations</div>
+        ${raw(provenancePanel(provenance, { heading: `Provenance · head ${reviewPacket.headSha?.slice(0, 10) ?? '—'}` }))}
+        <section class="card" id="escalations"><div class="card-title">Escalations</div>
           ${reviewPacket.escalations.length
-            ? raw(html`<ul class="k-list">${raw(reviewPacket.escalations.map((item) => `<li><span class="tag ${item.state === 'open' ? 'err' : 'muted'}">${escapeHtml(item.state)}</span> ${escapeHtml(item.reason)}${item.detail ? ` · ${escapeHtml(item.detail)}` : ''}</li>`).join(''))}</ul>`)
+            ? raw(html`<ul class="k-list">${raw(reviewPacket.escalations.map((item) => html`<li><span class="tag ${item.state === 'open' ? 'err' : 'muted'}">${item.state}</span> ${item.reason}${item.detail ? ` · ${item.detail}` : ''}${raw(item.state === 'open' && canResolve ? html`
+                <form method="post" action="${raw(`${path}/escalations/${encodeURIComponent(item.id)}/resolve`)}" class="inline">
+                  ${raw(csrf)}
+                  <input type="hidden" name="back" value="change" />
+                  <label for="resolution-${item.id}">Resolution note</label>
+                  <textarea id="resolution-${item.id}" name="note" rows="2" required maxlength="4000" placeholder="Add a note: overrides and change requests record why."></textarea>
+                  <button class="btn" type="submit" name="resolution" value="resolve">Resolve</button>
+                  <button class="btn" type="submit" name="resolution" value="acknowledge">Acknowledge</button>
+                </form>` : '')}</li>`).join(''))}</ul>`)
             : raw(html`<p class="muted">No escalations.</p>`)}
         </section>
       </aside>
@@ -439,15 +477,31 @@ changePages.get('/changes/:number', async (c) => {
 changePages.post('/changes/:number/review', async (c) => {
   const number = c.req.param('number');
   const url = `/${c.req.param('owner')}/${c.req.param('repo')}/changes/${number}`;
-  const form = await c.req.parseBody();
+  const form = await c.req.parseBody({ all: true });
+  const field = (name: string): unknown => {
+    const value = form[name];
+    return Array.isArray(value) ? value[value.length - 1] : value;
+  };
   const auth = await authorizeRoute(c, 'write', { requireActor: true, branchRules: true });
-  if (!auth.ok) return redirect(c, url, { error: auth.error });
-  if (!auth.actor) return redirect(c, url, { error: 'Sign in to review this change.' });
-  const refused = await sessionFormRefused(c, auth.actor, form);
-  if (refused) return refused;
-  const verdict = form.verdict ?? (form.ship === '1' ? 'approve' : undefined);
+  if (!auth.ok || !auth.actor) return notFound(c);
+  const key = `ch/${auth.repo.owner_login}/${auth.repo.name}/${number}`;
+  const back = field('back');
+  const submittedCursor = field('cursor');
+  const inbox = back === 'inbox';
+  const cursor = typeof submittedCursor === 'string' && submittedCursor.length > 0 && submittedCursor.length <= 200
+    ? `&cursor=${encodeURIComponent(submittedCursor)}`
+    : '';
+  const redirectDecision = (code: string | null, done: string | null): Response => {
+    const query = code ? `error=${encodeURIComponent(code)}` : `done=${encodeURIComponent(done ?? 'approve')}`;
+    return c.redirect(inbox
+      ? `/inbox?${query}${code ? cursor : ''}&item=${encodeURIComponent(key)}#${key}`
+      : `${url}?${query}#decide`, 303);
+  };
+  const submittedShip = field('ship');
+  const submittedVerdict = field('verdict');
+  const verdict = submittedVerdict ?? (submittedShip === '1' ? 'approve' : undefined);
   if (verdict !== 'approve' && verdict !== 'request-changes') {
-    return redirect(c, url, { error: 'Comment-only reviews are not supported by the current review service.' });
+    return redirectDecision('INVALID_VERDICT', null);
   }
   const cx: changes.ChangeContext = {
     env: c.env,
@@ -456,7 +510,18 @@ changePages.post('/changes/:number/review', async (c) => {
     branchRules: auth.branchRules ?? [],
     waitUntil: (promise) => c.executionCtx.waitUntil(promise),
   };
-  const result = await reviews.submitReview(cx, number, { body: String(form.body ?? ''), headSha: form.headSha, ship: form.ship === '1' }, verdict);
-  if (!result.ok) return redirect(c, url, { error: result.error });
-  return redirect(c, url, { notice: `${verdict === 'approve' ? 'Approval' : 'Request for changes'} recorded.` });
+  const result = await decideFromPage(cx, number, {
+    kind: 'review',
+    verdict,
+    headSha: typeof field('headSha') === 'string' && String(field('headSha')).length > 0 ? String(field('headSha')) : null,
+    ship: submittedShip === '1',
+  }, field('note') ?? field('body'));
+  if (!result.ok) {
+    return redirectDecision(result.code ?? 'FAILED', null);
+  }
+  await forgetInboxCount(auth.actor.user.id);
+  if (result.value.noteProvided && !result.value.decision) {
+    return redirectDecision('DECISION_NOT_RECORDED', null);
+  }
+  return redirectDecision(null, submittedShip === '1' ? 'ship' : verdict);
 });
