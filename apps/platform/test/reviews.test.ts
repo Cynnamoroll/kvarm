@@ -279,6 +279,10 @@ describe('review policy', () => {
   });
 });
 
+function byIdOf(cands: Array<Record<string, any>>): Record<string, Record<string, any>> {
+  return Object.fromEntries(cands.map((c) => [c.agent.id, c]));
+}
+
 describe('model families and assignment', () => {
   it('records the agent modelFamily, refuses agent self-review and prefers a different family than the author', async () => {
     await setup('family');
@@ -301,7 +305,7 @@ describe('model families and assignment', () => {
     // Agent model families are self-declared, so the cross-model claim is labeled declared.
     expect(assigned.json.preference).toEqual({ rule: 'different-model-family', authorModelFamily: 'claude', met: true, evidence: 'declared' });
     expect(assigned.json.assigned).toMatchObject({ principal: `agent:${other.id}`, modelFamily: 'gpt', differentFamily: true, eligible: true });
-    const byId = Object.fromEntries((assigned.json.candidates as Array<Record<string, any>>).map((c) => [c.agent.id, c]));
+    const byId = byIdOf(assigned.json.candidates as Array<Record<string, any>>);
     expect(byId[author.id]).toMatchObject({ eligible: false, ineligibleReason: 'author' });
     expect(byId[sameFamily.id]).toMatchObject({ eligible: true, differentFamily: false, modelFamily: 'claude' });
     expect(byId[unknown.id]).toMatchObject({ eligible: true, differentFamily: false, modelFamily: null });
@@ -322,10 +326,6 @@ describe('model families and assignment', () => {
     expect(byIdOf(after.json.candidates)[other.id]).toMatchObject({ eligible: false, ineligibleReason: 'already-reviewed' });
   });
 });
-
-function byIdOf(cands: Array<Record<string, any>>): Record<string, Record<string, any>> {
-  return Object.fromEntries(cands.map((c) => [c.agent.id, c]));
-}
 
 describe('escalations', () => {
   it('reviewer disagreement blocks merge and enqueue until a human approves the current head', async () => {
