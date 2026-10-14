@@ -701,6 +701,23 @@ describe('git gate fast path and pairing', () => {
     expect(await refRow(repo.id, 'refs/heads/topic')).toMatchObject({ sha: ZERO });
   });
 
+  it('moves the ref for a successor whose own successor arrived first but never held the ref', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('unheld-successor');
+    // Artifacts' clock runs behind the Worker's, so its later pushes still look older than the gate push.
+    const past = Date.now() - 3_600_000;
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(past)) }]);
+    await gate(env, repo, [[A, B, main]]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, C, D, iso(past + 2000)) }]);
+    const early = (await events(repo.id)).find((r) => r.before_sha === C)!;
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B });
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, B, C, iso(past + 1000)) }]);
+    // C->D never held the ref, so it is no evidence that B->C is an old transition.
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: C });
+    const held = await baseEnv.DB.prepare('SELECT held_ref FROM push_events WHERE id = ?').bind(early.id).first<{ held_ref: number }>();
+    expect(held!.held_ref).toBe(0);
+  });
+
   it('does not let a second delivery of an old transition roll the ref back after A->B->C->A', async () => {
     const env = envWith(new FakeWorkflow());
     const repo = await seedRepo('old-redelivery');
