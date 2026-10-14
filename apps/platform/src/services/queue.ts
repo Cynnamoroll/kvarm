@@ -1990,7 +1990,8 @@ interface ChainEntry {
   plan: Plan;
   e: WindowRow;
   pv: PreparedMerge;
-  checks: RequiredChecks;
+  /** Filled by the checks-gate phase before any read; the phases below throw on a null. */
+  checks: RequiredChecks | null;
   claimedGen: number;
   /** Before the claim: `ready` at the pass's generation; after it, `publishing` at the claimed one. */
   fence: { generation: number; state: QueueState };
@@ -2062,7 +2063,7 @@ async function publishChain(
     plan,
     e: plan.e,
     pv: plan.prepared!,
-    checks: null as unknown as RequiredChecks,
+    checks: null,
     claimedGen: plan.generation + 1,
     fence: { generation: plan.generation, state: 'ready' as QueueState },
     intent: null,
@@ -2319,6 +2320,7 @@ async function publishChain(
         await backOut(i + 1);
         break;
       }
+      if (!c.checks) throw new RefStoreUnavailable('checks not prepared');
       const block = branchPolicyBlock(freshPolicy, c.checks);
       if (block?.code === 'GUARD_INCOMPLETE' && c.checks.state !== 'failure') {
         await exit(c, 'GUARD_INCOMPLETE', block.error);
