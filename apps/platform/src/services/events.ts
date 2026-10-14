@@ -461,30 +461,71 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
 }
 
 /**
- * Queue consumer for `kvarm-events`. Messages are handled in order, each under
- * its own cost meter, and each logs one `{cost: …}` line. A message whose
- * effects did not all complete is retried with backoff; everything else
+ * Ordering key of a message within one batch. Messages of one repository
+ * keep their delivery order; different repositories run concurrently. Ingest
+ * is already order-independent (event time decides), so the key only avoids
+ * needless contention between effects of one repository.
+ */
+export function batchKey(body: unknown): string {
+  if (isTrainMessage(body)) return `repo-id:${body.repoId}`;
+  if (isSettleMessage(body)) return `repo-id:${body.repoId}`;
+  const ev = parsePushEvent(body);
+  if (ev) return `artifacts:${ev.namespace}:${ev.repoName}`;
+  return 'other';
+}
+
+interface Handled {
+  msg: Message<unknown>;
+  meter: CostMeter;
+  counters: { wf: number };
+  result: MessageResult;
+}
+
+async function handleOne(env: Env, msg: Message<unknown>): Promise<Handled> {
+  const meter = new CostMeter();
+  const counters = { wf: 0 };
+  let result: MessageResult;
+  try {
+    result = await runWithMeter(meter, () => processMessage(meter.wrapEnv(env), msg, counters));
+  } catch (err) {
+    result = { outcome: 'retry', error: String(err).slice(0, 200) };
+  }
+  if (result.outcome === 'retry') msg.retry({ delaySeconds: retryDelaySeconds(msg.attempts) });
+  else msg.ack();
+  return { msg, meter, counters, result };
+}
+
+/**
+ * Queue consumer for `kvarm-events`. Each message runs under its own cost
+ * meter and logs one `{cost: …}` line, in batch order. Messages of one
+ * repository run in delivery order; repositories run concurrently. A message
+ * whose effects did not all complete is retried with backoff; everything else
  * (including malformed messages and unknown repos) is acked.
  */
 export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): Promise<void> {
+  const groups = new Map<string, Message<unknown>[]>();
   for (const msg of batch.messages) {
-    const meter = new CostMeter();
-    const counters = { wf: 0 };
-    let result: MessageResult;
-    try {
-      result = await runWithMeter(meter, () => processMessage(meter.wrapEnv(env), msg, counters));
-    } catch (err) {
-      result = { outcome: 'retry', error: String(err).slice(0, 200) };
-    }
-    if (result.outcome === 'retry') msg.retry({ delaySeconds: retryDelaySeconds(msg.attempts) });
-    else msg.ack();
+    const key = batchKey(msg.body);
+    const group = groups.get(key);
+    if (group) group.push(msg);
+    else groups.set(key, [msg]);
+  }
+  const handled = new Map<Message<unknown>, Handled>();
+  await Promise.all(
+    [...groups.values()].map(async (group) => {
+      for (const msg of group) handled.set(msg, await handleOne(env, msg));
+    }),
+  );
+  for (const msg of batch.messages) {
+    const h = handled.get(msg)!;
+    const { result } = h;
     console.log(
       JSON.stringify({
-        cost: meter.snapshot(),
+        cost: h.meter.snapshot(),
         queue: batch.queue,
         outcome: result.outcome,
         attempts: msg.attempts,
-        wf: counters.wf,
+        wf: h.counters.wf,
         ...(result.eventId ? { eventId: result.eventId } : {}),
         ...(result.effects ? { effects: result.effects } : {}),
         ...(result.train ? { train: result.train } : {}),

@@ -15,7 +15,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
 import { refGeneration } from '../src/cache/compare';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
-import { eventIdentity, parsePushEvent, snapshotInstanceId } from '../src/services/events';
+import { batchKey, eventIdentity, parsePushEvent, snapshotInstanceId } from '../src/services/events';
 import worker from '../src/index';
 
 const baseEnv = cfEnv as unknown as Env;
@@ -461,6 +461,36 @@ describe('queue dispatcher', () => {
     expect(outcomes[1]!.cost.d1).toBe(0);
     expect(outcomes[3]!.cost.d1).toBe(0);
     expect((await refRow(repo.id, 'refs/heads/main'))?.sha).toBe(A);
+  });
+
+  it('groups a batch by repository: one repo failing does not hold back another, and logs keep batch order', async () => {
+    expect(batchKey(pushBody('o--r', 'refs/heads/main', A, B, iso(T0)))).toBe('artifacts:default:o--r');
+    expect(batchKey(pushBody('o--r', 'refs/heads/dev', A, B, iso(T0)))).toBe('artifacts:default:o--r');
+    expect(batchKey({ type: 'kvarm.train', repoId: 'r1', ref: 'refs/heads/main', reason: 'x' })).toBe('repo-id:r1');
+    expect(batchKey('junk')).toBe('other');
+
+    const wf = new FakeWorkflow();
+    wf.failNext = 1;
+    const env = envWith(wf);
+    const failing = await seedRepo('group-failing');
+    const healthy = await seedRepo('group-healthy');
+    const log = vi.spyOn(console, 'log');
+    const main = 'refs/heads/main';
+    const { batch, result } = await deliver(env, [
+      { id: 'grp-1', body: pushBody(failing.artifactsName, main, ZERO, A, iso(T0)) },
+      { id: 'grp-2', body: pushBody(healthy.artifactsName, main, ZERO, B, iso(T0)) },
+      { id: 'grp-3', body: pushBody(failing.artifactsName, main, A, C, iso(T0 + 1000)) },
+    ]);
+    // Exactly one snapshot create failed; whichever repo met it retries, the other completes.
+    expect(result.retryMessages.length + result.explicitAcks.length).toBe(3);
+    expect(result.retryMessages).toHaveLength(1);
+    expect(await refRow(healthy.id, main)).toMatchObject({ sha: B });
+    expect(await refRow(failing.id, main)).toMatchObject({ sha: C });
+    const lines = log.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith('{"cost"'));
+    expect(lines).toHaveLength(3);
+    const ids = lines.map((l) => (JSON.parse(l) as { eventId?: string }).eventId);
+    const expected = await Promise.all(batch.messages.map((m) => eventIdentity(parsePushEvent(m.body)!, m.id)));
+    expect(ids).toEqual(expected);
   });
 
   it('builds snapshots lazily for non-default and workspace refs, and skips deleted refs', async () => {
