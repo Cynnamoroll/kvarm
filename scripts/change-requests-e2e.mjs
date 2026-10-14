@@ -93,8 +93,6 @@ function git(args, cwd, token = PAT) {
       GIT_ASKPASS: askpass,
       GIT_TERMINAL_PROMPT: '0',
       KVARM_E2E_TOKEN: token,
-      GIT_AUTHOR_DATE: '2026-10-01T00:00:00Z',
-      GIT_COMMITTER_DATE: '2026-10-01T00:00:00Z',
     },
     encoding: 'utf8',
   });

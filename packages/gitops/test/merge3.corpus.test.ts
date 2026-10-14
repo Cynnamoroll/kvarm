@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { allCases, buildCorpus, conflictKey, loadObjects, type CorpusResult } from '../../../scripts/conflict-corpus/corpus.mjs';
 import { parseTree, type TreeEntry } from '../src/index';
 import { merge3, type MergeReader } from '../src/merge3';
+import { closed } from './helpers';
 
 let root = '';
 let results: CorpusResult[] = [];
@@ -38,19 +39,6 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
-
-/** Every object under `tree` is either one the merge created or already in the store. */
-async function closed(tree: string, created: Map<string, { type: string; raw: Uint8Array }>): Promise<boolean> {
-  const own = created.get(tree);
-  const entries = own ? parseTree(own.raw.subarray(own.raw.indexOf(0) + 1)) : await reader.readTree(tree);
-  if (!entries) return false;
-  for (const e of entries) {
-    if (e.mode === '40000') {
-      if (!(await closed(e.hash, created))) return false;
-    } else if (e.mode !== '160000' && !created.has(e.hash) && !(await reader.readBlob(e.hash))) return false;
-  }
-  return true;
-}
 
 describe('merge3 parity with git merge-tree --write-tree (conflict corpus)', () => {
   it('covers clean and conflicting cases of every conflict kind', () => {
@@ -79,7 +67,7 @@ describe('merge3 parity with git merge-tree --write-tree (conflict corpus)', () 
         truncated: false,
       };
       if (JSON.stringify(actual) !== JSON.stringify(expected)) mismatches.push({ case: r.name, expected, actual });
-      if (got.clean && !(await closed(got.treeHash!, new Map(got.objects.map((o) => [o.hash, o]))))) {
+      if (got.clean && !(await closed(reader, got.treeHash!, got.objects))) {
         mismatches.push({ case: r.name, error: 'merged tree references an object neither created nor stored' });
       }
     }

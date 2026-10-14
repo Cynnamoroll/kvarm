@@ -65,6 +65,14 @@ export function unhex(s: string): Uint8Array {
   return out;
 }
 
+/**
+ * One-line text for a caught error, capped so log lines and error replies
+ * stay bounded — `max` defaults to the repo-wide 200-char convention.
+ */
+export function errText(err: unknown, max = 200): string {
+  return String(err).slice(0, max);
+}
+
 // ---------------------------------------------------------------------------
 // Hashing (WebCrypto)
 // ---------------------------------------------------------------------------

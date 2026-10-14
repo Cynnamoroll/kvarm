@@ -97,13 +97,15 @@ authRoutes.get('/callback', async (c) => {
   let auth;
   try {
     auth = await httpWorkOSClient(c.env).authenticateWithCode({ code, codeVerifier: pending.verifier });
-  } catch {
+  } catch (err) {
+    console.warn(JSON.stringify({ authCallbackFailed: { step: 'authenticate', error: String(err).slice(0, 200) } }));
     return signInFailed(c, state);
   }
   let user;
   try {
     user = await provisionSessionUser(c.env, auth.user);
-  } catch {
+  } catch (err) {
+    console.warn(JSON.stringify({ authCallbackFailed: { step: 'provision', error: String(err).slice(0, 200) } }));
     return signInFailed(c, state, 500);
   }
   if (!user.ok) return signInFailed(c, state, user.status);

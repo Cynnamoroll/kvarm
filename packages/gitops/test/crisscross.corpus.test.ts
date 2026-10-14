@@ -16,6 +16,7 @@ import { decode, parseTree, type GitObject, type TreeEntry } from '../src/index'
 import { merge3, type MergeReader } from '../src/merge3';
 import { mergeBase, type CommitInfo, type CommitReader } from '../src/mergebase';
 import { virtualMergeBase } from '../src/virtualBase';
+import { closed } from './helpers';
 
 let root = '';
 let results: CrissCrossResult[] = [];
@@ -63,19 +64,6 @@ function overlay(objects: readonly GitObject[]): MergeReader {
   };
 }
 
-/** Every object under `tree` is either one the outer merge created or already in the store. */
-async function closed(tree: string, created: Map<string, GitObject>): Promise<boolean> {
-  const own = created.get(tree);
-  const entries = own ? parseTree(own.raw.subarray(own.raw.indexOf(0) + 1)) : await reader.readTree(tree);
-  if (!entries) return false;
-  for (const e of entries) {
-    if (e.mode === '40000') {
-      if (!(await closed(e.hash, created))) return false;
-    } else if (e.mode !== '160000' && !created.has(e.hash) && !(await reader.readBlob(e.hash))) return false;
-  }
-  return true;
-}
-
 const keys = (conflicts: Array<{ kind: string; paths: string[] }>) => [...new Set(conflicts.map((c) => conflictKey(c.kind, c.paths)))].sort();
 
 describe('criss-cross merges match git (virtual merge base)', () => {
@@ -104,7 +92,7 @@ describe('criss-cross merges match git (virtual merge base)', () => {
       const expected = { clean: r.expected.clean, tree: r.expected.clean ? r.expected.tree : undefined, conflicts: r.expected.conflicts, truncated: false };
       if (JSON.stringify(actual) !== JSON.stringify(expected)) mismatches.push({ case: r.name, expected, actual });
       // What publication pushes (the outer merge's objects) plus the store must close the tree: no virtual-only object.
-      if (got.clean && !(await closed(got.treeHash!, new Map(got.objects.map((o) => [o.hash, o]))))) {
+      if (got.clean && !(await closed(reader, got.treeHash!, got.objects))) {
         mismatches.push({ case: r.name, error: 'merged tree references a virtual-base object' });
       }
     }
