@@ -113,6 +113,21 @@ describe('operation registry', () => {
     expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40), ship: true }]);
   });
 
+  it('round-trips the branch-rule agent approval option through the operation registry', () => {
+    expect(findOperation('create_branch_rule')?.params.map((p) => p.name)).toContain('agentApprovals');
+    expect(findOperation('update_branch_rule')?.params.map((p) => p.name)).toContain('agentApprovals');
+    expect(buildRequest(findOperation('create_branch_rule')!, { repo: 'o/r', pattern: 'main', agentApprovals: 'low-risk' })).toMatchObject({
+      method: 'POST',
+      path: '/api/v1/repos/o/r/branch-rules',
+      body: { pattern: 'main', agentApprovals: 'low-risk' },
+    });
+    expect(buildRequest(findOperation('update_branch_rule')!, { repo: 'o/r', id: 'rule-id', agentApprovals: 'never' })).toMatchObject({
+      method: 'PATCH',
+      path: '/api/v1/repos/o/r/branch-rules/rule-id',
+      body: { agentApprovals: 'never' },
+    });
+  });
+
   it('registers the audit export and provenance key operations', () => {
     expect(findOperation('get_audit')).toMatchObject({ command: ['audit', 'export'], method: 'GET', path: '/repos/{repo}/audit', family: 'provenance', readOnly: true });
     expect(findOperation('get_audit')?.params.map((p) => p.name)).toEqual(['repo', 'since', 'until', 'format', 'limit', 'cursor']);

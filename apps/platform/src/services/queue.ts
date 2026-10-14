@@ -459,7 +459,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
                FROM change_sets c
               WHERE c.repo_id = ?1 AND c.number = ?2 AND c.state = 'open' AND c.merge_policy != 'draft' AND c.head_sha IS NOT NULL
                 AND (?9 IS NULL OR c.head_sha = ?9) AND (?10 IS NULL OR c.merge_policy = ?10)
-                AND ${reviewGuardCondition('c', '?13', '?14')}
+                AND ${reviewGuardCondition('c', '?13', '?14', '?16')}
                 AND ${noBlockedPinCondition('c')}
              RETURNING ${RETURNING_COLUMNS}`,
           )
@@ -479,6 +479,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
             target ? target.requiredApprovals : null,
             target?.protected ? 1 : 0,
             principal,
+            target?.agentApprovals ?? 'never',
           )
           .all<EntryRow>();
         return res.results?.[0];

@@ -1349,6 +1349,7 @@ export const OPERATIONS = Object.freeze([
         'advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)',
         { enum: ['advisory', 'required'] },
       ),
+      body('agentApprovals', 'string', 'never (default): agent approvals do not satisfy protected-branch approval requirements; low-risk: different-family agents may approve heads without scrutinize files', { enum: ['never', 'low-risk'] }),
     ],
   }),
   define({
@@ -1378,6 +1379,7 @@ export const OPERATIONS = Object.freeze([
         'advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)',
         { enum: ['advisory', 'required'] },
       ),
+      body('agentApprovals', 'string', 'never (default): agent approvals do not satisfy protected-branch approval requirements; low-risk: different-family agents may approve heads without scrutinize files', { enum: ['never', 'low-risk'] }),
     ],
   }),
   define({

@@ -10,7 +10,8 @@ const input = (overrides: Partial<RemainingInput> = {}): RemainingInput => ({
     conflicts: [],
   },
   blockers: [],
-  approvals: { count: 0, required: 0, humans: 0, humansRequired: 0 },
+  approvals: { count: 0, required: 0, humans: 0, humansRequired: 0, agentFamilyApprovals: 0, lowRisk: false },
+  agentApprovals: 'never',
   mergeability: { status: 'clean', mergeable: true, checks: { state: 'success', required: [] } },
   dependency: null,
   resolveConflictTaskOpen: false,
@@ -40,7 +41,7 @@ describe('remainingFor', () => {
         { code: 'APPROVALS_REQUIRED', error: 'requires 1 approval; 0 so far' },
         { code: 'ESCALATION_OPEN', error: 'open escalation(s) need a human' },
       ],
-      approvals: { count: 0, required: 2, humans: 0, humansRequired: 1 },
+      approvals: { count: 0, required: 2, humans: 0, humansRequired: 1, agentFamilyApprovals: 0, lowRisk: false },
       resolveConflictTaskOpen: true,
       viewer: { principal: 'user:author', login: 'author', kind: 'human', writeAccess: true },
     }));
@@ -64,10 +65,27 @@ describe('remainingFor', () => {
     expect(items.every((item) => item.summary.length <= 90)).toBe(true);
   });
 
+  it('describes eligible different-family approvals and scrutiny-gated human approvals', () => {
+    const blocker = [{ code: 'APPROVALS_REQUIRED' }];
+    const eligible = remainingFor(input({
+      blockers: blocker,
+      approvals: { count: 1, required: 1, humans: 0, humansRequired: 2, agentFamilyApprovals: 1, lowRisk: true },
+      agentApprovals: 'low-risk',
+    }));
+    expect(eligible[0]?.summary).toBe('Need 2 human approvals; 1 so far. Different-family agents may count for this low-risk head.');
+
+    const scrutinize = remainingFor(input({
+      blockers: blocker,
+      approvals: { count: 1, required: 1, humans: 0, humansRequired: 2, agentFamilyApprovals: 1, lowRisk: false },
+      agentApprovals: 'low-risk',
+    }));
+    expect(scrutinize[0]?.summary).toBe('Need 2 human approvals; 0 so far. A human must approve because this head requires scrutiny.');
+  });
+
   it('pluralizes structured review counts without parsing blocker errors', () => {
     const items = remainingFor(input({
       blockers: [{ code: 'REVIEWS_REQUIRED' }, { code: 'APPROVALS_REQUIRED' }],
-      approvals: { count: 0, required: 1, humans: 1, humansRequired: 2 },
+      approvals: { count: 0, required: 1, humans: 1, humansRequired: 2, agentFamilyApprovals: 0, lowRisk: false },
     }));
     expect(items.map((item) => item.summary)).toEqual([
       'Need 2 human approvals; 1 so far',
@@ -75,7 +93,7 @@ describe('remainingFor', () => {
     ]);
     expect(remainingFor(input({
       blockers: [{ code: 'REVIEWS_REQUIRED' }, { code: 'APPROVALS_REQUIRED' }],
-      approvals: { count: 1, required: 2, humans: 0, humansRequired: 1 },
+      approvals: { count: 1, required: 2, humans: 0, humansRequired: 1, agentFamilyApprovals: 0, lowRisk: false },
     })).map((item) => item.summary)).toEqual([
       'Need 1 human approval; 0 so far',
       'Need 2 approving reviews; 1 so far',

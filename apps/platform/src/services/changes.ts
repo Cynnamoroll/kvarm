@@ -96,6 +96,7 @@ import { remainingFor, type RemainingItem } from './remaining';
 import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
 import { actorName, changeLinkStatements, mergeCloseStatement, refreshPathLinks, retireIssueTasksStatement } from './issues';
+import { headCoverage, recordHeadTier } from './reviewCoverage';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -681,7 +682,8 @@ async function remainingForRow(cx: ChangeContext, row: ChangeRow, mergeability: 
     ...remainingAuxStatements(cx.env.DB, cx.repo.id, { id: row.id, number: row.number }),
   ]);
   const branchRules = ((rules?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow);
-  const gate = reviewGate(parseReviewFacts((facts?.results as ReviewFactsRow[] | undefined)?.[0]), effectivePolicy(branchRules, branchRef(row.base_ref)));
+  const policy = effectivePolicy(branchRules, branchRef(row.base_ref));
+  const gate = reviewGate(parseReviewFacts((facts?.results as ReviewFactsRow[] | undefined)?.[0]), policy);
   const aux = remainingAuxFromRows(
     dependencies?.results as DependencyRow[] | undefined,
     tasks?.results as Array<{ task_open: number }> | undefined,
@@ -700,6 +702,7 @@ async function remainingForRow(cx: ChangeContext, row: ChangeRow, mergeability: 
     },
     blockers: gate.blockers,
     approvals: gate.block?.review.approvals ?? null,
+    agentApprovals: policy.agentApprovals,
     mergeability,
     dependency: aux.dependency,
     resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
@@ -871,6 +874,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
     const now = Date.now();
     const id = crypto.randomUUID();
     const agentMeta = cx.actor?.agent ? JSON.stringify({ agentId: cx.actor.agent.agentId, agentName: cx.actor.agent.agentName }) : null;
+    const initialCoverage = await headCoverage(cx.env, cx.repo, { id, base: p.base }, headSha, cx.waitUntil);
     // The head watermark is tied to the ref position: a push ingested since the
     // observation (newer event) is adopted outright; the push that produced the
     // observed head lends its event time; otherwise the observation time, so a
@@ -909,16 +913,33 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now, changed),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
       ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
-      // A change into a ref covered by a branch rule asks a human from the start.
-      ...(cx.branchRules && effectivePolicy(cx.branchRules, branchRef(p.base)).protected
-        ? [recordMissingEscalation(cx.env.DB, id, 'protected-path', now)]
-        : []),
       guardRunInsert(cx.env.DB, { repoId: cx.repo.id, changeId: id, headSha, treeSha: headTree, summary: guard, startedAt: guardStarted, now }),
       cx.env.DB.prepare(`SELECT ${CHECK_RUN_COLUMNS} FROM check_runs k WHERE k.change_set_id = ? ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHANGE_LIMITS.checksMax}`).bind(id),
       cx.env.DB.prepare(`${CHANGE_SELECT} WHERE c.id = ?`).bind(id),
     ]);
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(500, 'change could not be created', 'CREATE_FAILED');
+    const tier = row.head_sha
+      ? await recordHeadTier(
+          cx.env,
+          cx.repo,
+          { id: row.id, base: row.base_ref },
+          row.head_sha,
+          row.head_sha === headSha ? initialCoverage : undefined,
+          cx.waitUntil,
+        )
+      : { maxTier: 'scrutinize' as const, truncated: false, recorded: false };
+    const targetPolicy = effectivePolicy(cx.branchRules ?? [], branchRef(p.base));
+    if (
+      targetPolicy.protected &&
+      !(targetPolicy.agentApprovals === 'low-risk' && (tier.maxTier === 'read' || tier.maxTier === 'receipt'))
+    ) {
+      try {
+        await cx.env.DB.batch([recordMissingEscalation(cx.env.DB, row.id, 'protected-path', now)]);
+      } catch {
+        // Review publication records any missing escalation before applying the gate.
+      }
+    }
     let checks = ((results[results.length - 2]?.results as CheckRunRow[] | undefined) ?? []).map(checkRunView);
     if (row.head_sha && row.head_sha !== headSha) {
       // The insert adopted a push newer than the evaluated head; that push's hooks ran before the change existed.
@@ -1672,6 +1693,19 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
     await recordGuard(e.env, e.repoId, e.change.id, e.headSha);
   },
   async (e) => {
+    try {
+      const [repoRead, changeRead] = await e.env.DB.batch([
+        e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId),
+        e.env.DB.prepare('SELECT id, base_ref FROM change_sets WHERE id = ? AND repo_id = ?').bind(e.change.id, e.repoId),
+      ]);
+      const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
+      const change = (changeRead?.results as { id: string; base_ref: string }[] | undefined)?.[0];
+      if (repo && change) await recordHeadTier(e.env, repo, { id: change.id, base: change.base_ref }, e.headSha);
+    } catch {
+      // A head-tier cache failure must not fail the push hook.
+    }
+  },
+  async (e) => {
     const repo = await e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId).first<RepoRow>();
     if (repo) await queueChangeCi(e.env, repo, e.change.id, e.headSha);
   },
@@ -1878,6 +1912,7 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM merge_admission WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM agent_tasks WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_reviews WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM change_head_tiers WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
     db.prepare('DELETE FROM change_escalations WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM review_policies WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),

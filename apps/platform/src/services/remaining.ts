@@ -17,7 +17,15 @@ export interface RemainingInput {
     conflicts: readonly { path: string }[];
   };
   blockers: readonly { code: string; error?: string }[];
-  approvals: { count: number; required: number; humans: number; humansRequired: number } | null;
+  approvals: {
+    count: number;
+    required: number;
+    humans: number;
+    humansRequired: number;
+    agentFamilyApprovals: number;
+    lowRisk: boolean;
+  } | null;
+  agentApprovals: 'never' | 'low-risk';
   mergeability: {
     status: string;
     mergeable: boolean;
@@ -42,15 +50,23 @@ function samePrincipal(input: RemainingInput): boolean {
   return Boolean(author.login && input.viewer.login && author.login === input.viewer.login);
 }
 
-function reviewSummary(code: string, approvals: RemainingInput['approvals']): string {
+function reviewSummary(code: string, approvals: RemainingInput['approvals'], agentApprovals: RemainingInput['agentApprovals']): string {
   if (code === 'ESCALATION_OPEN') return 'A human must resolve the open escalation.';
   if (approvals) {
-    const count = code === 'APPROVALS_REQUIRED' ? approvals.humans : approvals.count;
+    const count = code === 'APPROVALS_REQUIRED'
+      ? approvals.humans + (approvals.lowRisk ? approvals.agentFamilyApprovals : 0)
+      : approvals.count;
     const required = code === 'APPROVALS_REQUIRED' ? approvals.humansRequired : approvals.required;
     const noun = code === 'APPROVALS_REQUIRED'
       ? required === 1 ? 'human approval' : 'human approvals'
       : required === 1 ? 'approving review' : 'approving reviews';
-    return `Need ${required} ${noun}; ${count} so far`;
+    const text = `Need ${required} ${noun}; ${count} so far`;
+    if (code === 'APPROVALS_REQUIRED' && agentApprovals === 'low-risk') {
+      return approvals.lowRisk
+        ? `${text}. Different-family agents may count for this low-risk head.`
+        : `${text}. A human must approve because this head requires scrutiny.`;
+    }
+    return text;
   }
   if (code === 'APPROVALS_REQUIRED') {
     return 'A human approval is required by branch policy.';
@@ -116,7 +132,7 @@ export function remainingFor(input: RemainingInput): RemainingItem[] {
     items.push({
       code: 'ESCALATION_OPEN',
       who: 'human',
-      summary: reviewSummary(blocker.code, input.approvals),
+      summary: reviewSummary(blocker.code, input.approvals, input.agentApprovals),
       you: viewer.kind === 'human' && viewer.writeAccess && !author,
     });
   }
@@ -124,7 +140,7 @@ export function remainingFor(input: RemainingInput): RemainingItem[] {
     items.push({
       code: 'APPROVALS_REQUIRED',
       who: 'human',
-      summary: reviewSummary(blocker.code, input.approvals),
+      summary: reviewSummary(blocker.code, input.approvals, input.agentApprovals),
       you: viewer.kind === 'human' && viewer.writeAccess && !author,
     });
   }
@@ -132,7 +148,7 @@ export function remainingFor(input: RemainingInput): RemainingItem[] {
     items.push({
       code: 'REVIEWS_REQUIRED',
       who: 'reviewer',
-      summary: reviewSummary(blocker.code, input.approvals),
+      summary: reviewSummary(blocker.code, input.approvals, input.agentApprovals),
       you: viewer.writeAccess && Boolean(viewer.principal) && !author,
     });
   }

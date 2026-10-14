@@ -172,6 +172,9 @@ describe('change pages', () => {
   it('renders guide chapters, tiers, checks and a review form for a signed-in reviewer', async () => {
     await seedChange('detail');
     await request('PUT', `/api/v1/repos/${OWNER}/detail/review-policy`, { token: ownerToken, json: { requiredReviews: 1 } });
+    const row = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds.detail).first<{ id: string }>();
+    await env.DB.prepare('DELETE FROM change_head_tiers WHERE change_set_id = ?').bind(row!.id).run();
     await env.DB.prepare(
       'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
     ).bind(repoIds.detail, userIds[REVIEWER], 'write', userIds[OWNER], Date.now(), Date.now()).run();
@@ -195,6 +198,12 @@ describe('change pages', () => {
     expect(page.text).toContain('Need 1 approving review; 0 so far');
     expect(page.text.match(/Need 1 approving review;/g)).toHaveLength(1);
     expect(page.text).toContain('class="tag signal-hi">You</span>');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM change_head_tiers WHERE change_set_id = ?')
+      .bind(row!.id).first<{ n: number }>()).toMatchObject({ n: 1 });
+    await env.DB.prepare('UPDATE change_head_tiers SET computed_at = 1 WHERE change_set_id = ?').bind(row!.id).run();
+    expect((await browser(`/${OWNER}/detail/changes/1`)).status).toBe(200);
+    expect(await env.DB.prepare('SELECT computed_at FROM change_head_tiers WHERE change_set_id = ?')
+      .bind(row!.id).first<{ computed_at: number }>()).toMatchObject({ computed_at: 1 });
   });
 
   it('requires CSRF for a session approve and records the review', async () => {

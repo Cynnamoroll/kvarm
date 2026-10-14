@@ -208,8 +208,8 @@ export interface ReviewPacket {
   base: string;
   headSha: string | null;
   author: AuthorView;
-  policy: { requiredReviews: number; humanApprovalsRequired: number; protected: boolean; branchRules: string[] };
-  approvals: { count: number; required: number; humans: number; humansRequired: number };
+  policy: { requiredReviews: number; humanApprovalsRequired: number; protected: boolean; branchRules: string[]; agentApprovals: 'never' | 'low-risk' };
+  approvals: { count: number; required: number; humans: number; humansRequired: number; agentFamilyApprovals: number; lowRisk: boolean };
   /** Nothing in the review gate blocks publication of the current head. */
   satisfied: boolean;
   blockers: ReviewBlocker[];
@@ -354,8 +354,21 @@ function buildPacket(p: PacketRead): ReviewPacket {
     base: c.base_ref,
     headSha: c.head_sha,
     author,
-    policy: { requiredReviews: facts.required, humanApprovalsRequired: policy.requiredApprovals, protected: policy.protected, branchRules: policy.rules },
-    approvals: { count: facts.approvals, required: facts.required, humans: facts.humans, humansRequired: policy.requiredApprovals },
+    policy: {
+      requiredReviews: facts.required,
+      humanApprovalsRequired: policy.requiredApprovals,
+      protected: policy.protected,
+      branchRules: policy.rules,
+      agentApprovals: policy.agentApprovals,
+    },
+    approvals: {
+      count: facts.approvals,
+      required: facts.required,
+      humans: facts.humans,
+      humansRequired: policy.requiredApprovals,
+      agentFamilyApprovals: facts.agentFamilyApprovals,
+      lowRisk: policy.agentApprovals === 'low-risk' && facts.headTier !== null && facts.headTier !== 'scrutinize',
+    },
     satisfied: gate.block === null,
     blockers: gate.blockers,
     reviews: p.reviews.map((r) => reviewView(r, c.head_sha, author)),

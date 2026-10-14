@@ -144,9 +144,19 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
   return { repo, main: main.sha };
 }
 
+async function setupDocs(name: string): Promise<{ repo: FakeRepo; main: string; docs: string }> {
+  const { repo, main } = await setup(name, 0);
+  const docs = await commit(repo, { 'README.md': 'readme\n', 'docs/guide.md': 'guide\n' }, [main]);
+  repo.refs.set('refs/heads/docs', docs.sha);
+  repo.refs.set('refs/heads/agents/docs', docs.sha);
+  return { repo, main, docs: docs.sha };
+}
+
 const createChange = (repo: string, head: string, token = tok.owner, mergePolicy = 'review') =>
   call('POST', api(repo, '/changes'), token, { title: `Change ${head}`, base: 'main', head, mergePolicy });
 const setPolicy = (repo: string, requiredReviews: number, token = tok.owner) => call('PUT', api(repo, '/review-policy'), token, { requiredReviews });
+const setBranchRule = (repo: string, agentApprovals: 'never' | 'low-risk', requiredApprovals = 1) =>
+  call('POST', api(repo, '/branch-rules'), tok.owner, { pattern: 'main', requiredApprovals, agentApprovals });
 const approve = (repo: string, n: number, token: string, body: Record<string, unknown> = {}) => call('POST', api(repo, `/changes/${n}/approve`), token, body);
 const requestChanges = (repo: string, n: number, token: string, body: Record<string, unknown> = {}) =>
   call('POST', api(repo, `/changes/${n}/request-changes`), token, body);
@@ -387,7 +397,14 @@ describe('review policy', () => {
     // A human non-author counts as one more distinct principal, recorded with the human sentinel family.
     const human = await approve('n-distinct', 1, tok.human2);
     expect(human.json.review).toMatchObject({ principal: `user:${userIds['rv-human2']}`, modelFamily: 'human', differentFamily: false });
-    expect(human.json.packet.approvals).toEqual({ count: 3, required: 2, humans: 1, humansRequired: 0 });
+    expect(human.json.packet.approvals).toEqual({
+      count: 3,
+      required: 2,
+      humans: 1,
+      humansRequired: 0,
+      agentFamilyApprovals: 2,
+      lowRisk: false,
+    });
     expect((await merge('n-distinct', 1)).json.state).toBe('merged');
   });
 
@@ -452,6 +469,131 @@ describe('model families and assignment', () => {
 function byIdOf(cands: Array<Record<string, any>>): Record<string, Record<string, any>> {
   return Object.fromEntries(cands.map((c) => [c.agent.id, c]));
 }
+
+describe('agent approval head tiers', () => {
+  it('records a docs-only tier before pre-seeding and auto-merges a different-family agent approval', async () => {
+    const { docs } = await setupDocs('agent-docs-auto');
+    const reviewer = await agent('agent-docs-auto', 'da-gpt', 'gpt');
+    await setPolicy('agent-docs-auto', 1);
+    expect((await setBranchRule('agent-docs-auto', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-docs-auto', 'agents/docs', tok.owner, 'auto')).status).toBe(201);
+    const tier = await env.DB.prepare(
+      'SELECT max_tier, truncated FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-docs-auto'], docs).first<{ max_tier: string; truncated: number }>();
+    expect(tier).toMatchObject({ max_tier: 'read', truncated: 0 });
+    expect(await openEscalation('agent-docs-auto', 1, 'protected-path')).toBeUndefined();
+    const approval = await approve('agent-docs-auto', 1, reviewer.token);
+    expect(approval.json.packet.approvals).toMatchObject({ humans: 0, agentFamilyApprovals: 1, lowRisk: true });
+    expect(approval.json.packet.state).toBe('merged');
+  });
+
+  it('pre-seeds for a scrutinize creation and stores truncated coverage as scrutinize', async () => {
+    const { repo, main } = await setupDocs('agent-scrutinize-create');
+    const contract = await commit(repo, {
+      'README.md': 'readme\n',
+      'docs/guide.md': 'guide\n',
+      'apps/platform/migrations/0999_contract.sql': 'CREATE TABLE x (id TEXT);\n',
+    }, [main]);
+    repo.refs.set('refs/heads/contract', contract.sha);
+    expect((await setBranchRule('agent-scrutinize-create', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-scrutinize-create', 'contract')).status).toBe(201);
+    const seeded = await env.DB.prepare(
+      'SELECT max_tier, truncated FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-scrutinize-create'], contract.sha).first<{ max_tier: string; truncated: number }>();
+    expect(seeded).toMatchObject({ max_tier: 'scrutinize', truncated: 0 });
+    expect(await openEscalation('agent-scrutinize-create', 1, 'protected-path')).toMatchObject({ state: 'open' });
+
+    const { repo: largeRepo, main: largeMain } = await setupDocs('agent-truncated-create');
+    const files: Record<string, string> = { 'README.md': 'readme\n' };
+    for (let i = 0; i < 31; i++) files[`docs/file-${i}.md`] = `file ${i}\n`;
+    const large = await commit(largeRepo, files, [largeMain]);
+    largeRepo.refs.set('refs/heads/large', large.sha);
+    expect((await createChange('agent-truncated-create', 'large')).status).toBe(201);
+    const truncated = await env.DB.prepare(
+      'SELECT max_tier, truncated FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-truncated-create'], large.sha).first<{ max_tier: string; truncated: number }>();
+    expect(truncated).toMatchObject({ max_tier: 'scrutinize', truncated: 1 });
+  });
+
+  it('excludes same-family and null-family agents, and refuses a scrutinize head after a push', async () => {
+    const { repo, main } = await setupDocs('agent-family-and-push');
+    const author = await agent('agent-family-and-push', 'fp-author', 'claude');
+    const same = await agent('agent-family-and-push', 'fp-same', 'claude');
+    const unknown = await agent('agent-family-and-push', 'fp-unknown', null);
+    await setPolicy('agent-family-and-push', 1);
+    expect((await setBranchRule('agent-family-and-push', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-family-and-push', 'agents/docs', author.token)).status).toBe(201);
+    await approve('agent-family-and-push', 1, same.token);
+    const excluded = await approve('agent-family-and-push', 1, unknown.token);
+    expect(excluded.json.packet.approvals).toMatchObject({ agentFamilyApprovals: 0, lowRisk: true });
+    expect((await merge('agent-family-and-push', 1)).json.code).toBe('APPROVALS_REQUIRED');
+
+    const { repo: pushedRepo, main: pushedMain } = await setupDocs('agent-scrutinize-push');
+    const reviewer = await agent('agent-scrutinize-push', 'sp-gpt', 'gpt');
+    await setPolicy('agent-scrutinize-push', 1);
+    expect((await setBranchRule('agent-scrutinize-push', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-scrutinize-push', 'docs')).status).toBe(201);
+    await approve('agent-scrutinize-push', 1, reviewer.token);
+    const old = pushedRepo.refs.get('refs/heads/docs')!;
+    const next = await commit(pushedRepo, {
+      'README.md': 'readme\n',
+      'docs/guide.md': 'guide\n',
+      'apps/platform/migrations/0999_contract.sql': 'CREATE TABLE x (id TEXT);\n',
+    }, [old]);
+    pushedRepo.refs.set('refs/heads/docs', next.sha);
+    await deliver(pushBody('agent-scrutinize-push', 'refs/heads/docs', old, next.sha));
+    const tier = await env.DB.prepare(
+      'SELECT max_tier FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-scrutinize-push'], next.sha).first<{ max_tier: string }>();
+    expect(tier?.max_tier).toBe('scrutinize');
+    await approve('agent-scrutinize-push', 1, reviewer.token);
+    const refused = await merge('agent-scrutinize-push', 1);
+    expect(refused.json.code).toBe('APPROVALS_REQUIRED');
+    expect(refused.json.review.approvals).toMatchObject({ agentFamilyApprovals: 1, lowRisk: false });
+    expect(repo.refs.get(MAIN)).toBe(main);
+    expect(pushedRepo.refs.get(MAIN)).toBe(pushedMain);
+  });
+
+  it('does not count any agent-family approval for an agent author with no family', async () => {
+    const { repo } = await setupDocs('agent-author-family-unknown');
+    const author = await agent('agent-author-family-unknown', 'auf-author', null);
+    const reviewer = await agent('agent-author-family-unknown', 'auf-gpt', 'gpt');
+    await setPolicy('agent-author-family-unknown', 1);
+    expect((await setBranchRule('agent-author-family-unknown', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-author-family-unknown', 'agents/docs', author.token)).status).toBe(201);
+    await approve('agent-author-family-unknown', 1, reviewer.token);
+    const packetResult = await packet('agent-author-family-unknown', 1);
+    expect(packetResult.json.approvals).toMatchObject({ agentFamilyApprovals: 0, lowRisk: true });
+    expect((await merge('agent-author-family-unknown', 1)).json.code).toBe('APPROVALS_REQUIRED');
+    expect(repo.refs.get(MAIN)).toBeTruthy();
+  });
+
+  it('re-reads tier facts immediately before train publication', async () => {
+    const { repo } = await setupDocs('agent-train-reread');
+    const reviewer = await agent('agent-train-reread', `phase-c-tr-gpt-${crypto.randomUUID().slice(0, 8)}`, 'gpt');
+    await setPolicy('agent-train-reread', 1);
+    expect((await setBranchRule('agent-train-reread', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-train-reread', 'docs')).status).toBe(201);
+    await approve('agent-train-reread', 1, reviewer.token);
+    expect((await enqueue('agent-train-reread', 1)).status).toBe(201);
+    let changed = false;
+    const gate: ChecksGate = {
+      async requiredChecksFor(_repo, treeSha, configId) {
+        if (!changed) {
+          changed = true;
+          await env.DB.prepare("UPDATE change_head_tiers SET max_tier = 'scrutinize' WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1)")
+            .bind(repoIds['agent-train-reread']).run();
+        }
+        return { treeSha, configId, required: [], state: 'success' };
+      },
+    };
+    const run = await runTrain(env, repoIds['agent-train-reread']!, MAIN, trainDeps({ gate: () => gate }));
+    expect(changed).toBe(true);
+    expect(run.published).toEqual([]);
+    expect(run.ejected).toEqual([{ number: 1, code: 'APPROVALS_REQUIRED' }]);
+    expect(repo.refs.get(MAIN)).not.toBe(repo.refs.get('refs/heads/docs'));
+  });
+});
 
 describe('escalations', () => {
   it('reviewer disagreement blocks merge and enqueue until a human approves the current head', async () => {

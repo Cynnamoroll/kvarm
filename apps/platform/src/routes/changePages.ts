@@ -5,8 +5,7 @@
 
 import { Hono, type Context } from 'hono';
 import { escapeHtml, html, raw, timeAgo } from '@kvarm/ui';
-import { buildCoverage, fallbackGuide, parseReviewConfig, type CoverageFileInput, type ReviewTier } from '@kvarm/review';
-import { readFileAt } from '../artifacts/repo';
+import { fallbackGuide, type CoverageMap, type ReviewTier } from '@kvarm/review';
 import type { RepoRow } from '../db/repos';
 import { repoPage } from '../render/repoShell';
 import { authorizeRoute, requestSession, type App } from './api';
@@ -15,7 +14,7 @@ import { resolveRepo, notFound, finish, sessionFormRefused, type Resolved } from
 import * as changes from '../services/changes';
 import * as reviews from '../services/reviews';
 import * as compare from '../services/compare';
-import { compareChange } from '../services/changeDiff';
+import { headCoverage, recordHeadTier } from '../services/reviewCoverage';
 import type { CarryView } from '../services/approvalCarry';
 import { remainingFor, type RemainingItem, type RemainingWho } from '../services/remaining';
 import { DIFF_CLIENT_TAG, renderCompareFileRow } from './comparePages';
@@ -24,9 +23,6 @@ export const changePages = new Hono<App>();
 
 const HTML = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } as const;
 const LIST_LIMIT = 25;
-const COVERAGE_FILES = 30;
-const COVERAGE_BYTES = 512 * 1024;
-const CONFIG_BYTES = 64 * 1024;
 
 type ReviewTierLabel = ReviewTier;
 
@@ -187,7 +183,7 @@ function renderGuide(
   encRange: string,
   result: compare.CompareResponse,
   guide: ReturnType<typeof fallbackGuide>,
-  map: Awaited<ReturnType<typeof buildCoverage>>,
+  map: CoverageMap,
   configError: string | null,
   carry: CarryView | null,
 ): string {
@@ -294,16 +290,26 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
     writeAccess: resolved.viewer !== null && (resolved.role === 'write' || resolved.role === 'admin'),
     waitUntil: (promise) => c.executionCtx.waitUntil(promise),
   };
-  const [detail, packet] = await Promise.all([
-    changes.getChange(cx, number, { includeRemaining: false }),
-    reviews.getReviewPacket(c.env, resolved.repo, number),
-  ]);
-  if (!detail.ok || !packet.ok) return notFound(c);
+  const detail = await changes.getChange(cx, number, { includeRemaining: false });
+  if (!detail.ok) return notFound(c);
   const change = detail.value;
+  const row = await c.env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = ?')
+    .bind(resolved.repo.id, change.number).first<{ id: string }>();
+  if (!row) return notFound(c);
+  const coverage = change.headSha
+    ? await headCoverage(c.env, resolved.repo, { id: row.id, base: change.base }, change.headSha, (promise) => c.executionCtx.waitUntil(promise))
+    : null;
+  if (change.headSha && coverage) {
+    await recordHeadTier(c.env, resolved.repo, { id: row.id, base: change.base }, change.headSha, coverage, (promise) => c.executionCtx.waitUntil(promise));
+  }
+  const [packet, aux] = await Promise.all([
+    reviews.getReviewPacket(c.env, resolved.repo, number),
+    change.state === 'open' || change.state === 'conflicted'
+      ? changes.readRemainingAux(c.env, resolved.repo.id, change.number)
+      : Promise.resolve({ dependency: null, resolveConflictTaskOpen: false }),
+  ]);
+  if (!packet.ok) return notFound(c);
   const reviewPacket = packet.value;
-  const aux = change.state === 'open' || change.state === 'conflicted'
-    ? await changes.readRemainingAux(c.env, resolved.repo.id, change.number)
-    : { dependency: null, resolveConflictTaskOpen: false };
   const viewerPrincipal = resolved.viewer
     ? resolved.viewer.agent
       ? `agent:${resolved.viewer.agent.agentId}`
@@ -319,6 +325,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
     },
     blockers: reviewPacket.blockers,
     approvals: reviewPacket.approvals,
+    agentApprovals: reviewPacket.policy.agentApprovals,
     mergeability: change.mergeability,
     dependency: aux.dependency,
     resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
@@ -332,86 +339,18 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   const path = `${base(resolved.repo)}/changes/${change.number}`;
   const encRange = encodeURIComponent(`${change.base}...${change.headSha ?? change.head}`);
   let coverageBody = html`<div class="flash warn">The base or head commit is unavailable for a bounded diff.</div>`;
-  let configError: string | null = null;
-  if (change.headSha) {
-    const diff = await compareChange(c.env, resolved.repo, { base: change.base }, change.headSha, (promise) => c.executionCtx.waitUntil(promise));
-    if (diff.ok) {
-      const response = diff.value.response;
-      const inputs: CoverageFileInput[] = [];
-      let reads = 0;
-      let usedBytes = 0;
-      let exhausted = response.truncated || response.nextCursor !== undefined;
-      for (const file of response.files) {
-        let hunks: CoverageFileInput['hunks'] = null;
-        let truncated = false;
-        if (!file.binary && !file.tooLarge && !exhausted && reads < COVERAGE_FILES) {
-          const found = await compare.fileDiff(
-            { env: c.env, repo: resolved.repo, bypass: false, waitUntil: (promise) => c.executionCtx.waitUntil(promise) },
-            change.base,
-            change.headSha,
-            file.path,
-          );
-          reads++;
-          if (found.ok && !found.value.response.binary && !found.value.response.tooLarge) {
-            const size = new TextEncoder().encode(JSON.stringify(found.value.response.hunks)).byteLength;
-            if (usedBytes + size <= COVERAGE_BYTES) {
-              hunks = found.value.response.hunks;
-              usedBytes += size;
-              truncated = found.value.response.truncated === true;
-            } else {
-              truncated = true;
-              exhausted = true;
-            }
-          } else if (!found.ok) {
-            truncated = true;
-            exhausted = true;
-          }
-        } else if (!file.binary && !file.tooLarge && !exhausted) {
-          truncated = true;
-          exhausted = true;
-        } else if (!file.binary && !file.tooLarge && exhausted) {
-          truncated = true;
-        }
-        inputs.push({
-          path: file.path,
-          ...(file.oldPath ? { oldPath: file.oldPath } : {}),
-          status: file.status,
-          oldHash: file.oldHash,
-          newHash: file.newHash,
-          additions: file.additions,
-          deletions: file.deletions,
-          tags: file.risk.tags,
-          hunks,
-          ...(truncated ? { truncated: true } : {}),
-        });
-      }
-      let config: Parameters<typeof buildCoverage>[1] = {};
-      try {
-        const blob = await readFileAt(c.env, resolved.repo.artifacts_name, change.headSha, '.kvarm/review.json');
-        if (blob) {
-          if (blob.size > CONFIG_BYTES) {
-            configError = '.kvarm/review.json exceeds the 64 KiB config limit; default review tiers are used.';
-          } else {
-            const parsed = parseReviewConfig(await blob.text());
-            if (parsed.ok) config = parsed.value;
-            else configError = `${parsed.error}; default review tiers are used.`;
-          }
-        }
-      } catch {
-        configError = 'Could not read .kvarm/review.json; default review tiers are used.';
-      }
-      const map = await buildCoverage(inputs, config);
-      if (response.truncated || response.nextCursor !== undefined) map.truncated = true;
-      const guide = fallbackGuide(map);
+  const configError = coverage?.configError ?? null;
+  if (coverage) {
+    if (coverage.response && coverage.map && coverage.guide) {
       const principal = resolved.viewer
         ? resolved.viewer.agent
           ? `agent:${resolved.viewer.agent.agentId}`
           : `user:${resolved.viewer.user.id}`
         : null;
       const carry = reviewPacket.carry.find((item) => item.principal === principal && item.changedPaths.length > 0) ?? null;
-      coverageBody = renderGuide(resolved.repo, encRange, response, guide, map, configError, carry);
+      coverageBody = renderGuide(resolved.repo, encRange, coverage.response, coverage.guide, coverage.map, configError, carry);
     } else {
-      coverageBody = html`<div class="flash warn">Diff coverage unavailable: ${diff.error}</div>`;
+      coverageBody = html`<div class="flash warn">Diff coverage unavailable: ${coverage.error ?? 'the bounded comparison could not be read.'}</div>`;
     }
   }
   const checkTags = change.checks.map((check) => html`<span class="tag">${check.name}: ${check.conclusion ?? check.status}</span>`).join(' ');
@@ -478,6 +417,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
         <section class="card"><div class="card-title">Policy & reviewers</div>
           <p>${reviewPacket.policy.requiredReviews} required approval(s); ${reviewPacket.policy.humanApprovalsRequired} human approval(s).</p>
           <p class="muted">${reviewPacket.policy.protected ? 'Protected target' : 'No protected-target rule'} · ${reviewPacket.policy.branchRules.length} branch rule(s)</p>
+          <p class="muted">Agent approvals: ${reviewPacket.policy.agentApprovals === 'low-risk' ? 'different-family agents may count when the head has no scrutinize files.' : 'off; agent approvals do not count toward protected-branch approvals.'}</p>
         </section>
         <section class="card"><div class="card-title">Escalations</div>
           ${reviewPacket.escalations.length
