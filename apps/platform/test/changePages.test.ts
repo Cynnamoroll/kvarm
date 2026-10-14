@@ -161,6 +161,7 @@ describe('change pages', () => {
 
   it('renders guide chapters, tiers, checks and a review form for a signed-in reviewer', async () => {
     await seedChange('detail');
+    await request('PUT', `/api/v1/repos/${OWNER}/detail/review-policy`, { token: ownerToken, json: { requiredReviews: 1 } });
     await env.DB.prepare(
       'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
     ).bind(repoIds.detail, userIds[REVIEWER], 'write', userIds[OWNER], Date.now(), Date.now()).run();
@@ -169,6 +170,7 @@ describe('change pages', () => {
     const page = await browser(`/${OWNER}/detail/changes/1`);
     expect(page.status).toBe(200);
     expect(page.text).toContain('Guide-driven change');
+    expect(page.text).toContain('What’s left');
     expect(page.text).toContain('example/check');
     expect(page.text).toContain('Generated guide');
     expect(page.text).toContain('guide-chapter');
@@ -179,6 +181,9 @@ describe('change pages', () => {
     expect(page.text).toContain('name="_csrf"');
     expect(page.text).toContain('Request changes');
     expect(page.text).toContain('Approve &amp; ship');
+    expect(page.text).toContain('What’s left');
+    expect(page.text).toContain('Need 1 approving review(s); 0 recorded.');
+    expect(page.text).toContain('class="tag signal-hi">You</span>');
   });
 
   it('requires CSRF for a session approve and records the review', async () => {

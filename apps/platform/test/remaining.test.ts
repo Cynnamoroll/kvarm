@@ -1,0 +1,100 @@
+import { describe, expect, it } from 'vitest';
+import { remainingFor, type RemainingInput } from '../src/services/remaining';
+
+const input = (overrides: Partial<RemainingInput> = {}): RemainingInput => ({
+  change: {
+    state: 'open',
+    mergePolicy: 'review',
+    author: { principal: 'user:author', login: 'author' },
+    queueState: null,
+    conflicts: [],
+  },
+  blockers: [],
+  mergeability: { status: 'clean', mergeable: true, checks: { state: 'success', required: [] } },
+  dependency: null,
+  resolveConflictTaskOpen: false,
+  viewer: { principal: 'user:reviewer', login: 'reviewer', kind: 'human', writeAccess: true },
+  ...overrides,
+});
+
+describe('remainingFor', () => {
+  it('returns blockers in the prescribed order and names conflicts and failed checks', () => {
+    const items = remainingFor(input({
+      change: { ...input().change, mergePolicy: 'draft', state: 'conflicted', conflicts: [{ path: 'src/a.ts' }] },
+      mergeability: {
+        status: 'conflicts',
+        mergeable: false,
+        conflicts: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }],
+        checks: {
+          state: 'failure',
+          required: [
+            { name: 'ci/test', state: 'failure' },
+            { name: 'ci/lint', state: 'pending' },
+          ],
+        },
+      },
+      dependency: { code: 'DEPENDENCY_STALE' },
+      blockers: [
+        { code: 'REVIEWS_REQUIRED', error: 'requires 2 approvals; 0 so far' },
+        { code: 'APPROVALS_REQUIRED', error: 'requires 1 approval; 0 so far' },
+        { code: 'ESCALATION_OPEN', error: 'open escalation(s) need a human' },
+      ],
+      resolveConflictTaskOpen: true,
+      viewer: { principal: 'user:author', login: 'author', kind: 'human', writeAccess: true },
+    }));
+    expect(items.map((item) => item.code)).toEqual([
+      'DRAFT',
+      'CONFLICTS',
+      'CHECKS_FAILED',
+      'CHECKS_PENDING',
+      'DEPENDENCY',
+      'ESCALATION_OPEN',
+      'APPROVALS_REQUIRED',
+      'REVIEWS_REQUIRED',
+    ]);
+    expect(items[1]).toMatchObject({ paths: ['src/a.ts', 'src/b.ts'], you: true });
+    expect(items[1]?.summary).toContain('task is open');
+    expect(items[2]?.summary).toContain('ci/test');
+    expect(items[3]?.summary).toContain('ci/lint');
+    expect(items[0]?.you).toBe(true);
+    expect(items[2]?.you).toBe(true);
+    expect(items[5]?.who).toBe('human');
+    expect(items.every((item) => item.summary.length <= 90)).toBe(true);
+  });
+
+  it('marks review and human actions for eligible non-author viewers only', () => {
+    const blockers = [
+      { code: 'APPROVALS_REQUIRED' },
+      { code: 'ESCALATION_OPEN' },
+      { code: 'REVIEWS_REQUIRED' },
+    ];
+    const reviewer = remainingFor(input({ blockers }));
+    expect(reviewer.map((item) => item.you)).toEqual([true, true, true]);
+    const author = remainingFor(input({
+      blockers,
+      viewer: { principal: 'user:author', login: 'author', kind: 'human', writeAccess: true },
+    }));
+    expect(author.map((item) => item.you)).toEqual([false, false, false]);
+    const readOnly = remainingFor(input({
+      blockers,
+      viewer: { principal: 'user:reviewer', login: 'reviewer', kind: 'human', writeAccess: false },
+    }));
+    expect(readOnly.map((item) => item.you)).toEqual([false, false, false]);
+  });
+
+  it('identifies ready, queued and unknown states without inventing readiness for terminal changes', () => {
+    expect(remainingFor(input()).map((item) => item.code)).toEqual(['READY']);
+    expect(remainingFor(input({ change: { ...input().change, queueState: 'queued' } })).map((item) => item.code)).toEqual(['QUEUED']);
+    const unknown = remainingFor(input({
+      mergeability: { status: 'unknown', mergeable: false, checks: null, unknownReason: 'tree budget exceeded' },
+    }));
+    expect(unknown).toEqual([expect.objectContaining({ code: 'UNKNOWN', summary: 'tree budget exceeded' })]);
+    expect(remainingFor(input({
+      mergeability: { status: 'unrelated', mergeable: false, checks: null },
+    }))).toEqual([expect.objectContaining({ code: 'UNKNOWN', summary: 'The change and target have no shared history.' })]);
+    expect(remainingFor(input({
+      mergeability: { status: 'up-to-date', mergeable: false, checks: null },
+    }))).toEqual([expect.objectContaining({ code: 'UNKNOWN', summary: 'The change is already contained in the target.' })]);
+    expect(remainingFor(input({ change: { ...input().change, state: 'merged' }, mergeability: null }))).toEqual([]);
+  });
+});

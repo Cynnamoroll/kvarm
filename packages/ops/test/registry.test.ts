@@ -100,6 +100,8 @@ describe('operation registry', () => {
     expect(findOperation('approve_change')).toMatchObject({ command: ['review', 'approve'], method: 'POST', path: '/repos/{repo}/changes/{number}/approve' });
     expect(findOperation('request_changes')).toMatchObject({ command: ['review', 'request-changes'], method: 'POST', path: '/repos/{repo}/changes/{number}/request-changes' });
     expect(findOperation('get_reviews')).toMatchObject({ command: ['review', 'get'], method: 'GET', path: '/repos/{repo}/changes/{number}/reviews', readOnly: true });
+    expect(findOperation('get_change')?.description).toMatch(/ordered remaining actions/i);
+    expect(findOperation('get_mergeability')?.description).toMatch(/ordered remaining actions/i);
     expect(findOperation('list_pending_reviews')).toMatchObject({ command: ['review', 'pending'], path: '/repos/{repo}/reviews/pending', readOnly: true });
     expect(findOperation('assign_reviewer')).toMatchObject({ command: ['review', 'assign'], path: '/repos/{repo}/changes/{number}/reviewers/assign' });
     expect(findOperation('resolve_escalation')).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });

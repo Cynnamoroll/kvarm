@@ -17,6 +17,7 @@ import * as reviews from '../services/reviews';
 import * as compare from '../services/compare';
 import { compareChange } from '../services/changeDiff';
 import type { CarryView } from '../services/approvalCarry';
+import { remainingFor, type RemainingItem, type RemainingWho } from '../services/remaining';
 import { DIFF_CLIENT_TAG, renderCompareFileRow } from './comparePages';
 
 export const changePages = new Hono<App>();
@@ -237,6 +238,27 @@ function checkRows(change: changes.ChangeDetail): string {
   }).join(''))}</ul>`;
 }
 
+function remainingPanel(items: readonly RemainingItem[], state: string, queueState: string | null, agentMode: boolean): string {
+  if (state === 'closed' || state === 'merged') return '';
+  const glyph: Record<RemainingWho, string> = { human: 'H', reviewer: 'R', author: 'A', ci: 'CI', train: 'T', dependency: 'D' };
+  const rows = items.map((item) => html`<li class="remaining-row">
+    <span class="remaining-who" aria-label="${item.who}" title="${item.who}">${glyph[item.who]}</span>
+    <div class="remaining-copy">
+      <span>${item.summary}</span>
+      ${item.paths?.length ? raw(html`<ul class="remaining-paths">${raw(item.paths.map((path) => `<li><code>${escapeHtml(path)}</code></li>`).join(''))}</ul>`) : ''}
+    </div>
+    <div class="remaining-meta">
+      ${item.you ? raw(html`<span class="tag signal-hi">You</span>`) : ''}
+      ${agentMode ? raw(html`<code class="remaining-code">${item.code}</code>`) : ''}
+    </div>
+  </li>`).join('');
+  const empty = queueState !== null ? 'In the train.' : 'Nothing left. Ready to merge.';
+  return html`<section class="card remaining-panel">
+    <div class="card-title">What’s left</div>
+    ${items.length ? raw(html`<ol class="remaining-list">${raw(rows)}</ol>`) : html`<p class="muted">${empty}</p>`}
+  </section>`;
+}
+
 function reviewTimeline(packet: reviews.ReviewPacket): string {
   if (!packet.reviews.length) return html`<p class="muted">No reviews submitted yet.</p>`;
   return html`<ol class="review-timeline">${raw(packet.reviews.map((review) => `
@@ -253,15 +275,43 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
     env: c.env,
     repo: resolved.repo,
     actor: resolved.viewer,
+    writeAccess: resolved.viewer !== null && (resolved.role === 'write' || resolved.role === 'admin'),
     waitUntil: (promise) => c.executionCtx.waitUntil(promise),
   };
   const [detail, packet] = await Promise.all([
-    changes.getChange(cx, number),
+    changes.getChange(cx, number, { includeRemaining: false }),
     reviews.getReviewPacket(c.env, resolved.repo, number),
   ]);
   if (!detail.ok || !packet.ok) return notFound(c);
   const change = detail.value;
   const reviewPacket = packet.value;
+  const aux = change.state === 'open' || change.state === 'conflicted'
+    ? await changes.readRemainingAux(c.env, resolved.repo.id, change.number)
+    : { dependency: null, resolveConflictTaskOpen: false };
+  const viewerPrincipal = resolved.viewer
+    ? resolved.viewer.agent
+      ? `agent:${resolved.viewer.agent.agentId}`
+      : `user:${resolved.viewer.user.id}`
+    : null;
+  const remaining = remainingFor({
+    change: {
+      state: change.state,
+      mergePolicy: change.mergePolicy,
+      author: { login: reviewPacket.author.login, agentId: reviewPacket.author.agent?.id ?? null },
+      queueState: change.queueState,
+      conflicts: change.conflicts,
+    },
+    blockers: reviewPacket.blockers,
+    mergeability: change.mergeability,
+    dependency: aux.dependency,
+    resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
+    viewer: {
+      principal: viewerPrincipal,
+      login: resolved.viewer?.user.login ?? null,
+      kind: resolved.viewer ? (resolved.viewer.agent ? 'agent' : 'human') : null,
+      writeAccess: resolved.viewer !== null && (resolved.role === 'write' || resolved.role === 'admin'),
+    },
+  });
   const path = `${base(resolved.repo)}/changes/${change.number}`;
   const encRange = encodeURIComponent(`${change.base}...${change.headSha ?? change.head}`);
   let coverageBody = html`<div class="flash warn">The base or head commit is unavailable for a bounded diff.</div>`;
@@ -402,6 +452,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
         </section>`) : ''}
       </main>
       <aside class="change-review-side">
+        ${raw(remainingPanel(remaining, change.state, change.queueState, resolved.viewer?.agent !== undefined))}
         <section class="card"><div class="card-title">Checks</div>${raw(checkRows(change))}</section>
         <section class="card"><div class="card-title">Mergeability</div>
           <p>${change.mergeability ? raw(stateTag(change.mergeability.status)) : html`<span class="muted">Not available for this state.</span>`}</p>

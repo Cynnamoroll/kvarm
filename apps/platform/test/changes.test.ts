@@ -548,6 +548,7 @@ describe('detail: rating, mergeability, checks', () => {
     });
     // Creation records the kvarm/guard run of the head, the only check on a repo without CI.
     expect(d.json.checks).toMatchObject([{ name: 'kvarm/guard', headSha: feature.sha, treeSha: feature.tree, status: 'success', required: true }]);
+    expect(d.json.remaining).toEqual([expect.objectContaining({ code: 'READY', who: 'human' })]);
 
     const c = await seedRepo('conflicted');
     await conflicting(c);
@@ -561,6 +562,7 @@ describe('detail: rating, mergeability, checks', () => {
       conflicts: [{ path: 'README.md', kind: expect.any(String) }],
       treeSha: null,
     });
+    expect(m.json.remaining).toEqual([expect.objectContaining({ code: 'CONFLICTS', paths: ['README.md'] })]);
     const refused = await merge('conflicted', 1);
     expect([refused.status, refused.json.code]).toEqual([409, 'MERGE_CONFLICT']);
     expect(refused.json.conflicts).toEqual([{ path: 'README.md', kind: expect.any(String) }]);
@@ -585,8 +587,8 @@ describe('detail: rating, mergeability, checks', () => {
     expect(after.json.checks).toHaveLength(100);
     expect(after.json.checks[0].name).toBe('check-119');
     expect(after.cost.d1).toBe(before.cost.d1);
-    // Authority, the change + newest runs batch, and the checks-gate read.
-    expect(after.cost.d1).toBeLessThanOrEqual(3);
+    // Authority, the change + newest runs batch, checks gate and bounded Remaining inputs.
+    expect(after.cost.d1).toBeLessThanOrEqual(7);
     const checks = await call('GET', path('cost', '/1/checks'), tok.owner);
     expect(checks.json.checks).toHaveLength(100);
     expect(checks.cost.d1).toBeLessThanOrEqual(2);

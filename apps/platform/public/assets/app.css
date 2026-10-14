@@ -205,6 +205,30 @@ body.k-app:not(.k-landing) .change-review-side > * { margin-bottom: var(--s4); }
 body.k-app:not(.k-landing) .change-review-side { position: sticky; top: var(--s4); }
 body.k-app:not(.k-landing) .change-review-side .k-list > li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--s2); }
 body.k-app:not(.k-landing) .change-review-side .k-list > li > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .remaining-list { list-style: none; margin: 0; padding: 0; }
+body.k-app:not(.k-landing) .remaining-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--s2);
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line);
+}
+body.k-app:not(.k-landing) .remaining-row:last-child { border-bottom: 0; }
+body.k-app:not(.k-landing) .remaining-who {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--steel);
+  color: var(--steel);
+  font: 10px var(--mono);
+}
+body.k-app:not(.k-landing) .remaining-copy { min-width: 0; overflow-wrap: anywhere; }
+body.k-app:not(.k-landing) .remaining-meta { display: flex; align-items: center; gap: var(--s1); }
+body.k-app:not(.k-landing) .remaining-code { color: var(--steel); font: 9px var(--mono); }
+body.k-app:not(.k-landing) .remaining-paths { margin: var(--s1) 0 0; padding-left: var(--s3); color: var(--steel); }
+body.k-app:not(.k-landing) .remaining-paths code { overflow-wrap: anywhere; }
 body.k-app:not(.k-landing) .coverage-counts {
   display: flex;
   flex-wrap: wrap;
@@ -240,4 +264,6 @@ body.k-app:not(.k-landing) .carry-file-row > details { min-width: 0; }
   body.k-app:not(.k-landing) .change-stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   body.k-app:not(.k-landing) .change-stages li { padding: var(--s2); font-size: 10px; }
   body.k-app:not(.k-landing) .changes-table { display: table; }
+  body.k-app:not(.k-landing) .remaining-row { grid-template-columns: 24px minmax(0, 1fr); }
+  body.k-app:not(.k-landing) .remaining-meta { grid-column: 2; }
 }
