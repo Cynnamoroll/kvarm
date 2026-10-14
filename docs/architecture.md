@@ -241,6 +241,7 @@ D1 is created by `0001_init.sql` and extended by additive migrations:
 | `0041_review_guides` | review guides, content-keyed acknowledgements, structured findings, guide/finding policy and approval coverage (§0.4.1) |
 | `0042_review_danger_ack` | the danger-acknowledgement policy flag (§0.4.1) |
 | `0043_review_stacks_nudges` | the review-nudge delay and the nudge ledger (§0.4.1) |
+| `0044_repos_public_pushed` | the partial index bounding the sitemap's public-repository read to public rows (§11.6) |
 
 ## 7. Testing
 

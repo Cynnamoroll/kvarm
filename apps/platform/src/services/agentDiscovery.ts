@@ -8,6 +8,7 @@
  */
 
 import { OPERATIONS } from '@kvarm/ops';
+import { openApiDocument } from '@kvarm/ops/openapi';
 import { appOrigin, siteName } from '../config';
 import { MCP_SERVER_INFO } from '../mcp/server';
 
@@ -21,6 +22,17 @@ const SOURCE_URL = 'https://github.com/kvarm-git/kvarm';
 
 function families(): string {
   return [...new Set(OPERATIONS.map((op) => op.family))].join(', ');
+}
+
+/**
+ * The operation count llms.txt quotes is the OpenAPI document's own, so the
+ * file and /openapi.json cannot disagree: two registry entries that share a
+ * route (an MCP alias) are one operation in the document but two MCP tools,
+ * which is why this count can be one lower than `OPERATIONS.length`.
+ */
+function openApiOperationCount(origin: string): number {
+  const paths = openApiDocument({ origin }).paths as Record<string, Record<string, unknown>>;
+  return Object.values(paths).reduce((total, item) => total + Object.keys(item).length, 0);
 }
 
 /** `/llms.txt`: a lean, described index of what an agent can read and call. */
@@ -39,7 +51,7 @@ Use ${siteName(env)} when an agent needs to push code, open and review changes, 
 
 ## API
 
-- [OpenAPI](${o}/openapi.json): the full REST contract under /api/v1 (${OPERATIONS.length} operations: ${families()})
+- [OpenAPI](${o}/openapi.json): the full REST contract under /api/v1 (${openApiOperationCount(o)} operations: ${families()})
 - [API catalog](${o}/.well-known/api-catalog): RFC 9727 linkset for the REST API
 - [MCP server](${o}/mcp): Streamable HTTP; every REST operation is a tool with the same name as its OpenAPI operationId
 - [MCP server card](${o}/.well-known/mcp/server-card.json): transport, authentication and tool count
@@ -173,11 +185,22 @@ Revoke a personal access token at [${o}/settings/tokens](${o}/settings/tokens); 
 }
 
 export function robotsTxt(env: Env): string {
-  return `# Public pages, the API description and the discovery files are open to every crawler and agent.
+  return `# Repository landing pages and the discovery files are open to every crawler and agent.
+# The generated views below are not: compare ranges (an unbounded URL space),
+# commit, tree, blob and raw views each read Artifacts objects and D1 rows,
+# and every query-string variant is a separate crawl of the same page.
 User-agent: *
 Allow: /
 Disallow: /auth/
 Disallow: /settings/
+Disallow: /*/*/compare
+Disallow: /*/*/commits
+Disallow: /*/*/commit/
+Disallow: /*/*/branches
+Disallow: /*/*/tree/
+Disallow: /*/*/blob/
+Disallow: /*/*/raw/
+Disallow: /*?
 
 Sitemap: ${appOrigin(env)}/sitemap.xml
 `;
@@ -187,12 +210,13 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/** The sitemap's only D1 read. The partial index `idx_repos_public_pushed` (migration `0044`) bounds it: SQLite walks public rows only, never the private rows an unfiltered index would read and discard. */
+export const sitemapSql = `SELECT owner_login, name, pushed_at, created_at FROM repos WHERE visibility = 'public'
+      ORDER BY pushed_at DESC LIMIT ?1`;
+
 export async function sitemapXml(env: Env): Promise<string> {
   const o = appOrigin(env);
-  const { results } = await env.DB.prepare(
-    `SELECT owner_login, name, pushed_at, created_at FROM repos WHERE visibility = 'public'
-      ORDER BY pushed_at DESC LIMIT ?1`,
-  )
+  const { results } = await env.DB.prepare(sitemapSql)
     .bind(SITEMAP_REPO_LIMIT)
     .all<{ owner_login: string; name: string; pushed_at: number | null; created_at: number }>();
   const url = (loc: string, lastmod?: number | null) =>

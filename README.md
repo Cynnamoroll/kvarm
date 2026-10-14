@@ -314,7 +314,7 @@ A deployment describes itself to agents that arrive without setup. Every file is
 | `/openapi.json` | OpenAPI 3.1 for `/api/v1`, generated from the operation registry (`packages/ops/src/openapi.js`); each `operationId` is the MCP tool name |
 | `/.well-known/api-catalog` | RFC 9727 linkset pointing at the OpenAPI document |
 | `/.well-known/mcp/server-card.json` | the MCP server's transport, authentication and tool count |
-| `/robots.txt`, `/sitemap.xml` | open crawling; the sitemap lists the public repositories (one bounded D1 read, at most 1,000) |
+| `/robots.txt`, `/sitemap.xml` | crawling of landing and discovery pages (generated views and query variants are disallowed); the sitemap lists the public repositories through a partial index, one D1 read of at most 1,000 rows |
 
 Pages carry a canonical URL, a description, Open Graph tags and discovery `Link` headers. The home page also carries JSON-LD and a Markdown alternate. `?mode=agent` renders the agent view on the server. A path that does not exist answers a real `404`: Markdown for agents, a page for browsers, and JSON under `/api/v1`. To check a deployment, run `curl -s -H 'Accept: text/markdown' <origin>/`, or scan it with [is-agentic.com](https://is-agentic.com).
 
