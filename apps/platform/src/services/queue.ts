@@ -41,7 +41,7 @@ import { toUserRow, type UserRow } from '../db/users';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, attributeMerges, mergeAttributionDefaults, parseAttributionInput, type AttributionInput, type MergeAttributionItem } from './attribution';
 import { credentialMayUpdateRef, isOrgRole, isRepoNeed, repoRole, type Actor } from './authz';
-import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
+import { BRANCH_RULE_COLUMNS, effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   HEAD_MOVED_HOOKS,
   MERGE_POLICIES,
@@ -912,12 +912,7 @@ const WINDOW_IDS = (() => {
 function windowStatements(db: D1Database, repoId: string, ref: string): D1PreparedStatement[] {
   return [
     db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
-    db
-      .prepare(
-        `SELECT ${BRANCH_RULE_COLUMNS}
-           FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
-      )
-      .bind(repoId),
+    repoBranchRulesSelect(db, repoId),
     // ci_staged: the earliest CI job of the recorded tree (the staged commit). SQLite takes a bare column from the
     // MIN() row, which reads the (repo, tree) index range once instead of reading it and then sorting it.
     db
