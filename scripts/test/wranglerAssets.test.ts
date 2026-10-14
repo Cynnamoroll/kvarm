@@ -36,7 +36,11 @@ function referencedUrls(dirs: string[]): string[] {
   for (const dir of dirs) {
     if (!existsSync(dir)) continue;
     for (const file of walk(dir)) {
-      for (const match of readFileSync(file, 'utf8').matchAll(URL_RE)) urls.add(match[0]);
+      for (const match of readFileSync(file, 'utf8').matchAll(URL_RE)) {
+        // A capture that ends in `/` is a dynamic reference (`/assets/${name}.css`
+        // scans as `/assets/`), a directory the deploy would never serve.
+        if (!match[0].endsWith('/')) urls.add(match[0]);
+      }
     }
   }
   return [...urls].sort();
@@ -72,7 +76,8 @@ describe('the shipped UI references only files the deploy carries', () => {
 
   it('every referenced URL exists in the assets directory', () => {
     for (const url of urls) {
-      expect(existsSync(join(PUBLIC, url.slice(1))), `${url} is referenced but not shipped`).toBe(true);
+      // existsSync would also accept a directory; a reference must resolve to a file.
+      expect(statSync(join(PUBLIC, url.slice(1))).isFile(), `${url} is referenced but not shipped`).toBe(true);
     }
   });
 
