@@ -15,6 +15,7 @@
     "@kvarm/gitops": "*"
   },
   "dependencies": {
-    "@kvarm/ops": "*"
+    "@kvarm/ops": "*",
+    "@kvarm/zstd": "*"
   }
 }

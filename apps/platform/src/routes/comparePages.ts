@@ -219,7 +219,7 @@ async function renderCompare(c: PageContext, resolved: Resolved, range: { base: 
   const offset = c.req.query('cursor') ? ' (continuing)' : '';
 
   const refLink = (ref: string | null, sha: string | null): string =>
-    sha ? `<a href="${base}/commit/${sha}"><code>${ref ?? short(sha)}</code></a>` : `<code>${ref ?? '—'}</code>`;
+    sha ? html`<a href="${base}/commit/${sha}"><code>${ref ?? short(sha)}</code></a>` : html`<code>${ref ?? '—'}</code>`;
 
   const body = html`
     <div class="compare-root" data-file-api="${raw(fileApi)}">

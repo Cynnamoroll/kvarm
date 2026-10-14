@@ -10,9 +10,10 @@
  *                                     → 201 opened | 200 duplicate event id | 401 unverified (nothing written)
  */
 
-import { concat } from '@kvarm/gitops';
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, clientIp, denyJson, type App, failJson} from '../api';
+import { actorJson, authorizeRoute, clientIp, denyJson, type App, failJson } from '../api';
+import { readBodyCapped } from '../../requestBody';
+import type { ServiceResult } from '../../repos/service';
 import * as incidents from '../../services/incidents';
 import * as reverts from '../../services/reverts';
 
@@ -61,29 +62,9 @@ revertsApi.delete('/repos/:owner/:repo/incidents/webhook', async (c) => {
   return r.ok ? actorJson(c, r.value) : failJson(c, r);
 });
 
-/** The request body, or null once it passes `max` bytes (the rest is never buffered, declared length or not). */
-async function readBounded(req: Request, max: number): Promise<Uint8Array | null> {
-  if (Number(req.headers.get('content-length') ?? 0) > max) return null;
-  if (!req.body) return new Uint8Array();
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size > max) {
-      await reader.cancel().catch(() => undefined);
-      return null;
-    }
-    chunks.push(value);
-  }
-  return concat(...chunks);
-}
-
 revertsApi.post('/repos/:owner/:repo/incidents', async (c) => {
   // The signature covers the exact bytes, so the body is read raw and bounded before anything parses it.
-  const body = await readBounded(c.req.raw, incidents.INCIDENT_LIMITS.maxBodyBytes);
+  const body = await readBodyCapped(c.req.raw, incidents.INCIDENT_LIMITS.maxBodyBytes);
   if (body === null) {
     return c.json({ error: `the body exceeds ${incidents.INCIDENT_LIMITS.maxBodyBytes} bytes`, code: 'BODY_TOO_LARGE' }, 413);
   }

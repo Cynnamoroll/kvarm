@@ -23,7 +23,9 @@ export class SandboxEgress extends WorkerEntrypoint<Env, EgressProps> {
     let appOrigin: URL;
     try {
       appOrigin = new URL(this.env.APP_ORIGIN);
-    } catch {
+    } catch (err) {
+      // Still fails closed, but a malformed APP_ORIGIN must not read as a policy denial.
+      console.warn(JSON.stringify({ sandboxEgressAppOriginInvalid: String(err).slice(0, 200) }));
       return denied(target.host);
     }
     const props = this.ctx.props;

@@ -541,14 +541,16 @@ export function openChangeSet(
 
 /**
  * Retires the live (open or claimed) resolve-conflict task of the change
- * `changeId` names (SQL over parameters ?2...) once that change is closed;
- * a completed task is kept.
+ * `changeIdExpr` names once that change is closed; a completed task is kept.
+ * `changeIdExpr` is interpolated into the statement text, so callers pass a
+ * SQL expression over parameters ?2... ('?2' for a bound id, or a subquery)
+ * plus the matching `params` — never a bare change id.
  */
-function retireClosedChangeTask(db: D1Database, changeId: string, params: unknown[], now: number): D1PreparedStatement {
+function retireClosedChangeTask(db: D1Database, changeIdExpr: string, params: unknown[], now: number): D1PreparedStatement {
   return db
     .prepare(
       `UPDATE agent_tasks SET status = 'obsolete', updated_at = ?1
-        WHERE kind = '${RESOLVE_CONFLICT}' AND status IN ('open', 'claimed') AND change_set_id = ${changeId}
+        WHERE kind = '${RESOLVE_CONFLICT}' AND status IN ('open', 'claimed') AND change_set_id = ${changeIdExpr}
           AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = agent_tasks.change_set_id AND c.state = 'closed')`,
     )
     .bind(now, ...params);
