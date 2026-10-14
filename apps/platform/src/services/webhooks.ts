@@ -37,6 +37,7 @@
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import {
   WEBHOOK_KEY_VERSION,
@@ -454,16 +455,12 @@ function deliveryView(r: DeliveryRow): DeliveryView {
 }
 
 function encodeCursor(createdAt: number, id: string): string {
-  return btoa(`${createdAt}:${id}`).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return encodeCursorPayload(`${createdAt}:${id}`);
 }
 
 function decodeCursor(cursor: string): { createdAt: number; id: string } | null {
-  try {
-    const m = /^(\d{1,16}):([0-9a-f]{32})$/.exec(atob(cursor.replace(/-/g, '+').replace(/_/g, '/')));
-    return m ? { createdAt: Number(m[1]), id: m[2]! } : null;
-  } catch {
-    return null;
-  }
+  const m = /^(\d{1,16}):([0-9a-f]{32})$/.exec(decodeCursorPayload(cursor) ?? '');
+  return m ? { createdAt: Number(m[1]), id: m[2]! } : null;
 }
 
 const DELIVERY_STATES = ['pending', 'delivered', 'failed', 'cancelled'] as const;

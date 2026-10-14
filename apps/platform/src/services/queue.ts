@@ -93,6 +93,7 @@ import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
 import { artifactsMergeSources, overlaySources, prepareMerge, type MergeSources, type PreparedMerge } from './merge';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
 import { hasCiJobs, queueExactTreeCi, type CiConfigMemo } from './ci';
@@ -634,12 +635,14 @@ interface Cursor {
 }
 
 function encodeCursor(c: Cursor): string {
-  return btoa(JSON.stringify(c)).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify(c));
 }
 
 function decodeCursor(raw: string): Cursor | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const c = JSON.parse(atob(raw)) as Cursor;
+    const c = JSON.parse(text) as Cursor;
     return typeof c.ref === 'string' && Number.isInteger(c.seq) && Number.isInteger(c.pos) ? c : null;
   } catch {
     return null;

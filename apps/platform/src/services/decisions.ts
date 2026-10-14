@@ -16,6 +16,7 @@ import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
 import { normalizeRepoPath } from './contents';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 
 export const DECISION_LIMITS = {
   /** Paths one decision may name. */
@@ -203,12 +204,14 @@ export interface ContextQuery {
 }
 
 function encodeCursor(r: DecisionRow): string {
-  return btoa(JSON.stringify([r.at, r.id])).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify([r.at, r.id]));
 }
 
 function decodeCursor(raw: string): { at: number; id: string } | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const v: unknown = JSON.parse(atob(raw));
+    const v: unknown = JSON.parse(text);
     if (Array.isArray(v) && v.length === 2 && Number.isSafeInteger(v[0]) && typeof v[1] === 'string' && v[1].length <= 64) {
       return { at: v[0] as number, id: v[1] };
     }
