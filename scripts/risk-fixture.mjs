@@ -95,14 +95,11 @@ writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv
 chmodSync(askpass, 0o700);
 
 function git(args, cwd, auth = false) {
-  const date = '2026-10-01T00:00:00Z';
   const env = {
     ...process.env,
     GIT_ASKPASS: askpass,
     GIT_TERMINAL_PROMPT: '0',
     KVARM_E2E_TOKEN: auth ? process.env.KVARM_PAT : '',
-    GIT_AUTHOR_DATE: date,
-    GIT_COMMITTER_DATE: date,
   };
   const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
     cwd,
