@@ -174,6 +174,7 @@ describe('change pages', () => {
     expect(page.text).toContain('guide-chapter');
     expect(page.text).toContain('<div class="card-title">src/app.ts');
     expect(page.text).toContain('scrutinize');
+    expect(page.text).toContain('1 file');
     expect(page.text).toContain('src');
     expect(page.text).toContain('name="_csrf"');
     expect(page.text).toContain('Request changes');
@@ -229,7 +230,7 @@ describe('change pages', () => {
     expect(page.status).toBe(200);
     expect(page.text).toContain('Your approval at');
     expect(page.text).toContain('still covers 2 of 3 files');
-    expect(page.text).toContain('Review the 1 changed files.');
+    expect(page.text).toContain('Review the 1 changed file.');
     expect(page.text).toContain('carry-unchanged');
     expect(page.text).toContain('carry-changed');
     expect(page.text).toContain('<code>src/app.ts</code>');

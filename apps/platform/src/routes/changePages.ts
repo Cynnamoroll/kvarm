@@ -161,6 +161,10 @@ function tierTag(tier: ReviewTier): string {
   return html`<span class="tag review-tier ${klass}">${tier}</span>`;
 }
 
+function filesLabel(count: number): string {
+  return count === 1 ? 'file' : 'files';
+}
+
 function renderGuide(
   repo: RepoRow,
   encRange: string,
@@ -206,14 +210,14 @@ function renderGuide(
   const summary = html`<section class="card coverage-summary">
     <div class="card-title">Coverage · ${guide.source === 'fallback' ? 'Generated guide' : 'Author guide'}</div>
     <div class="coverage-counts">
-      <span>${raw(tierTag('scrutinize'))} ${counts.scrutinize.size} files</span>
-      <span>${raw(tierTag('read'))} ${counts.read.size} files</span>
-      <span>${raw(tierTag('receipt'))} ${counts.receipt.size} files</span>
+      <span>${raw(tierTag('scrutinize'))} ${counts.scrutinize.size} ${filesLabel(counts.scrutinize.size)}</span>
+      <span>${raw(tierTag('read'))} ${counts.read.size} ${filesLabel(counts.read.size)}</span>
+      <span>${raw(tierTag('receipt'))} ${counts.receipt.size} ${filesLabel(counts.receipt.size)}</span>
     </div>
     ${map.truncated ? raw(html`<p class="flash warn">Coverage is truncated by the review-page diff budget.</p>`) : ''}
     ${configError ? raw(html`<p class="flash warn">${configError}</p>`) : ''}
     ${carry && carry.changedPaths.length
-      ? raw(html`<div class="approval-carry"><p>Your approval at <code>${carry.fromHead.slice(0, 8)}</code> still covers ${carry.unchangedPaths.length} of ${carry.unchangedPaths.length + carry.changedPaths.length} files. Review the ${carry.changedPaths.length} changed files.</p>
+      ? raw(html`<div class="approval-carry"><p>Your approval at <code>${carry.fromHead.slice(0, 8)}</code> still covers ${carry.unchangedPaths.length} of ${carry.unchangedPaths.length + carry.changedPaths.length} ${filesLabel(carry.unchangedPaths.length + carry.changedPaths.length)}. Review the ${carry.changedPaths.length} changed ${filesLabel(carry.changedPaths.length)}.</p>
           <ul class="carry-agent-paths">${raw(carry.changedPaths.map((path) => `<li><code>${escapeHtml(path)}</code></li>`).join(''))}</ul></div>`)
       : ''}
   </section>`;

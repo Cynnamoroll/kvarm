@@ -1202,13 +1202,7 @@ async function trainPass(
     const headRef = branchRef(e.c_head_ref);
     const moved = liveHeadRefusal(headRef, plan.headSha, tips.get(headRef));
     if (moved) {
-      const movedHead = moved.headSha;
-      if (!movedHead) {
-        plan.next = 'queued';
-        blocked = true;
-        out.waiting = true;
-        continue;
-      }
+      const movedHead = moved.headSha!;
       if (e.c_policy !== 'auto') {
         const oldFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, plan.headSha);
         const newFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, movedHead);
