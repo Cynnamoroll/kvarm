@@ -31,13 +31,14 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { writeAskpass } from './lib/live.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } } });
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
@@ -91,9 +92,7 @@ const short = (sha) => (sha ? sha.slice(0, 10) : String(sha));
 // --- git -----------------------------------------------------------------------
 
 const work = mkdtempSync(join(tmpdir(), 'review-approvals-e2e-'));
-const askpass = join(work, 'askpass.sh');
-writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
-chmodSync(askpass, 0o700);
+const askpass = writeAskpass(work);
 const gitEnv = { ...process.env, GIT_ASKPASS: askpass, GIT_TERMINAL_PROMPT: '0', KVARM_E2E_TOKEN: PAT };
 
 function git(args, cwd) {

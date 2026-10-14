@@ -32,12 +32,13 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, createWriteStream, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { CONFIG_PATH, createLimiter, memberFiles, parseCost, planFleet, retryAfterMs } from './lib/fleet.mjs';
+import { splitJsonStream, startWranglerTail } from './lib/live.mjs';
 import { remoteD1Args } from './lib/wrangler-target.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -193,40 +194,6 @@ const summarize = (xs) => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length ? { n: s.length, min: s[0], p50: s[Math.floor((s.length - 1) / 2)], max: s[s.length - 1] } : { n: 0 };
 };
-
-/** Splits concatenated (possibly pretty-printed) JSON objects, as `wrangler tail --format json` writes them. */
-function splitJsonStream(text) {
-  const out = [];
-  let depth = 0;
-  let start = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === '\\') esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') inStr = true;
-    else if (ch === '{') {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (ch === '}') {
-      depth--;
-      if (depth === 0 && start >= 0) {
-        try {
-          out.push(JSON.parse(text.slice(start, i + 1)));
-        } catch {
-          // a partial object at the tail's start or end
-        }
-        start = -1;
-      }
-    }
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------- state
 
@@ -442,24 +409,7 @@ async function changesExplain() {
 
 // ---------------------------------------------------------------- train
 
-function startTail() {
-  const file = join(outDir, 'tail.jsonl');
-  const stream = createWriteStream(file);
-  const child = spawn(join(ROOT, 'node_modules/.bin/wrangler'), ['tail', 'kvarm-platform', '--format', 'json'], { cwd: PLATFORM, stdio: ['ignore', 'pipe', 'pipe'] });
-  child.stdout.pipe(stream);
-  let err = '';
-  child.stderr.on('data', (d) => (err += d));
-  return {
-    file,
-    async stop() {
-      await sleep(8000);
-      child.kill('SIGINT');
-      await new Promise((r) => child.once('close', r));
-      stream.end();
-      return err;
-    },
-  };
-}
+
 
 async function train() {
   console.log('\n## train');
@@ -480,7 +430,7 @@ async function train() {
     if (r.status !== 201) throw new Error(`change set ${key}: ${r.status} ${r.json?.code ?? ''}`);
     w.number = r.json.number;
   }
-  const tail = startTail();
+  const tail = startWranglerTail(join(outDir, 'tail.jsonl'), join(ROOT, 'node_modules/.bin/wrangler'));
   await sleep(10_000);
   const enqueues = [];
   for (const key of keys) {
