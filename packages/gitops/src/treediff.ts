@@ -262,7 +262,9 @@ class TreeDiffWalk {
 }
 
 /** Pair removed and added leaves carrying the identical blob hash as renames. */
-function pairRenames(changes: TreeChange[]): TreeChange[] {
+function pairRenames(walked: TreeChange[]): TreeChange[] {
+  // The walk emits in completion order; pairing ties must not depend on it.
+  const changes = [...walked].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const removedByHash = new Map<string, TreeChange[]>();
   for (const c of changes) {
     if (c.status !== 'removed' || !c.oldHash) continue;

@@ -473,7 +473,7 @@ export async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, tar
 /** The cached merge plan of a commit pair, without asking the checks-gate (conflict evaluation, guard base). */
 export async function mergePlanFor(ctx: ResolveContext, targetSha: string, headSha: string): Promise<CachedPlan> {
   // v3: v2 entries cached criss-cross pairs as refused; they now merge through a virtual base.
-  const key = internalKey('mergeplan/v3', ctx.repo.id, targetSha, headSha);
+  const key = internalKey('mergeplan/v4', ctx.repo.id, targetSha, headSha);
   const hit = await readCachedJson<CachedPlan>(key);
   if (hit) return hit;
   const plan = await computeMergePlan(artifactsMergeSources(ctx), { targetSha, headSha });

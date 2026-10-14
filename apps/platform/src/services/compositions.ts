@@ -331,7 +331,13 @@ async function computeComposition(
       baseTree = v.treeHash;
       for (const o of v.objects) virtualObjects.set(o.hash, o);
     }
-    pieces.push({ name: piece.workspace, baseTree, headTree: headCommit.treeHash, ...(piece.paths ? { paths: piece.paths } : {}) });
+    pieces.push({
+      name: piece.workspace,
+      baseTree,
+      headTree: headCommit.treeHash,
+      ...(piece.paths ? { paths: piece.paths } : {}),
+      ...(bases.length > 1 ? { refuseAmbiguousRenames: true } : {}),
+    });
     recorded.push({ workspace: piece.workspace, headSha, mergeBase: bases[0]!, ...(bases.length > 1 ? { mergeBases: bases } : {}), paths: piece.paths });
   }
 
@@ -353,6 +359,12 @@ async function computeComposition(
     });
   }
   if (result.truncated) {
+    if (isCrissCrossRefusal(result.truncatedReason)) {
+      return fail(422, `workspace ${result.truncatedPiece} has several merge bases with ${p.base} that cannot be merged (${result.truncatedReason})`, 'MULTIPLE_MERGE_BASES', {
+        workspace: result.truncatedPiece,
+        reason: result.truncatedReason,
+      });
+    }
     const read = result.truncatedReason === 'readError' || result.truncatedReason === 'missingObject';
     return read
       ? fail(503, `could not read the composition inputs (${result.truncatedReason})`, 'COMPOSE_READ_FAILED', { workspace: result.truncatedPiece })

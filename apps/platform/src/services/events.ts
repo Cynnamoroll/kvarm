@@ -197,8 +197,10 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
          WHERE r.artifacts_name = ?1`,
       )
       .bind(ev.repoName, id),
-    // Only a newer event (event time, then id as a deterministic tiebreak)
-    // moves the ref, so a late older delivery never rolls state back.
+    // Only a newer event moves the ref, so a late older delivery never rolls
+    // state back. Two events of one time are ordered by succession: never
+    // the one the current position follows, always the one that follows the
+    // current position, and by id only when neither follows the other.
     db
       .prepare(
         `INSERT INTO repo_refs (repo_id, ref, sha, event_id, event_at, updated_at)
@@ -207,9 +209,11 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
          ON CONFLICT (repo_id, ref) DO UPDATE SET
            sha = excluded.sha, event_id = excluded.event_id, event_at = excluded.event_at, updated_at = excluded.updated_at
          WHERE excluded.event_at > repo_refs.event_at
-            OR (excluded.event_at = repo_refs.event_at AND excluded.event_id > repo_refs.event_id)`,
+            OR (excluded.event_at = repo_refs.event_at AND excluded.event_id != repo_refs.event_id
+                AND NOT EXISTS (SELECT 1 FROM push_events c WHERE c.id = repo_refs.event_id AND c.before_sha = ?4)
+                AND (?6 = repo_refs.sha OR excluded.event_id > repo_refs.event_id))`,
       )
-      .bind(ev.repoName, id, ev.ref, ev.after, now),
+      .bind(ev.repoName, id, ev.ref, ev.after, now, ev.before),
     // Head refresh: open changes on this branch follow the ref position just
     // reconciled above, and only when it is newer than the event that last
     // set their head (creation time at first), so an old delivery never

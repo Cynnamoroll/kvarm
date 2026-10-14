@@ -126,6 +126,24 @@ describe('composeTrees', () => {
     expect(fsck.stdout.toString()).toContain('src/a.ts');
   });
 
+  it('stops a piece marked refuseAmbiguousRenames where git could pair its renames differently', async () => {
+    const { 'src/extra.ts': _, ...rest } = BASE;
+    // A deletes src/extra.ts; B renames it to lib/extra.ts with an edit (git: rename/delete conflict).
+    const a = await writeTree(store, rest);
+    const b = await writeTree(store, { ...rest, 'lib/extra.ts': 'extra\nmore\n' });
+    const pieces = [
+      { name: 'A', baseTree: base, headTree: a },
+      { name: 'B', baseTree: base, headTree: b },
+    ];
+    expect(await composeTrees(store, base, pieces)).toMatchObject({ clean: true });
+    expect(await composeTrees(store, base, [pieces[0]!, { ...pieces[1]!, refuseAmbiguousRenames: true }])).toMatchObject({
+      truncated: true,
+      truncatedReason: 'ambiguousRenames',
+      truncatedPiece: 'B',
+      treeHash: null,
+    });
+  });
+
   it('folds three candidates in order, like successive merge-tree runs', async () => {
     const a = await writeTree(store, { ...BASE, 'src/shared.ts': shared('S1', 's10') });
     const b = await writeTree(store, { ...BASE, 'src/shared.ts': shared('s1', 'S10') });

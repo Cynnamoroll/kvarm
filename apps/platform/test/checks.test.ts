@@ -123,8 +123,16 @@ describe('kvarm/guard on creation and head refresh', () => {
     const second = await checksOf('refresh');
     expect(second.json.checks.map((c: any) => [c.name, c.headSha, c.status])).toEqual([
       ['kvarm/guard', next.sha, 'success'],
-      ['kvarm/guard', feature.sha, 'success'],
     ]);
+    // The API serves only the current head; the earlier verdict remains in the audit history.
+    const guards = await env.DB.prepare("SELECT head_sha, status FROM check_runs WHERE repo_id = ? AND name = 'kvarm/guard'")
+      .bind(repoIds.refresh)
+      .all<{ head_sha: string; status: string }>();
+    expect(guards.results).toHaveLength(2);
+    expect(guards.results).toEqual(expect.arrayContaining([
+      { head_sha: next.sha, status: 'success' },
+      { head_sha: feature.sha, status: 'success' },
+    ]));
 
     const status = await call('GET', `${R('refresh')}/commits/${next.sha}/status`, tok.owner);
     expect(status.status).toBe(200);
@@ -613,8 +621,15 @@ describe('CI pipeline runner', () => {
     const checks = await checksOf('ci-refresh');
     expect(checks.json.checks.filter((r: any) => r.name === 'test').map((r: any) => [r.headSha, r.status])).toEqual([
       [next.sha, 'queued'],
-      [feature.sha, 'queued'],
     ]);
+    const runs = await env.DB.prepare("SELECT head_sha, status FROM check_runs WHERE repo_id = ? AND name = 'test'")
+      .bind(repoIds['ci-refresh'])
+      .all<{ head_sha: string; status: string }>();
+    expect(runs.results).toHaveLength(2);
+    expect(runs.results).toEqual(expect.arrayContaining([
+      { head_sha: next.sha, status: 'queued' },
+      { head_sha: feature.sha, status: 'queued' },
+    ]));
   });
 
   it('queues and requires CI on the exact merge tree when the base advanced (VAL-MERGE-003/007)', async () => {
