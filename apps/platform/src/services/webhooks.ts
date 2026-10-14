@@ -274,17 +274,17 @@ export async function updateWebhook(
 ): Promise<ServiceResult<WebhookView>> {
   const sets: string[] = [];
   const binds: unknown[] = [];
+  // ?1-?3 bind id, repo_id and updated_at below; each optional value takes the next ?4+.
+  const fixedBinds = 3;
   if (input.url !== undefined) {
     const url = checkWebhookUrl(input.url, selfHost(env));
     if (!url.ok) return fail(400, url.reason, 'INVALID_URL');
-    binds.push(url.url);
-    sets.push(`url = ?${binds.length + 3}`);
+    sets.push(`url = ?${binds.push(url.url) + fixedBinds}`);
   }
   if (input.events !== undefined) {
     const events = checkEvents(input.events);
     if (!events.ok) return fail(400, events.error, 'INVALID_EVENTS');
-    binds.push(JSON.stringify(events.events));
-    sets.push(`events = ?${binds.length + 3}`);
+    sets.push(`events = ?${binds.push(JSON.stringify(events.events)) + fixedBinds}`);
   }
   if (input.active !== undefined) {
     if (typeof input.active !== 'boolean') return fail(400, 'active must be a boolean', 'INVALID_ACTIVE');
@@ -487,12 +487,12 @@ export async function listDeliveries(
   const conds = ['d.webhook_id = ?1'];
   const binds: unknown[] = [id, limit + 1];
   if (after) {
-    binds.push(after.createdAt, after.id);
-    conds.push(`(d.created_at < ?${binds.length - 1} OR (d.created_at = ?${binds.length - 1} AND d.id < ?${binds.length}))`);
+    const createdPos = binds.push(after.createdAt);
+    const idPos = binds.push(after.id);
+    conds.push(`(d.created_at < ?${createdPos} OR (d.created_at = ?${createdPos} AND d.id < ?${idPos}))`);
   }
   if (page.state !== undefined) {
-    binds.push(page.state);
-    conds.push(`d.state = ?${binds.length}`);
+    conds.push(`d.state = ?${binds.push(page.state)}`);
   }
   const [hook, list] = await env.DB.batch([
     env.DB.prepare('SELECT 1 AS found FROM webhooks WHERE id = ? AND repo_id = ?').bind(id, repo.id),
