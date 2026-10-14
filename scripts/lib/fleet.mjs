@@ -16,7 +16,7 @@ export const CAMPAIGN_LIMITS = Object.freeze({
   gitHttpPerOp: 4,
 });
 
-const MISSION_CAPS = Object.freeze({ gitChildren: 3, httpInFlight: 5 });
+const MISSION_CAPS = Object.freeze({ gitChildren: CAMPAIGN_LIMITS.gitChildren, httpInFlight: CAMPAIGN_LIMITS.httpInFlight });
 
 const pad = (n, w) => String(n).padStart(w, '0');
 
