@@ -61,6 +61,8 @@ function queryFlash(c: Context<App>): string {
     acknowledge: 'Escalation acknowledged.',
     approve: 'Review submitted.',
     'request-changes': 'Change request submitted.',
+    'review-requested': 'Reviewer requested.',
+    'review-request-withdrawn': 'Reviewer request withdrawn.',
     resolve: 'Escalation resolved.',
     ship: 'Change approved and queued to ship.',
   };
@@ -333,6 +335,17 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
   ]);
   if (!packet.ok) return notFound(c);
   const reviewPacket = packet.value;
+  const [requestedReviewers, suggestedReviewers] = await Promise.all([
+    reviews.listReviewRequests(c.env, row.id),
+    reviews.suggestedReviewers(
+      c.env,
+      resolved.repo,
+      row.id,
+      coverage?.map?.units.map((unit) => unit.path) ?? [],
+      reviewPacket.author.principal,
+    ),
+  ]);
+  reviewPacket.suggestedReviewers = suggestedReviewers;
   const approvalNoteRequired = approvalNeedsDecisionNote(reviewPacket);
   const provenance = await commitProvenance(c.env, resolved.repo, reviewPacket.headSha, {
     admin: resolved.role === 'admin',
@@ -357,6 +370,7 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
     mergeability: change.mergeability,
     dependency: aux.dependency,
     resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
+    requestedReviewers: requestedReviewers.map((reviewer) => reviewer.login ?? reviewer.principal),
     viewer: {
       principal: viewerPrincipal,
       login: resolved.viewer?.user.login ?? null,
@@ -444,10 +458,32 @@ async function renderDetail(c: Context<App>, resolved: Resolved, number: string)
           ${change.mergeability?.unknownReason ? raw(html`<p class="muted">${change.mergeability.unknownReason}</p>`) : ''}
           ${change.mergeability?.conflicts?.length ? raw(html`<ul>${raw(change.mergeability.conflicts.map((conflict) => `<li><code>${escapeHtml(conflict.path)}</code></li>`).join(''))}</ul>`) : ''}
         </section>
-        <section class="card"><div class="card-title">Policy & reviewers</div>
+        <section class="card" id="reviewers"><div class="card-title">Policy & reviewers</div>
           <p>${reviewPacket.policy.requiredReviews} required approval(s); ${reviewPacket.policy.humanApprovalsRequired} human approval(s).</p>
           <p class="muted">${reviewPacket.policy.protected ? 'Protected target' : 'No protected-target rule'} · ${reviewPacket.policy.branchRules.length} branch rule(s)</p>
           <p class="muted">Agent approvals: ${reviewPacket.policy.agentApprovals === 'low-risk' ? 'different-family agents may count when the head has no scrutinize files.' : 'off; agent approvals do not count toward protected-branch approvals.'}</p>
+          <h3>Suggested reviewers</h3>
+          ${reviewPacket.suggestedReviewers.filter((reviewer) => reviewer.reason !== 'requested').length
+            ? raw(html`<ul class="k-list">${raw(reviewPacket.suggestedReviewers.filter((reviewer) => reviewer.reason !== 'requested').map((reviewer) => html`
+                <li><strong>${reviewer.login}</strong> · ${reviewer.reviewedPaths} overlapping path(s)
+                  ${writable ? raw(html`<form method="post" action="${raw(`${path}/review-requests`)}" class="inline reviewer-request-form">
+                    ${raw(csrf)}
+                    <input type="hidden" name="principal" value="${reviewer.principal}" />
+                    <button class="btn" type="submit">Request review</button>
+                  </form>`) : ''}
+                </li>`).join(''))}</ul>`)
+            : raw(html`<p class="muted">No eligible reviewer suggestions.</p>`)}
+          <h3>Requested reviewers</h3>
+          ${requestedReviewers.length
+            ? raw(html`<ul class="k-list">${raw(requestedReviewers.map((reviewer) => html`
+                <li><strong>${reviewer.login ?? reviewer.principal}</strong>
+                  ${writable ? raw(html`<form method="post" action="${raw(`${path}/review-requests/${encodeURIComponent(reviewer.principal)}/withdraw`)}" class="inline reviewer-request-form">
+                    ${raw(csrf)}
+                    <button class="btn" type="submit">Withdraw</button>
+                  </form>`) : ''}
+                </li>`).join(''))}</ul>`)
+            : raw(html`<p class="muted">No reviewers requested.</p>`)}
+          <pre class="k-term m-agent"><code>kvarm review request --repo ${resolved.repo.owner_login}/${resolved.repo.name} ${change.number} &lt;principal&gt;</code></pre>
         </section>
         ${raw(provenancePanel(provenance, { heading: `Provenance · head ${reviewPacket.headSha?.slice(0, 10) ?? '—'}` }))}
         <section class="card" id="escalations"><div class="card-title">Escalations</div>
@@ -524,4 +560,42 @@ changePages.post('/changes/:number/review', async (c) => {
     return redirectDecision('DECISION_NOT_RECORDED', null);
   }
   return redirectDecision(null, submittedShip === '1' ? 'ship' : verdict);
+});
+
+changePages.post('/changes/:number/review-requests', async (c) => {
+  const number = c.req.param('number');
+  const url = `/${c.req.param('owner')}/${c.req.param('repo')}/changes/${number}`;
+  const auth = await authorizeRoute(c, 'write', { requireActor: true, allowAgent: true, branchRules: true });
+  if (!auth.ok || !auth.actor) return notFound(c);
+  const form = await c.req.parseBody({ all: true });
+  const rawPrincipal = form.principal;
+  const principal = Array.isArray(rawPrincipal) ? rawPrincipal[rawPrincipal.length - 1] : rawPrincipal;
+  const cx: changes.ChangeContext = {
+    env: c.env,
+    repo: auth.repo,
+    actor: auth.actor,
+    writeAccess: true,
+    branchRules: auth.branchRules ?? [],
+    waitUntil: (promise) => c.executionCtx.waitUntil(promise),
+  };
+  const result = await reviews.requestReview(cx, number, { principal });
+  return c.redirect(`${url}?${result.ok ? 'done=review-requested' : `error=${encodeURIComponent(result.code ?? 'FAILED')}`}#reviewers`, 303);
+});
+
+changePages.post('/changes/:number/review-requests/:principal/withdraw', async (c) => {
+  const number = c.req.param('number');
+  const url = `/${c.req.param('owner')}/${c.req.param('repo')}/changes/${number}`;
+  const auth = await authorizeRoute(c, 'write', { requireActor: true, allowAgent: true, branchRules: true });
+  if (!auth.ok || !auth.actor) return notFound(c);
+  const cx: changes.ChangeContext = {
+    env: c.env,
+    repo: auth.repo,
+    actor: auth.actor,
+    writeAccess: true,
+    branchRules: auth.branchRules ?? [],
+    waitUntil: (promise) => c.executionCtx.waitUntil(promise),
+  };
+  const principal = decodeURIComponent(c.req.param('principal'));
+  const result = await reviews.withdrawReviewRequest(cx, number, principal);
+  return c.redirect(`${url}?${result.ok ? 'done=review-request-withdrawn' : `error=${encodeURIComponent(result.code ?? 'FAILED')}`}#reviewers`, 303);
 });

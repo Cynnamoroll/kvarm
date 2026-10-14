@@ -20,9 +20,12 @@
  */
 
 import type { RepoRow } from '../db/repos';
+import { getUserById } from '../db/users';
+import { agentFromRow, type AgentTokenRow } from '../auth/agentTokens';
 import type { ServiceResult } from '../repos/service';
 import { withLazyRepo } from '../artifacts/repo';
-import type { Actor } from './authz';
+import { patActor, type Actor } from './authz';
+import { resolveRepoAccessAs } from './access';
 import { modelFamilyEvidence, type EvidenceLevel } from './provenance';
 import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
@@ -217,7 +220,142 @@ export interface ReviewPacket {
   blockers: ReviewBlocker[];
   reviews: ReviewView[];
   escalations: EscalationView[];
+  suggestedReviewers: SuggestedReviewer[];
   carry: CarryView[];
+}
+
+export interface SuggestedReviewer {
+  principal: string;
+  login: string;
+  kind: 'user' | 'agent';
+  reason: 'reviewed-these-paths' | 'requested';
+  reviewedPaths: number;
+}
+
+export interface ReviewRequestView {
+  principal: string;
+  requestedBy: string;
+  requestedAt: string;
+  login: string | null;
+  kind: 'user' | 'agent';
+}
+
+interface ReviewRequestRow {
+  principal: string;
+  requested_by: string;
+  requested_at: number;
+  user_login: string | null;
+  agent_name: string | null;
+}
+
+const PRINCIPAL_RE = /^(user|agent):[A-Za-z0-9_-]{1,128}$/;
+
+function requestView(row: ReviewRequestRow): ReviewRequestView {
+  return {
+    principal: row.principal,
+    requestedBy: row.requested_by,
+    requestedAt: iso(row.requested_at),
+    login: row.user_login ?? row.agent_name,
+    kind: row.principal.startsWith('agent:') ? 'agent' : 'user',
+  };
+}
+
+export async function listReviewRequests(env: Env, changeSetId: string): Promise<ReviewRequestView[]> {
+  const rows = await env.DB.prepare(
+    `SELECT rr.principal, rr.requested_by, rr.requested_at, u.login AS user_login, a.name AS agent_name
+       FROM change_review_requests rr
+       LEFT JOIN users u ON rr.principal = 'user:' || u.id
+       LEFT JOIN agents a ON rr.principal = 'agent:' || a.id
+      WHERE rr.change_set_id = ?1
+      ORDER BY rr.requested_at DESC, rr.principal`,
+  ).bind(changeSetId).all<ReviewRequestRow>();
+  return (rows.results ?? []).map(requestView);
+}
+
+async function reviewerHasWriteAccess(env: Env, repo: RepoRow, principal: string): Promise<boolean> {
+  const [kind, id] = principal.split(':') as ['user' | 'agent', string];
+  let actor: Actor | null = null;
+  if (kind === 'user') {
+    const user = await getUserById(env.DB, id);
+    if (user) actor = { user, via: 'session', scopes: null };
+  } else {
+    const now = Date.now();
+    const row = await env.DB.prepare(
+      `SELECT t.id AS tok_id, t.agent_id AS tok_agent_id, t.repo_id AS tok_repo_id, t.role AS tok_role,
+              t.refs AS tok_refs, t.expires_at AS tok_expires_at, t.last_used_at AS tok_last_used_at,
+              a.name AS agent_name, a.owner_login AS agent_owner_login, a.owner_kind AS agent_owner_kind, u.*
+         FROM agent_tokens t
+         JOIN agents a ON a.id = t.agent_id
+         JOIN users u ON u.id = t.created_by
+        WHERE t.agent_id = ?1 AND t.repo_id = ?2 AND t.role = 'write'
+          AND t.revoked_at IS NULL AND a.revoked_at IS NULL AND t.expires_at > ?3
+        LIMIT 1`,
+    ).bind(id, repo.id, now).first<AgentTokenRow>();
+    const pat = agentFromRow(row, now);
+    if (pat?.agent?.role === 'write') actor = patActor(pat);
+  }
+  if (!actor) return false;
+  const access = await resolveRepoAccessAs(env, actor, repo.owner_login, repo.name, 'write');
+  return access.ok;
+}
+
+export async function suggestedReviewers(
+  env: Env,
+  repo: RepoRow,
+  changeSetId: string,
+  changedPaths: readonly string[],
+  authorPrincipal: string | null,
+): Promise<SuggestedReviewer[]> {
+  const paths = [...new Set(changedPaths)].slice(0, 2_000);
+  const rows = await env.DB.prepare(
+    `WITH reviewed AS (
+       SELECT r.principal, COUNT(DISTINCT f.path) AS reviewed_paths, MAX(r.updated_at) AS reviewed_at
+         FROM change_review_files f
+         JOIN change_reviews r ON r.id = f.review_id AND r.verdict = 'approve'
+         JOIN json_each(?2) p ON p.value = f.path
+        WHERE r.change_set_id = ?1
+        GROUP BY r.principal
+     ), requested AS (
+       SELECT principal, MAX(requested_at) AS requested_at
+         FROM change_review_requests WHERE change_set_id = ?1 GROUP BY principal
+     ), principals AS (
+       SELECT principal FROM reviewed UNION SELECT principal FROM requested
+     )
+     SELECT p.principal, u.login AS user_login, a.name AS agent_name,
+            CASE WHEN p.principal LIKE 'agent:%' THEN 'agent' ELSE 'user' END AS kind,
+            CASE WHEN q.principal IS NOT NULL THEN 'requested' ELSE 'reviewed-these-paths' END AS reason,
+            COALESCE(v.reviewed_paths, 0) AS reviewed_paths
+       FROM principals p
+       LEFT JOIN reviewed v ON v.principal = p.principal
+       LEFT JOIN requested q ON q.principal = p.principal
+       LEFT JOIN users u ON p.principal = 'user:' || u.id
+       LEFT JOIN agents a ON p.principal = 'agent:' || a.id
+      WHERE (?3 IS NULL OR p.principal <> ?3)
+      ORDER BY (q.principal IS NOT NULL) DESC, COALESCE(v.reviewed_paths, 0) DESC,
+               MAX(COALESCE(q.requested_at, 0), COALESCE(v.reviewed_at, 0)) DESC
+      LIMIT ${REVIEW_LIMITS.candidatesMax}`,
+  ).bind(changeSetId, JSON.stringify(paths), authorPrincipal).all<{
+    principal: string;
+    user_login: string | null;
+    agent_name: string | null;
+    kind: 'user' | 'agent';
+    reason: SuggestedReviewer['reason'];
+    reviewed_paths: number;
+  }>();
+  const out: SuggestedReviewer[] = [];
+  for (const row of rows.results ?? []) {
+    if (!row.user_login && !row.agent_name) continue;
+    if (!(await reviewerHasWriteAccess(env, repo, row.principal))) continue;
+    out.push({
+      principal: row.principal,
+      login: row.user_login ?? row.agent_name!,
+      kind: row.kind,
+      reason: row.reason,
+      reviewedPaths: Number(row.reviewed_paths) || 0,
+    });
+    if (out.length === 5) break;
+  }
+  return out;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -385,6 +523,7 @@ function buildPacket(p: PacketRead): ReviewPacket {
     blockers: gate.blockers,
     reviews: p.reviews.map((r) => reviewView(r, c.head_sha, author)),
     escalations: p.escalations.map(escalationView),
+    suggestedReviewers: [],
     carry: [],
   };
 }
@@ -675,6 +814,78 @@ export interface ResolveOutcome {
  * closes one open escalation (`acknowledge` or `resolve`). One batch after
  * authority: the guarded update, the escalation read-back and the packet.
  */
+export interface ReviewRequestOutcome {
+  request: ReviewRequestView;
+  created: boolean;
+}
+
+export function requestReview(
+  cx: ChangeContext,
+  rawNumber: string,
+  input: { principal: string } | unknown,
+): Promise<ServiceResult<ReviewRequestOutcome>> {
+  return guarded(async () => {
+    const number = parseNumber(rawNumber);
+    if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+    if (!cx.actor || cx.writeAccess === false) return fail(403, 'write access required', 'FORBIDDEN');
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object {principal}', 'INVALID_BODY');
+    const principal = (input as Record<string, unknown>).principal;
+    if (typeof principal !== 'string' || !PRINCIPAL_RE.test(principal)) return fail(422, 'principal must be a user: or agent: principal', 'INVALID_PRINCIPAL');
+    const change = await cx.env.DB.prepare(
+      'SELECT id, state, author_id, agent_meta FROM change_sets WHERE repo_id = ?1 AND number = ?2',
+    ).bind(cx.repo.id, number).first<{ id: string; state: string; author_id: string | null; agent_meta: string | null }>();
+    if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+    if (change.state !== 'open' && change.state !== 'conflicted') return fail(409, 'change is not open', 'CHANGE_NOT_OPEN');
+    const authorAgent = parseAgentMeta(change.agent_meta);
+    const authorPrincipal = authorAgent ? `agent:${authorAgent.id}` : change.author_id ? `user:${change.author_id}` : null;
+    if (authorPrincipal === principal) return fail(409, 'the change author cannot review their own change', 'SELF_REVIEW');
+    if (!(await reviewerHasWriteAccess(cx.env, cx.repo, principal))) return fail(403, 'reviewer must have current write access', 'FORBIDDEN');
+
+    const requestedAt = Date.now();
+    const insert = await cx.env.DB.prepare(
+      `INSERT OR IGNORE INTO change_review_requests (change_set_id, principal, requested_by, requested_at)
+       VALUES (?1, ?2, ?3, ?4)`,
+    ).bind(change.id, principal, actorPrincipal(cx.actor).id, requestedAt).run();
+    const row = await cx.env.DB.prepare(
+      `SELECT rr.principal, rr.requested_by, rr.requested_at, u.login AS user_login, a.name AS agent_name
+         FROM change_review_requests rr
+         LEFT JOIN users u ON rr.principal = 'user:' || u.id
+         LEFT JOIN agents a ON rr.principal = 'agent:' || a.id
+        WHERE rr.change_set_id = ?1 AND rr.principal = ?2`,
+    ).bind(change.id, principal).first<ReviewRequestRow>();
+    if (!row) return fail(500, 'review request could not be stored', 'INTERNAL');
+    publishRepoEvent(cx.env, cx.repo.id, { type: 'review.requested', changeNumber: number }, cx.waitUntil);
+    return { ok: true, value: { request: requestView(row), created: (insert.meta?.changes ?? 0) > 0 } };
+  });
+}
+
+export interface WithdrawReviewRequestOutcome {
+  principal: string;
+  withdrawn: boolean;
+}
+
+export function withdrawReviewRequest(
+  cx: ChangeContext,
+  rawNumber: string,
+  principal: string,
+): Promise<ServiceResult<WithdrawReviewRequestOutcome>> {
+  return guarded(async () => {
+    const number = parseNumber(rawNumber);
+    if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+    if (!cx.actor || cx.writeAccess === false) return fail(403, 'write access required', 'FORBIDDEN');
+    if (!PRINCIPAL_RE.test(principal)) return fail(422, 'principal must be a user: or agent: principal', 'INVALID_PRINCIPAL');
+    const change = await cx.env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2')
+      .bind(cx.repo.id, number).first<{ id: string }>();
+    if (!change) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
+    const removed = await cx.env.DB.prepare(
+      'DELETE FROM change_review_requests WHERE change_set_id = ?1 AND principal = ?2',
+    ).bind(change.id, principal).run();
+    const withdrawn = (removed.meta?.changes ?? 0) > 0;
+    if (withdrawn) publishRepoEvent(cx.env, cx.repo.id, { type: 'review.requested', changeNumber: number }, cx.waitUntil);
+    return { ok: true, value: { principal, withdrawn } };
+  });
+}
+
 export function resolveEscalation(cx: ChangeContext, rawNumber: string, id: string, input: unknown): Promise<ServiceResult<ResolveOutcome>> {
   return guarded(async () => {
     const number = parseNumber(rawNumber);
@@ -1018,12 +1229,14 @@ export interface PendingChange {
   /** Sort key for the inbox cursor. */
   createdAtMs: number;
   id: string;
+  requestedForViewer?: boolean;
 }
 
 interface PendingAcrossRow extends PacketChangeRow {
   repo_id: string;
   title: string;
   created_at: number;
+  requested_for_viewer?: number;
 }
 
 /**
@@ -1057,7 +1270,7 @@ export function staleApprovals(reviews: readonly ReviewView[]): ReviewView[] {
 export async function pendingAcross(
   env: Env,
   repoIds: readonly string[],
-  page: { limit: number; window: number; after: { at: number; id: string } | null },
+  page: { limit: number; window: number; after: { at: number; id: string } | null; requestedPrincipal?: string | null },
 ): Promise<{ changes: PendingChange[]; more: boolean; last: { at: number; id: string } | null }> {
   if (repoIds.length === 0) return { changes: [], more: false, last: null };
   const db = env.DB;
@@ -1069,6 +1282,9 @@ export async function pendingAcross(
       .prepare(
         `SELECT c.id, c.repo_id, c.number, c.title, c.state, c.merge_policy, c.base_ref, c.head_sha, c.author_id, u.login AS author_login,
                 c.agent_meta, c.created_at,
+                CASE WHEN ?5 IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM change_review_requests rr WHERE rr.change_set_id = c.id AND rr.principal = ?5
+                ) THEN 1 ELSE 0 END AS requested_for_viewer,
                 (SELECT a.model_family FROM agents a WHERE a.id = json_extract(c.agent_meta, '$.agentId')) AS author_family,
                 ${reviewFactsColumns('c')}
            FROM change_sets c LEFT JOIN users u ON u.id = c.author_id
@@ -1079,7 +1295,7 @@ export async function pendingAcross(
                           ORDER BY x.created_at DESC, x.id DESC LIMIT ?4)
           ORDER BY c.created_at DESC, c.id DESC`,
       )
-      .bind(JSON.stringify(repoIds), page.after?.at ?? null, page.after?.id ?? null, window + 1),
+      .bind(JSON.stringify(repoIds), page.after?.at ?? null, page.after?.id ?? null, window + 1, page.requestedPrincipal ?? null),
     db
       .prepare(
         `SELECT b.repo_id, ${BRANCH_RULE_COLUMNS} FROM json_each(?1) j
@@ -1094,7 +1310,7 @@ export async function pendingAcross(
   for (const r of (ruleRes?.results as Array<BranchRuleRow & { repo_id: string }> | undefined) ?? []) {
     rulesOf.set(r.repo_id, [...(rulesOf.get(r.repo_id) ?? []), ruleFromRow(r)]);
   }
-  const held: Array<{ row: PendingAcrossRow; facts: ReviewFacts; policy: BranchPolicy; gate: ReturnType<typeof reviewGate> }> = [];
+  const held: Array<{ row: PendingAcrossRow; facts: ReviewFacts; policy: BranchPolicy; gate: ReturnType<typeof reviewGate>; requestedForViewer: boolean }> = [];
   let last: { at: number; id: string } | null = null;
   for (let i = 0; i < examined.length; i++) {
     const row = examined[i]!;
@@ -1103,8 +1319,9 @@ export async function pendingAcross(
     const policy = effectivePolicy(rulesOf.get(row.repo_id) ?? [], branchRef(row.base_ref));
     const gate = reviewGate(facts, policy);
     // Only what a human must answer: a change blocked by nothing (or by checks alone) is not inbox work.
-    if (gate.blockers.length === 0) continue;
-    held.push({ row, facts, policy, gate });
+    const requestedForViewer = row.requested_for_viewer === 1;
+    if (gate.blockers.length === 0 && !requestedForViewer) continue;
+    held.push({ row, facts, policy, gate, requestedForViewer });
     if (held.length === page.limit) {
       more ||= i < examined.length - 1;
       break;
@@ -1139,7 +1356,7 @@ export async function pendingAcross(
   };
   const reviewsOf = group(reviewRes?.results as Array<ReviewRow & { change_set_id: string }> | undefined);
   const escalationsOf = group(escalationRes?.results as Array<EscalationRow & { change_set_id: string }> | undefined);
-  const changes: PendingChange[] = held.map(({ row, facts, policy, gate }) => {
+  const changes: PendingChange[] = held.map(({ row, facts, policy, gate, requestedForViewer }) => {
     const author = authorView(row);
     const reviews = (reviewsOf.get(row.id) ?? [])
       .sort((a, b) => b.updated_at - a.updated_at || (a.id < b.id ? -1 : 1))
@@ -1161,6 +1378,7 @@ export async function pendingAcross(
       staleApprovals: staleApprovals(reviews).length,
       createdAt: iso(row.created_at),
       createdAtMs: row.created_at,
+      requestedForViewer,
     };
   });
   return { changes, more, last };

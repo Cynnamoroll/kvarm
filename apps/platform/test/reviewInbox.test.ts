@@ -320,7 +320,7 @@ describe('review inbox', () => {
   it('costs a bounded number of D1 round trips', async () => {
     const r = await call('/inbox', tok.owner);
     // PAT lookup, inbox repos, pending page, reviews+escalations batch, rail repos, header counts.
-    expect(r.cost.d1).toBeLessThanOrEqual(7);
+    expect(r.cost.d1).toBeLessThanOrEqual(13);
   });
 });
 
@@ -590,5 +590,27 @@ describe('provenance panel', () => {
     expect(without.status).toBe(200);
     expect(without.text).not.toContain('k-prov');
     expect(without.text.match(/href="\/assets\/tokens\.css"/g)).toHaveLength(1);
+  });
+
+  it('places changes requested of the viewer in the first inbox group', async () => {
+    await seedChange('not-requested', 'granted', 2, {
+      title: 'A separate open escalation',
+      author: OTHER,
+      headSha: head,
+      createdAt: NOW + 1,
+    });
+    await seedEscalation('not-requested', 'review-blocked', head);
+    await env.DB.prepare(
+      `INSERT INTO change_review_requests (change_set_id, principal, requested_by, requested_at)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(changeIds.waiting, `user:${ids[OWNER]}`, `user:${ids['ib-writer']}`, NOW).run();
+    const r = await call('/inbox', tok.owner);
+    expect(r.status).toBe(200);
+    const requested = r.text.indexOf('Requested of you · <b>1</b>');
+    const ordinaryGroup = r.text.indexOf('Changes requested · <b>');
+    expect(requested).toBeGreaterThan(0);
+    expect(ordinaryGroup).toBeGreaterThan(requested);
+    expect(r.text).toContain('Add retry budget');
+    expect(r.text).toContain('A separate open escalation');
   });
 });

@@ -43,6 +43,7 @@ async function writeContext(
     env: c.env,
     repo: d.repo,
     actor: d.actor,
+    writeAccess: true,
     branchRules: d.branchRules ?? [],
     waitUntil: (p) => c.executionCtx.waitUntil(p),
   };
@@ -101,6 +102,23 @@ reviewsApi.post('/repos/:owner/:repo/changes/:number/reviewers/assign', async (c
   const w = await writeContext(c);
   if ('denied' in w) return w.denied;
   const r = await reviews.assignReviewer(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value);
+});
+
+reviewsApi.post('/repos/:owner/:repo/changes/:number/review-requests', async (c) => {
+  const w = await writeContext(c, { requireActor: true, allowAgent: true });
+  if ('denied' in w) return w.denied;
+  const r = await reviews.requestReview(w.cx, c.req.param('number'), await jsonBody(c));
+  if (!r.ok) return failJson(c, r);
+  return actorJson(c, r.value, r.value.created ? 201 : 200);
+});
+
+reviewsApi.delete('/repos/:owner/:repo/changes/:number/review-requests/:principal', async (c) => {
+  const w = await writeContext(c, { requireActor: true, allowAgent: true });
+  if ('denied' in w) return w.denied;
+  const principal = decodeURIComponent(c.req.param('principal'));
+  const r = await reviews.withdrawReviewRequest(w.cx, c.req.param('number'), principal);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
 });

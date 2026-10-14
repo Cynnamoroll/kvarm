@@ -207,6 +207,8 @@ describe('change pages', () => {
     expect(page.text).toContain('guide-chapter');
     expect(page.text).toContain('<div class="card-title">src/app.ts');
     expect(page.text).toContain('scrutinize');
+    expect(page.text).toContain('<p class="muted">No eligible reviewer suggestions.</p>');
+    expect(page.text).toContain('<p class="muted">No reviewers requested.</p>');
     expect(page.text).toContain('1 file');
     expect(page.text).toContain('src');
     expect(page.text).toContain('name="_csrf"');
@@ -343,6 +345,42 @@ describe('change pages', () => {
     expect(page.text).toContain('carry-unchanged');
     expect(page.text).toContain('carry-changed');
     expect(page.text).toContain('<code>src/app.ts</code>');
+  });
+
+  it('renders suggested and requested reviewers with CSRF-protected forms and the agent command', async () => {
+    const { head } = await seedChange('reviewer-panel');
+    await request('PUT', `/api/v1/repos/${OWNER}/reviewer-panel/review-policy`, {
+      token: ownerToken,
+      json: { requiredReviews: 2 },
+    });
+    const suggestedId = await seedUser('cp-suggested');
+    for (const userId of [userIds[REVIEWER]!, suggestedId]) {
+      await env.DB.prepare(
+        'INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ).bind(repoIds['reviewer-panel'], userId, 'write', userIds[OWNER], Date.now(), Date.now()).run();
+    }
+    const requestResult = await request('POST', `/api/v1/repos/${OWNER}/reviewer-panel/changes/1/review-requests`, {
+      token: ownerToken,
+      json: { principal: `user:${userIds[REVIEWER]}` },
+    });
+    expect(requestResult.status).toBe(201);
+    const suggestedToken = (await mintPAT(env, suggestedId, 'suggested', FULL)).token;
+    expect((await request('POST', `/api/v1/repos/${OWNER}/reviewer-panel/changes/1/approve`, {
+      token: suggestedToken,
+      json: { headSha: head },
+    })).status).toBe(201);
+
+    const browser = await browserSession(REVIEWER);
+    const page = await browser(`/${OWNER}/reviewer-panel/changes/1`);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('Policy & reviewers');
+    expect(page.text).toContain('cp-suggested');
+    expect(page.text).toContain('Request review');
+    expect(page.text).toContain('cp-reviewer');
+    expect(page.text).toContain('Withdraw');
+    expect(page.text).toContain('name="_csrf"');
+    expect(page.text).toContain('kvarm review request --repo cp-owner/reviewer-panel 1');
+    expect(page.text).toContain('Requested reviewers: cp-reviewer');
   });
 
   it('disables approve-and-ship for a draft change with a clear reason', async () => {

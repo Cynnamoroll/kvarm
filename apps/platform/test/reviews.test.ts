@@ -15,6 +15,7 @@ import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/met
 import type { RepoRow } from '../src/db/repos';
 import worker from '../src/index';
 import { headFingerprint } from '../src/services/approvalCarry';
+import { suggestedReviewers } from '../src/services/reviews';
 import type { ChecksGate } from '../src/services/checksGate';
 import { defaultTrainDeps, runTrain, type TrainDeps } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
@@ -465,6 +466,113 @@ describe('model families and assignment', () => {
     const after = await call('POST', api('family', '/changes/1/reviewers/assign'), tok.owner, {});
     expect(after.json.assigned).toBeNull();
     expect(byIdOf(after.json.candidates)[other.id]).toMatchObject({ eligible: false, ineligibleReason: 'already-reviewed' });
+  });
+});
+
+describe('persisted reviewer routing', () => {
+  it('requests idempotently, publishes the event, and withdraws the request', async () => {
+    await setup('review-request-routing');
+    await createChange('review-request-routing', 'b1');
+    const principal = `user:${userIds['rv-human2']}`;
+    const path = api('review-request-routing', '/changes/1/review-requests');
+    const first = await call('POST', path, tok.owner, { principal });
+    const duplicate = await call('POST', path, tok.owner, { principal });
+    expect([first.status, first.json.created]).toEqual([201, true]);
+    expect([duplicate.status, duplicate.json.created]).toEqual([200, false]);
+    expect(first.json.request).toMatchObject({ principal, requestedBy: `user:${userIds[OWNER]}` });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_requests WHERE principal = ?').bind(principal).first<{ n: number }>())?.n).toBe(1);
+
+    const stream = env.REPO_EVENTS.get(env.REPO_EVENTS.idFromName(repoIds['review-request-routing']!));
+    const cursor = await stream.fetch('https://repo-events/since?seq=0');
+    const events = (await cursor.json() as { events: Array<{ type: string }> }).events;
+    expect(events.map((event) => event.type)).toContain('review.requested');
+
+    const withdrawn = await call('DELETE', `${path}/${encodeURIComponent(principal)}`, tok.owner);
+    expect([withdrawn.status, withdrawn.json.withdrawn]).toEqual([200, true]);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_requests WHERE principal = ?').bind(principal).first<{ n: number }>())?.n).toBe(0);
+
+    await env.DB.prepare("UPDATE change_sets SET state = 'conflicted' WHERE repo_id = ?").bind(repoIds['review-request-routing']).run();
+    const requester = await agent('review-request-routing', 'rr-requester', 'gpt');
+    const agentRequest = await call('POST', path, requester.token, { principal: `user:${userIds['rv-human3']}` });
+    expect([agentRequest.status, agentRequest.json.request.requestedBy]).toEqual([201, `agent:${requester.id}`]);
+  });
+
+  it('refuses callers without write, author targets, revoked agents, and closed changes', async () => {
+    await setup('review-request-refusals');
+    await createChange('review-request-refusals', 'b1');
+    const path = api('review-request-refusals', '/changes/1/review-requests');
+    const noWrite = await call('POST', path, tok.reader, { principal: `user:${userIds['rv-human2']}` });
+    expect(noWrite.status).toBe(403);
+
+    const author = await call('POST', path, tok.owner, { principal: `user:${userIds[OWNER]}` });
+    expect([author.status, author.json.code]).toEqual([409, 'SELF_REVIEW']);
+
+    const revoked = await agent('review-request-refusals', 'rr-revoked', 'gpt');
+    await env.DB.prepare('UPDATE agents SET revoked_at = ? WHERE id = ?').bind(Date.now(), revoked.id).run();
+    const revokedTarget = await call('POST', path, tok.owner, { principal: `agent:${revoked.id}` });
+    expect([revokedTarget.status, revokedTarget.json.code]).toEqual([403, 'FORBIDDEN']);
+
+    await env.DB.prepare("UPDATE change_sets SET state = 'closed' WHERE repo_id = ? AND number = 1").bind(repoIds['review-request-refusals']).run();
+    const closed = await call('POST', path, tok.owner, { principal: `user:${userIds['rv-human2']}` });
+    expect([closed.status, closed.json.code]).toEqual([409, 'CHANGE_NOT_OPEN']);
+  });
+
+  it('ranks requested reviewers first, then overlap and recency, excluding the author and revoked agents', async () => {
+    await setup('review-suggestion-routing');
+    await createChange('review-suggestion-routing', 'b1');
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds['review-suggestion-routing']).first<{ id: string }>();
+    const requested = await call('POST', api('review-suggestion-routing', '/changes/1/review-requests'), tok.owner, {
+      principal: `user:${userIds['rv-human3']}`,
+    });
+    expect(requested.status).toBe(201);
+
+    const live = await agent('review-suggestion-routing', 'rr-live', 'gpt');
+    const revoked = await agent('review-suggestion-routing', 'rr-expired', 'claude');
+    for (const token of [tok.human2, tok.human3, live.token, revoked.token]) {
+      expect((await approve('review-suggestion-routing', 1, token)).status).toBe(201);
+    }
+    await env.DB.prepare('UPDATE agents SET revoked_at = ? WHERE id = ?').bind(Date.now(), revoked.id).run();
+
+    const principalReview = async (principal: string) =>
+      env.DB.prepare('SELECT id FROM change_reviews WHERE change_set_id = ? AND principal = ?')
+        .bind(change!.id, principal).first<{ id: string }>();
+    const addPaths = async (principal: string, paths: string[]) => {
+      const review = await principalReview(principal);
+      expect(review).not.toBeNull();
+      await env.DB.batch(paths.map((path) =>
+        env.DB.prepare('INSERT OR IGNORE INTO change_review_files (review_id, path) VALUES (?, ?)').bind(review!.id, path),
+      ));
+    };
+    await addPaths(`user:${userIds['rv-human2']}`, ['a.ts', 'b.ts']);
+    await addPaths(`user:${userIds['rv-human3']}`, ['a.ts']);
+    await addPaths(`agent:${live.id}`, ['a.ts', 'b.ts', 'c.ts']);
+    await addPaths(`agent:${revoked.id}`, ['a.ts', 'b.ts', 'c.ts']);
+    await env.DB.prepare(
+      'INSERT INTO change_review_requests (change_set_id, principal, requested_by, requested_at) VALUES (?, ?, ?, ?)',
+    ).bind(change!.id, `user:${userIds[OWNER]}`, `user:${userIds[OWNER]}`, Date.now()).run();
+
+    const repoRow = await env.DB.prepare('SELECT * FROM repos WHERE id = ?')
+      .bind(repoIds['review-suggestion-routing']).first<RepoRow>();
+    const suggestions = await suggestedReviewers(
+      env,
+      repoRow!,
+      change!.id,
+      ['a.ts', 'b.ts', 'c.ts'],
+      `user:${userIds[OWNER]}`,
+    );
+    expect(suggestions.map(({ principal }) => principal)).toEqual([
+      `user:${userIds['rv-human3']}`,
+      `agent:${live.id}`,
+      `user:${userIds['rv-human2']}`,
+    ]);
+    expect(suggestions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ principal: `user:${userIds['rv-human3']}`, reason: 'requested', reviewedPaths: 1 }),
+      expect.objectContaining({ principal: `agent:${live.id}`, reason: 'reviewed-these-paths', reviewedPaths: 3 }),
+      expect.objectContaining({ principal: `user:${userIds['rv-human2']}`, reviewedPaths: 2 }),
+    ]));
+    expect(suggestions.some(({ principal }) => principal === `agent:${revoked.id}`)).toBe(false);
+    expect(suggestions.some(({ principal }) => principal === `user:${userIds[OWNER]}`)).toBe(false);
   });
 });
 
