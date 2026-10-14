@@ -13,6 +13,7 @@ import {
   concat,
   decode,
   encode,
+  parseTree,
   pktLine,
   ZERO_OID,
   type FetchLike,
@@ -516,5 +517,88 @@ describe('publishMerge before-send revalidation', () => {
     const sent = await publishMerge({ pusher, gate: checksGate([]), beforeSend: async () => true }, target, prepared);
     expect(sent.ok).toBe(true);
     expect(requests).toEqual([`${repo.artifacts_remote}/git-receive-pack`]);
+  });
+});
+
+describe('criss-cross histories', () => {
+  const lines = (tag: string) => Array.from({ length: 10 }, (_, i) => `${tag}${i}`);
+  const text = (ls: string[]) => ls.join('\n') + '\n';
+  const set = (ls: string[], at: number, v: string) => ls.map((l, i) => (i === at ? v : l));
+  const A = lines('a');
+  const B = lines('b');
+
+  /** root; x and y edit a.txt (same line when `clash`); m1 = merge(x, y), m2 = merge(y, x); main and head grow from them. */
+  async function crissCross(store: Store, clash: boolean) {
+    const root = await store.commit([], { 'a.txt': text(A), 'b.txt': text(B) });
+    const xa = set(A, 1, 'X');
+    const ya = set(A, clash ? 1 : 8, 'Y');
+    const x = await store.commit([root], { 'a.txt': text(xa), 'b.txt': text(B) }, 'x');
+    const y = await store.commit([root], { 'a.txt': text(ya), 'b.txt': text(B) }, 'y');
+    const ma = clash ? set(A, 1, 'XY') : set(set(A, 1, 'X'), 8, 'Y');
+    const m1 = await store.commit([x, y], { 'a.txt': text(ma), 'b.txt': text(B) }, 'm1');
+    const m2 = await store.commit([y, x], { 'a.txt': text(ma), 'b.txt': text(B) }, 'm2');
+    const main = await store.commit([m1], { 'a.txt': text(set(ma, 4, 'MAIN')), 'b.txt': text(B) }, 'main');
+    const head = await store.commit([m2], { 'a.txt': text(ma), 'b.txt': text(set(B, 2, 'HEAD')) }, 'head');
+    return { x, y, main, head, merged: { 'a.txt': text(set(ma, 4, 'MAIN')), 'b.txt': text(set(B, 2, 'HEAD')) } };
+  }
+
+  it('merges over the virtual base when the two bases merge cleanly', async () => {
+    const store = new Store();
+    const { x, y, main, head, merged } = await crissCross(store, false);
+    const [first, second] = [x, y].sort();
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({
+      status: 'clean',
+      mergeable: true,
+      mergeBase: first,
+      treeSha: await new Store().tree(merged),
+      virtualBase: { bases: [first, second] },
+    });
+    // The same pair always plans the same way.
+    const again = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(again.treeSha).toBe(m.treeSha);
+    expect(again.virtualBase).toEqual(m.virtualBase);
+  });
+
+  it('publishes a merge commit whose tree is closed over the store and the pack', async () => {
+    const store = new Store();
+    const { main, head } = await crissCross(store, false);
+    const prepared = await prepareMerge(store, { targetSha: main, headSha: head, message: 'merge' });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    const pack = new Map(prepared.value.objects.map((o) => [o.hash, o]));
+    const read = async (hash: string) => pack.get(hash) ?? null;
+    const walk = async (tree: string): Promise<boolean> => {
+      const own = await read(tree);
+      const entries = own ? parseTree(own.raw.subarray(own.raw.indexOf(0) + 1)) : await store.readTree(tree);
+      if (!entries) return false;
+      for (const e of entries) {
+        if (e.mode === '40000' ? !(await walk(e.hash)) : !(await read(e.hash)) && !(await store.readBlob(e.hash))) return false;
+      }
+      return true;
+    };
+    expect(await walk(prepared.value.treeSha)).toBe(true);
+    const pusher = new FakePusher(store);
+    pusher.refs.set('refs/heads/main', main);
+    const published = await publishMerge({ pusher, gate: checksGate([]) }, { repo: REPO, ref: 'refs/heads/main' }, prepared.value);
+    expect(published).toMatchObject({ ok: true, value: { kind: 'merge' } });
+  });
+
+  it('refuses bases that conflict with each other as MULTIPLE_MERGE_BASES', async () => {
+    const store = new Store();
+    const { main, head } = await crissCross(store, true);
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({ status: 'unknown', unknownReason: 'criss-cross', mergeable: false });
+    expect(m.virtualBase).toBeUndefined();
+    const p = await prepareMerge(store, { targetSha: main, headSha: head, message: 'merge' });
+    expect(p).toMatchObject({ ok: false, status: 422, code: 'MULTIPLE_MERGE_BASES' });
+  });
+
+  it('charges the virtual base against the merge budgets', async () => {
+    const store = new Store();
+    const { main, head } = await crissCross(store, false);
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head, budgets: { maxTreeReads: 2 } });
+    expect(m).toMatchObject({ status: 'unknown', unknownReason: 'maxTreeReads', mergeable: false });
+    expect(m.work.treeReads).toBeLessThanOrEqual(2);
   });
 });

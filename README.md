@@ -321,7 +321,7 @@ Configured limits (constants in the code, documented with their behavior in the 
 - Dependencies: chains of at most 4 workspaces, at most 8 direct pins per workspace.
 - `kvarm/guard` reads at most 100 files, 64 KiB per side.
 - CI: at most 16 jobs per `.kvarm/ci.json`; runner leases of 120 s, renewed by heartbeat.
-- Known engine limits: criss-cross histories with several merge bases are refused (`422 MULTIPLE_MERGE_BASES`); Artifacts `log()` follows first parents and is capped at 1,000 entries; multi-ref atomicity is not assumed, so the platform pushes one ref per write.
+- Known engine limits: a criss-cross history with two merge bases merges over git's virtual base when the two bases merge cleanly; three or more bases, nested criss-crosses and bases that conflict with each other are refused (`422 MULTIPLE_MERGE_BASES`), and compositions still refuse any criss-cross; Artifacts `log()` follows first parents and is capped at 1,000 entries; multi-ref atomicity is not assumed, so the platform pushes one ref per write.
 
 ## Deferred roadmap
 
