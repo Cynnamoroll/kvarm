@@ -5,8 +5,9 @@
  * When two tips have two best common ancestors, git merges those ancestors
  * into a virtual commit and uses its tree as the merge base. This module does
  * the same for exactly two bases whose own merge base is unique, and only
- * where merge3's model provably agrees with git's: no side of the inner
- * merge leaves room for a similarity rename (`refuseAmbiguousRenames`), and
+ * where merge3's model provably agrees with git's: git could pair no side
+ * of the inner merge's paths differently (`refuseAmbiguousRenames`; pure
+ * exact renames are fine), and
  * no path needs a line-level merge (git's xdiff could conflict where
  * mergeText does not, and would then put conflict markers in the virtual
  * base). Paths changed on one side only, or identically on both, merge the

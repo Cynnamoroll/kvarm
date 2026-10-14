@@ -23,9 +23,10 @@
  * when the other side deletes the source too, adds under the renamed
  * directory, or the rename changes the file's type, this model can merge
  * cleanly to a tree git would not write, or where git reports a conflict.
- * `refuseAmbiguousRenames` declines every merge where a side's diff leaves
- * room for such a pairing. Several merge bases (criss-cross) are the
- * caller's concern: pass one base tree.
+ * `refuseAmbiguousRenames` declines every merge where git could pair a
+ * side's paths differently (see `renamesAmbiguous`); pure exact renames,
+ * which git pairs the same way, still merge. Several merge bases
+ * (criss-cross) are the caller's concern: pass one base tree.
  *
  * Budgeted: tree reads, blob reads, blob size, diff work and the total size
  * of the objects the merge creates are bounded, and content merges run one
@@ -114,9 +115,11 @@ export interface Merge3Options {
   resolver?: HunkResolver;
   /**
    * Refuse (`refused: 'ambiguousRenames'`) instead of merging when git's
-   * similarity rename detection could pair paths differently from the exact
-   * model here: a side that removes a path (or changes its type) and also
-   * adds one. Callers that must match git's tree exactly set this.
+   * rename detection could pair paths differently from the exact model here
+   * (see `renamesAmbiguous`): a side with leftover removals and additions, a
+   * retyped path, an exact rename git could pair another way, or an addition
+   * the other side's directory rename could move. Pure exact renames merge.
+   * Callers that must match git's tree exactly set this.
    */
   refuseAmbiguousRenames?: boolean;
 }
@@ -175,8 +178,8 @@ interface SideOps {
   /** Base entries of the paths this side touched. */
   base: Map<string, Entry>;
   renames: Array<[string, string]>;
-  /** A path left (removed, renamed away or retyped) and a path appeared: git might pair them. */
-  renameCandidates: boolean;
+  /** A path kept its name but changed type (file, symlink, submodule). */
+  retyped: boolean;
 }
 
 class Stop extends Error {
@@ -221,14 +224,9 @@ class Limiter {
 }
 
 function sideOps(changes: TreeChange[]): SideOps {
-  const ops: SideOps = { src: new Map(), adds: new Map(), base: new Map(), renames: [], renameCandidates: false };
-  let left = false;
-  let appeared = false;
+  const ops: SideOps = { src: new Map(), adds: new Map(), base: new Map(), renames: [], retyped: false };
   for (const c of changes) {
-    if (c.status === 'renamed') left = appeared = true;
-    else if (c.status === 'removed') left = true;
-    else if (c.status === 'added') appeared = true;
-    else if (c.oldMode && c.newMode && typeOf(c.oldMode) !== typeOf(c.newMode)) left = appeared = true;
+    if (c.status !== 'renamed' && c.oldMode && c.newMode && typeOf(c.oldMode) !== typeOf(c.newMode)) ops.retyped = true;
     const oldEntry = c.oldMode && c.oldHash ? { mode: c.oldMode, hash: c.oldHash } : undefined;
     const newEntry = c.newMode && c.newHash ? { mode: c.newMode, hash: c.newHash } : undefined;
     if (c.status === 'added') ops.adds.set(c.path, { entry: newEntry! });
@@ -246,8 +244,47 @@ function sideOps(changes: TreeChange[]): SideOps {
       ops.base.set(c.path, oldEntry!);
     }
   }
-  ops.renameCandidates = left && appeared;
   return ops;
+}
+
+/**
+ * Whether git could pair `s`'s paths differently from the exact model here,
+ * given the `other` side. git pairs exact renames first, then files at least
+ * 50% similar among the sources and destinations left, then infers directory
+ * renames from all of them. The exact model agrees when:
+ * - no path changed type in place, and every rename kept its mode;
+ * - each renamed blob is the only one of its hash among the side's sources
+ *   and among its destinations, so git's exact pass has one choice too;
+ * - removals and additions left over are not both present, so git's
+ *   similarity pass has nothing to pair;
+ * - the other side adds nothing under a directory a rename here left, so no
+ *   directory rename can move it.
+ */
+function renamesAmbiguous(s: SideOps, other: SideOps): boolean {
+  if (s.retyped) return true;
+  const removed = [...s.src.values()].some((op) => op.op === 'delete');
+  const added = [...s.adds.values()].some((a) => a.from === undefined);
+  if (removed && added) return true;
+  if (s.renames.length === 0) return false;
+  const sources = new Map<string, number>();
+  const targets = new Map<string, number>();
+  for (const [path, op] of s.src) {
+    if (op.op === 'modify') continue;
+    const h = s.base.get(path)!.hash;
+    sources.set(h, (sources.get(h) ?? 0) + 1);
+  }
+  for (const { entry } of s.adds.values()) targets.set(entry.hash, (targets.get(entry.hash) ?? 0) + 1);
+  const vacated = new Set<string>();
+  for (const [from, to] of s.renames) {
+    const was = s.base.get(from)!;
+    const now = s.adds.get(to)!.entry;
+    if (was.mode !== now.mode || sources.get(was.hash) !== 1 || targets.get(now.hash) !== 1) return true;
+    for (let d = dirname(from); d !== ''; d = dirname(d)) vacated.add(d);
+  }
+  for (const q of other.adds.keys()) {
+    for (let d = dirname(q); d !== ''; d = dirname(d)) if (vacated.has(d)) return true;
+  }
+  return false;
 }
 
 /**
@@ -401,7 +438,7 @@ class Merge {
   async run(baseTree: string, oursTree: string, theirsTree: string): Promise<Merge3Result> {
     const ours = await this.diffSide(baseTree, oursTree);
     const theirs = await this.diffSide(baseTree, theirsTree);
-    if (this.opts.refuseAmbiguousRenames && (ours.renameCandidates || theirs.renameCandidates)) {
+    if (this.opts.refuseAmbiguousRenames && (renamesAmbiguous(ours, theirs) || renamesAmbiguous(theirs, ours))) {
       return this.result({ refused: 'ambiguousRenames' });
     }
     const consumed = { ours: new Set<string>(), theirs: new Set<string>() };

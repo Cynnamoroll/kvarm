@@ -14,8 +14,9 @@
  *
  * Criss-cross histories with two merge bases merge over git's virtual base
  * (gitops virtualBase.ts) when the result provably matches git's: the bases
- * merge without line-level merges, and no side of either merge leaves room
- * for a similarity rename. Anything else with several merge bases is
+ * merge without line-level merges, and git could pair no side of either
+ * merge's paths differently (pure exact renames merge). Anything else with
+ * several merge bases is
  * refused as `MULTIPLE_MERGE_BASES` rather than merged against an arbitrary
  * base or to a tree git would not write.
  *

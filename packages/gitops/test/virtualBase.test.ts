@@ -242,6 +242,42 @@ describe('virtualMergeBase', () => {
     expect(got.virtual).toMatchObject({ ok: false, reason: 'bases-ambiguous' });
   });
 
+  it('merges a criss-cross with exact renames on both stages exactly like git', async () => {
+    const store = new Store();
+    const { ours, theirs } = await crissCross(
+      store,
+      ROOT,
+      ({ 'a.txt': a, ...rest }) => ({ ...rest, 'docs/a.txt': a! }),
+      (f) => ({ ...f, 'c.txt': edit(f['c.txt']!, 9, 'Y') }),
+      ({ 'a.txt': a, ...rest }) => ({ ...rest, 'docs/a.txt': a!, 'c.txt': edit(rest['c.txt']!, 9, 'Y') }),
+      ({ 'b.txt': b, ...rest }) => ({ ...rest, 'lib/b.txt': b! }),
+      (f) => ({ ...f, 'docs/a.txt': edit(f['docs/a.txt']!, 4, 'T'), 'b.txt': edit(f['b.txt']!, 2, 'T') }),
+    );
+    const got = await ourMerge(store, ours, theirs);
+    expect(got.virtual.ok).toBe(true);
+    expect(got.merge).toMatchObject({ clean: true });
+    expect(got.merge?.refused).toBeUndefined();
+    const git = await gitMergeTree(store, ours, theirs);
+    expect(git.clean).toBe(true);
+    expect(got.merge!.treeHash).toBe(git.tree);
+  });
+
+  it('refuses an exact rename when the other side adds under the directory it left, or git has two choices', async () => {
+    const store = new Store();
+    const files: Files = { ...ROOT, 'lib/one.txt': text(lines(12, 'one')) };
+    const base = await store.tree(files);
+    const { 'lib/one.txt': one, ...rest } = files;
+    const moved = await store.tree({ ...rest, 'pkg/one.txt': one! });
+    const addsInLib = await store.tree({ ...files, 'lib/two.txt': text(lines(12, 'two')) });
+    expect(await merge3(store, base, moved, addsInLib, { refuseAmbiguousRenames: true })).toMatchObject({ refused: 'ambiguousRenames' });
+    // Two destinations with the moved content: git's exact pass could pick either.
+    const copies = await store.tree({ ...rest, 'pkg/one.txt': one!, 'pkg/copy.txt': one! });
+    const editsC = await store.tree({ ...files, 'c.txt': edit(files['c.txt']!, 3, 'T') });
+    expect(await merge3(store, base, copies, editsC, { refuseAmbiguousRenames: true })).toMatchObject({ refused: 'ambiguousRenames' });
+    // The same move against an unrelated edit merges.
+    expect(await merge3(store, base, moved, editsC, { refuseAmbiguousRenames: true })).toMatchObject({ clean: true });
+  });
+
   it('marks an outer merge refused when a side removes and adds paths under refuseAmbiguousRenames', async () => {
     const store = new Store();
     const base = await store.tree(ROOT);
@@ -357,15 +393,23 @@ describe('virtualMergeBase', () => {
   it('never publishes a tree git would not write on a corpus with deletes, renames and adds', async () => {
     const tally = { refused: 0, clean: 0, conflicted: 0 };
     const mismatches: unknown[] = [];
-    for (let seed = 1; seed <= 120; seed++) {
+    let renamesAccepted = 0;
+    const root: Files = { ...ROOT, 'lib/one.txt': text(lines(12, 'one')), 'lib/two.txt': text(lines(12, 'two')) };
+    for (let seed = 1; seed <= 300; seed++) {
       let s = seed * 7919;
       const rand = () => {
         s = (s * 1664525 + 1013904223) >>> 0;
         return s / 2 ** 32;
       };
       const pick = <T,>(xs: T[]) => xs[Math.floor(rand() * xs.length)]!;
-      const names = Object.keys(ROOT);
+      const names = Object.keys(root);
       const fresh = (name: string) => text(lines(12, name));
+      let exactRename = false;
+      const twoOps = (tag: string): ((f: Files) => Files) => {
+        const a = randomOp(`${tag}1`);
+        const b = randomOp(`${tag}2`);
+        return (f) => b(a(f));
+      };
       // Each op is fixed when drawn and tolerates a missing file.
       const randomOp = (tag: string): ((f: Files) => Files) => {
         const name = pick(names);
@@ -379,9 +423,10 @@ describe('virtualMergeBase', () => {
             return rest;
           };
         }
-        const to = `${pick(['', 'd/'])}${name}.${tag}`;
+        const to = `${pick(['', 'd/', 'lib/', 'pkg/'])}${name.replace('/', '-')}.${tag}`;
         if (r < 0.86) {
           const edited = r >= 0.74;
+          if (!edited) exactRename = true;
           return (f) => {
             const moved = f[name];
             if (moved === undefined) return f;
@@ -389,12 +434,12 @@ describe('virtualMergeBase', () => {
             return { ...rest, [to]: edited ? edit(moved, at, value) : moved };
           };
         }
-        return (f) => ({ ...f, [`d/new-${tag}.txt`]: fresh(value) });
+        return (f) => ({ ...f, [`${pick(['d/', 'lib/'])}new-${tag}.txt`]: fresh(value) });
       };
       const store = new Store();
-      const x = randomOp('X');
-      const y = randomOp('Y');
-      const { ours, theirs } = await crissCross(store, ROOT, x, y, (f) => y(x(f)), randomOp('O'), randomOp('T'));
+      const x = twoOps('X');
+      const y = twoOps('Y');
+      const { ours, theirs } = await crissCross(store, root, x, y, (f) => y(x(f)), twoOps('O'), twoOps('T'));
       const mb = await mergeBase(store, ours, theirs);
       if (mb.bases.length !== 2) continue;
       const got = await ourMerge(store, ours, theirs);
@@ -406,11 +451,13 @@ describe('virtualMergeBase', () => {
       const git = await gitMergeTree(store, ours, theirs);
       if (m.clean) tally.clean++;
       else tally.conflicted++;
+      if (m.clean && exactRename) renamesAccepted++;
       // A conflict where git merges is safe (nothing is published); the reverse, or a different tree, is not.
       if ((m.clean && !git.clean) || (m.clean && m.treeHash !== git.tree)) mismatches.push({ seed, ours: m.treeHash, git });
     }
     expect(mismatches).toEqual([]);
     expect(tally.refused).toBeGreaterThan(0);
     expect(tally.clean).toBeGreaterThan(0);
+    expect(renamesAccepted).toBeGreaterThan(0);
   });
 });
