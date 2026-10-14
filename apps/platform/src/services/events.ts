@@ -174,6 +174,10 @@ function parseChanges(json: string | null): ChangeOnRef[] {
  */
 async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: string, now: number): Promise<Ingested | null> {
   const eventAt = Number.isFinite(ev.eventAt) ? ev.eventAt : now;
+  // Gate pushes and Artifacts events without a source timestamp are timed on the Worker's clock.
+  const gateSource = ev.source === GATE_SOURCE;
+  const clock = gateSource || !Number.isFinite(ev.eventAt) ? 'worker' : 'artifacts';
+  const artifactsAt = gateSource || !Number.isFinite(ev.eventAt) ? null : ev.eventAt;
   // The row this delivery belongs to: its own, or the one it was paired with.
   const eid = (p: string) => `COALESCE((SELECT a.event_id FROM push_event_aliases a WHERE a.alias_id = ${p}), ${p})`;
   const persistedAt = `SELECT p.event_at FROM push_events p WHERE p.id = ${eid('?2')} AND p.repo_id = r.id`;
@@ -181,6 +185,21 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
   const branch = ev.ref.startsWith(BRANCH_PREFIX) ? ev.ref.slice(BRANCH_PREFIX.length) : null;
   const currentRef = 'FROM repo_refs f WHERE f.repo_id = change_sets.repo_id AND f.ref = ?2';
   const results = await db.batch([
+    // One push under two identities (a source id on one delivery and not the
+    // other, a re-driven message): the same transition with the same
+    // Artifacts source timestamp is the push already recorded, never a new
+    // one, so it can neither run twice nor be ordered as a later push.
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO push_event_aliases (alias_id, event_id, created_at)
+         SELECT ?1, p.id, ?6 FROM repos r JOIN push_events p ON p.repo_id = r.id
+          WHERE r.artifacts_name = ?2 AND ?7 IS NOT NULL
+            AND p.transition_key = r.id || ':' || ?3 || ':' || ?4 || ':' || ?5
+            AND p.artifacts_at = ?7 AND p.id != ?1
+            AND NOT EXISTS (SELECT 1 FROM push_events s WHERE s.id = ?1)
+          ORDER BY p.id LIMIT 1`,
+      )
+      .bind(id, ev.repoName, ev.ref, ev.before, ev.after, now, artifactsAt),
     // Pairing: the git gate and Artifacts each deliver a confirmed push once.
     // A delivery without a row of its own adopts the oldest unpaired row of
     // the same transition from the other source. Repeats of a transition pair
@@ -203,6 +222,13 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
           ORDER BY p.event_at, p.id LIMIT 1`,
       )
       .bind(id, ev.repoName, ev.ref, ev.before, ev.after, now, ev.source, PAIRING_WINDOW_MS),
+    // An Artifacts delivery paired with a gate row gives that row its source timestamp.
+    db
+      .prepare(
+        `UPDATE push_events SET artifacts_at = ?2
+          WHERE id = (SELECT a.event_id FROM push_event_aliases a WHERE a.alias_id = ?1) AND artifacts_at IS NULL AND ?2 IS NOT NULL`,
+      )
+      .bind(id, artifactsAt),
     // Ordering across clocks. Gate rows carry Worker time and Artifacts rows
     // Artifacts time, so time alone cannot order a push after the one it
     // follows. An event that leaves the ledger's current position (before ==
@@ -220,15 +246,15 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
     db
       .prepare(
         `INSERT OR IGNORE INTO push_events (id, repo_id, ref, before_sha, after_sha, transition_key, source,
-           first_delivery_id, last_delivery_id, deliveries, held_ref, event_at, received_at)
-         SELECT ${eid('?1')}, r.id, ?3, ?4, ?5, r.id || ':' || ?3 || ':' || ?4 || ':' || ?5, ?6, ?7, ?7, 0, 0,
+           first_delivery_id, last_delivery_id, deliveries, held_ref, clock, artifacts_at, event_at, received_at)
+         SELECT ${eid('?1')}, r.id, ?3, ?4, ?5, r.id || ':' || ?3 || ':' || ?4 || ':' || ?5, ?6, ?7, ?7, 0, 0, ?10, ?11,
                 CASE WHEN ?6 = '${GATE_SOURCE}'
                        THEN MAX(?8, COALESCE((SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3), 0))
                      WHEN EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3 AND f.sha = ?4)
                       AND NOT EXISTS (SELECT 1 FROM push_events s
                                        WHERE s.repo_id = r.id AND s.ref = ?3 AND s.before_sha = ?5 AND s.event_at > ?8
                                          AND s.held_ref = 1
-                                         AND (s.source = '${GATE_SOURCE}') = (?6 = '${GATE_SOURCE}'))
+                                         AND COALESCE(s.clock, CASE WHEN s.source = '${GATE_SOURCE}' THEN 'worker' ELSE 'artifacts' END) = ?10)
                        THEN MAX(?8, (SELECT f.event_at + 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3))
                      ELSE ?8 END,
                 ?9
@@ -237,7 +263,7 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
                  OR (SELECT f.sha FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3) = ?4
                  OR (?4 = '${ZERO_OID}' AND NOT EXISTS (SELECT 1 FROM repo_refs f WHERE f.repo_id = r.id AND f.ref = ?3)))`,
       )
-      .bind(id, ev.repoName, ev.ref, ev.before, ev.after, ev.source, deliveryId, eventAt, now),
+      .bind(id, ev.repoName, ev.ref, ev.before, ev.after, ev.source, deliveryId, eventAt, now, clock, artifactsAt),
     db
       .prepare(`UPDATE push_events SET deliveries = deliveries + 1, last_delivery_id = ?2 WHERE id = ${eid('?1')}`)
       .bind(id, deliveryId),
@@ -247,8 +273,10 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
          WHERE r.artifacts_name = ?1`,
       )
       .bind(ev.repoName, id),
-    // Only a newer event (event time, then id as a deterministic tiebreak)
-    // moves the ref, so a late older delivery never rolls state back.
+    // Only a newer event moves the ref, so a late older delivery never rolls
+    // state back. Two events of one time are ordered by succession: never
+    // the one the current position follows, always the one that follows the
+    // current position, and by id only when neither follows the other.
     db
       .prepare(
         `INSERT INTO repo_refs (repo_id, ref, sha, event_id, event_at, updated_at)
@@ -257,9 +285,11 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
          ON CONFLICT (repo_id, ref) DO UPDATE SET
            sha = excluded.sha, event_id = excluded.event_id, event_at = excluded.event_at, updated_at = excluded.updated_at
          WHERE excluded.event_at > repo_refs.event_at
-            OR (excluded.event_at = repo_refs.event_at AND excluded.event_id > repo_refs.event_id)`,
+            OR (excluded.event_at = repo_refs.event_at AND excluded.event_id != repo_refs.event_id
+                AND NOT EXISTS (SELECT 1 FROM push_events c WHERE c.id = repo_refs.event_id AND c.before_sha = ?4)
+                AND (?6 = repo_refs.sha OR excluded.event_id > repo_refs.event_id))`,
       )
-      .bind(ev.repoName, id, ev.ref, ev.after, now),
+      .bind(ev.repoName, id, ev.ref, ev.after, now, ev.before),
     db
       .prepare(
         `UPDATE push_events SET held_ref = 1
@@ -301,7 +331,7 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
       )
       .bind(ev.repoName, id, ev.ref, branch, ev.ref.startsWith(WORKSPACE_REF_PREFIX) ? ev.ref : null),
   ]);
-  const row = (results[7]?.results as IngestRow[] | undefined)?.[0];
+  const row = (results[results.length - 1]?.results as IngestRow[] | undefined)?.[0];
   if (!row) return null;
   return {
     eventId: row.event_id,

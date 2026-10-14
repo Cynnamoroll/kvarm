@@ -701,6 +701,63 @@ describe('git gate fast path and pairing', () => {
     expect(await refRow(repo.id, 'refs/heads/topic')).toMatchObject({ sha: ZERO });
   });
 
+  it('treats a redelivery under a new identity as the push already recorded, even when its successors came through the gate', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('reidentified');
+    const past = Date.now() - 3_600_000;
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(past)) }]);
+    await gate(env, repo, [[A, B, main]]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(past + 1000)) }]);
+    await gate(env, repo, [[B, C, main]]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, B, C, iso(past + 2000)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, C, A, iso(past + 3000)) }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: A });
+    const rowsBefore = (await events(repo.id)).length;
+    // The A->B push again, now carrying a source id its first delivery lacked.
+    const again = pushBody(repo.artifactsName, main, A, B, iso(past + 1000));
+    (again as Record<string, unknown>).id = 'evt-reidentified';
+    await deliver(env, [{ body: again }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: A });
+    expect((await events(repo.id)).length).toBe(rowsBefore);
+  });
+
+  it('orders two pushes of the same millisecond by succession, not by id', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('same-ms');
+    const at = iso(T0 + 5000);
+    // Source ids chosen so the older push has the larger identity (the id tiebreak alone would pick it).
+    let older = '';
+    let newer = '';
+    for (let i = 0; i < 64 && !older; i++) {
+      const o = { namespace: 'default', sourceId: `older-${i}` } as Parameters<typeof eventIdentity>[0];
+      const n = { namespace: 'default', sourceId: `newer-${i}` } as Parameters<typeof eventIdentity>[0];
+      if ((await eventIdentity(o, 'm')) > (await eventIdentity(n, 'm'))) [older, newer] = [`older-${i}`, `newer-${i}`];
+    }
+    expect(older).not.toBe('');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    const bc = pushBody(repo.artifactsName, main, B, C, at);
+    (bc as Record<string, unknown>).id = newer;
+    const ab = pushBody(repo.artifactsName, main, A, B, at);
+    (ab as Record<string, unknown>).id = older;
+    await deliver(env, [{ body: bc }]);
+    await deliver(env, [{ body: ab }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: C });
+  });
+
+  it('does not count a push timed on receipt as evidence against an Artifacts-timed one', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('receipt-clock');
+    const past = Date.now() - 3_600_000;
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(past)) }]);
+    // B->C carries no source timestamp: it is timed when it arrives, on the Worker's clock.
+    await deliver(env, [{ id: 'no-ts', body: pushBody(repo.artifactsName, main, B, C, null) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, C, A, iso(past + 3000)) }]);
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, A, B, iso(past + 4000)) }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: B });
+    const clocks = await baseEnv.DB.prepare('SELECT before_sha, clock FROM push_events WHERE repo_id = ? ORDER BY before_sha').bind(repo.id).all<{ before_sha: string; clock: string }>();
+    expect(Object.fromEntries(clocks.results.map((r) => [r.before_sha, r.clock]))).toEqual({ [ZERO]: 'artifacts', [A]: 'artifacts', [B]: 'worker', [C]: 'artifacts' });
+  });
+
   it('moves the ref for a successor whose own successor arrived first but never held the ref', async () => {
     const env = envWith(new FakeWorkflow());
     const repo = await seedRepo('unheld-successor');
