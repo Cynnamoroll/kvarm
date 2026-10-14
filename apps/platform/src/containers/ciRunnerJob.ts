@@ -275,19 +275,30 @@ export async function drainAndRunJobs(container: ContainerLike, o: DrainOptions)
       }),
     ),
   );
+  let claimed = false;
   try {
-    if (await firstPrepared) {
-      if (o.cold) {
-        const s = Date.now();
-        snapshot = await container.snapshotContainer({ name: o.snapshotName });
-        await o.saveSnapshot?.(snapshot);
-        phases.snapshot = Date.now() - s;
-      }
-      await mustExec(container, ['touch', goFile], {}, 'releasing the prepared workers');
-    }
+    claimed = await firstPrepared;
   } catch {
     // Every worker exited without claiming (another runner drained the
     // queue first); the workers report empty on their own.
+  }
+  if (claimed) {
+    // A snapshot or save failure still releases the workers waiting at
+    // the prepared point — otherwise they hang until the runner-side go
+    // timeout — and then aborts the drain so the failure is reported.
+    let failure: unknown;
+    if (o.cold) {
+      const s = Date.now();
+      try {
+        snapshot = await container.snapshotContainer({ name: o.snapshotName });
+        await o.saveSnapshot?.(snapshot);
+        phases.snapshot = Date.now() - s;
+      } catch (err) {
+        failure = err;
+      }
+    }
+    await mustExec(container, ['touch', goFile], {}, 'releasing the prepared workers');
+    if (failure !== undefined) throw failure;
   }
   const workers = await Promise.all(
     started.map(async (w) => ({ runnerId: w.runnerId, exitCode: await w.proc.exitCode, stdout: await w.stdout.rest(), stderr: await w.stderrDone })),
