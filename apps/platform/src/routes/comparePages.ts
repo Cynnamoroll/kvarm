@@ -39,6 +39,12 @@ export const comparePages = new Hono<App>();
 const HTML = { 'content-type': 'text/html; charset=utf-8' };
 /** Files per page; the service caps a page at 5,000, this stays lean. */
 const PAGE_LIMIT = 200;
+/** Layout and expand controls; hidden until diffClient.js wires them, so no-JS readers never see dead buttons. */
+export const DIFF_TOOLBAR_CONTROLS = `<span class="diff-controls" data-diff-controls hidden>
+  <span class="seg" role="group" aria-label="Diff layout"><button class="btn btn-sm" type="button" data-diff-layout="unified">Unified</button><button class="btn btn-sm" type="button" data-diff-layout="split">Split</button></span>
+  <button class="btn btn-sm" type="button" data-diff-expand="open">Expand all</button>
+  <button class="btn btn-sm" type="button" data-diff-expand="close">Collapse all</button>
+</span>`;
 export const DIFF_CLIENT_TAG = '<script type="module" src="/assets/diffClient.js"></script><script type="module" src="/assets/reviewClient.js"></script>';
 
 type PageContext = Context<App>;
@@ -146,14 +152,57 @@ const STATUS_MARK: Record<string, string> = {
   typechange: 'T',
 };
 
+const STATUS_LABEL: Record<string, string> = {
+  added: 'Added',
+  removed: 'Deleted',
+  modified: 'Modified',
+  renamed: 'Renamed',
+  typechange: 'Type changed',
+};
+
+/** Stable in-page anchor for a changed file, shared by the file nav and its row. */
+export function diffAnchor(path: string): string {
+  return `diff-${path.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+}
+
+/** Five-cell additions/deletions bar, proportional within the file. */
+function diffBar(additions: number, deletions: number): string {
+  const total = additions + deletions;
+  if (total === 0) return '<span class="diff-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>';
+  const add = Math.round((additions / total) * 5);
+  const del = Math.min(5 - add, Math.round((deletions / total) * 5));
+  const cells = [...Array(add).fill('<i class="a"></i>'), ...Array(del).fill('<i class="d"></i>')];
+  while (cells.length < 5) cells.push('<i></i>');
+  return `<span class="diff-bar" aria-hidden="true">${cells.join('')}</span>`;
+}
+
+function splitPath(path: string): { dir: string; name: string } {
+  const cut = path.lastIndexOf('/');
+  return cut < 0 ? { dir: '', name: path } : { dir: path.slice(0, cut + 1), name: path.slice(cut + 1) };
+}
+
+/** The changed-file navigator beside the diff list. */
+export function renderCompareFileNav(files: readonly CompareFile[]): string {
+  const items = files
+    .map((f) => {
+      const { dir, name } = splitPath(f.path);
+      const stats = f.additions !== undefined && f.deletions !== undefined
+        ? `<span class="ok">+${f.additions}</span><span class="err">−${f.deletions}</span>`
+        : '';
+      return `<li><a href="#${diffAnchor(f.path)}" title="${escape(f.path)}"><span class="diff-status ${f.status}" aria-label="${escape(STATUS_LABEL[f.status] ?? f.status)}">${STATUS_MARK[f.status] ?? '·'}</span><span class="diff-nav-path"><span class="dir">${escape(dir)}</span>${escape(name)}</span><span class="diff-nav-stat">${stats}</span></a></li>`;
+    })
+    .join('');
+  return `<nav class="diff-nav" aria-label="Changed files"><div class="diff-nav-head hud"><b>Files</b><span>${files.length}</span></div><ol>${items}</ol></nav>`;
+}
+
 const HIGH_SIGNAL_TAGS = new Set(['ci-config', 'test-deletion', 'security-sensitive', 'new-dependency']);
 
 export function renderCompareFileRow(repo: RepoRow, encRange: string, f: CompareFile, tier?: 'scrutinize' | 'read' | 'receipt'): string {
   const mark = STATUS_MARK[f.status] ?? '·';
-  const stats =
-    f.additions !== undefined && f.deletions !== undefined
-      ? `<span class="ok">+${f.additions}</span> <span class="err">−${f.deletions}</span>`
-      : '<span class="muted">no line stats</span>';
+  const counted = f.additions !== undefined && f.deletions !== undefined;
+  const stats = counted
+    ? `<span class="ok">+${f.additions}</span> <span class="err">−${f.deletions}</span>${diffBar(f.additions!, f.deletions!)}`
+    : '<span class="muted">no line stats</span>';
   const marks = [
     ...(f.binary ? ['binary'] : []),
     ...(f.tooLarge ? ['too large'] : []),
@@ -166,26 +215,36 @@ export function renderCompareFileRow(repo: RepoRow, encRange: string, f: Compare
     .join(' ');
   const tierClasses = tier === 'scrutinize' ? 'heat-3 fail' : tier === 'read' ? 'signal-hi' : 'steel';
   const tierTag = tier ? `<span class="tag review-tier ${tier} ${tierClasses}">${escape(tier)}</span>` : '';
-  const rename = f.oldPath && f.oldPath !== f.path ? `<span class="muted">${escape(f.oldPath)} →</span> ` : '';
+  const rename = f.oldPath && f.oldPath !== f.path ? `<span class="diff-old-path">${escape(f.oldPath)} →</span> ` : '';
+  const { dir, name } = splitPath(f.path);
   // The client fetches from this pre-encoded per-file API endpoint; binary
   // and too-large files are known server-side and never fetched.
   const data = [
+    `id="${diffAnchor(f.path)}"`,
     `data-path="${escape(f.path)}"`,
+    counted ? `data-lines="${f.additions! + f.deletions!}"` : '',
     f.binary ? 'data-binary="1"' : '',
     f.tooLarge ? 'data-toolarge="1"' : '',
   ]
     .filter(Boolean)
     .join(' ');
+  const blobHref = f.status === 'removed' ? '' : `/${repo.owner_login}/${repo.name}/blob/${encodeURIComponent(encRangeHead(encRange))}/${f.path.split('/').map(encodeURIComponent).join('/')}`;
   return `<details class="diff-file" ${data}>
     <summary>
-      <span class="diff-status ${f.status}">${mark}</span>
-      ${rename}<code>${escape(f.path)}</code>
-      <span class="diff-stat">${stats}</span>${marks ? ` ${marks}` : ''}${tags ? ` ${tags}` : ''}${tierTag ? ` ${tierTag}` : ''}
+      <span class="diff-caret" aria-hidden="true"></span>
+      <span class="diff-status ${f.status}" title="${escape(STATUS_LABEL[f.status] ?? f.status)}">${mark}</span>
+      <span class="diff-path">${rename}<code><span class="dir">${escape(dir)}</span>${escape(name)}</code></span>
+      <span class="diff-meta"><span class="diff-stat">${stats}</span>${marks ? ` ${marks}` : ''}${tags ? ` ${tags}` : ''}${tierTag ? ` ${tierTag}` : ''}${blobHref ? `<a class="diff-view-file" href="${blobHref}" title="View the file at the head ref">View</a>` : ''}</span>
     </summary>
     <div class="diff-body">
       <noscript><p class="muted">The line diff needs JavaScript. It is also available as JSON at <a href="/api/v1/repos/${repo.owner_login}/${repo.name}/compare/${encRange}/file?path=${encodeURIComponent(f.path)}">the file diff API</a>.</p></noscript>
     </div>
   </details>`;
+}
+
+/** The head side of an encoded `base...head` range, decoded. */
+function encRangeHead(encRange: string): string {
+  return parseRange(encRange)?.head ?? encRange;
 }
 
 async function renderCompare(c: PageContext, resolved: Resolved, range: { base: string; head: string }, encRange: string): Promise<Response> {
@@ -226,46 +285,47 @@ async function renderCompare(c: PageContext, resolved: Resolved, range: { base: 
     sha ? html`<a href="${base}/commit/${sha}"><code>${ref ?? short(sha)}</code></a>` : html`<code>${ref ?? '—'}</code>`;
 
   const body = html`
-    <div class="compare-root" data-file-api="${raw(fileApi)}">
-      <div class="card">
-        <div class="card-title">
-          Compare
-          <span class="muted">
-            ${raw(refLink(res.base.ref, res.base.sha))}
-            <span class="muted">…</span>
-            ${raw(refLink(res.head.ref, res.head.sha))}
-          </span>
-        </div>
+    <div class="compare-root diff-review" data-file-api="${raw(fileApi)}">
+      <header class="diff-head">
+        <h2 class="diff-title">
+          ${raw(refLink(res.base.ref, res.base.sha))}
+          <span class="diff-arrow" aria-label="to">←</span>
+          ${raw(refLink(res.head.ref, res.head.sha))}
+        </h2>
         <div class="compare-summary">
           <span class="ok">+${res.totals.additions ?? '?'}</span>
           <span class="err">−${res.totals.deletions ?? '?'}</span>
           <span class="muted">across ${res.totals.files} file(s)${res.totalsComplete ? '' : ' (at least)'}</span>
           <span class="chip">risk ${res.rating.level} (${res.rating.score})</span>
         </div>
-        ${res.rating.reasons.length > 0 ? raw(`<div class="muted">${res.rating.reasons.map((x) => escape(x)).join(' · ')}</div>`) : ''}
+        ${res.rating.reasons.length > 0 ? raw(`<div class="muted diff-reasons">${res.rating.reasons.map((x) => escape(x)).join(' · ')}</div>`) : ''}
         ${
           res.truncated
             ? raw(`<div class="flash warn">The comparison is truncated: ${escape(res.truncatedReason ?? 'bounded read')} — the totals are a lower bound over the discovered files.</div>`)
             : ''
         }
         ${res.statsOmitted ? raw('<div class="flash warn">Line stats are omitted: more than 300 files changed, so per-file counts are not shown.</div>') : ''}
-        <div class="pager">
-          <span class="muted">order</span>
-          <a href="${base}/compare/${raw(encodeURIComponent(`${range.base}...${range.head}`))}?order=risk">risk</a>
-          <a href="${base}/compare/${raw(encodeURIComponent(`${range.base}...${range.head}`))}?order=path">path</a>
-          <span class="spacer"></span>
-          <span class="muted">expand a file for its line diff · first ${shown} file(s)${offset}</span>
-        </div>
+      </header>
+      <div class="diff-toolbar">
+        <span class="hud muted">Order</span>
+        <a class="${order === 'risk' ? 'active' : ''}" href="${base}/compare/${raw(encodeURIComponent(`${range.base}...${range.head}`))}?order=risk">risk</a>
+        <a class="${order === 'path' ? 'active' : ''}" href="${base}/compare/${raw(encodeURIComponent(`${range.base}...${range.head}`))}?order=path">path</a>
+        <span class="muted">· first ${shown} file(s)${offset}</span>
+        <span class="spacer"></span>
+        ${raw(DIFF_TOOLBAR_CONTROLS)}
+      </div>
+      <div class="diff-layout">
+        ${raw(shown > 1 ? renderCompareFileNav(res.files) : '')}
         <div class="compare-list">
           ${raw(rows || '<p class="muted">no changed files</p>')}
+          ${
+            res.nextCursor
+              ? raw(
+                  `<div class="pager"><a class="btn" href="${base}/compare/${encodeURIComponent(`${range.base}...${range.head}`)}?order=${order}&cursor=${encodeURIComponent(res.nextCursor)}">More files</a></div>`,
+                )
+              : ''
+          }
         </div>
-        ${
-          res.nextCursor
-            ? raw(
-                `<div class="pager"><a class="btn" href="${base}/compare/${encodeURIComponent(`${range.base}...${range.head}`)}?order=${order}&cursor=${encodeURIComponent(res.nextCursor)}">More files</a></div>`,
-              )
-            : ''
-        }
       </div>
     </div>
   `;

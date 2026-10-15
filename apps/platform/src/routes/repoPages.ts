@@ -22,7 +22,7 @@ import { clientIp, requestCredential, requestSession, type ApiActor, type App } 
 import { csrfTokenValid } from '../auth/workos';
 import { csrfInput, layout } from '../web/render';
 import { CSRF_REFUSED } from './pageCsrf';
-import { cloneBox, repoPage } from '../render/repoShell';
+import { repoPage } from '../render/repoShell';
 import {
   commitAt,
   isCommitRef,
@@ -304,17 +304,18 @@ async function renderTreeView(
   const subject = tree.commit.message.split('\n', 1)[0] ?? '';
   const author = tree.commit.author.name || tree.commit.committer.name;
   const branchCount = refs?.branches.length;
-  const clone = cloneBox(c.env, c.req.url, resolved.repo, ref, 'repo-clone-url');
+  const commitHref = `${base}/commit/${headInfo?.sha ?? tree.commit.hash}`;
   const body = html`
     <div class="repo-overview">
       <main class="repo-overview-main">
-        <section class="card repo-head-commit">
-          <a class="repo-head-sha mono" href="${raw(`${base}/commit/${headInfo?.sha ?? tree.commit.hash}`)}">${(headInfo?.sha ?? tree.commit.hash).slice(0, 10)}</a>
-          <div class="repo-head-subject">${subject}</div>
-          <div class="repo-head-meta hud">${author} · ${timeAgo(tree.commit.authoredAt * 1000)}</div>
-        </section>
         <section class="card repo-files-panel">
-          <div class="panel-head hud"><b>Files</b><span>${sorted.length} entries</span></div>
+          <div class="repo-head-commit">
+            <span class="repo-head-author">${author}</span>
+            <a class="repo-head-subject" href="${raw(commitHref)}">${subject}</a>
+            <a class="repo-head-sha mono" href="${raw(commitHref)}">${(headInfo?.sha ?? tree.commit.hash).slice(0, 7)}</a>
+            <span class="repo-head-meta hud">${timeAgo(tree.commit.authoredAt * 1000)}</span>
+            <a class="repo-head-history hud" href="${raw(`${base}/commits?ref=${encRef}`)}">History</a>
+          </div>
           <div class="repo-file-scroll">
             <table class="repo-file-table"><tbody>
               ${raw(upRow)}
@@ -325,27 +326,23 @@ async function renderTreeView(
         ${raw(readmeHtml)}
       </main>
       <aside class="repo-overview-side">
-        ${resolved.repo.description ? raw(html`<section class="card repo-about"><h2>About</h2><p>${resolved.repo.description}</p></section>`) : ''}
-        <section class="card repo-sidebar-clone">
-          <div class="panel-head hud"><b>Clone</b></div>
-          ${raw(clone)}
+        <section class="card repo-about">
+          <h2>About</h2>
+          ${resolved.repo.description ? raw(html`<p>${resolved.repo.description}</p>`) : raw('<p class="muted">No description.</p>')}
+          <dl class="repo-facts">
+            <div><dt class="hud">Default branch</dt><dd><code>${resolved.repo.default_branch || 'main'}</code></dd></div>
+            <div><dt class="hud">Branches</dt><dd>${branchCount === undefined ? 'Unavailable' : raw(html`<a href="${raw(`${base}/branches`)}">${branchCount}</a>`)}</dd></div>
+            <div><dt class="hud">Visibility</dt><dd>${resolved.repo.visibility}</dd></div>
+            <div><dt class="hud">Entries here</dt><dd>${sorted.length}</dd></div>
+          </dl>
         </section>
-        <section class="card repo-facts">
-          <div><span class="hud">Branches</span><b>${branchCount === undefined ? 'Unavailable' : branchCount}</b></div>
-          <div><span class="hud">Default branch</span><b><code>${resolved.repo.default_branch || 'main'}</code></b></div>
-        </section>
-        <nav class="card repo-shortcuts" aria-label="Repository views">
-          <a href="${raw(`${base}/changes`)}">Changes <span aria-hidden="true">→</span></a>
-          <a href="${raw(`${base}/train`)}">Train <span aria-hidden="true">→</span></a>
-          <a href="${raw(`${base}/activity`)}">Activity <span aria-hidden="true">→</span></a>
-        </nav>
       </aside>
     </div>
   `;
 
   const page = repoPage(
     c.env,
-    { repo: resolved.repo, ref, path, tab: 'code', branches: refs?.branches, showClone: false },
+    { repo: resolved.repo, ref, path, tab: 'code', branches: refs?.branches },
     viewerLogin,
     body,
     c.req.url,

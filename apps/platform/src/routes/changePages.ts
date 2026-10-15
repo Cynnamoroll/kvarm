@@ -20,7 +20,7 @@ import { approvalNeedsDecisionNote, decisionErrorMessage, decideFromPage } from 
 import { forgetInboxCount } from '../services/inboxCount';
 import type { CarryView } from '../services/approvalCarry';
 import { remainingFor, type RemainingItem, type RemainingWho } from '../services/remaining';
-import { DIFF_CLIENT_TAG, renderCompareFileRow } from './comparePages';
+import { DIFF_CLIENT_TAG, DIFF_TOOLBAR_CONTROLS, renderCompareFileRow } from './comparePages';
 import { commitProvenance } from '../services/provenancePanel';
 import { provenancePanel } from '../render/provenance';
 import * as reviewGuide from '../services/reviewGuide';
@@ -267,27 +267,28 @@ function renderGuide(
       const reviewed = rowUnits.filter((unit) => unit.acked).length;
       const from = rowUnits.find((unit) => unit.inherited)?.inherited?.change;
       return html`<div class="carry-file-row ${mark ? `carry-${mark}` : ''}" data-review-file-row tabindex="0">
-        <div>${raw(renderCompareFileRow(repo, encRange, file, tier))}
-          ${rowUnits.length ? raw(html`<p class="muted">${reviewed}/${rowUnits.length} reviewed</p>`) : ''}
+        <div class="carry-file-actions">
+          ${rowUnits.length ? raw(html`<span class="muted">${reviewed}/${rowUnits.length} reviewed</span>`) : ''}
           ${from ? raw(html`<span class="tag steel">from #${from}</span>`) : ''}
+          ${mark ? raw(html`<span class="tag ${mark === 'changed' ? 'err' : 'steel'}">${mark}</span>`) : ''}
+          ${options.writable ? raw(html`<form method="post" action="${raw(`${options.path}/ack`)}" class="inline review-ack-form">
+            ${raw(options.csrf)}<input type="hidden" name="headSha" value="${options.headSha}" />
+            ${raw(keys.map((key) => html`<input type="hidden" name="keys" value="${key}" />`).join(''))}
+            <button class="btn btn-sm" type="submit">Mark reviewed</button>
+          </form>`) : ''}
         </div>
-        ${options.writable ? raw(html`<form method="post" action="${raw(`${options.path}/ack`)}" class="inline review-ack-form">
-          ${raw(options.csrf)}<input type="hidden" name="headSha" value="${options.headSha}" />
-          ${raw(keys.map((key) => html`<input type="hidden" name="keys" value="${key}" />`).join(''))}
-          <button class="btn" type="submit">Mark reviewed</button>
-        </form>`) : ''}
-        ${mark ? raw(html`<span class="tag ${mark === 'changed' ? 'err' : 'steel'}">${mark}</span>`) : ''}
+        ${raw(renderCompareFileRow(repo, encRange, file, tier))}
       </div>`;
     }).join('');
     return html`<section class="card guide-chapter">
-      <div class="card-title">${chapter.title} ${raw(tierTag(chapter.tier))}</div>
-      ${chapter.why ? raw(html`<p class="muted">${chapter.why}</p>`) : ''}
-      ${raw(chapter.notes?.map((note) => html`<p class="guide-note">${note.body}</p>`).join('') ?? '')}
+      <div class="card-title">${chapter.title} ${raw(tierTag(chapter.tier))}
       ${options.writable ? raw(html`<form method="post" action="${raw(`${options.path}/ack`)}" class="inline review-ack-form">
         ${raw(options.csrf)}<input type="hidden" name="headSha" value="${options.headSha}" />
         ${raw(chapter.hunks.filter((key) => visiblePageUnitsByKey.has(key)).map((key) => html`<input type="hidden" name="keys" value="${key}" />`).join(''))}
-        <button class="btn" type="submit">Mark chapter reviewed</button>
-      </form>`) : ''}
+        <button class="btn btn-sm" type="submit">Mark chapter reviewed</button>
+      </form>`) : ''}</div>
+      ${chapter.why ? raw(html`<p class="muted">${chapter.why}</p>`) : ''}
+      ${raw(chapter.notes?.map((note) => html`<p class="guide-note">${note.body}</p>`).join('') ?? '')}
       <div class="compare-list">${raw(fileRows || '<p class="muted">No diff rows in this chapter.</p>')}</div>
     </section>`;
   }).join('');
@@ -348,7 +349,9 @@ function renderGuide(
     ${options.impact.truncated ? raw(html`<p class="muted">Some downstream consumers were omitted by the analysis budget.</p>`) : ''}
   </section>` : html`<section class="card"><div class="card-title">Downstream impact</div><p class="muted">Not computed yet.</p></section>`;
   return html`<div id="review-guide" class="compare-root review-guide-root" data-file-api="/api/v1/repos/${repo.owner_login}/${repo.name}/compare/${raw(encRange)}/file">
-    ${raw(stackPanel)}${raw(summary)}${raw(findingPanel)}${raw(contractsPanel)}${raw(evidencePanel)}${raw(movedPanel)}${raw(impactPanel)}
+    ${raw(stackPanel)}${raw(summary)}
+    <div class="review-insights">${raw(findingPanel)}${raw(contractsPanel)}${raw(evidencePanel)}${raw(movedPanel)}${raw(impactPanel)}</div>
+    ${rows ? raw(html`<div class="diff-toolbar"><span class="hud muted">Files</span><span class="spacer"></span>${raw(DIFF_TOOLBAR_CONTROLS)}</div>`) : ''}
     ${raw(rows || '<p class="muted">No reviewable files in this change.</p>')}
   </div>`;
 }

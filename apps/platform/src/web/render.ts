@@ -187,7 +187,7 @@ function renderShell(env: Env, opts: PageOptions, body: string): string {
     ? html`<div class="k-shell">
         <aside class="k-rail" aria-label="App">
           <nav>
-            <a href="/" ${raw(active('home'))}><svg aria-hidden="true"><use href="#g-reticle"/></svg>Home</a>
+            <a href="/" ${raw(active('home'))}><svg aria-hidden="true"><use href="#g-home"/></svg>Home</a>
             <a href="/inbox" ${raw(active('inbox'))}><svg aria-hidden="true"><use href="#g-tray"/></svg>Inbox</a>
             <a href="/fleet" ${raw(active('fleet'))}><svg aria-hidden="true"><use href="#g-node"/></svg>Fleet${raw(running)}</a>
             <a href="/settings/tokens" ${raw(active('tokens'))}><svg aria-hidden="true"><use href="#g-x"/></svg>Tokens &amp; agents</a>
@@ -231,7 +231,7 @@ ${raw(customScripts)}
   <symbol id="g-node" viewBox="0 0 5 5"><path fill="currentColor" d="M1 0h3v1H1zM0 1h1v3H0zM4 1h1v3H4zM1 4h3v1H1zM2 2h1v1H2z"/></symbol>
   <symbol id="g-x" viewBox="0 0 5 5"><path fill="currentColor" d="M0 0h1v1H0zM4 0h1v1H4zM1 1h1v1H1zM3 1h1v1H3zM2 2h1v1H2zM1 3h1v1H1zM3 3h1v1H3zM0 4h1v1H0zM4 4h1v1H4z"/></symbol>
   <symbol id="g-tray" viewBox="0 0 5 5"><path fill="currentColor" d="M1 0h3v1H1zM0 1h1v4H0zM4 1h1v4H4zM1 2h1v1H1zM3 2h1v1H3zM1 4h3v1H1z"/></symbol>
-  <symbol id="g-reticle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10.5"/><path d="M12 0v4M12 20v4M0 12h4M20 12h4M12 10v4M10 12h4"/></g></symbol>
+  <symbol id="g-home" viewBox="0 0 5 5"><path fill="currentColor" d="M2 0h1v1H2zM1 1h3v1H1zM0 2h5v1H0zM1 3h1v2H1zM3 3h1v2H3z"/></symbol>
 </svg>
 <p class="sr" id="mode-status" role="status" aria-live="polite"></p>
 ${raw(header)}

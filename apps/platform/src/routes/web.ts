@@ -245,14 +245,11 @@ web.get('/', async (c) => {
   );
   const repoRows = repos
     .map(
-      (repo) => html`<div class="repo-row">
-        <div class="k-repo-info">
-          <a href="/${repo.owner_login}/${repo.name}"><strong>${repo.owner_login}/${repo.name}</strong></a>
-          <span class="badge">${repo.visibility}</span>
-          <div class="muted">${repo.description ?? ''}</div>
-        </div>
-        <div class="muted">${repo.pushed_at ? timeAgo(repo.pushed_at) : 'never pushed'}</div>
-      </div>`,
+      (repo) => html`<a class="dash-repo" href="/${repo.owner_login}/${repo.name}">
+        <span class="dash-repo-top"><strong>${repo.name}</strong><span class="tag">${repo.visibility}</span></span>
+        <span class="dash-repo-desc ${repo.description ? '' : 'muted'}">${repo.description ?? 'No description'}</span>
+        <span class="dash-repo-meta hud">${repo.owner_login} · ${repo.pushed_at ? `pushed ${timeAgo(repo.pushed_at)}` : 'never pushed'}</span>
+      </a>`,
     )
     .join('');
   const csrf = raw(csrfInput(ctx.session?.csrfToken));
@@ -264,32 +261,41 @@ web.get('/', async (c) => {
       : approvals.length
         ? approvalRows!.join('')
         : html`<p class="muted">Nothing needs you right now.</p>`;
+  // The approvals panel leads only when something is waiting; an empty queue is
+  // already said by the heading and the top bar count.
+  const needsSection = approvals === null || approvals.length > 0
+    ? html`<section class="panel dash-needs">
+        <div class="panel-head hud"><b>Needs you</b><span>${pendingCount ?? 'Unavailable'}</span></div>
+        <div class="k-panel-body k-approval-list">${raw(needsPanel)}</div>
+      </section>`
+    : '';
   const body = html`
-    <header class="k-head">
+    <header class="k-head dash-head">
       <div class="k-head-copy">
         <p class="hud">Signed in as ${ctx.user.login}</p>
         <h1 class="m-human">${humanHeading}</h1>
         <h1 class="m-agent">Your agent workspace</h1>
         <p class="lede m-agent">Connect to MCP at <a class="k-mono" href="${mcpUrl}">${mcpUrl}</a></p>
       </div>
+      <div class="k-head-side">
+        <div class="k-kpis" aria-label="Account overview">
+          <div><span class="hud">Repositories</span><b>${repos.length}</b></div>
+          <div><span class="hud">Running sandboxes</span><b>${runningCount ?? 'Unavailable'}</b></div>
+          <div><span class="hud">Pending approvals</span><b class="${pendingCount ? 'warn' : ''}">${pendingCount ?? 'Unavailable'}</b></div>
+        </div>
+      </div>
     </header>
     <section class="k-content">
-      <div class="k-kpis" aria-label="Account overview">
-        <div><span class="hud">Repositories</span><b>${repos.length}</b></div>
-        <div><span class="hud">Running sandboxes</span><b>${runningCount ?? 'Unavailable'}</b></div>
-        <div><span class="hud">Pending approvals</span><b class="${pendingCount ? 'warn' : ''}">${pendingCount ?? 'Unavailable'}</b></div>
-      </div>
       ${raw(nexusPanel(field))}
       <div class="k-grid">
         <div class="k-col">
-          <section class="panel">
-            <div class="panel-head hud"><b>Needs you</b><span>${pendingCount ?? 'Unavailable'}</span></div>
-            <div class="k-panel-body k-approval-list">${raw(needsPanel)}</div>
+          ${raw(needsSection)}
+          <section class="dash-repos-section">
+            <div class="dash-section-head"><h2>Repositories</h2><span class="hud muted">${repos.length}</span></div>
+            ${raw(repoRows ? `<div class="dash-repos">${repoRows}</div>` : '<p class="muted dash-empty">No repositories yet. Create one or import a remote on the right.</p>')}
           </section>
-          <section class="panel">
-            <div class="panel-head hud"><b>Your repositories</b><span>${repos.length}</span></div>
-            <div class="k-panel-body">${raw(repoRows || '<p class="muted">none yet</p>')}</div>
-          </section>
+        </div>
+        <div class="k-col">
           <section class="panel m-agent">
             <div class="panel-head hud"><b>Connect an agent</b><span class="k-mono">MCP</span></div>
             <div class="k-panel-body">
@@ -298,9 +304,7 @@ web.get('/', async (c) => {
 kvarm sandbox mine --limit 50</pre>
             </div>
           </section>
-        </div>
-        <div class="k-col">
-          <section class="panel">
+          <section class="panel dash-new">
             <div class="panel-head hud"><b>New repository</b></div>
             <div class="k-panel-body">
               <form method="post" action="/new-repo">
@@ -314,21 +318,19 @@ kvarm sandbox mine --limit 50</pre>
                   <option value="private">private</option>
                   <option value="public">public</option>
                 </select>
-                <p><button class="btn primary" type="submit">Create</button></p>
+                <p><button class="btn primary" type="submit">Create repository</button></p>
               </form>
-            </div>
-          </section>
-          <section class="panel">
-            <div class="panel-head hud"><b>Import from HTTPS</b></div>
-            <div class="k-panel-body">
-              <form method="post" action="/import-repo">
-                ${csrf}
-                <label for="url">Remote URL</label>
-                <input id="url" name="url" type="url" required placeholder="https://example.com/owner/repo" />
-                <label for="iname">Name</label>
-                <input id="iname" name="name" type="text" placeholder="defaults to remote name" />
-                <p><button class="btn" type="submit">Import</button></p>
-              </form>
+              <details class="dash-import">
+                <summary>Import from an HTTPS remote</summary>
+                <form method="post" action="/import-repo">
+                  ${csrf}
+                  <label for="url">Remote URL</label>
+                  <input id="url" name="url" type="url" required placeholder="https://example.com/owner/repo" />
+                  <label for="iname">Name</label>
+                  <input id="iname" name="name" type="text" placeholder="defaults to remote name" />
+                  <p><button class="btn" type="submit">Import</button></p>
+                </form>
+              </details>
             </div>
           </section>
         </div>

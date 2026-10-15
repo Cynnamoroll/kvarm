@@ -92,19 +92,19 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
     })
     .join('');
 
-  const tabs: RepoTab[] = ['code', 'changes', 'commits', 'branches', 'issues', 'compare', 'activity', 'train'];
-  if (userLogin) tabs.push('environments');
-  if (userLogin === repo.owner_login) tabs.push('settings');
-  const tabHtml = tabs
-    .map(
-      (t) =>
-        `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${repoTabHref(repo, t, ref)}"${opts.tab === t ? ' aria-current="page"' : ''}>${t}</a>`,
-    )
-    .join('');
+  // Day-to-day views first; coordination and admin views after a divider.
+  const primary: RepoTab[] = ['code', 'changes', 'issues', 'commits', 'branches'];
+  const secondary: RepoTab[] = ['compare', 'activity', 'train'];
+  if (userLogin) secondary.push('environments');
+  if (userLogin === repo.owner_login) secondary.push('settings');
+  const tabLink = (t: RepoTab) =>
+    `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${repoTabHref(repo, t, ref)}"${opts.tab === t ? ' aria-current="page"' : ''}>${t}</a>`;
+  const tabHtml = `${primary.map(tabLink).join('')}<span class="tab-sep" aria-hidden="true"></span>${secondary.map(tabLink).join('')}`;
 
   const description = repo.description ? html`<p class="lede">${repo.description}</p>` : '';
+  // The repository root needs no breadcrumb: the header already names it.
   const crumbs =
-    opts.path !== undefined && opts.tab !== 'settings' && opts.tab !== 'environments'
+    opts.path && opts.tab !== 'settings' && opts.tab !== 'environments'
       ? `<div class="crumbs hud">${breadcrumbs(repo, ref, opts.path)}</div>`
       : '';
   const clone = opts.showClone === false
@@ -114,18 +114,19 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
   const shellBody = html`
 <header class="k-head repo-page-head">
   <div class="k-head-copy">
-    <p class="hud k-head-hud"><a href="/${repo.owner_login}">${repo.owner_login}</a><span aria-hidden="true">/</span><a href="/${repo.owner_login}/${repo.name}">${repo.name}</a><span class="tag">${repo.visibility}</span>${isDemoRepo(repo.description) ? '<span class="tag demo">Demo</span>' : ''}<span class="k-ref">${ref}</span></p>
-    <h1>${repo.name}</h1>
+    <p class="hud k-head-hud"><a href="/${repo.owner_login}">${repo.owner_login}</a><span aria-hidden="true">/</span></p>
+    <div class="repo-title"><h1><a href="/${repo.owner_login}/${repo.name}">${repo.name}</a></h1><span class="tag">${repo.visibility}</span>${isDemoRepo(repo.description) ? raw('<span class="tag demo">Demo</span>') : ''}</div>
     ${raw(description)}
   </div>
-  <div class="k-head-side">
-    ${raw(clone)}
-  </div>
+  ${clone ? raw(html`<details class="clone-menu k-head-side">
+    <summary class="btn btn-primary">Clone <span aria-hidden="true">▾</span></summary>
+    <div class="clone-pop">${raw(clone)}</div>
+  </details>`) : ''}
 </header>
 <nav class="tabs k-tabs">${raw(tabHtml)}
   <span class="spacer"></span>
   <details class="branch-picker">
-    <summary><code>${ref}</code> ▾</summary>
+    <summary><span class="hud muted">ref</span> <code>${ref}</code> ▾</summary>
     <ul>${raw(branchList || '<li class="muted">loading…</li>')}</ul>
   </details>
 </nav>
