@@ -5,7 +5,7 @@
  *  - risk/v2/<baseTree>/<headTree>       per-file risk + change rating for a tree pair (immutable)
  *  - filediff/v1/<oldBlob>/<newBlob>     per-file diff body for a blob pair (immutable)
  *  - numstat/v2/<oldBlob>/<newBlob>      line counts + content hints for a blob pair (immutable)
- *  - commit/v1?repo&sha                  commit -> {tree, parents}, repo-scoped (immutable)
+ *  - commit/v2?repo&sha                  commit -> {tree, parents, committedAt}, repo-scoped (immutable)
  *  - ref/v1?repo&gen&name                ref name -> commit, short TTL, repo-scoped
  *  - refgen/v1?repo                      ref generation, replaced after a push
  *
@@ -51,7 +51,7 @@ export const compareKeys = {
   imports: (blobSha: string) => key(`imports/v1/${blobSha}`),
   reviewImpact: (baseTree: string, headTree: string, configSha: string) =>
     key(`review-impact/v1/${baseTree}/${headTree}/${configSha}`),
-  commit: (repoId: string, sha: string) => key('commit/v1', { repo: repoId, sha }),
+  commit: (repoId: string, sha: string) => key('commit/v2', { repo: repoId, sha }),
   ref: (repoId: string, gen: string, name: string) => key('ref/v1', { repo: repoId, gen, name }),
   refgen: (repoId: string) => key('refgen/v1', { repo: repoId }),
 };

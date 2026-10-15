@@ -28,11 +28,13 @@ export interface ResolvedCommit {
 
 export interface CommitWithParents extends ResolvedCommit {
   parents: string[];
+  committedAt: number;
 }
 
 interface CommitEntry {
   tree: string;
   parents: string[];
+  committedAt: number;
 }
 
 export interface ResolveContext {
@@ -77,7 +79,7 @@ function recall(ctx: ResolveContext, sha: string): Promise<CommitEntry | undefin
 /** A commit's tree and parents from the commit cache or one `readCommit`. */
 export async function readCommitInfo(ctx: ResolveContext, sha: string): Promise<CommitWithParents | null> {
   const cached = await recall(ctx, sha);
-  if (cached) return { sha, tree: cached.tree, parents: cached.parents };
+  if (cached) return { sha, tree: cached.tree, parents: cached.parents, committedAt: cached.committedAt };
   let commit: ArtifactsCommitMetadata | null;
   try {
     commit = await (await ctx.artifacts.get()).readCommit(sha);
@@ -86,8 +88,8 @@ export async function readCommitInfo(ctx: ResolveContext, sha: string): Promise<
     throw err;
   }
   if (!commit || commit.hash !== sha) return null;
-  remember(ctx, sha, { tree: commit.treeHash, parents: commit.parents });
-  return { sha, tree: commit.treeHash, parents: commit.parents };
+  remember(ctx, sha, { tree: commit.treeHash, parents: commit.parents, committedAt: commit.committedAt });
+  return { sha, tree: commit.treeHash, parents: commit.parents, committedAt: commit.committedAt };
 }
 
 /**
@@ -102,7 +104,7 @@ export async function readCommitAndParent(
   let commit: CommitWithParents;
   let parent: CommitWithParents | null = null;
   if (cached) {
-    commit = { sha, tree: cached.tree, parents: cached.parents };
+    commit = { sha, tree: cached.tree, parents: cached.parents, committedAt: cached.committedAt };
   } else {
     let log: ArtifactsCommitMetadata[];
     try {
@@ -113,12 +115,12 @@ export async function readCommitAndParent(
     }
     const head = log[0];
     if (!head || head.hash !== sha) return null;
-    commit = { sha, tree: head.treeHash, parents: head.parents };
-    remember(ctx, sha, { tree: head.treeHash, parents: head.parents });
+    commit = { sha, tree: head.treeHash, parents: head.parents, committedAt: head.committedAt };
+    remember(ctx, sha, { tree: head.treeHash, parents: head.parents, committedAt: head.committedAt });
     const p = log[1];
     if (p && p.hash === head.parents[0]) {
-      parent = { sha: p.hash, tree: p.treeHash, parents: p.parents };
-      remember(ctx, p.hash, { tree: p.treeHash, parents: p.parents });
+      parent = { sha: p.hash, tree: p.treeHash, parents: p.parents, committedAt: p.committedAt };
+      remember(ctx, p.hash, { tree: p.treeHash, parents: p.parents, committedAt: p.committedAt });
     }
   }
   const parentSha = commit.parents[0];
@@ -154,15 +156,15 @@ async function readCommitPair(ctx: ResolveContext, base: string, head: string): 
     out.set(head, null);
     return out;
   }
-  out.set(head, { sha: head, tree: h.treeHash, parents: h.parents });
-  remember(ctx, head, { tree: h.treeHash, parents: h.parents });
+  out.set(head, { sha: head, tree: h.treeHash, parents: h.parents, committedAt: h.committedAt });
+  remember(ctx, head, { tree: h.treeHash, parents: h.parents, committedAt: h.committedAt });
   for (let i = 1; i < log.length; i++) {
     const c = log[i]!;
     // Trust the chain only while each entry is the previous one's first parent.
     if (c.hash !== log[i - 1]!.parents[0]) break;
     if (c.hash === base) {
-      out.set(base, { sha: base, tree: c.treeHash, parents: c.parents });
-      remember(ctx, base, { tree: c.treeHash, parents: c.parents });
+      out.set(base, { sha: base, tree: c.treeHash, parents: c.parents, committedAt: c.committedAt });
+      remember(ctx, base, { tree: c.treeHash, parents: c.parents, committedAt: c.committedAt });
       break;
     }
   }

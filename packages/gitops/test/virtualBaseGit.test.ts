@@ -69,8 +69,8 @@ class Store implements CommitReader, MergeReader {
     return this.add(await buildTree(entries)).hash;
   }
 
-  async commit(files: Files, parents: string[]): Promise<string> {
-    const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: this.time++ };
+  async commit(files: Files, parents: string[], committedAt = this.time++): Promise<string> {
+    const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: committedAt };
     const tree = await this.tree(files);
     return this.add(await buildCommit({ tree, parents, author: ident, committer: ident, message: `c${this.time}` })).hash;
   }
@@ -81,7 +81,8 @@ class Store implements CommitReader, MergeReader {
     const text = new TextDecoder().decode(body(o));
     const treeHash = /^tree ([0-9a-f]{40})$/m.exec(text)![1]!;
     const parents = [...text.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!);
-    return { treeHash, parents };
+    const committedAt = Number(/^committer .* (\d+) [+-]\d{4}$/m.exec(text)?.[1] ?? 0);
+    return { treeHash, parents, committedAt };
   }
 
   async readTree(hash: string) {
@@ -228,8 +229,68 @@ describe('criss-cross merges against git with refuseAmbiguousRenames', () => {
     expect(await merge3(store, base, moved, editsC, opts)).toMatchObject({ clean: true });
   });
 
+  it('uses git committer-time order for a conflict-sensitive virtual base', async () => {
+    const store = new Store();
+    const baseText = text(lines(12, 'a'));
+    const wholeFileText = text(lines(12, 'a.txt').map((line, i) => (i === 5 ? 'whole-file-line5' : line)));
+    const laterText = edit(baseText, 10, 'later-line10');
+    const base = await store.commit({ 'a.txt': baseText }, []);
+    const earlier = await store.commit({ 'a.txt': wholeFileText }, [base], 1_790_000_001);
+    const later = await store.commit({ 'a.txt': laterText }, [base], 1_790_000_003);
+    const oursBase = await store.commit({ 'a.txt': wholeFileText }, [earlier, later]);
+    const theirsBase = await store.commit({ 'a.txt': wholeFileText }, [later, earlier]);
+    const ours = await store.commit({ 'a.txt': edit(wholeFileText, 5, 'ours-line5') }, [oursBase]);
+    const theirs = await store.commit({ 'a.txt': edit(wholeFileText, 10, 'later-line10') }, [theirsBase]);
+
+    expect(earlier > later).toBe(true);
+    const git = await gitMergeTree(store, ours, theirs);
+    const got = await ourMerge(store, ours, theirs);
+    expect(git.clean).toBe(false);
+    expect('refused' in got || !got.merge.clean).toBe(true);
+  });
+
+  it('refuses a conflicting fold when merge-base commit times are tied', async () => {
+    const store = new Store();
+    const baseText = text(lines(12, 'a'));
+    const base = await store.commit({ 'a.txt': baseText }, []);
+    const first = await store.commit({ 'a.txt': edit(baseText, 5, 'first') }, [base], 1_790_000_100);
+    const second = await store.commit({ 'a.txt': edit(baseText, 5, 'second') }, [base], 1_790_000_100);
+
+    expect(await virtualMergeBase(store, [first, second])).toMatchObject({
+      truncated: true,
+      truncatedReason: 'baseOrder',
+      treeHash: null,
+    });
+
+    const withoutDate: CommitReader & MergeReader = {
+      async readCommit(sha) {
+        const info = await store.readCommit(sha);
+        if (!info || sha !== first) return info;
+        const { committedAt: _committedAt, ...missingDate } = info;
+        return missingDate;
+      },
+      readTree: (hash) => store.readTree(hash),
+      readBlob: (hash) => store.readBlob(hash),
+    };
+    expect(await virtualMergeBase(withoutDate, [first, second])).toMatchObject({
+      truncated: true,
+      truncatedReason: 'baseOrder',
+      treeHash: null,
+    });
+  });
+
+  it('keeps a tied-time fold when the bases merge without conflicts', async () => {
+    const store = new Store();
+    const baseText = text(lines(12, 'a'));
+    const base = await store.commit({ 'a.txt': baseText }, []);
+    const first = await store.commit({ 'a.txt': edit(baseText, 1, 'first') }, [base], 1_790_000_100);
+    const second = await store.commit({ 'a.txt': edit(baseText, 10, 'second') }, [base], 1_790_000_100);
+
+    expect(await virtualMergeBase(store, [first, second])).toMatchObject({ truncated: false, treeHash: expect.any(String) });
+  });
+
   it('never publishes a tree git would not write on a seeded corpus with edits, deletes, renames and adds', async () => {
-    const tally = { refused: 0, clean: 0, conflicted: 0, renamesAccepted: 0 };
+    const tally = { refused: 0, clean: 0, conflicted: 0, renamesAccepted: 0, baseOrder: 0 };
     const mismatches: unknown[] = [];
     const root: Files = { ...ROOT, 'lib/one.txt': text(lines(12, 'one')), 'lib/two.txt': text(lines(12, 'two')) };
     for (let seed = 1; seed <= 300; seed++) {
@@ -282,6 +343,7 @@ describe('criss-cross merges against git with refuseAmbiguousRenames', () => {
       const got = await ourMerge(store, ours, theirs);
       if (!got.merge) {
         tally.refused++;
+        if (got.refused === 'baseOrder') tally.baseOrder++;
         continue;
       }
       const m = got.merge;

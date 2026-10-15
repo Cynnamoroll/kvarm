@@ -39,11 +39,14 @@ class Store implements CommitReader, MergeReader {
     return t.hash;
   }
 
-  async commit(parents: string[], files: Record<string, string>): Promise<string> {
+  async commit(parents: string[], files: Record<string, string>, committedAt?: number): Promise<string> {
     const treeHash = await this.tree(files);
-    const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time: 1_790_000_000 + this.tick++ };
+    const time = committedAt ?? 1_790_000_000 + this.tick;
+    this.tick = Math.max(this.tick + 1, time - 1_790_000_000 + 1);
+    const ident = { name: 'Kvarm', email: 'kvarm@kvarm.invalid', time };
     const c = await buildCommit({ tree: treeHash, parents, author: ident, committer: ident, message: `c${this.tick}` });
-    this.commits.set(c.hash, { parents, treeHash });
+    const parsedCommittedAt = Number(/^committer .* (\d+) [+-]\d{4}$/m.exec(decode(body(c)))?.[1] ?? 0);
+    this.commits.set(c.hash, { parents, treeHash, committedAt: parsedCommittedAt });
     return c.hash;
   }
 
@@ -171,6 +174,20 @@ describe('virtualMergeBase', () => {
     const outer = await merge3(reader, v.treeHash!, t1, t2);
     expect(outer.clean).toBe(true);
     expect(await fileAt(store, outer.objects, outer.treeHash!, 'f.txt')).toBe(ten({ 1: 'M1', 5: 'fixed', 10: 'M2' }));
+  });
+
+  it('puts the older base first in a conflict marker even when its object id sorts later', async () => {
+    const store = new Store();
+    const base = await store.commit([], { 'f.txt': ten() });
+    const older = await store.commit([base], { 'f.txt': ten({ 5: 'older' }) }, 1_790_000_001);
+    const later = await store.commit([base], { 'f.txt': ten({ 5: 'later' }) }, 1_790_000_003);
+    expect(older > later).toBe(true);
+
+    const v = await virtualMergeBase(store, [later, older]);
+    expect(v.truncated).toBe(false);
+    expect(await fileAt(store, v.objects, v.treeHash!, 'f.txt')).toContain(
+      '<<<<<<<<< Temporary merge branch 1\nolder\n=========',
+    );
   });
 
   it('enforces the bases and depth budgets with the budget named', async () => {
