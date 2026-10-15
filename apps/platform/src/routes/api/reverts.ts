@@ -11,7 +11,7 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, clientIp, denyJson, type App, failJson } from '../api';
+import { actorJson, authorizeRoute, clientIp, denyJson, failJson, jsonBody, type App } from '../api';
 import { readBodyCapped } from '../../requestBody';
 import * as incidents from '../../services/incidents';
 import * as reverts from '../../services/reverts';
@@ -21,8 +21,7 @@ export const revertsApi = new Hono<App>();
 revertsApi.post('/repos/:owner/:repo/reverts', async (c) => {
   const d = await authorizeRoute(c, 'write', { branchRules: true });
   if (!d.ok) return denyJson(c, d);
-  const body = await c.req.json().catch(() => undefined);
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
+  const body = await jsonBody(c);
   const r = await reverts.createRevert(
     { env: c.env, repo: d.repo, actor: d.actor, branchRules: d.branchRules ?? [], waitUntil: (p) => c.executionCtx.waitUntil(p) },
     body,

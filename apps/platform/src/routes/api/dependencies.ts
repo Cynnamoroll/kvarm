@@ -38,8 +38,6 @@ dependenciesApi.post(BASE, async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return c.json({ error: 'body must be JSON {onWorkspace, revision}', code: 'INVALID_BODY' }, 400);
   const r = await svc.createDependency(w.cx, c.req.param('id'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value, 201);
@@ -57,8 +55,6 @@ dependenciesApi.post(`${BASE}/:dep/repin`, async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return c.json({ error: 'body must be JSON {revision, onWorkspace?}', code: 'INVALID_BODY' }, 400);
   const r = await svc.repinDependency(w.cx, c.req.param('id'), c.req.param('dep'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);

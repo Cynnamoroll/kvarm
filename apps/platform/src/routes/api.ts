@@ -5,6 +5,7 @@
  */
 
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { listReposForOwner, type RepoRow } from '../db/repos';
 import {
   getSessionInfo,
@@ -44,22 +45,25 @@ export function unauthJson(c: Context<App>): Response {
 }
 
 /**
- * The strict request-body read every JSON endpoint shares: an absent body
- * reads as {}, while malformed JSON and non-object values answer 400
- * INVALID_BODY here rather than falling through to a default body.
+ * Empty bodies read as {}, while malformed JSON and non-object values throw
+ * an HTTPException that Hono turns into its response, including nested MCP
+ * dispatches that re-enter app.fetch.
  */
-export async function jsonBody(c: Context<App>): Promise<Record<string, unknown> | Response> {
+export async function jsonBody(c: Context<App>): Promise<Record<string, unknown>> {
   const raw = await c.req.text();
   if (raw.trim() === '') return {};
   let v: unknown;
   try {
     v = JSON.parse(raw);
   } catch {
-    return c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
+    throw new HTTPException(400, {
+      res: c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400),
+    });
   }
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
+  if (typeof v === 'object' && v !== null && !Array.isArray(v)) return v as Record<string, unknown>;
+  throw new HTTPException(400, {
+    res: c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400),
+  });
 }
 
 /** A ServiceResult failure as its API response: {error, code} plus any extra fields the failure carries. */
@@ -219,7 +223,6 @@ api.post('/user/tokens', async (c) => {
   if (actor instanceof Response) return actor;
   if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session', code: 'SESSION_REQUIRED' }, 403);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   if (typeof body.name !== 'string' || !Array.isArray(body.scopes)) {
     return c.json({ error: 'body must be a JSON object {name, scopes}', code: 'INVALID_BODY' }, 400);
   }

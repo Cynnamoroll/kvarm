@@ -157,6 +157,25 @@ afterAll(() => restoreFetch());
 
 // ---------------------------------------------------------------------------
 
+describe('strict JSON request bodies', () => {
+  it('rejects malformed JSON before merging and leaves the change open', async () => {
+    const repo = await seedRepo('malformed-merge');
+    await linear(repo);
+    await create('malformed-merge', { title: 'Change', base: 'main', head: 'feature' });
+
+    const r = await apiCall(env, 'POST', path('malformed-merge', '/1/merge'), { token: tok.owner, rawBody: '{' });
+    expect([r.status, r.json.error, r.json.code]).toEqual([400, 'body must be a JSON object', 'INVALID_BODY']);
+    expect(r.headers.get('x-kvarm-cost')).toBeTruthy();
+    expect((await get('malformed-merge', 1)).json.state).toBe('open');
+  });
+
+  it('rejects non-object JSON bodies', async () => {
+    await seedRepo('non-object-body');
+    const r = await create('non-object-body', []);
+    expect([r.status, r.json.error, r.json.code]).toEqual([400, 'body must be a JSON object', 'INVALID_BODY']);
+  });
+});
+
 describe('create, read, list', () => {
   it('creates a change with the review default, the head tip and per-repo numbers', async () => {
     const repo = await seedRepo('create');
