@@ -21,7 +21,7 @@ import * as orgs from '../../services/orgs';
 import * as orgRepos from '../../services/orgRepos';
 import * as grants from '../../services/grants';
 
-const bodyOf = async <T>(c: Context<App>): Promise<Partial<T> | Response> => (await jsonBody(c)) as Partial<T> | Response;
+const bodyOf = async <T>(c: Context<App>): Promise<Partial<T>> => (await jsonBody(c)) as Partial<T>;
 
 export const tenancyApi = new Hono<App>();
 
@@ -46,7 +46,6 @@ tenancyApi.post('/orgs', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   const body = await bodyOf<{ login: string; name: string }>(c);
-  if (body instanceof Response) return body;
   const res = await orgs.createOrg(c.env, actor, {
     login: typeof body.login === 'string' ? body.login : '',
     name: typeof body.name === 'string' ? body.name : null,
@@ -85,7 +84,6 @@ tenancyApi.put('/orgs/:org/members/:login', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   const body = await bodyOf<{ role: string }>(c);
-  if (body instanceof Response) return body;
   if (!isOrgRole(body.role)) {
     return c.json({ error: 'role must be owner, maintainer or member', code: 'INVALID_ROLE' }, 400);
   }
@@ -124,7 +122,6 @@ tenancyApi.post('/orgs/:org/repos', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   const body = await bodyOf<{ name: string; description: string; visibility: string; defaultBranch: string }>(c);
-  if (body instanceof Response) return body;
   const res = await orgRepos.createOrgRepo(c.env, actor, c.req.param('org'), {
     name: typeof body.name === 'string' ? body.name : '',
     description: typeof body.description === 'string' ? body.description : null,
@@ -153,7 +150,6 @@ tenancyApi.put('/repos/:owner/:repo/grants/:login', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await bodyOf<{ role: string }>(c);
-  if (body instanceof Response) return body;
   if (!isRepoNeed(body.role)) {
     return c.json({ error: 'role must be read, write or admin', code: 'INVALID_ROLE' }, 400);
   }

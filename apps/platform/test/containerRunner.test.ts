@@ -46,9 +46,16 @@ describe('container CI runner route', () => {
   });
 
   it('validates the run mode', async () => {
-    for (const body of [{}, { mode: 'hot' }, 'cold', null]) {
+    for (const body of [{}, { mode: 'hot' }]) {
       const r = await call('POST', R, tok.admin, body);
       expect([r.status, r.json.code]).toEqual([422, 'INVALID_MODE']);
+    }
+  });
+
+  it('rejects non-object request bodies', async () => {
+    for (const body of ['cold', null]) {
+      const r = await call('POST', R, tok.admin, body);
+      expect([r.status, r.json.code]).toEqual([400, 'INVALID_BODY']);
     }
   });
 

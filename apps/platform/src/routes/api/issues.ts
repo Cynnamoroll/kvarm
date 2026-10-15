@@ -14,7 +14,7 @@
  *   POST  changes/:number/issues  {issue, kind?, state?} confirm or reject a link
  */
 
-import { Hono, type Context } from 'hono';
+import { Hono } from 'hono';
 import { actorJson, authorizeRoute, denyJson, type App, failJson,
   jsonBody} from '../api';
 import * as svc from '../../services/issues';
@@ -22,14 +22,10 @@ import { getTask } from '../../services/tasks';
 
 export const issuesApi = new Hono<App>();
 
-const invalidBody = (c: Context<App>) => c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
-
 issuesApi.post('/repos/:owner/:repo/issues', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return invalidBody(c);
   const r = await svc.createIssue({ env: c.env, repo: d.repo, actor: d.actor }, body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, { ...r.value.issue, created: r.value.created }, r.value.created ? 201 : 200);
@@ -60,8 +56,6 @@ issuesApi.patch('/repos/:owner/:repo/issues/:number', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return invalidBody(c);
   const r = await svc.updateIssue({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);
@@ -71,8 +65,6 @@ issuesApi.post('/repos/:owner/:repo/issues/:number/comments', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return invalidBody(c);
   const r = await svc.createComment({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value, 201);
@@ -90,8 +82,6 @@ issuesApi.post('/repos/:owner/:repo/changes/:number/issues', async (c) => {
   const d = await authorizeRoute(c, 'write');
   if (!d.ok) return denyJson(c, d);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return invalidBody(c);
   const r = await svc.linkIssue({ env: c.env, repo: d.repo, actor: d.actor }, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);

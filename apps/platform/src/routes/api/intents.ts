@@ -15,7 +15,7 @@
 
 import { Hono, type Context } from 'hono';
 import type { ServiceResult } from '../../repos/service';
-import { actorJson, authorizeRoute, denyJson, type App, failJson} from '../api';
+import { actorJson, authorizeRoute, denyJson, failJson, jsonBody, type App } from '../api';
 import * as svc from '../../services/intents/forecast';
 
 export const intentsApi = new Hono<App>();
@@ -46,8 +46,7 @@ intentsApi.get('/repos/:owner/:repo/workspaces/:id/intent', async (c) => {
 intentsApi.post('/repos/:owner/:repo/workspaces/:id/intent', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
-  const body = await c.req.json().catch(() => undefined);
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
+  const body = await jsonBody(c);
   return reply(c, await svc.declareIntent(w.cx, c.req.param('id'), body));
 });
 

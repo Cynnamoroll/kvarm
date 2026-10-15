@@ -62,8 +62,6 @@ changesApi.post('/repos/:owner/:repo/changes', async (c) => {
   const w = await writeContext(c);
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.createChange(w.cx, body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value, 201);
@@ -93,8 +91,6 @@ changesApi.patch('/repos/:owner/:repo/changes/:number', async (c) => {
   const w = await writeContext(c);
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.updateChange(w.cx, c.req.param('number'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value);

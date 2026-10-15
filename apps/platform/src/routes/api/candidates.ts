@@ -52,7 +52,6 @@ candidatesApi.post('/repos/:owner/:repo/candidates/compose', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   return reply(c, await compositions.compose(w.cx, body), 201);
 });
 
@@ -72,7 +71,6 @@ candidatesApi.post('/repos/:owner/:repo/arenas', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   return reply(c, await candidates.createArena(w.cx, body), 201);
 });
 
@@ -98,6 +96,5 @@ candidatesApi.post('/repos/:owner/:repo/arenas/:id/select', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   return reply(c, await candidates.selectArena(w.cx, c.req.param('id'), body));
 });
