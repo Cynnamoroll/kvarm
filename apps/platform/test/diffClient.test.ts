@@ -18,8 +18,11 @@ import {
   ROW_HEIGHT,
   VIEWPORT_ROWS,
   inlineOf,
+  intralineOf,
+  markIntraline,
   RowPool,
   rowsOf,
+  splitRowsOf,
   windowOf,
 } from '../public/assets/diffClient.js';
 
@@ -156,5 +159,50 @@ describe('recycled row pool', () => {
     expect(shifted.size).toBe(50);
     expect(pool.slotOf.get(140)).toBeUndefined();
     expect(pool.size).toBe(60);
+  });
+});
+
+describe('intraline and split rows', () => {
+  const hunks = [
+    {
+      oldStart: 1,
+      oldLines: 3,
+      newStart: 1,
+      newLines: 4,
+      lines: [
+        { type: 'eq' as const, text: 'keep', oldNo: 1, newNo: 1 },
+        { type: 'del' as const, text: 'const a = 1;', oldNo: 2 },
+        { type: 'del' as const, text: 'gone', oldNo: 3 },
+        { type: 'ins' as const, text: 'const a = 22;', newNo: 2 },
+        { type: 'ins' as const, text: 'fresh', newNo: 3 },
+        { type: 'ins' as const, text: 'extra', newNo: 4 },
+      ],
+    },
+  ];
+
+  it('marks only the changed span between a deleted line and its replacement', () => {
+    expect(intralineOf('const a = 1;', 'const a = 22;')).toEqual({ del: [10, 11], ins: [10, 12] });
+    expect(intralineOf('abc', 'xyz')).toBeNull();
+    expect(intralineOf('same', 'same')).toBeNull();
+    expect(intralineOf('x'.repeat(2000), 'x'.repeat(2001))).toBeNull();
+  });
+
+  it('pairs a deletion run with the insertion run that follows it', () => {
+    const { rows } = rowsOf(hunks);
+    markIntraline(rows);
+    expect(rows[2]).toMatchObject({ op: 'del', mark: [10, 11] });
+    expect(rows[4]).toMatchObject({ op: 'ins', mark: [10, 12] });
+    expect(rows[3]!.mark).toBeUndefined(); // 'gone' vs 'fresh' share nothing
+    expect(rows[6]!.mark).toBeUndefined(); // unpaired insertion
+  });
+
+  it('lays unchanged lines on both sides and leaves unpaired sides empty', () => {
+    const split = splitRowsOf(rowsOf(hunks).rows);
+    expect(split).toHaveLength(5);
+    expect(split[0]).toMatchObject({ kind: 'hunk' });
+    expect(split[1]!.left).toBe(split[1]!.right);
+    expect(split[2]).toMatchObject({ left: { oldNo: 2 }, right: { newNo: 2 } });
+    expect(split[3]).toMatchObject({ left: { oldNo: 3 }, right: { newNo: 3 } });
+    expect(split[4]).toMatchObject({ left: null, right: { newNo: 4 } });
   });
 });

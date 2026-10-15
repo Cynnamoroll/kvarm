@@ -501,7 +501,7 @@ describe('train page', () => {
   it('renders an empty train without work', async () => {
     const r = await call(p('quiet', 'train'));
     expect(r.status).toBe(200);
-    expect(r.text).toContain('the train is empty');
+    expect(r.text).toContain('the merge queue is empty');
     expect(r.refresh).toBe('10');
   });
 });
