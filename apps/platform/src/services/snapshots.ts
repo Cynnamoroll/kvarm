@@ -15,7 +15,13 @@ import { REF_TTL_SECONDS, refGeneration } from '../cache/compare';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import { streamAndStore } from '../cache/snapshot';
 import { snapshotInstanceId } from './events';
-import { STALE_BUILD_MS, type BuildCost, type SnapshotParams } from '../workflows/snapshotBuilder';
+import {
+  isRetiredSnapshotKey,
+  RETIRED_SNAPSHOT_PREFIX,
+  STALE_BUILD_MS,
+  type BuildCost,
+  type SnapshotParams,
+} from '../workflows/snapshotBuilder';
 
 export { RefStoreUnavailable };
 
@@ -79,16 +85,23 @@ const ROW_SELECT = `SELECT c.sha, c.tree, c.state, c.trigger, c.instance_id, c.a
          c.requested_at, c.built_at, t.size, t.files, t.r2_key, t.encoding, t.encoded_size
     FROM snapshot_commits c
     LEFT JOIN snapshot_trees t ON t.repo_id = c.repo_id AND t.tree = c.tree AND t.state = 'ready'
+      AND t.r2_key NOT LIKE (?3 || '%')
    WHERE c.repo_id = ?1 AND c.sha = ?2`;
 
 /** The commit's snapshot row with its tarball, in one indexed query. */
 export async function readSnapshot(env: Env, repoId: string, sha: string): Promise<SnapshotRow | null> {
-  return env.DB.prepare(ROW_SELECT).bind(repoId, sha).first<SnapshotRow>();
+  return env.DB.prepare(ROW_SELECT).bind(repoId, sha, RETIRED_SNAPSHOT_PREFIX).first<SnapshotRow>();
 }
 
 /** True when a commit row is ready and its tarball row is too. */
 export function isReady(row: SnapshotRow | null): row is SnapshotRow & { r2_key: string; size: number } {
-  return row !== null && row.state === 'ready' && row.r2_key !== null && row.size !== null;
+  return (
+    row !== null &&
+    row.state === 'ready' &&
+    row.r2_key !== null &&
+    !isRetiredSnapshotKey(row.r2_key) &&
+    row.size !== null
+  );
 }
 
 /** Does a full SHA name a commit in the repo? (commit cache, else one readCommit.) */
@@ -125,7 +138,12 @@ export async function downloadSnapshot(
   row: SnapshotRow | null,
 ): Promise<SnapshotDownload> {
   if (!isReady(row)) {
-    return { ok: false, error: 'snapshot is not ready', code: 'SNAPSHOT_NOT_READY', state: row?.state ?? 'absent' };
+    return {
+      ok: false,
+      error: 'snapshot is not ready',
+      code: 'SNAPSHOT_NOT_READY',
+      state: row?.state === 'ready' ? 'absent' : row?.state ?? 'absent',
+    };
   }
   const object = await env.SNAPSHOTS.get(row.r2_key);
   if (!object) return { ok: false, error: 'snapshot bytes missing', code: 'SNAPSHOT_MISSING' };
@@ -164,7 +182,7 @@ function parseCost(raw: string | null): BuildCost | null {
  * exists but no build was requested), 409 failed.
  */
 export function snapshotView(ref: string, sha: string, row: SnapshotRow | null, demandPath: string): SnapshotView {
-  if (!row) {
+  if (!row || (row.state === 'ready' && !isReady(row))) {
     return { status: 202, body: { ref, sha, state: 'absent', demand: `POST ${demandPath}` } };
   }
   const common = {
@@ -208,8 +226,9 @@ export interface DemandOutcome {
 
 /**
  * Records an explicit demand and starts a build when none is live: a new
- * commit, a failed build, or a build stuck past STALE_BUILD_MS. A live or
- * finished build is left alone. One D1 batch; at most one Workflow create.
+ * commit, a failed build, a retired ready snapshot, or a build stuck past
+ * STALE_BUILD_MS. A live or other finished build is left alone. One D1
+ * batch; at most one Workflow create.
  * If the create fails and no instance exists, the unstarted attempt is
  * marked failed (one more D1 write) so the next demand starts a new one.
  */
@@ -228,10 +247,14 @@ export async function demandSnapshot(env: Env, repoId: string, sha: string): Pro
            requested_at = ?4, error = NULL, built_at = NULL
          WHERE snapshot_commits.state = 'failed'
             OR (snapshot_commits.state = 'building' AND snapshot_commits.requested_at < ?5)
+            OR (snapshot_commits.state = 'ready' AND EXISTS (
+                 SELECT 1 FROM snapshot_trees t
+                  WHERE t.repo_id = ?1 AND t.tree = snapshot_commits.tree
+                    AND t.r2_key LIKE (?6 || '%')))
          RETURNING instance_id`,
       )
-      .bind(repoId, sha, base, now, now - STALE_BUILD_MS),
-    db.prepare(ROW_SELECT).bind(repoId, sha),
+      .bind(repoId, sha, base, now, now - STALE_BUILD_MS, RETIRED_SNAPSHOT_PREFIX),
+    db.prepare(ROW_SELECT).bind(repoId, sha, RETIRED_SNAPSHOT_PREFIX),
   ]);
   const row = (read?.results as SnapshotRow[] | undefined)?.[0];
   if (!row) throw new Error('snapshot demand row missing');
