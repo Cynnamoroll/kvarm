@@ -183,7 +183,7 @@ describe('criss-cross merges against git with refuseAmbiguousRenames', () => {
     expect(got.merge!.treeHash).toBe(git.tree);
   });
 
-  it('refuses bases where git could detect a similarity rename', async () => {
+  it('matches git when a similarity rename is unrelated to the other side', async () => {
     const store = new Store();
     // x renames a.txt with an edit: git pairs it, the exact model sees a delete and an add.
     const { ours, theirs } = await crissCross(
@@ -195,7 +195,52 @@ describe('criss-cross merges against git with refuseAmbiguousRenames', () => {
       (f) => f,
       (f) => ({ ...f, 'b.txt': edit(f['b.txt']!, 1, 'T') }),
     );
-    expect(await ourMerge(store, ours, theirs)).toEqual({ refused: 'ambiguousRenames' });
+    const got = await ourMerge(store, ours, theirs);
+    const git = await gitMergeTree(store, ours, theirs);
+    expect(got.merge?.clean).toBe(true);
+    expect(git.clean).toBe(true);
+    expect(got.merge!.treeHash).toBe(git.tree);
+  });
+
+  it('matches git when one side deletes and adds unrelated paths over a virtual base', async () => {
+    const store = new Store();
+    const { ours, theirs } = await crissCross(
+      store,
+      ROOT,
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 0, 'X') }),
+      (f) => ({ ...f, 'b.txt': edit(f['b.txt']!, 0, 'Y') }),
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 0, 'X'), 'b.txt': edit(f['b.txt']!, 0, 'Y') }),
+      (f) => {
+        const { 'a.txt': _a, ...rest } = f;
+        return { ...rest, 'new.txt': text(lines(12, 'new')) };
+      },
+      (f) => ({ ...f, 'c.txt': edit(f['c.txt']!, 3, 'T') }),
+    );
+    const got = await ourMerge(store, ours, theirs);
+    const git = await gitMergeTree(store, ours, theirs);
+    expect(got.merge?.clean).toBe(true);
+    expect(git.clean).toBe(true);
+    expect(got.merge!.treeHash).toBe(git.tree);
+  });
+
+  it('refuses deletion plus addition when the other side modifies the deleted path', async () => {
+    const store = new Store();
+    const { ours, theirs } = await crissCross(
+      store,
+      ROOT,
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 0, 'X') }),
+      (f) => ({ ...f, 'b.txt': edit(f['b.txt']!, 0, 'Y') }),
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 0, 'X'), 'b.txt': edit(f['b.txt']!, 0, 'Y') }),
+      (f) => {
+        const { 'a.txt': _a, ...rest } = f;
+        return { ...rest, 'new.txt': text(lines(12, 'new')) };
+      },
+      (f) => ({ ...f, 'a.txt': edit(f['a.txt']!, 2, 'T') }),
+    );
+    const got = await ourMerge(store, ours, theirs);
+    const git = await gitMergeTree(store, ours, theirs);
+    expect(got).toEqual({ refused: 'ambiguousRenames' });
+    expect(git.clean).toBe(false);
   });
 
   it('stops a merge the exact model would publish where git conflicts (rename/delete)', async () => {
