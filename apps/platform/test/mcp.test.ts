@@ -396,6 +396,22 @@ describe('MCP tools match REST', () => {
     expect((await rest('GET', R('doomed'))).status).toBe(404);
   });
 
+  it('rejects malformed JSON on repo forks before creating a repository row', async () => {
+    await seedRepo('malformed-fork');
+    const forkName = 'malformed-fork-fork';
+    const before = await env.DB.prepare('SELECT COUNT(*) AS n FROM repos WHERE owner_login = ? AND name = ?')
+      .bind(OWNER, forkName)
+      .first<{ n: number }>();
+
+    const r = await apiCall(env, 'POST', `/api/v1${R('malformed-fork')}/forks`, { token: tok.owner, rawBody: '{' });
+    expect([r.status, r.json.error, r.json.code]).toEqual([400, 'body must be a JSON object', 'INVALID_BODY']);
+    expect(r.headers.get('x-kvarm-cost')).toBeTruthy();
+    const after = await env.DB.prepare('SELECT COUNT(*) AS n FROM repos WHERE owner_login = ? AND name = ?')
+      .bind(OWNER, forkName)
+      .first<{ n: number }>();
+    expect(after?.n).toBe(before?.n);
+  });
+
   it('compose_candidates returns the composed commit as the new workspace head', async () => {
     const { repo, main } = await seedRepo('compose');
     const a = await tool('create_workspace', { repo: `${OWNER}/compose`, task: 'a' });

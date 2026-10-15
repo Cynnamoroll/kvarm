@@ -22,13 +22,13 @@ const repoIds: Record<string, string> = {};
 const costs: Record<string, CostCounters> = {};
 const api = (repo: string, path: string) => `/api/v1/repos/${OWNER}/${repo}${path}`;
 
-async function call(method: string, path: string, token: string, body?: unknown) {
+async function call(method: string, path: string, token: string, body?: unknown, rawBody?: string) {
   const ctx = createExecutionContext();
   const response = await worker.fetch!(
     new Request(`https://kvarm.test${path}`, {
       method,
-      headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      headers: { Authorization: `Bearer ${token}`, ...(body === undefined && rawBody === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : rawBody !== undefined ? { body: rawBody } : {}),
     }) as Request<unknown, IncomingRequestCfProperties>,
     env,
     ctx,
@@ -116,6 +116,13 @@ beforeAll(async () => {
 afterAll(() => restoreFetch());
 
 describe('guided review endpoints', () => {
+  it('returns INVALID_BODY for malformed guide submissions', async () => {
+    await setup('malformed-guide');
+    await openChange('malformed-guide');
+    const r = await call('POST', api('malformed-guide', '/changes/1/review-guide'), tokens.owner, undefined, '{');
+    expect([r.status, r.json.error, r.json.code]).toEqual([400, 'body must be a JSON object', 'INVALID_BODY']);
+  });
+
   it('lists import consumers and test evidence, and serves warm impact from cache', async () => {
     await setup('impact-flow', 'src/a.ts', ['src/*.ts'], {
       base: {

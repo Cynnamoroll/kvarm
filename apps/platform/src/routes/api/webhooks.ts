@@ -34,7 +34,6 @@ webhooksApi.post('/repos/:owner/:repo/webhooks', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return unauthJson(c);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   const res = await hooks.createWebhook(c.env, d.repo, d.actor, { url: body.url, events: body.events });
   if (!res.ok) return failJson(c, res);
   return secretJson(c, res.value, 201);
@@ -53,7 +52,6 @@ webhooksApi.patch('/repos/:owner/:repo/webhooks/:id', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return unauthJson(c);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   const res = await hooks.updateWebhook(c.env, d.repo, d.actor, c.req.param('id'), { url: body.url, events: body.events, active: body.active });
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { webhook: res.value });

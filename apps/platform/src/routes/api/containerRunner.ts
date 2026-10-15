@@ -9,7 +9,7 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
+import { actorJson, authorizeRoute, denyJson, jsonBody, type App } from '../api';
 import type { RepoRow } from '../../db/repos';
 
 export const containerRunnerApi = new Hono<App>();
@@ -27,8 +27,8 @@ async function adminContext(c: Context<App>): Promise<{ repo: RepoRow } | { deni
 containerRunnerApi.post('/repos/:owner/:repo/ci/container-runs', async (c) => {
   const x = await adminContext(c);
   if ('denied' in x) return x.denied;
-  const body: unknown = await c.req.json().catch(() => undefined);
-  const mode = body && typeof body === 'object' && !Array.isArray(body) ? (body as { mode?: unknown }).mode : undefined;
+  const body = await jsonBody(c);
+  const mode = body.mode;
   if (mode !== 'cold' && mode !== 'warm') return c.json({ error: 'mode must be cold or warm', code: 'INVALID_MODE' }, 422);
   const header = c.req.header('Authorization') ?? '';
   if (!header.startsWith('Bearer ')) return c.json({ error: 'a ci-scoped PAT is required; a browser session cannot be handed to the runner', code: 'PAT_REQUIRED' }, 422);

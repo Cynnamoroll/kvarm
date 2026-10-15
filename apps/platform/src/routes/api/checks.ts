@@ -9,7 +9,7 @@
  */
 
 import { Hono } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App, failJson} from '../api';
+import { actorJson, authorizeRoute, denyJson, failJson, jsonBody, type App } from '../api';
 import * as checks from '../../services/checks';
 import { guarded, resolveCtx, resumeAfterCheck } from '../../services/changes';
 import { withLazyRepo } from '../../artifacts/repo';
@@ -27,8 +27,7 @@ checksApi.get('/repos/:owner/:repo/commits/:sha/status', async (c) => {
 checksApi.post('/repos/:owner/:repo/check-runs', async (c) => {
   const d = await authorizeRoute(c, 'write', { requireActor: true, allowAgent: true, transport: 'ci' });
   if (!d.ok) return denyJson(c, d);
-  const body = await c.req.json().catch(() => undefined);
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
+  const body = await jsonBody(c);
   const waitUntil = (p: Promise<unknown>) => c.executionCtx.waitUntil(p);
   const r = await guarded(() =>
     withLazyRepo(c.env, d.repo.artifacts_name, (artifacts) => checks.reportCheckRun(resolveCtx({ env: c.env, repo: d.repo, waitUntil }, artifacts), body)),
@@ -44,8 +43,7 @@ checksApi.post('/repos/:owner/:repo/check-runs', async (c) => {
 checksApi.patch('/repos/:owner/:repo/check-runs/:id', async (c) => {
   const d = await authorizeRoute(c, 'write', { requireActor: true, allowAgent: true, transport: 'ci' });
   if (!d.ok) return denyJson(c, d);
-  const body = await c.req.json().catch(() => undefined);
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
+  const body = await jsonBody(c);
   const r = await checks.updateCheckRun(c.env, d.repo, c.req.param('id'), body);
   if (!r.ok) return failJson(c, r);
   if (r.value.change && r.value.run.status !== 'queued' && r.value.run.status !== 'running') {

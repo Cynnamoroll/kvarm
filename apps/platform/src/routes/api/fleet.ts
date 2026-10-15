@@ -59,7 +59,6 @@ fleetApi.post('/repos/:owner/:repo/environments', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
   const input = await jsonBody(c);
-  if (input instanceof Response) return input;
   const result = await environments.createEnvironment(route.envContext, input as unknown as environments.CreateEnvironmentInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value, 201);
@@ -77,7 +76,6 @@ fleetApi.patch('/repos/:owner/:repo/environments/:id', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
   const input = await jsonBody(c);
-  if (input instanceof Response) return input;
   const result = await environments.updateEnvironment(route.envContext, c.req.param('id'), input as environments.UpdateEnvironmentInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value);
@@ -143,7 +141,6 @@ fleetApi.post('/repos/:owner/:repo/sandboxes', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
   const input = await jsonBody(c);
-  if (input instanceof Response) return input;
   const result = await sandboxes.startSandbox(route.sandboxContext, input as unknown as sandboxes.StartSandboxInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value, result.value.resumed ? 200 : 201);
@@ -161,8 +158,7 @@ fleetApi.post('/repos/:owner/:repo/sandboxes/:id/stop', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
   const input = await jsonBody(c);
-  if (input instanceof Response) return input;
-  const discard = Boolean(input && typeof input === 'object' && (input as { discard?: unknown }).discard === true);
+  const discard = input.discard === true;
   const result = await sandboxes.stopSandbox(route.sandboxContext, c.req.param('id'), { discard });
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value);
@@ -172,8 +168,6 @@ fleetApi.post('/repos/:owner/:repo/sandboxes/:id/exec', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
   const input = await jsonBody(c);
-  if (input instanceof Response) return input;
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
   const result = await sandboxes.execSandbox(route.sandboxContext, c.req.param('id'), input as Parameters<typeof sandboxes.execSandbox>[2]);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value);
@@ -193,8 +187,6 @@ fleetApi.put('/repos/:owner/:repo/sandboxes/:id/files', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
   const input = await jsonBody(c);
-  if (input instanceof Response) return input;
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
   const result = await sandboxes.writeSandboxFile(route.sandboxContext, c.req.param('id'), input as { path: string; content: string });
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value);
@@ -220,8 +212,7 @@ fleetApi.post('/repos/:owner/:repo/sandbox-approvals/:approvalId', async (c) => 
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
   const input = await jsonBody(c);
-  if (input instanceof Response) return input;
-  const decision = input && typeof input === 'object' ? (input as { decision?: unknown }).decision : undefined;
+  const decision = input.decision;
   if (decision !== 'approve' && decision !== 'deny') return c.json({ error: 'decision must be approve or deny', code: 'INVALID_DECISION' }, 422);
   const result = await sandboxes.decideSandboxApproval(route.sandboxContext, c.req.param('approvalId'), decision);
   if (!result.ok) return failJson(c, result);

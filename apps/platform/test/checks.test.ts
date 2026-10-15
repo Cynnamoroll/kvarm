@@ -401,6 +401,13 @@ describe('the guard as the checks gate', () => {
 });
 
 describe('reported check runs', () => {
+  it('lets an empty body reach check-run validation', async () => {
+    await seedRepo('report-empty');
+    const r = await apiCall(env, 'POST', `${R('report-empty')}/check-runs`, { token: tok.ciOnly });
+    expect([r.status, r.json.code]).toEqual([422, 'INVALID_SHA']);
+    expect(r.headers.get('x-kvarm-cost')).toBeTruthy();
+  });
+
   it('needs the ci scope, reserves kvarm/ names, and validates the body', async () => {
     const repo = await seedRepo('report-auth');
     const { feature } = await fixture(repo, BASE, { 'notes.txt': 'n\n' });

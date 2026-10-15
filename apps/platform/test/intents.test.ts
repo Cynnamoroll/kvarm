@@ -279,6 +279,8 @@ describe('declarations', () => {
     expect(upd.json.declaredPaths).toEqual(['lib/util.ts']);
     expect(upd.cost.d1).toBeLessThanOrEqual(2);
     expect(upd.cost.do).toBe(0);
+    const empty = await apiCall(env, 'POST', `${R('declare')}/workspaces/${id}/intent`, { token: tok.owner });
+    expect([empty.status, empty.json.code]).toEqual([422, 'INVALID_INTENT']);
     expect((await getIntent('declare', id)).json.declaredPaths).toEqual(['lib/util.ts']);
 
     for (const body of [{ paths: ['/abs/path'] }, { paths: ['a/../b'] }, { paths: [] }, {}]) {

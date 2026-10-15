@@ -37,8 +37,6 @@ workspacesApi.post('/repos/:owner/:repo/workspaces', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.createWorkspace(w.cx, body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value, 201);
@@ -68,8 +66,6 @@ workspacesApi.post('/repos/:owner/:repo/workspaces/:id/change-set', async (c) =>
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
-  if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.openChangeSet(w.cx, c.req.param('id'), body);
   if (!r.ok) return failJson(c, r);
   return actorJson(c, r.value, 201);

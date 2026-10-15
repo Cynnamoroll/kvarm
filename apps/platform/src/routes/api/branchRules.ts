@@ -31,7 +31,6 @@ branchRulesApi.post('/repos/:owner/:repo/branch-rules', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   const res = await rules.createRule(c.env, d.repo, d.actor, {
     pattern: body.pattern,
     requiredChecks: body.requiredChecks,
@@ -56,7 +55,6 @@ branchRulesApi.patch('/repos/:owner/:repo/branch-rules/:id', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   if (body.pattern !== undefined) {
     return c.json({ error: 'pattern cannot be changed; delete the rule and create a new one', code: 'INVALID_PATTERN' }, 400);
   }

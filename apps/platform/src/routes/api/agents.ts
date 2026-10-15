@@ -19,7 +19,6 @@ agentsApi.post('/agents', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   const res = await agents.createAgent(c.env, actor, {
     owner: str(body.owner) ?? actor.user.login,
     name: str(body.name) ?? '',
@@ -62,7 +61,6 @@ agentsApi.post('/agents/:id/tokens', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   const body = await jsonBody(c);
-  if (body instanceof Response) return body;
   const res = await agents.mintAgentToken(c.env, actor, c.req.param('id'), {
     repo: str(body.repo) ?? '',
     role: str(body.role) ?? '',
