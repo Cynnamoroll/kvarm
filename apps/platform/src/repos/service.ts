@@ -19,7 +19,6 @@ import { workspaceCleanupStatements } from '../services/workspaces';
 import { issueCleanupStatements } from '../services/issues';
 import { arenaCleanupStatements } from '../services/candidates';
 import { compositionCleanupStatements } from '../services/compositions';
-import { historyCleanupStatements } from '../services/history';
 
 import type { ServiceResult } from './types';
 export type { ServiceResult } from './types';
@@ -167,7 +166,6 @@ export async function deleteRepo(
     ...workspaceCleanupStatements(env.DB, repo.id),
     ...changeCleanupStatements(env.DB, repo.id),
     ...issueCleanupStatements(env.DB, repo.id),
-    ...historyCleanupStatements(env.DB, repo.id),
     env.DB.prepare('UPDATE repos SET fork_parent_id = NULL WHERE fork_parent_id = ?').bind(repo.id),
   ];
   const results = await env.DB.batch<{ r2_key: string }>([
@@ -188,6 +186,11 @@ export async function deleteRepo(
     if (!/not ?found|does not exist|no such/i.test(String(err))) {
       console.log(JSON.stringify({ artifactsDeleteFailed: repo.id, error: String(err).slice(0, 200) }));
     }
+  }
+  try {
+    await env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id)).destroy();
+  } catch (err) {
+    console.log(JSON.stringify({ pathHistoryCleanupFailed: repo.id, error: String(err).slice(0, 200) }));
   }
   await purgeGitTokens(repo.artifacts_name);
   try {

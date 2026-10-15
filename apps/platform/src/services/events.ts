@@ -497,6 +497,17 @@ const issueGuardEffect: PushEffect = {
   },
 };
 
+const historyEffect: PushEffect = {
+  name: 'history',
+  async run(ctx) {
+    if (ctx.event.ref !== `refs/heads/${ctx.defaultBranch}`) return { state: 'skipped', detail: 'not the default branch' };
+    if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
+    const stub = ctx.env.PATH_HISTORY.get(ctx.env.PATH_HISTORY.idFromName(ctx.repoId));
+    const result = await stub.pushed({ ref: ctx.event.ref, after: ctx.event.after, eventAt: ctx.eventAt });
+    return { state: 'done', detail: result };
+  },
+};
+
 export const PUSH_EFFECTS: readonly PushEffect[] = [
   purgeEffect,
   snapshotEffect,
@@ -504,6 +515,7 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [
   changeHooksEffect,
   issueCommitsEffect,
   issueGuardEffect,
+  historyEffect,
   environmentBuildEffect,
 ];
 

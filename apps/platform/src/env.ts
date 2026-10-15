@@ -4,6 +4,8 @@
  * not listed in wrangler.jsonc, so they are declared here instead, as are the
  * rate-limit bindings (declared identically, so a regenerated file merges).
  */
+import type { PathHistory } from './do/pathHistory';
+
 declare global {
   interface Env {
     /** WorkOS API key (secret). */
@@ -34,7 +36,6 @@ declare global {
     /** Workers Rate Limiting: 120 requests/min per key. */
     WRITE_LIMITER: RateLimit;
     REPO_EVENTS: DurableObjectNamespace;
+    PATH_HISTORY: DurableObjectNamespace<PathHistory>;
   }
 }
-
-export {};

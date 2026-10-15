@@ -1,359 +1,426 @@
 /**
- * Path history (services/history.ts, routes/api/history.ts): the lazily built
- * first-parent index of the default branch. Answers are checked against the
- * fake repo's own history; the index's step bounds, epochs on a rewritten
- * branch, cursor paging, racing requests and the cost of a warm read.
+ * PathHistory Durable Object integration: first-parent indexing, cold/warm
+ * reads, concurrent activation, push wakeups, and access validation.
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { bumpRefGeneration, compareKeys, refGeneration, writeJson } from '../src/cache/compare';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
-import { HISTORY_LIMITS, historyCleanupStatements } from '../src/services/history';
-import worker from '../src/index';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { bumpRefGeneration } from '../src/cache/compare';
+import { PathHistory } from '../src/do/pathHistory';
+import { call } from './helpers/http';
+import { commit, fakeArtifacts, installFakeGitRemote, restoreFetch, type FakeRepo, type Files } from './helpers/fakeArtifacts';
+import { seedRepo, seedUser } from './helpers/seed';
 
 const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts } as Env;
-const ORIGIN = 'https://kvarm.test';
-const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'history-owner';
-const tok = { owner: '', outsider: '' };
+const FULL: Scope[] = ['read', 'write', 'api'];
+let token = '';
+let repoIds: Record<string, string> = {};
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
+beforeAll(async () => {
+  installFakeGitRemote();
+  token = (await mintPAT(env, await seedUser(env, OWNER), 'owner', FULL)).token;
+});
+
+afterAll(() => restoreFetch());
+
+async function createRepo(name: string, visibility: 'private' | 'public' = 'private'): Promise<{ id: string; fake: FakeRepo }> {
+  const seeded = await seedRepo(env, name, { owner: OWNER, visibility, repoIds });
+  const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(seeded.id));
+  await runInDurableObject(stub, async (object) => {
+    (object as unknown as { artifacts: Artifacts }).artifacts = fakeArtifacts;
+  });
+  return { id: seeded.id, fake: seeded.repo };
 }
 
-async function seedRepo(name: string, visibility: 'public' | 'private' = 'private'): Promise<{ id: string; fake: FakeRepo }> {
-  const artifactsName = `${OWNER}--${name}`;
-  const fake = new FakeRepo();
-  fakeRepos.set(artifactsName, fake);
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  return { id, fake };
-}
-
-/** Moves main like a confirmed push would: the ref, then the ref generation. */
 async function setMain(repo: { id: string; fake: FakeRepo }, sha: string): Promise<void> {
   repo.fake.refs.set('refs/heads/main', sha);
   await bumpRefGeneration(repo.id);
 }
 
-/** A linear history of `n` commits; commit i changes `f${i % files}.txt`. Returns shas oldest first. */
-async function linear(repo: { fake: FakeRepo }, n: number, files = 3, from: string[] = [], tag = 'v', base: Files = {}): Promise<{ shas: string[]; tree: Files }> {
-  const tree: Files = { ...base };
+async function linear(repo: { fake: FakeRepo }, count: number, files = 3): Promise<string[]> {
+  const tree: Files = {};
   const shas: string[] = [];
-  let parents = from;
-  for (let i = 0; i < n; i++) {
-    tree[`f${i % files}.txt`] = `${tag}${i}\n`;
-    const c = await commit(repo.fake, { ...tree }, parents);
-    shas.push(c.sha);
-    parents = [c.sha];
+  let parent: string[] = [];
+  for (let i = 0; i < count; i++) {
+    tree[`f${i % files}.txt`] = `${i}\n`;
+    const result = await commit(repo.fake, { ...tree }, parent);
+    shas.push(result.sha);
+    parent = [result.sha];
   }
-  return { shas, tree };
+  return shas;
 }
 
-function treeOf(repo: { fake: FakeRepo }, sha: string): string {
-  const o = repo.fake.objects.get(sha)!;
-  return /^tree ([0-9a-f]{40})/.exec(new TextDecoder().decode(o.content as Uint8Array))![1]!;
-}
+const historyPath = (name: string, query: string) => `/api/v1/repos/${OWNER}/${name}/history?${query}`;
+const history = (name: string, query: string, authToken = token) =>
+  call(env, 'GET', historyPath(name, query), { token: authToken });
 
-async function get(path: string, token = tok.owner): Promise<{ status: number; json: Record<string, any>; cost: CostCounters }> {
-  const ctx = createExecutionContext();
-  const req = new Request(`${ORIGIN}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  return { status: res.status, json: JSON.parse(text) as Record<string, any>, cost: parseCostHeader(res.headers.get(COST_HEADER))! };
-}
-
-const H = (repo: string, query: string) => `/api/v1/repos/${OWNER}/${repo}/history?${query}`;
-
-/** Requests until the index is complete (each request advances it by one bounded step). */
-async function settle(repo: string, path: string): Promise<{ json: Record<string, any>; requests: number }> {
-  for (let i = 1; i <= 20; i++) {
-    const r = await get(H(repo, `path=${encodeURIComponent(path)}&limit=100`));
-    expect(r.status, JSON.stringify(r.json)).toBe(200);
-    if (r.json.index.complete) return { json: r.json, requests: i };
+async function settle(repo: { id: string }, name: string, path: string) {
+  let result = await history(name, `path=${encodeURIComponent(path)}&limit=100`);
+  const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+  for (let i = 0; i < 20 && result.status === 200 && !result.json.index?.rootReached; i++) {
+    await runDurableObjectAlarm(stub);
+    result = await history(name, `path=${encodeURIComponent(path)}&limit=100`);
   }
-  throw new Error('history index did not complete');
+  return result;
 }
 
-/** Every page of a path's history through nextCursor. */
-async function allPages(repo: string, path: string, limit: number): Promise<string[]> {
-  const out: string[] = [];
-  let cursor: string | null = null;
-  for (let i = 0; i < 100; i++) {
-    const r = await get(H(repo, `path=${encodeURIComponent(path)}&limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
-    expect(r.status, JSON.stringify(r.json)).toBe(200);
-    out.push(...(r.json.commits as Array<{ sha: string }>).map((c) => c.sha));
-    cursor = r.json.nextCursor;
-    if (!cursor) return out;
-  }
-  throw new Error('paging did not end');
-}
-
-beforeAll(async () => {
-  installFakeGitRemote();
-  tok.owner = (await mintPAT(env, await seedUser(OWNER), 'owner', FULL)).token;
-  tok.outsider = (await mintPAT(env, await seedUser('history-outsider'), 'outsider', FULL)).token;
-});
-
-afterAll(() => {
-  restoreFetch();
-});
-
-describe('GET /repos/:o/:r/history', () => {
-  it('lists the commits that changed a path, newest first, complete for a short history', async () => {
-    const repo = await seedRepo('short');
-    const c1 = await commit(repo.fake, { 'a.txt': '1\n', 'b.txt': '1\n' });
-    const c2 = await commit(repo.fake, { 'a.txt': '2\n', 'b.txt': '1\n' }, [c1.sha]);
-    const c3 = await commit(repo.fake, { 'b.txt': '2\n' }, [c2.sha], 'm\n\nbody text\n');
-    await setMain(repo, c3.sha);
-
-    const r = await get(H('short', 'path=a.txt'));
-    expect(r.status, JSON.stringify(r.json)).toBe(200);
-    expect(r.json).toMatchObject({ path: 'a.txt', ref: 'refs/heads/main', headSha: c3.sha, nextCursor: null });
-    expect(r.json.commits.map((c: any) => [c.sha, c.status])).toEqual([
-      [c3.sha, 'removed'],
-      [c2.sha, 'modified'],
-      [c1.sha, 'added'],
-    ]);
-    expect(r.json.commits[0]).toMatchObject({ author: { name: 't', email: 't@kvarm.invalid' }, summary: 'm' });
-    expect(r.json.commits[0].committedAt).toMatch(/Z$/);
-    expect(r.json.index).toMatchObject({ epoch: 1, indexedHead: c3.sha, current: true, rootReached: true, gaps: 0, complete: true, progressed: true });
-
-    // A path no commit touched has an empty, complete history.
-    expect((await get(H('short', 'path=nope.txt'))).json).toMatchObject({ commits: [], index: { complete: true } });
-  });
-
-  it('serves a warm read from D1 alone: no Artifacts call, one service batch', async () => {
-    const repo = await seedRepo('warm');
-    const { shas } = await linear(repo, 4);
+describe('GET /repos/:owner/:repo/history', () => {
+  it('indexes a short first-parent history and reads the warm page from the DO', async () => {
+    const repo = await createRepo('short');
+    const shas = await linear(repo, 4);
     await setMain(repo, shas[3]!);
-    await settle('warm', 'f0.txt');
+
+    const cold = await history('short', 'path=f0.txt');
+    expect(cold.status).toBe(200);
+    expect(cold.json.commits.map((entry: { sha: string }) => entry.sha)).toEqual([shas[3], shas[0]]);
+    expect(cold.json.index).toMatchObject({ current: true, rootReached: true, complete: true });
+    expect(cold.cost).toMatchObject({ d1: 1, art: 3, do: 1, sub: 1 });
+
     const before = repo.fake.calls.length;
-    const r = await get(H('warm', 'path=f0.txt'));
-    expect(r.json.index.progressed).toBe(false);
-    expect(r.cost).toMatchObject({ art: 0, do: 0 });
-    expect(r.cost.d1).toBeLessThanOrEqual(2);
+    const warm = await history('short', 'path=f0.txt');
+    expect(warm.status).toBe(200);
+    expect(warm.cost).toMatchObject({ do: 1 });
     expect(repo.fake.calls.length).toBe(before);
+    expect(warm.cost).toMatchObject({ d1: 1, art: 0, do: 1, sub: 0 });
   });
 
-  it('follows new commits on the branch', async () => {
-    const repo = await seedRepo('forward');
-    const first = await linear(repo, 3);
-    await setMain(repo, first.shas[2]!);
-    await settle('forward', 'f1.txt');
-    const more = await linear(repo, 3, 3, [first.shas[2]!], 'w', first.tree);
-    await setMain(repo, more.shas[2]!);
-    const r = await get(H('forward', 'path=f1.txt'));
-    expect(r.json.index).toMatchObject({ indexedHead: more.shas[2], complete: true, progressed: true });
-    expect(r.json.commits.map((c: any) => c.sha)).toEqual([more.shas[1], first.shas[1]]);
+  it('coalesces concurrent cold reads and deduplicates tree hashes', async () => {
+    const repo = await createRepo('concurrent');
+    const shas = await linear(repo, 24);
+    await setMain(repo, shas.at(-1)!);
+    const results = await Promise.all(Array.from({ length: 10 }, () => history('concurrent', 'path=f0.txt')));
+    expect(results.every((result) => result.status === 200)).toBe(true);
+    const reads = repo.fake.calls.filter((entry) => entry.startsWith('readTree:'));
+    expect(reads).toHaveLength(24);
+    const byHash = new Map<string, number>();
+    for (const read of reads) byHash.set(read.slice('readTree:'.length), (byHash.get(read.slice('readTree:'.length)) ?? 0) + 1);
+    expect(byHash.size).toBe(24);
+    expect(Math.max(...byHash.values())).toBe(1);
+    expect(results.filter((result) => result.json.index.progressed).length).toBeLessThanOrEqual(1);
+    const logs = repo.fake.calls.filter((entry) => entry.startsWith('log:'));
+    expect(logs).toHaveLength(2);
+    expect(new Set(logs).size).toBe(logs.length);
   });
 
-  it('builds a long history in bounded steps, then pages it with cursors without duplicates', async () => {
-    const repo = await seedRepo('long');
-    const n = HISTORY_LIMITS.commitsPerStep * 2 + 17;
-    const { shas } = await linear(repo, n, 2);
-    await setMain(repo, shas[n - 1]!);
+  it('reads a 2,500-commit chain in three retained log windows', async () => {
+    const repo = await createRepo('long');
+    const shas = await linear(repo, 2500, 10);
+    await setMain(repo, shas.at(-1)!);
+    const result = await settle(repo, 'long', 'f0.txt');
+    expect(result.status).toBe(200);
+    expect(result.json.index).toMatchObject({ current: true, rootReached: true, complete: true });
+    const indexWindows = repo.fake.calls.filter((entry) => /^log:[0-9a-f]{40}$/.test(entry)).length;
+    expect(indexWindows).toBe(3);
+  }, 60_000);
 
-    const first = await get(H('long', 'path=f0.txt&limit=100'));
-    expect(first.json.index).toMatchObject({ current: true, rootReached: false, complete: false, progressed: true });
-    // Only the newest step is indexed so far.
-    expect(first.json.commits.length).toBe(HISTORY_LIMITS.commitsPerStep / 2);
-
-    const { requests } = await settle('long', 'f0.txt');
-    expect(requests).toBe(2);
-    const expected = shas.filter((_, i) => i % 2 === 0).reverse();
-    expect(await allPages('long', 'f0.txt', 7)).toEqual(expected);
-  });
-
-  it('restarts in a new epoch when the branch is rewritten; old cursors are refused', async () => {
-    const repo = await seedRepo('rewrite');
-    const old = await linear(repo, 12, 1, [], 'old');
-    await setMain(repo, old.shas[11]!);
-    await settle('rewrite', 'f0.txt');
-    const page = await get(H('rewrite', 'path=f0.txt&limit=5'));
-    const staleCursor = page.json.nextCursor as string;
-    expect(staleCursor).toEqual(expect.any(String));
-
-    // Force-push main to an unrelated history.
-    const fresh = await linear(repo, 3, 1, [], 'new');
-    await setMain(repo, fresh.shas[2]!);
-    const r = await get(H('rewrite', 'path=f0.txt'));
-    expect(r.json.index).toMatchObject({ epoch: 2, complete: true });
-    expect(r.json.commits.map((c: any) => c.sha)).toEqual([...fresh.shas].reverse());
-
-    const stale = await get(H('rewrite', `path=f0.txt&cursor=${encodeURIComponent(staleCursor)}`));
-    expect([stale.status, stale.json.code]).toEqual([409, 'STALE_CURSOR']);
-
-    // Old-epoch rows are never served and are purged by later steps.
-    const rows = await env.DB.prepare('SELECT COUNT(*) AS n FROM path_history WHERE repo_id = ? AND epoch = 1').bind(repo.id).first<{ n: number }>();
-    expect(rows!.n).toBe(0);
-  });
-
-  it('keeps one consistent index when two first requests race', async () => {
-    const repo = await seedRepo('race');
-    const { shas } = await linear(repo, 20, 2);
-    await setMain(repo, shas[19]!);
-    const [a, b] = await Promise.all([get(H('race', 'path=f1.txt')), get(H('race', 'path=f1.txt'))]);
-    expect([a.status, b.status]).toEqual([200, 200]);
-    const done = await settle('race', 'f1.txt');
-    expect(done.json.commits.map((c: any) => c.sha)).toEqual(shas.filter((_, i) => i % 2 === 1).reverse());
-    const state = await env.DB.prepare('SELECT epoch FROM path_history_state WHERE repo_id = ?').bind(repo.id).first<{ epoch: number }>();
-    const seqs = await env.DB.prepare('SELECT COUNT(*) AS n, COUNT(DISTINCT sha) AS d FROM path_history_commits WHERE repo_id = ? AND epoch = ?')
-      .bind(repo.id, state!.epoch)
-      .first<{ n: number; d: number }>();
-    expect(seqs).toEqual({ n: 20, d: 20 });
-  });
-
-  it('answers an empty repository with an empty, complete history', async () => {
-    await seedRepo('empty');
-    const r = await get(H('empty', 'path=a.txt'));
-    expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
-  });
-
-  it('validates input and conceals private repositories', async () => {
-    const repo = await seedRepo('valid');
-    const { shas } = await linear(repo, 2);
-    await setMain(repo, shas[1]!);
-    expect((await get(`/api/v1/repos/${OWNER}/valid/history`)).json.code).toBe('INVALID_PATH');
-    expect((await get(H('valid', 'path=a&limit=0'))).json.code).toBe('INVALID_LIMIT');
-    expect((await get(H('valid', 'path=a&limit=101'))).json.code).toBe('INVALID_LIMIT');
-    expect((await get(H('valid', 'path=a&cursor=%%%'))).json.code).toBe('INVALID_CURSOR');
-    const hidden = await get(H('valid', 'path=f0.txt'), tok.outsider);
-    expect(hidden.status).toBe(404);
-    expect(hidden.cost.art).toBe(0);
-  });
-
-  it('serves no history for a deleted default branch', async () => {
-    const repo = await seedRepo('deleted');
-    const { shas } = await linear(repo, 3);
-    await setMain(repo, shas[2]!);
-    await settle('deleted', 'f0.txt');
-    repo.fake.refs.delete('refs/heads/main');
-    await bumpRefGeneration(repo.id);
-    const r = await get(H('deleted', 'path=f0.txt'));
-    expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ headSha: null, commits: [], nextCursor: null, index: { gaps: 0, complete: true } });
-  });
-
-  it('does not let a cached head mask a deletion the push ledger has recorded', async () => {
-    const repo = await seedRepo('deleted-cached');
-    const { shas } = await linear(repo, 3);
-    await setMain(repo, shas[2]!);
-    await settle('deleted-cached', 'f0.txt');
-    // Deleted elsewhere: this location's ref cache still answers the old head, the ledger knows.
-    const gen = await refGeneration(repo.id);
-    await writeJson(compareKeys.ref(repo.id, gen, 'refs/heads/main'), JSON.stringify({ sha: shas[2], tree: treeOf(repo, shas[2]!) }));
-    repo.fake.refs.delete('refs/heads/main');
-    await env.DB.prepare(
-      `INSERT INTO repo_refs (repo_id, ref, sha, event_id, event_at, updated_at) VALUES (?, 'refs/heads/main', ?, 'evt-delete', ?, ?)`,
-    )
-      .bind(repo.id, '0'.repeat(40), Date.now(), Date.now())
-      .run();
-    const r = await get(H('deleted-cached', 'path=f0.txt'));
-    expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
-  });
-
-  it('keeps the index when a stale cached head is older than the indexed one', async () => {
-    const repo = await seedRepo('stale-head');
-    const { shas, tree } = await linear(repo, 3);
-    const more = await linear(repo, 2, 3, [shas[2]!], 'w', tree);
-    const head = more.shas[1]!;
-    await setMain(repo, head);
-    await settle('stale-head', 'f0.txt');
-    // This colo's ref cache still answers an older head (another colo indexed the newer one).
-    const gen = await refGeneration(repo.id);
-    await writeJson(compareKeys.ref(repo.id, gen, 'refs/heads/main'), JSON.stringify({ sha: shas[2], tree: treeOf(repo, shas[2]!) }));
-    const r = await get(H('stale-head', 'path=f0.txt'));
-    expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ headSha: head, index: { epoch: 1, indexedHead: head, complete: true } });
-  });
-
-  it('answers 503 and records nothing when a tree is missing, instead of indexing it as empty', async () => {
-    const repo = await seedRepo('missing-tree');
-    const { shas } = await linear(repo, 3, 3);
-    await setMain(repo, shas[2]!);
-    repo.fake.objects.delete(treeOf(repo, shas[1]!));
-    const r = await get(H('missing-tree', 'path=f0.txt'));
-    expect([r.status, r.json.code]).toEqual([503, 'STORAGE_UNAVAILABLE']);
-    const state = await env.DB.prepare('SELECT COUNT(*) AS n FROM path_history_commits WHERE repo_id = ?').bind(repo.id).first<{ n: number }>();
-    expect(state!.n).toBe(0);
-  });
-
-  it('ends the backward walk as one gap when the tail commit cannot be followed, instead of stalling', async () => {
-    const repo = await seedRepo('lost-tail');
-    const n = HISTORY_LIMITS.commitsPerStep + 10;
-    const { shas } = await linear(repo, n, 2);
-    await setMain(repo, shas[n - 1]!);
-    const first = await get(H('lost-tail', 'path=f0.txt'));
-    expect(first.json.index).toMatchObject({ rootReached: false, progressed: true });
-    // The next commit the backward walk needs is gone.
-    repo.fake.objects.delete(shas[9]!);
-    const second = await get(H('lost-tail', 'path=f0.txt'));
-    expect(second.status).toBe(200);
-    expect(second.json.index).toMatchObject({ rootReached: true, gaps: 1, complete: false, progressed: true });
-    const third = await get(H('lost-tail', 'path=f0.txt'));
-    expect(third.json.index).toMatchObject({ rootReached: true, gaps: 1, progressed: false });
-  });
-
-  it('ends the walk as one gap when the binding reports the tail commit missing, and answers 503 for a transient failure', async () => {
-    const repo = await seedRepo('missing-tail');
-    const n = HISTORY_LIMITS.commitsPerStep + 10;
-    const { shas } = await linear(repo, n, 2);
-    await setMain(repo, shas[n - 1]!);
-    await get(H('missing-tail', 'path=f0.txt'));
-    // A transient head-commit read failure is retryable and records nothing.
-    const fresh = await linear(repo, 1, 2, [shas[n - 1]!], 'w');
-    await setMain(repo, fresh.shas[0]!);
-    repo.fake.hook = async (call) => {
-      if (call === `readCommit:${fresh.shas[0]}`) throw new Error('upstream 502');
-    };
-    const flaky = await get(H('missing-tail', 'path=f0.txt'));
-    expect([flaky.status, flaky.json.code]).toEqual([503, 'STORAGE_UNAVAILABLE']);
-    repo.fake.hook = null;
-    repo.fake.logNotFound.add(shas[9]!);
-    const r = await get(H('missing-tail', 'path=f0.txt'));
-    expect(r.status, JSON.stringify(r.json)).toBe(200);
-    expect(r.json.index).toMatchObject({ indexedHead: fresh.shas[0], rootReached: true, gaps: 1, complete: false });
-  });
-
-  it('records many long paths in byte-bounded statements and skips paths no query can name', async () => {
-    const repo = await seedRepo('long-paths');
-    const files: Files = {};
-    for (let i = 0; i < 300; i++) files[`${'d'.repeat(250)}/f${i}.txt`] = `${i}\n`;
-    files[`${'x'.repeat(HISTORY_LIMITS.maxPathBytes + 1)}`] = 'too long\n';
-    const c = await commit(repo.fake, files);
-    await setMain(repo, c.sha);
-    const r = await settle('long-paths', `${'d'.repeat(250)}/f299.txt`);
-    expect(r.json.commits.map((x: any) => x.sha)).toEqual([c.sha]);
-    const rows = await env.DB.prepare('SELECT COUNT(*) AS n FROM path_history WHERE repo_id = ?').bind(repo.id).first<{ n: number }>();
-    expect(rows!.n).toBe(300);
-  });
-
-  it('is removed with the repository', async () => {
-    const repo = await seedRepo('cleanup');
-    const { shas } = await linear(repo, 3);
-    await setMain(repo, shas[2]!);
-    await settle('cleanup', 'f0.txt');
-    await env.DB.batch(historyCleanupStatements(env.DB, repo.id));
-    for (const table of ['path_history', 'path_history_commits', 'path_history_state']) {
-      const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE repo_id = ?`).bind(repo.id).first<{ n: number }>();
-      expect(row!.n, table).toBe(0);
+  it('keeps a window-boundary change distinct from a root addition', async () => {
+    const repo = await createRepo('window-boundary');
+    const shas: string[] = [];
+    let files: Files = {};
+    let parents: string[] = [];
+    for (let i = 0; i < 1005; i++) {
+      if (i === 0) files = { ...files, 'root-only.txt': 'root\n', 'boundary.txt': 'before\n' };
+      if (i === 5) files = { ...files, 'boundary.txt': 'after\n' };
+      const result = await commit(repo.fake, { ...files }, parents);
+      shas.push(result.sha);
+      parents = [result.sha];
     }
+    await setMain(repo, shas.at(-1)!);
+
+    const rootOnly = await settle(repo, 'window-boundary', 'root-only.txt');
+    expect(rootOnly.json.commits.map((entry: { sha: string; status: string }) => ({ sha: entry.sha, status: entry.status }))).toEqual([
+      { sha: shas[0], status: 'added' },
+    ]);
+    const boundary = await history('window-boundary', 'path=boundary.txt&limit=100');
+    expect(boundary.json.commits.find((entry: { sha: string }) => entry.sha === shas[5])?.status).toBe('modified');
+  }, 60_000);
+
+  it('pages through a path without duplicates across a posting-row cursor', async () => {
+    const repo = await createRepo('paging');
+    const shas = await linear(repo, 12, 1);
+    await setMain(repo, shas.at(-1)!);
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const query = `path=f0.txt&limit=3${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      const result = await history('paging', query);
+      expect(result.status).toBe(200);
+      seen.push(...result.json.commits.map((entry: { sha: string }) => entry.sha));
+      cursor = result.json.nextCursor as string | null;
+    } while (cursor);
+
+    expect(seen).toEqual([...shas].reverse());
+    expect(new Set(seen).size).toBe(shas.length);
+  });
+
+  it('rebuilds a rewritten branch in a new epoch and rejects old cursors', async () => {
+    const repo = await createRepo('rewrite');
+    const old = await linear(repo, 12, 1);
+    await setMain(repo, old.at(-1)!);
+    const first = await history('rewrite', 'path=f0.txt&limit=5');
+    const oldCursor = first.json.nextCursor as string;
+    expect(oldCursor).toEqual(expect.any(String));
+    const oldEpoch = first.json.index.epoch as number;
+    const fresh = await linear(repo, 3, 1);
+    await setMain(repo, fresh.at(-1)!);
+    const rebuilt = await settle(repo, 'rewrite', 'f0.txt');
+    expect(rebuilt.json.index.epoch).toBeGreaterThan(oldEpoch);
+    expect(rebuilt.json.commits.map((entry: { sha: string }) => entry.sha)).toEqual([...fresh].reverse());
+    expect((await history('rewrite', `path=f0.txt&cursor=${encodeURIComponent(oldCursor)}`)).json.code).toBe('STALE_CURSOR');
+  });
+
+  it('follows a push effect before the next read and does not query Artifacts while serving it', async () => {
+    const repo = await createRepo('forward');
+    const initial = await linear(repo, 3);
+    await setMain(repo, initial.at(-1)!);
+    await settle(repo, 'forward', 'f0.txt');
+    const child = await commit(repo.fake, { 'f0.txt': 'next\n', 'f1.txt': 'next\n', 'f2.txt': 'next\n' }, [initial.at(-1)!]);
+    await setMain(repo, child.sha);
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    repo.fake.calls.length = 0;
+    expect(await stub.pushed({ ref: 'refs/heads/main', after: child.sha, eventAt: Date.now() + 1000 })).toBe('indexed');
+    await runDurableObjectAlarm(stub);
+    expect(repo.fake.calls.filter((entry) => entry.startsWith('log:'))).toEqual([`log:${child.sha}`]);
+    const state = await runInDurableObject(stub, async (_obj: PathHistory, storage) =>
+      storage.storage.sql.exec<{ known_sha: string; head_sha: string }>('SELECT known_sha,head_sha FROM state').toArray()[0],
+    );
+    expect(state).toMatchObject({ known_sha: child.sha, head_sha: child.sha });
+    const before = repo.fake.calls.length;
+    const result = await stub.query({ repoName: `${OWNER}--forward`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: null, cachedHead: child.sha });
+    expect(result.value?.index).toMatchObject({ indexedHead: child.sha, current: true });
+    expect(repo.fake.calls.slice(before)).toEqual([]);
+  });
+
+  it('memoizes a cached-head disagreement for five reads', async () => {
+    const repo = await createRepo('memo');
+    const old = (await linear(repo, 1))[0]!;
+    await setMain(repo, old);
+    await settle(repo, 'memo', 'f0.txt');
+    const fresh = (await commit(repo.fake, { 'f0.txt': 'new\n' }, [old])).sha;
+    repo.fake.refs.set('refs/heads/main', fresh);
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    await stub.pushed({ ref: 'refs/heads/main', after: fresh, eventAt: Date.now() + 1000 });
+    await runDurableObjectAlarm(stub);
+    repo.fake.calls.length = 0;
+    const query = () => stub.query({
+      repoName: `${OWNER}--memo`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: { epoch: 1, seq: 0 }, cachedHead: old,
+    });
+    for (let i = 0; i < 5; i++) await query();
+    expect(repo.fake.calls.filter((entry) => entry === 'log:main')).toEqual(['log:main']);
+  });
+
+  it('answers a full current page without waiting for the remaining root batch', async () => {
+    const repo = await createRepo('full-page');
+    const [root, middle, head] = await linear(repo, 3, 1);
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    const repoName = `${OWNER}--full-page`;
+    const now = Date.now();
+    await runInDurableObject(stub, async (_obj: PathHistory, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
+         VALUES(1,?,'refs/heads/main',?,0,?,-1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
+        repoName, head!, root!, head!, now, now,
+      );
+      state.storage.sql.exec(
+        'INSERT INTO commits(seq,sha,author_name,author_email,committed_at,summary,gap) VALUES(0,?,?,?,?,?,0),(-1,?,?,?,?,?,0)',
+        head!, 'author', 'author@example.test', now, 'head',
+        middle!, 'author', 'author@example.test', now, 'middle',
+      );
+      state.storage.sql.exec("INSERT INTO paths(path) VALUES('f0.txt')");
+      const pathId = state.storage.sql.exec<{ id: number }>("SELECT id FROM paths WHERE path='f0.txt'").toArray()[0]!.id;
+      state.storage.sql.exec('INSERT INTO postings(path_id,top,bottom,data) VALUES(?,0,-1,?)', pathId, '0m,-1m');
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    repo.fake.hook = async (call) => {
+      if (call.startsWith('readTree:')) {
+        repo.fake.hook = null;
+        entered();
+        await blocked;
+      }
+    };
+    const outcome = await runInDurableObject(stub, async (object, state) => {
+      const internal = object as unknown as {
+        targetHead: string | null;
+        repoName: string;
+        ref: string;
+        start(): Promise<void>;
+        query(input: Parameters<PathHistory['query']>[0]): ReturnType<PathHistory['query']>;
+      };
+      internal.targetHead = head!;
+      internal.repoName = repoName;
+      internal.ref = 'refs/heads/main';
+      const build = internal.start();
+      await reading;
+      try {
+        const before = state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM commits').toArray()[0]!.count;
+        const result = await internal.query({
+          repoName, ref: 'refs/heads/main', path: 'f0.txt', limit: 1, cursor: null, cachedHead: head!,
+        });
+        const after = state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM commits').toArray()[0]!.count;
+        return { result, before, after };
+      } finally {
+        release();
+        repo.fake.hook = null;
+        await build;
+      }
+    });
+    expect(outcome.result).toMatchObject({ ok: true, value: { commits: [{ sha: head! }], index: { current: true, rootReached: false, progressed: false } } });
+    expect(outcome.after).toBe(outcome.before);
+  });
+
+  it('records a deletion push as a null known head and rejects a stale cached head', async () => {
+    const repo = await createRepo('deletion-push');
+    const [head] = await linear(repo, 2);
+    await setMain(repo, head!);
+    await settle(repo, 'deletion-push', 'f0.txt');
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    repo.fake.refs.delete('refs/heads/main');
+    expect(await stub.pushed({ ref: 'refs/heads/main', after: '0'.repeat(40), eventAt: Date.now() + 1000 })).toBe('indexed');
+    const known = await runInDurableObject(stub, async (_obj: PathHistory, state) =>
+      state.storage.sql.exec<{ known_sha: string | null }>('SELECT known_sha FROM state').toArray()[0],
+    );
+    expect(known?.known_sha).toBeNull();
+
+    const result = await stub.query({
+      repoName: `${OWNER}--deletion-push`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: null, cachedHead: head!,
+    });
+    expect(result.value).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
+  });
+
+  it('does not recreate SQLite tables when destroyed during a blocked build', async () => {
+    const repo = await createRepo('destroy-race');
+    const [head] = await linear(repo, 1);
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    const repoName = `${OWNER}--destroy-race`;
+    const now = Date.now();
+    await runInDurableObject(stub, async (_obj: PathHistory, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
+         VALUES(1,?,'refs/heads/main',NULL,0,?,1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
+        repoName, head!, head!, now, now,
+      );
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    repo.fake.hook = async (call) => {
+      if (call.startsWith('readTree:')) {
+        repo.fake.hook = null;
+        entered();
+        await blocked;
+      }
+    };
+    try {
+      const tables = await runInDurableObject(stub, async (object, state) => {
+        const internal = object as unknown as { targetHead: string | null; repoName: string; ref: string; start(): Promise<void> };
+        internal.targetHead = head!;
+        internal.repoName = repoName;
+        internal.ref = 'refs/heads/main';
+        const build = internal.start();
+        await reading;
+        try {
+          await object.destroy();
+        } finally {
+          release();
+          repo.fake.hook = null;
+        }
+        await build;
+        return state.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table'").toArray();
+      });
+      expect(tables).toEqual([]);
+    } finally {
+      release();
+      repo.fake.hook = null;
+    }
+  });
+
+  it('does not record missing trees and retains the indexing error', async () => {
+    const repo = await createRepo('missing-tree');
+    const head = (await commit(repo.fake, { 'f0.txt': 'one\n' })).sha;
+    for (const [hash, object] of repo.fake.objects) if (object.type === 'tree') repo.fake.objects.delete(hash);
+    await setMain(repo, head);
+    const result = await history('missing-tree', 'path=f0.txt');
+    expect(result.status).toBe(200);
+    expect(result.json.index).toMatchObject({ complete: false, rootReached: false });
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    const state = await runInDurableObject(stub, async (_obj: PathHistory, storage) =>
+      storage.storage.sql.exec<{ last_error: string; count: number }>('SELECT last_error,(SELECT COUNT(*) FROM commits) AS count FROM state').toArray()[0],
+    );
+    expect(state?.last_error).toBeTruthy();
+    expect(state?.count).toBe(0);
+  });
+
+  it('omits paths whose UTF-8 encoding exceeds the indexing limit', async () => {
+    const repo = await createRepo('long-path');
+    const tooLong = 'x'.repeat(4097);
+    const head = (await commit(repo.fake, { 'ok.txt': 'ok\n', [tooLong]: 'ignored\n' })).sha;
+    await setMain(repo, head);
+    await settle(repo, 'long-path', 'ok.txt');
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    const paths = await runInDurableObject(stub, async (_obj: PathHistory, storage) =>
+      storage.storage.sql.exec<{ path: string }>('SELECT path FROM paths').toArray(),
+    );
+    expect(paths.map((row) => row.path)).toEqual(['ok.txt']);
+  });
+
+  it('records one gap when the indexed first-parent tail has disappeared', async () => {
+    const repo = await createRepo('lost-tail');
+    const missing = 'a'.repeat(40);
+    const head = (await commit(repo.fake, { 'f0.txt': 'one\n' }, [missing])).sha;
+    await setMain(repo, head);
+    const result = await history('lost-tail', 'path=f0.txt');
+    expect(result.json.index).toMatchObject({ indexedHead: head, rootReached: true, gaps: 1, complete: false });
+  });
+
+  it('does not activate or write storage when a never-queried repository is pushed', async () => {
+    const repo = await createRepo('push-only');
+    const sha = (await linear(repo, 1))[0]!;
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    expect(await stub.pushed({ ref: 'refs/heads/main', after: sha, eventAt: Date.now() })).toBe('not indexed');
+    const rows = await runInDurableObject(stub, async (_obj: PathHistory, state) => state.storage.sql.exec('SELECT COUNT(*) AS n FROM state').toArray()[0]);
+    expect(rows).toMatchObject({ n: 0 });
+  });
+
+  it('answers empty histories for an empty or deleted default branch', async () => {
+    await createRepo('empty');
+    const emptyResult = await history('empty', 'path=f0.txt');
+    expect(emptyResult.json).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
+    const populated = await createRepo('deleted');
+    const [head] = await linear(populated, 1);
+    await setMain(populated, head!);
+    await settle(populated, 'deleted', 'f0.txt');
+    populated.fake.refs.delete('refs/heads/main');
+    await bumpRefGeneration(populated.id);
+    expect((await history('deleted', 'path=f0.txt')).json).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
+  });
+
+  it('destroys the per-repository SQLite index during cleanup', async () => {
+    const repo = await createRepo('cleanup');
+    const [head] = await linear(repo, 2);
+    await setMain(repo, head!);
+    await settle(repo, 'cleanup', 'f0.txt');
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    await stub.destroy();
+    const tables = await runInDurableObject(stub, async (_obj: PathHistory, state) => state.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table'").toArray());
+    expect(tables).toEqual([]);
+  });
+
+  it('retains private-repository concealment and request validation', async () => {
+    await createRepo('private');
+    const outsider = (await mintPAT(env, await seedUser(env, 'history-outsider'), 'outsider', FULL)).token;
+    const denied = await history('private', 'path=f0.txt', outsider);
+    expect(denied.status).toBe(404);
+    expect(denied.cost).toMatchObject({ do: 0, art: 0 });
+    expect((await history('private', 'path=')).json.code).toBe('INVALID_PATH');
+    expect((await history('private', 'path=f0.txt&limit=0')).json.code).toBe('INVALID_LIMIT');
+    expect((await history('private', 'path=f0.txt&cursor=bad')).json.code).toBe('INVALID_CURSOR');
   });
 });

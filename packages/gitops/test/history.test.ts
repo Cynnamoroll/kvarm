@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { buildBlob, buildTree, encode, EMPTY_TREE_HASH, HistoryReadError, indexCommits, parseTree, type GitObject, type TreeReader } from '../src/index';
+import { buildBlob, buildTree, cachedTreeReader, encode, EMPTY_TREE_HASH, HistoryReadError, indexCommits, parseTree, type GitObject, type TreeReader } from '../src/index';
 
 class Trees implements TreeReader {
   objects = new Map<string, GitObject>();
@@ -138,6 +138,7 @@ describe('indexCommits', () => {
         throw new Error('upstream 503');
       },
     };
+    await expect(indexCommits(failing, [{ sha: 'c', tree: 'a'.repeat(40), parentTree: 'b'.repeat(40) }], BUDGET)).rejects.toBeInstanceOf(HistoryReadError);
     await expect(indexCommits(failing, [{ sha: 'c', tree: 'a'.repeat(40), parentTree: 'b'.repeat(40) }], BUDGET)).rejects.toThrow(/upstream 503/);
   });
 
@@ -164,5 +165,90 @@ describe('indexCommits', () => {
     expect(r.stopped).toBe('maxRows');
     const tiny = await indexCommits(t, commits, { ...BUDGET, maxRowBytes: 10 });
     expect(tiny.indexed[0]).toEqual({ sha: 'c1', gap: true, changes: [] });
+  });
+
+  it('caches shared trees across a linear commit chain', async () => {
+    const t = new Trees();
+    const t1 = await t.tree({ a: '1' });
+    const t2 = await t.tree({ a: '2' });
+    const t3 = await t.tree({ a: '3' });
+    const cached = cachedTreeReader(t, 10);
+    const result = await indexCommits(
+      cached,
+      [
+        { sha: 'c1', tree: t1, parentTree: null },
+        { sha: 'c2', tree: t2, parentTree: t1 },
+        { sha: 'c3', tree: t3, parentTree: t2 },
+      ],
+      BUDGET,
+    );
+    expect(result.indexed).toHaveLength(3);
+    expect(t.reads).toBe(3);
+  });
+
+  it('diffs concurrently while keeping ordered gap and stop semantics', async () => {
+    const t = new Trees();
+    const big = await t.tree(Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}`, 'x'])));
+    const small = await t.tree({ ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}`, 'x'])), g: 'y' });
+    const last = await t.tree({ ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}`, 'x'])), g: 'y', h: 'z' });
+    let active = 0;
+    let maxActive = 0;
+    const activeByHash = new Map<string, number>();
+    let maxSameHash = 0;
+    const concurrent: TreeReader = {
+      async readTree(hash) {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        const sameHash = (activeByHash.get(hash) ?? 0) + 1;
+        activeByHash.set(hash, sameHash);
+        maxSameHash = Math.max(maxSameHash, sameHash);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        try {
+          return await t.readTree(hash);
+        } finally {
+          active--;
+          activeByHash.set(hash, activeByHash.get(hash)! - 1);
+        }
+      },
+    };
+    const result = await indexCommits(
+      concurrent,
+      [
+        { sha: 'large', tree: big, parentTree: null },
+        { sha: 'small', tree: small, parentTree: big },
+        { sha: 'last', tree: last, parentTree: small },
+      ],
+      { ...BUDGET, maxChangesPerCommit: 10, commitConcurrency: 3 },
+    );
+    expect(maxActive).toBeGreaterThan(1);
+    expect(maxSameHash).toBeGreaterThan(1);
+    expect(result.indexed).toEqual([
+      { sha: 'large', changes: [], gap: true },
+      { sha: 'small', changes: [{ path: 'g', status: 'added' }], gap: false },
+      { sha: 'last', changes: [{ path: 'h', status: 'added' }], gap: false },
+    ]);
+  });
+
+  it('discards concurrent work after the first ordered stop point', async () => {
+    const t = new Trees();
+    const t1 = await t.tree({ a: '1', b: '1' });
+    const t2 = await t.tree({ a: '2', b: '2' });
+    const failing: TreeReader = {
+      async readTree(hash) {
+        if (hash === 'f'.repeat(40)) throw new Error('discarded read');
+        return t.readTree(hash);
+      },
+    };
+    const result = await indexCommits(
+      failing,
+      [
+        { sha: 'c1', tree: t1, parentTree: null },
+        { sha: 'c2', tree: t2, parentTree: t1 },
+        { sha: 'c3', tree: 'f'.repeat(40), parentTree: t2 },
+      ],
+      { ...BUDGET, maxRows: 3, commitConcurrency: 3 },
+    );
+    expect(result.indexed.map((c) => c.sha)).toEqual(['c1']);
+    expect(result.stopped).toBe('maxRows');
   });
 });

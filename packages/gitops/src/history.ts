@@ -44,6 +44,8 @@ export interface HistoryBudget {
   maxRows: number;
   /** UTF-8 bytes of the paths of those rows (default unbounded). */
   maxRowBytes?: number;
+  /** Commits to diff at once; completed results are still consumed in input order. */
+  commitConcurrency?: number;
 }
 
 export interface HistoryIndexResult {
@@ -55,6 +57,36 @@ export interface HistoryIndexResult {
 }
 
 const utf8 = new TextEncoder();
+
+/** Cache tree reads by object id with LRU eviction; failed and missing reads are not retained. */
+export function cachedTreeReader(source: TreeReader, maxEntries: number): TreeReader {
+  type Entries = Awaited<ReturnType<TreeReader['readTree']>>;
+  const limit = Math.max(0, Math.floor(maxEntries));
+  const cache = new Map<string, Promise<Entries>>();
+  return {
+    readTree(hash) {
+      if (limit === 0) return source.readTree(hash);
+      const cached = cache.get(hash);
+      if (cached) {
+        cache.delete(hash);
+        cache.set(hash, cached);
+        return cached;
+      }
+      const pending = Promise.resolve().then(() => source.readTree(hash));
+      cache.set(hash, pending);
+      while (cache.size > limit) cache.delete(cache.keys().next().value!);
+      void pending.then(
+        (entries) => {
+          if (entries === null && cache.get(hash) === pending) cache.delete(hash);
+        },
+        () => {
+          if (cache.get(hash) === pending) cache.delete(hash);
+        },
+      );
+      return pending;
+    },
+  };
+}
 
 export async function indexCommits(source: TreeReader, commits: readonly HistoryCommit[], budget: HistoryBudget): Promise<HistoryIndexResult> {
   const reader: TreeReader = {
@@ -72,38 +104,51 @@ export async function indexCommits(source: TreeReader, commits: readonly History
   let treeReads = 0;
   let rows = 0;
   let rowBytes = 0;
-  for (const c of commits) {
-    const first = indexed.length === 0;
+  const concurrency = Math.max(1, Math.floor(budget.commitConcurrency ?? 1));
+  for (let offset = 0; offset < commits.length; offset += concurrency) {
     const remaining = budget.maxTreeReads - treeReads;
     if (remaining <= 0) return { indexed, treeReads, stopped: 'maxTreeReads' };
-    const d = await diffTrees(reader, c.parentTree ?? EMPTY_TREE_HASH, c.tree, {
-      maxTreeReads: remaining,
-      maxChanges: budget.maxChangesPerCommit + 1,
-      detectRenames: false,
-      leavesOnly: true,
-    });
-    treeReads += d.treeReads;
-    if (d.truncated && d.truncatedReason === 'readError') throw new HistoryReadError(`history: tree read failed: ${d.readError ?? 'unknown'}`);
-    const tooMany = (d.truncated && d.truncatedReason === 'maxChanges') || d.changes.length > budget.maxChangesPerCommit;
-    if (tooMany) {
-      indexed.push({ sha: c.sha, changes: [], gap: true });
-      continue;
+    const batch = commits.slice(offset, offset + concurrency);
+    const results = await Promise.all(
+      batch.map(async (c) =>
+        diffTrees(reader, c.parentTree ?? EMPTY_TREE_HASH, c.tree, {
+          maxTreeReads: remaining,
+          maxChanges: budget.maxChangesPerCommit + 1,
+          detectRenames: false,
+          leavesOnly: true,
+        }),
+      ),
+    );
+    for (let i = 0; i < batch.length; i++) {
+      const c = batch[i]!;
+      const d = results[i]!;
+      const first = indexed.length === 0;
+      const available = budget.maxTreeReads - treeReads;
+      if (available <= 0) return { indexed, treeReads, stopped: 'maxTreeReads' };
+      const overReadBudget = d.treeReads > available;
+      treeReads += Math.min(d.treeReads, available);
+      if (d.truncated && d.truncatedReason === 'readError') throw new HistoryReadError(`history: tree read failed: ${d.readError ?? 'unknown'}`);
+      const tooMany = (d.truncated && d.truncatedReason === 'maxChanges') || d.changes.length > budget.maxChangesPerCommit;
+      if (tooMany) {
+        indexed.push({ sha: c.sha, changes: [], gap: true });
+        continue;
+      }
+      if (overReadBudget || d.truncated) {
+        // Later diffs in this batch may finish after the ordered budget is used.
+        if (!first) return { indexed, treeReads, stopped: 'maxTreeReads' };
+        indexed.push({ sha: c.sha, changes: [], gap: true });
+        continue;
+      }
+      const bytes = d.changes.reduce((n, x) => n + utf8.encode(x.path).length, 0);
+      if (rows + d.changes.length > budget.maxRows || rowBytes + bytes > maxRowBytes) {
+        if (!first) return { indexed, treeReads, stopped: 'maxRows' };
+        indexed.push({ sha: c.sha, changes: [], gap: true });
+        continue;
+      }
+      rows += d.changes.length;
+      rowBytes += bytes;
+      indexed.push({ sha: c.sha, changes: d.changes.map((x) => ({ path: x.path, status: x.status })), gap: false });
     }
-    if (d.truncated) {
-      // Only maxTreeReads is left: the shared budget ran out inside this commit.
-      if (!first) return { indexed, treeReads, stopped: 'maxTreeReads' };
-      indexed.push({ sha: c.sha, changes: [], gap: true });
-      continue;
-    }
-    const bytes = d.changes.reduce((n, x) => n + utf8.encode(x.path).length, 0);
-    if (rows + d.changes.length > budget.maxRows || rowBytes + bytes > maxRowBytes) {
-      if (!first) return { indexed, treeReads, stopped: 'maxRows' };
-      indexed.push({ sha: c.sha, changes: [], gap: true });
-      continue;
-    }
-    rows += d.changes.length;
-    rowBytes += bytes;
-    indexed.push({ sha: c.sha, changes: d.changes.map((x) => ({ path: x.path, status: x.status })), gap: false });
   }
   return { indexed, treeReads, stopped: null };
 }

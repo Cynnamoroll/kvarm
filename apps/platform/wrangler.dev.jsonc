@@ -69,7 +69,8 @@
       { "name": "MERGE_LOCK", "class_name": "MergeLock" },
       { "name": "ENV_BUILDER", "class_name": "EnvironmentBuilder" },
       { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" },
-      { "name": "REPO_EVENTS", "class_name": "RepoEvents" }
+      { "name": "REPO_EVENTS", "class_name": "RepoEvents" },
+      { "name": "PATH_HISTORY", "class_name": "PathHistory" }
     ]
   },
   "migrations": [
@@ -88,6 +89,10 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["RepoEvents"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["PathHistory"]
     }
   ],
   "containers": [
