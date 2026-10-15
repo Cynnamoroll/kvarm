@@ -1072,7 +1072,7 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
                 WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted')
                   AND EXISTS (SELECT 1 FROM repo_refs f
                                 WHERE f.repo_id = change_sets.repo_id AND f.ref = 'refs/heads/' || change_sets.head_ref
-                                  AND f.sha != '${ZERO_OID}' AND f.event_at > COALESCE(change_sets.head_event_at, 0)
+                                  AND f.sha != '${ZERO_OID}' AND f.event_at >= COALESCE(change_sets.head_event_at, 0)
                                   AND f.sha IS NOT change_sets.head_sha)`,
             ).bind(cx.repo.id, number, now),
           ]
