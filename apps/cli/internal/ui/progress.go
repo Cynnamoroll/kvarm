@@ -49,7 +49,9 @@ func (p *Progress) run() {
 			line := fmt.Sprintf("  %s %s %s", spinnerFrames[frame%len(spinnerFrames)], p.label, p.out.Dim(humanBytes(p.n)))
 			p.mu.Unlock()
 			frame++
-			fmt.Fprintf(p.out.w, "\r\x1b[2K%s", line)
+			// The animation writes its own control codes, so it redacts the
+			// text itself rather than going through Line.
+			fmt.Fprintf(p.out.w, "\r\x1b[2K%s", p.out.redact(line))
 		}
 	}
 }

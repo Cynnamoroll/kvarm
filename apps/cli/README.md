@@ -30,6 +30,12 @@ basic-auth header scoped to `KVARM_BASE_URL`. It is passed through
 credential helpers disabled and terminal prompts off, so no credential store
 is read or written.
 
+The token is never printed. The root help reports only whether a variable is
+set, never its value, and every line the CLI writes passes through a redactor
+that masks the `KVARM_PAT` value and its base64 forms, plus any
+`kvarm_pat_…`/`kvarm_agt_…` shape. That covers the one path that could echo it
+back: a platform error body quoting the `Authorization` header.
+
 ## Help: one level at a time
 
 Help is hierarchical, so no screen dumps every command at once:
