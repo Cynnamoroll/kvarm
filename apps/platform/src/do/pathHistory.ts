@@ -15,6 +15,7 @@ const CODE_TO_STATUS = { a: 'added', d: 'removed', m: 'modified', r: 'renamed', 
 
 interface StateRow {
   epoch: number;
+  repo_id: string | null;
   repo_name: string;
   ref: string;
   head_sha: string | null;
@@ -32,6 +33,7 @@ interface StateRow {
 }
 
 export interface HistoryQuery {
+  repoId: string;
   repoName: string;
   ref: string;
   path: string;
@@ -56,7 +58,7 @@ export interface HistoryResult {
 }
 
 const stateSql = `CREATE TABLE IF NOT EXISTS state (
-  epoch INTEGER NOT NULL, repo_name TEXT NOT NULL, ref TEXT NOT NULL, head_sha TEXT, head_seq INTEGER NOT NULL,
+  epoch INTEGER NOT NULL, repo_id TEXT, repo_name TEXT NOT NULL, ref TEXT NOT NULL, head_sha TEXT, head_seq INTEGER NOT NULL,
   tail_next TEXT, tail_seq INTEGER NOT NULL, gaps INTEGER NOT NULL DEFAULT 0,
   known_sha TEXT, known_at INTEGER NOT NULL DEFAULT 0, memo_cached TEXT, memo_known TEXT,
   memo_fresh TEXT, memo_at INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at INTEGER NOT NULL
@@ -75,6 +77,7 @@ export class PathHistory extends DurableObject<Env> {
   private headRead: Promise<string | null> | null = null;
   private readonly pageWaiters = new Set<() => void>();
   private destroyed = false;
+  private repoId = '';
   private repoName = '';
   private ref = '';
   private window: ArtifactsCommitMetadata[] = [];
@@ -91,6 +94,10 @@ export class PathHistory extends DurableObject<Env> {
     this.artifacts = env.ARTIFACTS;
     this.ready = ctx.blockConcurrencyWhile(async () => {
       ctx.storage.sql.exec(stateSql);
+      const stateColumns = ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(state)').toArray();
+      if (!stateColumns.some((column) => column.name === 'repo_id')) {
+        ctx.storage.sql.exec('ALTER TABLE state ADD COLUMN repo_id TEXT');
+      }
       ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS paths (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE)');
       ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS commits (seq INTEGER PRIMARY KEY, sha TEXT NOT NULL, author_name TEXT, author_email TEXT, committed_at INTEGER, summary TEXT, gap INTEGER NOT NULL)');
       ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS postings (path_id INTEGER NOT NULL, top INTEGER NOT NULL, bottom INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(path_id, top)) WITHOUT ROWID');
@@ -105,15 +112,13 @@ export class PathHistory extends DurableObject<Env> {
     return this.rows<StateRow>('SELECT * FROM state LIMIT 1')[0] ?? null;
   }
 
-  private async repoExists(repoName = this.repoName): Promise<boolean> {
-    return Boolean(
-      await this.env.DB.prepare('SELECT 1 AS ok FROM repos WHERE artifacts_name = ?').bind(repoName).first(),
-    );
+  private async repoExists(repoId = this.repoId): Promise<boolean> {
+    return Boolean(await this.env.DB.prepare('SELECT 1 AS ok FROM repos WHERE id = ?').bind(repoId).first());
   }
 
-  private async repoActive(repoName = this.repoName): Promise<boolean> {
+  private async repoActive(repoId = this.repoId): Promise<boolean> {
     if (this.destroyed) return false;
-    if (await this.repoExists(repoName)) return !this.destroyed;
+    if (await this.repoExists(repoId)) return !this.destroyed;
     await this.destroy();
     return false;
   }
@@ -185,16 +190,20 @@ export class PathHistory extends DurableObject<Env> {
     if (this.destroyed) await this.ctx.storage.deleteAlarm();
   }
 
-  async pushed(input: { ref: string; after: string; eventAt: number }): Promise<'indexed' | 'not indexed'> {
+  async pushed(input: { repoId: string; ref: string; after: string; eventAt: number }): Promise<'indexed' | 'not indexed'> {
     await this.ready;
     if (this.destroyed) return 'not indexed';
     const state = this.state();
     if (!state) return 'not indexed';
-    if (!(await this.repoActive(state.repo_name))) return 'not indexed';
+    if (state.repo_id && state.repo_id !== input.repoId) return 'not indexed';
+    this.repoId = input.repoId;
     if (input.ref === state.ref && input.eventAt >= state.known_at) {
       this.repoName = state.repo_name;
       const after = input.after === ZERO_OID ? null : input.after;
-      this.ctx.storage.sql.exec('UPDATE state SET known_sha = ?, known_at = ?, updated_at = ?', after, input.eventAt, Date.now());
+      this.ctx.storage.sql.exec(
+        'UPDATE state SET repo_id = COALESCE(repo_id, ?), known_sha = ?, known_at = ?, updated_at = ?',
+        input.repoId, after, input.eventAt, Date.now(),
+      );
       this.targetHead = after;
       await this.arm();
       return 'indexed';
@@ -214,9 +223,17 @@ export class PathHistory extends DurableObject<Env> {
   async query(input: HistoryQuery): Promise<HistoryResult> {
     await this.ready;
     if (this.destroyed) return { ok: false, status: 503, error: 'repository storage is unavailable, retry shortly', code: 'STORAGE_UNAVAILABLE' };
+    this.repoId = input.repoId;
     this.repoName = input.repoName;
     this.ref = input.ref;
     let state = this.state();
+    if (state?.repo_id && state.repo_id !== input.repoId) {
+      return { ok: false, status: 503, error: 'repository storage is unavailable, retry shortly', code: 'STORAGE_UNAVAILABLE' };
+    }
+    if (state && !state.repo_id) {
+      this.ctx.storage.sql.exec('UPDATE state SET repo_id = ? WHERE repo_id IS NULL', input.repoId);
+      state = this.state();
+    }
     let head = input.cachedHead;
     if (state && head === state.known_sha) {
       head = state.known_sha;
@@ -298,15 +315,16 @@ export class PathHistory extends DurableObject<Env> {
 
   private freshHead(input: HistoryQuery): Promise<string | null> {
     if (!this.headRead) {
-      this.headRead = (async () => {
+      const read = (async () => {
         const repo = await this.artifacts.get(input.repoName);
         const name = input.ref.replace(/^refs\/heads\//, '');
         try {
           const log = await repo.log({ ref: name, limit: 1 });
           const head = log[0]?.hash ?? null;
-          if (!(await this.repoActive(input.repoName))) return null;
+          if (this.destroyed) return null;
           this.ctx.storage.sql.exec(
-            `UPDATE state SET repo_name = ?, known_sha = ?, known_at = ?, memo_cached = ?, memo_known = ?, memo_fresh = ?, memo_at = ?`,
+            `UPDATE state SET repo_id = COALESCE(repo_id, ?), repo_name = ?, known_sha = ?, known_at = ?, memo_cached = ?, memo_known = ?, memo_fresh = ?, memo_at = ?`,
+            input.repoId,
             input.repoName,
             head,
             Date.now(),
@@ -321,7 +339,14 @@ export class PathHistory extends DurableObject<Env> {
             repo[Symbol.dispose]();
           } catch {}
         }
-      })().finally(() => { this.headRead = null; });
+      })();
+      this.headRead = read;
+      void read.then(
+        (head) => {
+          if (head === null || this.state()) this.headRead = null;
+        },
+        () => { this.headRead = null; },
+      );
     }
     return this.headRead;
   }
@@ -330,6 +355,8 @@ export class PathHistory extends DurableObject<Env> {
     await this.ready;
     if (this.destroyed) return;
     const state = this.state();
+    this.repoId = state?.repo_id ?? '';
+    if (!this.repoId) return;
     this.repoName = state?.repo_name ?? '';
     this.ref = state?.ref ?? '';
     this.targetHead = state?.known_sha ?? null;
@@ -337,6 +364,7 @@ export class PathHistory extends DurableObject<Env> {
   }
 
   private async run(): Promise<void> {
+    if (!this.repoId || !(await this.repoActive(this.repoId))) return;
     const until = Date.now() + MAX_SLICE_MS;
     while (!this.destroyed && this.targetHead && Date.now() < until) {
       const before = this.state();
@@ -344,7 +372,7 @@ export class PathHistory extends DurableObject<Env> {
       try {
         await this.indexBatch();
       } catch (err) {
-        if (!(await this.repoActive())) return;
+        if (this.destroyed) return;
         this.ctx.storage.sql.exec('UPDATE state SET last_error = ?, updated_at = ?', String(err).slice(0, 200), Date.now());
         console.warn(JSON.stringify({ pathHistory: String(err).slice(0, 200) }));
         throw err;
@@ -354,7 +382,7 @@ export class PathHistory extends DurableObject<Env> {
       const state = this.state();
       if (state && state.head_sha === this.targetHead && state.tail_next === null) break;
     }
-    if (!(await this.repoActive())) return;
+    if (this.destroyed) return;
     const state = this.state();
     if (this.targetHead && (!state || state.head_sha !== this.targetHead || state.tail_next !== null)) {
       await this.ctx.storage.setAlarm(Date.now());
@@ -368,7 +396,7 @@ export class PathHistory extends DurableObject<Env> {
     const head = this.targetHead!;
     let state = this.state();
     if (!state || state.ref !== this.ref || (!state.head_sha && state.known_sha !== head)) {
-      if (!(await this.repoActive())) return;
+      if (!this.repoId || !(await this.repoActive(this.repoId))) return;
       this.resetEpoch(state, head);
       if (this.destroyed) return;
       state = this.state();
@@ -377,7 +405,7 @@ export class PathHistory extends DurableObject<Env> {
     if (state!.head_sha && state!.head_sha !== head) {
       const indexed = await this.indexForward(repo, state!, head);
       if (indexed) return;
-      if (!(await this.repoActive())) return;
+      if (!this.repoId || !(await this.repoActive(this.repoId))) return;
       this.resetEpoch(state, head);
       if (this.destroyed) return;
       state = this.state();
@@ -387,7 +415,7 @@ export class PathHistory extends DurableObject<Env> {
       try {
         window = firstParentRun(await repo.log({ ref: state!.tail_next ?? head, limit: LOG_WINDOW }));
       } catch (err) {
-        if (!(await this.repoActive())) return;
+        if (this.destroyed) return;
         if ((err as { code?: string }).code !== 'NOT_FOUND' || state!.tail_next === head) throw err;
         this.ctx.storage.sql.exec('UPDATE state SET tail_next=NULL,gaps=gaps+1');
         return;
@@ -395,7 +423,7 @@ export class PathHistory extends DurableObject<Env> {
       this.window = window;
     }
     if (window.length === 0) {
-      if (!(await this.repoActive())) return;
+      if (this.destroyed) return;
       this.ctx.storage.sql.exec('UPDATE state SET tail_next=NULL,gaps=gaps+1');
       return;
     }
@@ -412,7 +440,6 @@ export class PathHistory extends DurableObject<Env> {
     if (batchLength === 0) {
       const missingParent = commits[0]!;
       const seq = state!.tail_seq - 1;
-      if (!(await this.repoActive())) return;
       if (!this.persist(
         [{ sha: missingParent.hash, tree: missingParent.treeHash, parentTree: null, meta: missingParent, seq }],
         [{ sha: missingParent.hash, changes: [], gap: true }],
@@ -433,7 +460,6 @@ export class PathHistory extends DurableObject<Env> {
     });
     this.treeReader ??= cachedTreeReader({ readTree: (hash) => repo.readTree(hash) }, CACHE_TREES);
     const result = await indexCommits(this.treeReader, inputs, { maxTreeReads: MAX_TREE_READS, maxChangesPerCommit: MAX_CHANGES, maxRows: 100_000, commitConcurrency: 8 });
-    if (!(await this.repoActive())) return;
     const indexed = inputs.slice(0, result.indexed.length);
     if (!this.persist(indexed, result.indexed, () => {
       const last = indexed[indexed.length - 1];
@@ -453,10 +479,11 @@ export class PathHistory extends DurableObject<Env> {
     this.ctx.storage.sql.exec('CREATE TABLE postings (path_id INTEGER NOT NULL, top INTEGER NOT NULL, bottom INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(path_id, top)) WITHOUT ROWID');
     this.ctx.storage.sql.exec('DELETE FROM state');
     this.ctx.storage.sql.exec(
-      `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
-       VALUES(?,?,?,NULL,0,?,1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
-      (state?.epoch ?? 0) + 1, this.repoName, this.ref, head, head, Date.now(), Date.now(),
+      `INSERT INTO state(epoch,repo_id,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
+       VALUES(?,?,?,?,NULL,0,?,1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
+      (state?.epoch ?? 0) + 1, this.repoId, this.repoName, this.ref, head, head, Date.now(), Date.now(),
     );
+    this.headRead = null;
     this.window = [];
     this.forwardHead = null;
     this.forwardFrom = null;
@@ -506,7 +533,6 @@ export class PathHistory extends DurableObject<Env> {
     }));
     this.treeReader ??= cachedTreeReader({ readTree: (hash) => repo.readTree(hash) }, CACHE_TREES);
     const result = await indexCommits(this.treeReader, inputs, { maxTreeReads: MAX_TREE_READS, maxChangesPerCommit: MAX_CHANGES, maxRows: 100_000, commitConcurrency: 8 });
-    if (!(await this.repoActive())) return false;
     const indexed = inputs.slice(0, result.indexed.length);
     if (!this.persist(indexed, result.indexed, () => {
       const last = indexed[indexed.length - 1];

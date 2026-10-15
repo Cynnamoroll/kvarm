@@ -679,7 +679,7 @@ describe('SnapshotBuilder', () => {
 
     const del = await call(`/api/v1/repos/${OWNER}/vanish-retired`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
-    expect(await env.SNAPSHOTS.get(retiredKey)).not.toBeNull();
+    expect(await env.SNAPSHOTS.get(retiredKey)).toBeNull();
     expect(await env.SNAPSHOTS.get(snapshotKey(id, c.tree, 'zstd'))).toBeNull();
 
     batch.release();
@@ -1337,7 +1337,7 @@ describe('snapshot API', () => {
     const del = await call(`/api/v1/repos/${OWNER}/doomed`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
     expect(del.cost.d1).toBeLessThanOrEqual(3);
-    expect(del.cost).toMatchObject({ art: 1, r2a: 3, r2b: 0, do: 1 });
+    expect(del.cost).toMatchObject({ art: 0, r2a: 0, r2b: 0, do: 0 });
     expect(await objectKeys(id)).toHaveLength(0);
     expect(await commitRow(id, main.sha)).toBeNull();
     const trees = await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_trees WHERE repo_id = ?').bind(id).first();
@@ -1350,7 +1350,7 @@ describe('snapshot API', () => {
     const del = await call(`/api/v1/repos/${OWNER}/bare`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
     expect(del.cost.d1).toBeLessThanOrEqual(3);
-    expect(del.cost).toMatchObject({ art: 1, r2a: 3, r2b: 0, do: 1 });
+    expect(del.cost).toMatchObject({ art: 0, r2a: 0, r2b: 0, do: 0 });
     expect(await env.DB.prepare('SELECT id FROM repos WHERE id = ?').bind(id).first()).toBeNull();
   });
 });

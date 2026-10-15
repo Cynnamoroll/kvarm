@@ -13,7 +13,7 @@ import {
   type RepoRow,
 } from '../db/repos';
 import { snapshotCleanupStatements } from '../services/snapshots';
-import { purgeRepo } from '../services/repoPurge';
+import { purgeRepo, purgeRepoById } from '../services/repoPurge';
 import { changeCleanupStatements } from '../services/changes';
 import { workspaceCleanupStatements } from '../services/workspaces';
 import { issueCleanupStatements } from '../services/issues';
@@ -51,7 +51,23 @@ async function prepareRepoCreation(
   if (await getRepo(env.DB, ownerLogin, name)) {
     return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
   }
-  return { ok: true, value: { name, artifactsName: artifactsRepoName(ownerLogin, name) } };
+  const artifactsName = artifactsRepoName(ownerLogin, name);
+  const purging = await env.DB.prepare(
+    'SELECT repo_id FROM repo_purges WHERE artifacts_name = ? AND done_at IS NULL',
+  ).bind(artifactsName).all<{ repo_id: string }>();
+  for (const tombstone of purging.results ?? []) await purgeRepoById(env, tombstone.repo_id);
+  const stillPurging = await env.DB.prepare(
+    'SELECT 1 AS pending FROM repo_purges WHERE artifacts_name = ? AND done_at IS NULL LIMIT 1',
+  ).bind(artifactsName).first();
+  if (stillPurging) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'a deleted repository with this name is still being purged, retry shortly',
+      code: 'REPO_DELETING',
+    };
+  }
+  return { ok: true, value: { name, artifactsName } };
 }
 
 export async function createRepo(env: Env, p: CreateRepoParams): Promise<ServiceResult<RepoRow>> {
@@ -155,8 +171,9 @@ export async function forkRepo(
 export async function deleteRepo(
   env: Env,
   repo: RepoRow,
+  options: { waitUntil?: (promise: Promise<unknown>) => void } = {},
 ): Promise<ServiceResult<{ deleted: true }>> {
-  // The tombstone and registry deletion commit with all relational cleanup.
+  // D1 goes first so the repo disappears from every listing before slower storage cleanup.
   const before = [
     ...compositionCleanupStatements(env.DB, repo.id),
     ...arenaCleanupStatements(env.DB, repo.id),
@@ -181,38 +198,50 @@ export async function deleteRepo(
     env.DB.prepare('UPDATE repos SET fork_parent_id = NULL WHERE fork_parent_id = ?').bind(repo.id),
   ];
   const now = Date.now();
-  const results = await env.DB.batch<{ r2_key: string }>([
+  const results = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO repo_purges (repo_id, artifacts_name, snapshot_keys, created_at, next_attempt_at)
-       SELECT r.id, r.artifacts_name,
-         (SELECT COALESCE(json_group_array(r2_key), '[]') FROM (
-           SELECT r2_key FROM snapshot_trees WHERE repo_id = r.id AND r2_key IS NOT NULL
-           UNION SELECT r2_key FROM snapshots WHERE repo_id = r.id AND r2_key IS NOT NULL
-         )), ?2, ?2
+      `INSERT INTO repo_purges (repo_id, artifacts_name, created_at, next_attempt_at)
+       SELECT r.id, r.artifacts_name, ?2, ?2
        FROM repos r WHERE r.id = ?1
        ON CONFLICT(repo_id) DO UPDATE SET
-         artifacts_name = excluded.artifacts_name, snapshot_keys = excluded.snapshot_keys
+         artifacts_name = excluded.artifacts_name
        RETURNING *`,
     ).bind(repo.id, now),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO repo_purge_keys (repo_id, "key")
+       SELECT ?1, r2_key FROM snapshots WHERE repo_id = ?1 AND r2_key IS NOT NULL`,
+    ).bind(repo.id),
     ...before,
     deleteRepoRowStatement(env.DB, repo.id),
     ...snapshotCleanupStatements(env.DB, repo.id),
   ]);
   const tombstone = results[0]?.results?.[0] as unknown as import('../services/repoPurge').RepoPurgeTombstone | undefined;
-  let purgeComplete = false;
-  if (tombstone) {
+  const cleanup = async () => {
+    if (!tombstone) return;
+    let purgeComplete = false;
     try {
       purgeComplete = (await purgeRepo(env, tombstone, { maxPrefixPages: 1, maxSnapshotBatches: 1 })).ok;
     } catch (err) {
       console.warn(JSON.stringify({ repoPurgeInlineFailed: repo.id, error: err instanceof Error ? err.name : 'Error' }));
     }
-  }
-  if (tombstone && !purgeComplete) {
-    try {
-      await env.EVENTS.send({ type: 'repo.purge', repoId: repo.id });
-    } catch (err) {
-      console.warn(JSON.stringify({ repoPurgeEnqueueFailed: repo.id, error: err instanceof Error ? err.name : 'Error' }));
+    if (!purgeComplete) {
+      try {
+        await env.EVENTS.send({ type: 'repo.purge', repoId: repo.id });
+      } catch (err) {
+        console.warn(JSON.stringify({ repoPurgeEnqueueFailed: repo.id, error: err instanceof Error ? err.name : 'Error' }));
+      }
     }
+  };
+  if (options.waitUntil) {
+    const task = cleanup();
+    try {
+      options.waitUntil(task);
+    } catch (err) {
+      console.warn(JSON.stringify({ repoPurgeWaitUntilFailed: repo.id, error: err instanceof Error ? err.name : 'Error' }));
+      await task;
+    }
+  } else {
+    await cleanup();
   }
   return { ok: true, value: { deleted: true } };
 }

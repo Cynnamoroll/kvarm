@@ -795,6 +795,6 @@ repoPages.post('/delete', async (c) => {
   if (!canAdminister(resolved)) return notFound(c);
   const refused = await sessionFormRefused(c, resolved.viewer, await c.req.parseBody());
   if (refused) return refused;
-  await svc.deleteRepo(c.env, resolved.repo);
+  await svc.deleteRepo(c.env, resolved.repo, { waitUntil: (promise) => c.executionCtx.waitUntil(promise) });
   return finish(c, c.redirect('/'));
 });

@@ -515,7 +515,7 @@ const historyEffect: PushEffect = {
     if (ctx.event.ref !== `refs/heads/${ctx.defaultBranch}`) return { state: 'skipped', detail: 'not the default branch' };
     if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
     const stub = ctx.env.PATH_HISTORY.get(ctx.env.PATH_HISTORY.idFromName(ctx.repoId));
-    const result = await stub.pushed({ ref: ctx.event.ref, after: ctx.event.after, eventAt: ctx.eventAt });
+    const result = await stub.pushed({ repoId: ctx.repoId, ref: ctx.event.ref, after: ctx.event.after, eventAt: ctx.eventAt });
     return { state: 'done', detail: result };
   },
 };

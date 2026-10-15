@@ -10,10 +10,11 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { listReposForOwner } from '../src/db/repos';
+import { listReposForOwner, type RepoRow } from '../src/db/repos';
+import { createRepo, deleteRepo, forkRepo, importRepo } from '../src/repos/service';
 import { handleEventBatch } from '../src/services/events';
-import { sweepRepoPurges } from '../src/services/repoPurge';
-import { fakeArtifacts, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { purgeRepo, purgeRepoById, sweepRepoPurges } from '../src/services/repoPurge';
+import { FakeRepo, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 import { call } from './helpers/http';
 import { seedRepo, seedRepoWithCommit, seedUser } from './helpers/seed';
 
@@ -104,7 +105,7 @@ async function populateRepoTables(repoId: string, sha: string, userId: string): 
   };
   const seeded = new Set<string>();
   for (const table of repoTables) {
-    if (table === 'repo_purges') continue;
+    if (table === 'repo_purges' || table === 'repo_purge_keys') continue;
     const quotedTable = `"${table.replaceAll('"', '""')}"`;
     const prior = await env.DB.prepare(`SELECT 1 AS found FROM ${quotedTable} WHERE repo_id = ? LIMIT 1`).bind(repoId).first();
     if (prior) {
@@ -133,11 +134,11 @@ async function populateRepoTables(repoId: string, sha: string, userId: string): 
       `INSERT INTO ${quotedTable} (${names.map((name) => `"${name.replaceAll('"', '""')}"`).join(', ')}) VALUES (${placeholders})`,
     ).bind(...names.map((name) => values.get(name))).run();
     if (table === 'snapshot_trees') {
-      await env.SNAPSHOTS.put(`snapshot/${repoId}/tree`, 'snapshot');
+      await env.SNAPSHOTS.put(`trees/v3/${repoId}/${sha}.tar.zst`, 'snapshot');
     }
     seeded.add(table);
   }
-  expect([...seeded].sort()).toEqual(repoTables.filter((table) => table !== 'repo_purges').sort());
+  expect([...seeded].sort()).toEqual(repoTables.filter((table) => table !== 'repo_purges' && table !== 'repo_purge_keys').sort());
   return repoTables;
 }
 
@@ -318,7 +319,7 @@ function repoTableValue(table: string, column: string, type: string, now: number
     prefix: 'test',
     command: 'true',
     artifacts_name: `${OWNER}--purge-test`,
-    r2_key: table === 'snapshot_trees' ? `snapshot/${repoId}/tree` : `snapshot/${table}`,
+    r2_key: table === 'snapshot_trees' ? `trees/v3/${repoId}/${sha}.tar.zst` : `snapshot/${table}`,
     instance_id: crypto.randomUUID(),
     builder: crypto.randomUUID(),
     trigger: 'push',
@@ -377,6 +378,9 @@ describe('repo deletion', () => {
       ).bind(id, sha, now, now),
     ]);
     await env.SNAPSHOTS.put('snapshot/purge', 'legacy snapshot');
+    for (const version of ['v1', 'v2', 'v3']) {
+      await env.SNAPSHOTS.put(`trees/${version}/${id}/legacy-object`, version);
+    }
     for (const prefix of ['replica', 'fetch', 'bundles']) {
       await env.SNAPSHOTS.put(`${prefix}/${id}/object`, prefix);
     }
@@ -385,8 +389,9 @@ describe('repo deletion', () => {
     const historyStub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(id));
     await runInDurableObject(historyStub, async (_obj, state) => {
       state.storage.sql.exec(
-        `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_at,updated_at)
-         VALUES(1,?,'refs/heads/main',?,0,NULL,0,0,?,?,0,?)`,
+        `INSERT INTO state(epoch,repo_id,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_at,updated_at)
+         VALUES(1,?,?,'refs/heads/main',?,0,NULL,0,0,?,?,0,?)`,
+        id,
         repo?.artifacts_name ?? '',
         sha,
         sha,
@@ -403,6 +408,9 @@ describe('repo deletion', () => {
     }
     for (const prefix of ['replica', 'fetch', 'bundles']) {
       expect((await env.SNAPSHOTS.list({ prefix: `${prefix}/${id}/` })).objects).toHaveLength(0);
+    }
+    for (const version of ['v1', 'v2', 'v3']) {
+      expect((await env.SNAPSHOTS.list({ prefix: `trees/${version}/${id}/` })).objects).toHaveLength(0);
     }
     expect((await env.SNAPSHOTS.list({ prefix: 'snapshot/' })).objects).toHaveLength(0);
     const historyTables = await runInDurableObject(historyStub, async (_obj, state) =>
@@ -426,7 +434,7 @@ describe('repo deletion', () => {
     expect((await call(failingEnv, 'DELETE', `/api/v1/repos/${OWNER}/purge-sweep`, { token: tok.owner })).status).toBe(200);
     const failedInline = await env.DB.prepare('SELECT done_at, attempts, last_error FROM repo_purges WHERE repo_id = ?')
       .bind(sweepId).first<{ done_at: number | null; attempts: number; last_error: string }>();
-    expect(failedInline).toMatchObject({ done_at: null, attempts: 1, last_error: 'artifacts:Error' });
+    expect(failedInline).toMatchObject({ done_at: null, attempts: 1, last_error: 'artifacts:Error:storage unavailable' });
     await env.DB.prepare('UPDATE repo_purges SET next_attempt_at = 0 WHERE repo_id = ?').bind(sweepId).run();
     expect(await sweepRepoPurges(env, { now: Date.now() })).toMatchObject({ count: 1, failed: 0 });
     const swept = await env.DB.prepare('SELECT done_at FROM repo_purges WHERE repo_id = ?')
@@ -474,6 +482,276 @@ describe('repo deletion', () => {
     const queued = await env.DB.prepare('SELECT done_at FROM repo_purges WHERE repo_id = ?')
       .bind(queueId).first<{ done_at: number | null }>();
     expect(queued?.done_at).not.toBeNull();
+  });
+
+  it('continues snapshot-prefix deletion across page-limited purge sweeps', async () => {
+    const { id } = await seedRepo(env, 'large-snapshot-prefix', { owner: OWNER, visibility: 'private' });
+    const prefix = `trees/v1/${id}/`;
+    for (let start = 0; start < 2001; start += 100) {
+      await Promise.all(
+        Array.from({ length: Math.min(100, 2001 - start) }, (_, offset) =>
+          env.SNAPSHOTS.put(`${prefix}${String(start + offset).padStart(5, '0')}`, 'tree'),
+        ),
+      );
+    }
+
+    expect((await call(env, 'DELETE', `/api/v1/repos/${OWNER}/large-snapshot-prefix`, { token: tok.owner })).status).toBe(200);
+    const first = await env.DB.prepare('SELECT attempts, done_at FROM repo_purges WHERE repo_id = ?')
+      .bind(id).first<{ attempts: number; done_at: number | null }>();
+    expect(first).toMatchObject({ attempts: 1, done_at: null });
+    expect((await env.SNAPSHOTS.list({ prefix })).objects).toHaveLength(1000);
+
+    await env.DB.prepare('UPDATE repo_purges SET next_attempt_at = 0 WHERE repo_id = ?').bind(id).run();
+    expect(await sweepRepoPurges(env)).toMatchObject({ count: 1, failed: 1 });
+    expect((await env.SNAPSHOTS.list({ prefix })).objects).toHaveLength(1);
+
+    await env.DB.prepare('UPDATE repo_purges SET next_attempt_at = 0 WHERE repo_id = ?').bind(id).run();
+    expect(await sweepRepoPurges(env)).toMatchObject({ count: 1, failed: 0 });
+    expect((await env.SNAPSHOTS.list({ prefix })).objects).toHaveLength(0);
+    const completed = await env.DB.prepare('SELECT done_at, attempts FROM repo_purges WHERE repo_id = ?')
+      .bind(id).first<{ done_at: number | null; attempts: number }>();
+    expect(completed).toMatchObject({ attempts: 2 });
+    expect(completed?.done_at).not.toBeNull();
+  }, 60_000);
+
+  it('does not wait for purge cleanup when a request lifetime callback is provided', async () => {
+    const { id } = await seedRepo(env, 'wait-until-delete', { owner: OWNER, visibility: 'private' });
+    const repo = await env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(id).first<RepoRow>();
+    expect(repo).not.toBeNull();
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const deleting = new Promise<void>((resolve) => { entered = resolve; });
+    const lifecycleEnv = {
+      ...env,
+      ARTIFACTS: {
+        ...fakeArtifacts,
+        async delete(name: string) {
+          entered();
+          await blocked;
+          await fakeArtifacts.delete(name);
+        },
+      },
+    } as unknown as Env;
+    let cleanup: Promise<unknown> | undefined;
+    const result = await deleteRepo(lifecycleEnv, repo!, { waitUntil: (promise) => { cleanup = promise; } });
+    expect(result.ok).toBe(true);
+    await deleting;
+    expect(cleanup).toBeDefined();
+    expect(await env.DB.prepare('SELECT 1 FROM repos WHERE id = ?').bind(id).first()).toBeNull();
+    release();
+    await cleanup;
+  });
+
+  it('does not resurrect a completed tombstone when a concurrent runner fails late', async () => {
+    const repoId = crypto.randomUUID();
+    const artifactsName = `${OWNER}--concurrent-purge`;
+    await env.DB.prepare(
+      `INSERT INTO repo_purges (repo_id, artifacts_name, created_at, next_attempt_at)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(repoId, artifactsName, Date.now(), Date.now()).run();
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const deleting = new Promise<void>((resolve) => { entered = resolve; });
+    let calls = 0;
+    const lifecycleEnv = {
+      ...env,
+      ARTIFACTS: {
+        ...fakeArtifacts,
+        async delete(name: string) {
+          calls++;
+          if (calls === 1) {
+            entered();
+            await blocked;
+            throw new Error('late failure');
+          }
+          await fakeArtifacts.delete(name);
+        },
+      },
+    } as unknown as Env;
+    const tombstone = await env.DB.prepare('SELECT * FROM repo_purges WHERE repo_id = ?')
+      .bind(repoId).first<import('../src/services/repoPurge').RepoPurgeTombstone>();
+    expect(tombstone).not.toBeNull();
+    const lateRunner = purgeRepo(lifecycleEnv, tombstone!);
+    await deleting;
+    expect((await purgeRepo(lifecycleEnv, tombstone!)).ok).toBe(true);
+    release();
+    expect((await lateRunner).ok).toBe(false);
+    const completed = await env.DB.prepare('SELECT done_at, attempts FROM repo_purges WHERE repo_id = ?')
+      .bind(repoId).first<{ done_at: number | null; attempts: number }>();
+    expect(completed?.done_at).not.toBeNull();
+    expect(completed?.attempts).toBe(0);
+  });
+
+  it('redacts long token-like purge errors and keeps them bounded', async () => {
+    const repoId = crypto.randomUUID();
+    const artifactsName = `${OWNER}--redacted-purge`;
+    await env.DB.prepare(
+      `INSERT INTO repo_purges (repo_id, artifacts_name, created_at, next_attempt_at)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(repoId, artifactsName, Date.now(), Date.now()).run();
+    const lifecycleEnv = {
+      ...env,
+      ARTIFACTS: {
+        ...fakeArtifacts,
+        async delete() {
+          throw new Error(`storage ${'x'.repeat(40)}${'y'.repeat(100)}`);
+        },
+      },
+    } as unknown as Env;
+    const tombstone = await env.DB.prepare('SELECT * FROM repo_purges WHERE repo_id = ?')
+      .bind(repoId).first<import('../src/services/repoPurge').RepoPurgeTombstone>();
+    expect(tombstone).not.toBeNull();
+    await purgeRepo(lifecycleEnv, tombstone!);
+    const failed = await env.DB.prepare('SELECT last_error FROM repo_purges WHERE repo_id = ?')
+      .bind(repoId).first<{ last_error: string }>();
+    expect(failed?.last_error).toMatch(/^artifacts:Error:storage …/);
+    expect(failed?.last_error.length).toBeLessThanOrEqual(500);
+    expect(failed?.last_error).not.toContain('x'.repeat(24));
+  });
+
+  it('recreates a deleted repo under a distinct Artifacts name without stale retry deleting it', async () => {
+    const { id } = await seedRepo(env, 'name-reuse', { owner: OWNER, visibility: 'private' });
+    const oldRepo = await env.DB.prepare('SELECT artifacts_name FROM repos WHERE id = ?')
+      .bind(id).first<{ artifacts_name: string }>();
+    expect(oldRepo).not.toBeNull();
+    const deletedNames: string[] = [];
+    let failDelete = true;
+    const artifacts = {
+      ...fakeArtifacts,
+      async delete(name: string) {
+        deletedNames.push(name);
+        if (name === oldRepo!.artifacts_name && failDelete) {
+          failDelete = false;
+          throw new Error('storage unavailable');
+        }
+        await fakeArtifacts.delete(name);
+      },
+      async create(name: string) {
+        fakeRepos.set(name, new FakeRepo());
+        return { remote: `https://artifacts.invalid/${name}.git`, defaultBranch: 'main' };
+      },
+    } as unknown as Artifacts;
+    const lifecycleEnv = { ...env, ARTIFACTS: artifacts } as Env;
+
+    const deleted = await call(lifecycleEnv, 'DELETE', `/api/v1/repos/${OWNER}/name-reuse`, { token: tok.owner });
+    expect(deleted.status).toBe(200);
+    const failed = await env.DB.prepare('SELECT attempts, done_at FROM repo_purges WHERE repo_id = ?')
+      .bind(id).first<{ attempts: number; done_at: number | null }>();
+    expect(failed).toMatchObject({ attempts: 1, done_at: null });
+
+    const recreated = await createRepo(lifecycleEnv, { ownerLogin: OWNER, name: 'name-reuse' });
+    expect(recreated.ok).toBe(true);
+    if (!recreated.ok) throw new Error(recreated.error);
+    expect(recreated.value.artifacts_name).not.toBe(oldRepo!.artifacts_name);
+    expect(recreated.value.artifacts_name).toMatch(/^del-owner--name-reuse--[0-9a-f]{8}$/);
+
+    expect((await purgeRepoById(lifecycleEnv, id)).ok).toBe(true);
+    expect(deletedNames).toEqual([oldRepo!.artifacts_name, oldRepo!.artifacts_name]);
+    expect(fakeRepos.has(recreated.value.artifacts_name)).toBe(true);
+  });
+
+  it('uses bounded randomized Artifacts names for create, import and fork', async () => {
+    const { id: parentId } = await seedRepo(env, 'creation-parent', { owner: OWNER, visibility: 'private' });
+    const parent = await env.DB.prepare('SELECT * FROM repos WHERE id = ?')
+      .bind(parentId).first<RepoRow>();
+    expect(parent).not.toBeNull();
+    const createdNames: string[] = [];
+    const artifacts = {
+      ...fakeArtifacts,
+      async create(name: string) {
+        createdNames.push(name);
+        fakeRepos.set(name, new FakeRepo());
+        return { remote: `https://artifacts.invalid/${name}.git`, defaultBranch: 'main' };
+      },
+      async import(input: { target: { name: string } }) {
+        createdNames.push(input.target.name);
+        fakeRepos.set(input.target.name, new FakeRepo());
+        return { remote: `https://artifacts.invalid/${input.target.name}.git`, defaultBranch: 'main' };
+      },
+      async get() {
+        return {
+          async fork(name: string) {
+            createdNames.push(name);
+            fakeRepos.set(name, new FakeRepo());
+            return { remote: `https://artifacts.invalid/${name}.git`, defaultBranch: 'main' };
+          },
+        };
+      },
+    } as unknown as Artifacts;
+    const serviceEnv = { ...env, ARTIFACTS: artifacts } as Env;
+    const created = await createRepo(serviceEnv, { ownerLogin: OWNER, name: 'created-new' });
+    const imported = await importRepo(serviceEnv, {
+      ownerLogin: OWNER,
+      name: 'imported-new',
+      sourceUrl: 'https://source.example/repo.git',
+    });
+    const forked = await forkRepo(serviceEnv, parent!, OWNER, 'forked-new');
+    expect([created, imported, forked].every((result) => result.ok)).toBe(true);
+    if (!created.ok || !imported.ok || !forked.ok) throw new Error('repository setup failed');
+    const names = [created.value.artifacts_name, imported.value.artifacts_name, forked.value.artifacts_name];
+    expect(new Set(names).size).toBe(3);
+    expect(createdNames).toEqual(names);
+    for (const name of names) {
+      expect(name).toMatch(/^del-owner--[a-z0-9._-]+--[0-9a-f]{8}$/);
+      expect(name.length).toBeLessThanOrEqual(63);
+    }
+  });
+
+  it('skips Artifacts and token deletion when a legacy tombstone name is currently in use', async () => {
+    const { id } = await seedRepo(env, 'legacy-name-active', { owner: OWNER, visibility: 'private' });
+    const active = await env.DB.prepare('SELECT artifacts_name FROM repos WHERE id = ?')
+      .bind(id).first<{ artifacts_name: string }>();
+    expect(active).not.toBeNull();
+    const tombstoneId = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO repo_purges (repo_id, artifacts_name, created_at, attempts, next_attempt_at)
+       VALUES (?, ?, ?, 0, ?)`,
+    ).bind(tombstoneId, active!.artifacts_name, Date.now(), Date.now()).run();
+    const deleteSpy = vi.spyOn(fakeArtifacts, 'delete');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect((await purgeRepoById(env, tombstoneId)).ok).toBe(true);
+    expect(deleteSpy).not.toHaveBeenCalledWith(active!.artifacts_name);
+    const superseded = logSpy.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('"status":"superseded"'));
+    expect(superseded).toHaveLength(2);
+    expect(superseded.join('\n')).toContain('"step":"artifacts"');
+    expect(superseded.join('\n')).toContain('"step":"tokens"');
+
+    deleteSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it('tries a matching pending tombstone before refusing repo creation', async () => {
+    const name = 'legacy-pending';
+    const artifactsName = `${OWNER}--${name}--deadbeef`;
+    const tombstoneId = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO repo_purges (repo_id, artifacts_name, created_at, attempts, next_attempt_at)
+       VALUES (?, ?, ?, 0, ?)`,
+    ).bind(tombstoneId, artifactsName, Date.now(), Date.now()).run();
+    const deleteSpy = vi.fn(async () => { throw new Error('storage unavailable'); });
+    const createSpy = vi.fn(async (target: string) => ({ remote: target, defaultBranch: 'main' }));
+    const serviceEnv = {
+      ...env,
+      ARTIFACTS: { ...fakeArtifacts, delete: deleteSpy, create: createSpy },
+    } as unknown as Env;
+    const randomSpy = vi.spyOn(crypto, 'getRandomValues').mockImplementation(<T extends ArrayBufferView>(array: T): T => {
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set([0xde, 0xad, 0xbe, 0xef]);
+      return array;
+    });
+
+    const result = await createRepo(serviceEnv, { ownerLogin: OWNER, name });
+    randomSpy.mockRestore();
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      code: 'REPO_DELETING',
+      error: 'a deleted repository with this name is still being purged, retry shortly',
+    });
+    expect(deleteSpy).toHaveBeenCalledWith(artifactsName);
+    expect(createSpy).not.toHaveBeenCalled();
   });
 
   it('prunes completed purge tombstones after seven days', async () => {

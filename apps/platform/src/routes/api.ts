@@ -326,7 +326,7 @@ api.patch('/repos/:owner/:repo', async (c) => {
 api.delete('/repos/:owner/:repo', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
-  const result = await svc.deleteRepo(c.env, d.repo);
+  const result = await svc.deleteRepo(c.env, d.repo, { waitUntil: (promise) => c.executionCtx.waitUntil(promise) });
   if (!result.ok) return c.json({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status as never);
   return c.json({ deleted: true });
 });

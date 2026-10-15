@@ -89,7 +89,7 @@ export async function pathHistory(
   }
   try {
     const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
-    const result = await stub.query({ repoName: repo.artifacts_name, ref, path, limit, cursor, cachedHead });
+    const result = await stub.query({ repoId: repo.id, repoName: repo.artifacts_name, ref, path, limit, cursor, cachedHead });
     if (!result.ok) return fail(result.status ?? 503, result.error ?? 'repository storage is unavailable, retry shortly', result.code ?? 'STORAGE_UNAVAILABLE');
     const value = result.value!;
     return {

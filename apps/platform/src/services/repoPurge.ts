@@ -3,7 +3,6 @@ import { purgeGitTokens } from '../artifacts/tokens';
 export interface RepoPurgeTombstone {
   repo_id: string;
   artifacts_name: string;
-  snapshot_keys: string;
   created_at: number;
   attempts: number;
   next_attempt_at: number;
@@ -17,9 +16,10 @@ export interface RepoPurgeResult {
 }
 
 const PURGE_BATCH = 1000;
+const KEY_DELETE_BATCH = 100;
 const MAX_PREFIX_PAGES = 10;
-const MAX_SNAPSHOT_BATCHES = Number.POSITIVE_INFINITY;
-const PREFIXES = ['replica/', 'fetch/', 'bundles/'] as const;
+const MAX_SNAPSHOT_BATCHES = 10;
+const PREFIXES = ['trees/v1/', 'trees/v2/', 'trees/v3/', 'replica/', 'fetch/', 'bundles/'] as const;
 
 async function deletePrefix(env: Env, prefix: string, maxPages: number): Promise<void> {
   let cursor: string | undefined;
@@ -35,14 +35,46 @@ async function deletePrefix(env: Env, prefix: string, maxPages: number): Promise
   throw new Error('page limit');
 }
 
-function snapshotKeys(raw: string): string[] {
-  const keys: unknown = JSON.parse(raw);
-  if (!Array.isArray(keys) || keys.some((key) => typeof key !== 'string')) throw new Error('invalid snapshot keys');
-  return keys;
+async function deleteSnapshotKeys(env: Env, repoId: string, maxBatches: number): Promise<void> {
+  let batches = 0;
+  while (batches < maxBatches) {
+    const rows = await env.DB.prepare(
+      'SELECT "key" FROM repo_purge_keys WHERE repo_id = ? ORDER BY "key" LIMIT ?',
+    ).bind(repoId, PURGE_BATCH).all<{ key: string }>();
+    const keys = rows.results?.map((row) => row.key) ?? [];
+    if (keys.length === 0) return;
+    await env.SNAPSHOTS.delete(keys);
+    const statements: D1PreparedStatement[] = [];
+    for (let i = 0; i < keys.length; i += KEY_DELETE_BATCH) {
+      const batch = keys.slice(i, i + KEY_DELETE_BATCH);
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM repo_purge_keys WHERE repo_id = ? AND "key" IN (${batch.map(() => '?').join(', ')})`,
+        ).bind(repoId, ...batch),
+      );
+    }
+    await env.DB.batch(statements);
+    batches++;
+  }
+  const remaining = await env.DB.prepare('SELECT 1 AS pending FROM repo_purge_keys WHERE repo_id = ? LIMIT 1')
+    .bind(repoId).first();
+  if (remaining) throw new Error('snapshot batch limit');
 }
 
 function errorLabel(error: unknown): string {
-  return error instanceof Error ? error.name : 'Error';
+  const name = error instanceof Error && error.name ? error.name : 'Error';
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const message = rawMessage.slice(0, 120).replace(/[A-Za-z0-9_-]{24,}/g, '…');
+  return `${name}:${message}`;
+}
+
+async function artifactsNameIsCurrent(env: Env, tombstone: RepoPurgeTombstone, step: string): Promise<boolean> {
+  const current = await env.DB.prepare('SELECT 1 AS active FROM repos WHERE artifacts_name = ? LIMIT 1')
+    .bind(tombstone.artifacts_name)
+    .first();
+  if (!current) return false;
+  console.log(JSON.stringify({ step, repoId: tombstone.repo_id, status: 'superseded' }));
+  return true;
 }
 
 export async function purgeRepo(
@@ -56,6 +88,7 @@ export async function purgeRepo(
     {
       name: 'artifacts',
       async run() {
+        if (await artifactsNameIsCurrent(env, tombstone, 'artifacts')) return;
         try {
           await env.ARTIFACTS.delete(tombstone.artifacts_name);
         } catch (error) {
@@ -69,18 +102,16 @@ export async function purgeRepo(
         await env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(tombstone.repo_id)).destroy();
       },
     },
-    { name: 'tokens', run: () => purgeGitTokens(tombstone.artifacts_name) },
+    {
+      name: 'tokens',
+      async run() {
+        if (await artifactsNameIsCurrent(env, tombstone, 'tokens')) return;
+        await purgeGitTokens(tombstone.artifacts_name);
+      },
+    },
     {
       name: 'snapshots',
-      async run() {
-        const keys = snapshotKeys(tombstone.snapshot_keys);
-        let batches = 0;
-        for (let i = 0; i < keys.length; i += PURGE_BATCH) {
-          if (batches >= maxSnapshotBatches) throw new Error('snapshot batch limit');
-          await env.SNAPSHOTS.delete(keys.slice(i, i + PURGE_BATCH));
-          batches++;
-        }
-      },
+      run: () => deleteSnapshotKeys(env, tombstone.repo_id, maxSnapshotBatches),
     },
     ...PREFIXES.map((prefix) => ({
       name: prefix,
@@ -97,7 +128,9 @@ export async function purgeRepo(
   }
   const now = Date.now();
   if (errors.length === 0) {
-    await env.DB.prepare('UPDATE repo_purges SET done_at = ?, last_error = NULL WHERE repo_id = ?')
+    await env.DB.prepare(
+      'UPDATE repo_purges SET done_at = ?, last_error = NULL WHERE repo_id = ? AND done_at IS NULL',
+    )
       .bind(now, tombstone.repo_id)
       .run();
     return { ok: true };
@@ -108,7 +141,7 @@ export async function purgeRepo(
   await env.DB.prepare(
     `UPDATE repo_purges
         SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?, done_at = NULL
-      WHERE repo_id = ?`,
+      WHERE repo_id = ? AND done_at IS NULL`,
   )
     .bind(now + backoffMs, lastError, tombstone.repo_id)
     .run();
@@ -136,7 +169,7 @@ export async function sweepRepoPurges(
   let failed = 0;
   for (const row of rows) {
     try {
-      const result = await purgeRepo(env, row);
+      const result = await purgeRepo(env, row, { maxPrefixPages: 1 });
       if (!result.ok) failed++;
     } catch {
       failed++;

@@ -68,6 +68,39 @@ async function settle(repo: { id: string }, name: string, path: string) {
 }
 
 describe('GET /repos/:owner/:repo/history', () => {
+  it('checks repo liveness once per run and again only when resetting the index', async () => {
+    const repo = await createRepo('liveness-reads');
+    const [head] = await linear(repo, 2);
+    await setMain(repo, head!);
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    const counts = await runInDurableObject(stub, async (object) => {
+      const internal = object as unknown as {
+        repoExists(repoId?: string): Promise<boolean>;
+        query(input: Parameters<PathHistory['query']>[0]): ReturnType<PathHistory['query']>;
+        alarm(): Promise<void>;
+        running: Promise<void> | null;
+      };
+      const checked: string[] = [];
+      const repoExists = internal.repoExists.bind(object);
+      internal.repoExists = async (repoId) => {
+        checked.push(repoId ?? '');
+        return repoExists(repoId);
+      };
+      const result = await internal.query({
+        repoId: repo.id, repoName: `${OWNER}--liveness-reads`, ref: 'refs/heads/main',
+        path: 'f0.txt', limit: 30, cursor: null, cachedHead: head!,
+      });
+      expect(result.ok).toBe(true);
+      await internal.running;
+      const firstRun = checked.length;
+      await internal.alarm();
+      return { firstRun, nextRun: checked.length - firstRun, checked };
+    });
+    expect(counts.firstRun).toBe(2);
+    expect(counts.nextRun).toBe(1);
+    expect(counts.checked).toEqual([repo.id, repo.id, repo.id]);
+  });
+
   it('indexes a short first-parent history and reads the warm page from the DO', async () => {
     const repo = await createRepo('short');
     const shas = await linear(repo, 4);
@@ -182,7 +215,7 @@ describe('GET /repos/:owner/:repo/history', () => {
     await setMain(repo, child.sha);
     const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
     repo.fake.calls.length = 0;
-    expect(await stub.pushed({ ref: 'refs/heads/main', after: child.sha, eventAt: Date.now() + 1000 })).toBe('indexed');
+    expect(await stub.pushed({ repoId: repo.id, ref: 'refs/heads/main', after: child.sha, eventAt: Date.now() + 1000 })).toBe('indexed');
     await runDurableObjectAlarm(stub);
     expect(repo.fake.calls.filter((entry) => entry.startsWith('log:'))).toEqual([`log:${child.sha}`]);
     const state = await runInDurableObject(stub, async (_obj: PathHistory, storage) =>
@@ -190,7 +223,7 @@ describe('GET /repos/:owner/:repo/history', () => {
     );
     expect(state).toMatchObject({ known_sha: child.sha, head_sha: child.sha });
     const before = repo.fake.calls.length;
-    const result = await stub.query({ repoName: `${OWNER}--forward`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: null, cachedHead: child.sha });
+    const result = await stub.query({ repoId: repo.id, repoName: `${OWNER}--forward`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: null, cachedHead: child.sha });
     expect(result.value?.index).toMatchObject({ indexedHead: child.sha, current: true });
     expect(repo.fake.calls.slice(before)).toEqual([]);
   });
@@ -203,11 +236,11 @@ describe('GET /repos/:owner/:repo/history', () => {
     const fresh = (await commit(repo.fake, { 'f0.txt': 'new\n' }, [old])).sha;
     repo.fake.refs.set('refs/heads/main', fresh);
     const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
-    await stub.pushed({ ref: 'refs/heads/main', after: fresh, eventAt: Date.now() + 1000 });
+    await stub.pushed({ repoId: repo.id, ref: 'refs/heads/main', after: fresh, eventAt: Date.now() + 1000 });
     await runDurableObjectAlarm(stub);
     repo.fake.calls.length = 0;
     const query = () => stub.query({
-      repoName: `${OWNER}--memo`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: { epoch: 1, seq: 0 }, cachedHead: old,
+      repoId: repo.id, repoName: `${OWNER}--memo`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: { epoch: 1, seq: 0 }, cachedHead: old,
     });
     for (let i = 0; i < 5; i++) await query();
     expect(repo.fake.calls.filter((entry) => entry === 'log:main')).toEqual(['log:main']);
@@ -221,9 +254,9 @@ describe('GET /repos/:owner/:repo/history', () => {
     const now = Date.now();
     await runInDurableObject(stub, async (_obj: PathHistory, state) => {
       state.storage.sql.exec(
-        `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
-         VALUES(1,?,'refs/heads/main',?,0,?,-1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
-        repoName, head!, root!, head!, now, now,
+        `INSERT INTO state(epoch,repo_id,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
+         VALUES(1,?,?,'refs/heads/main',?,0,?,-1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
+        repo.id, repoName, head!, root!, head!, now, now,
       );
       state.storage.sql.exec(
         'INSERT INTO commits(seq,sha,author_name,author_email,committed_at,summary,gap) VALUES(0,?,?,?,?,?,0),(-1,?,?,?,?,?,0)',
@@ -248,12 +281,14 @@ describe('GET /repos/:owner/:repo/history', () => {
     const outcome = await runInDurableObject(stub, async (object, state) => {
       const internal = object as unknown as {
         targetHead: string | null;
+        repoId: string;
         repoName: string;
         ref: string;
         start(): Promise<void>;
         query(input: Parameters<PathHistory['query']>[0]): ReturnType<PathHistory['query']>;
       };
       internal.targetHead = head!;
+      internal.repoId = repo.id;
       internal.repoName = repoName;
       internal.ref = 'refs/heads/main';
       const build = internal.start();
@@ -261,7 +296,7 @@ describe('GET /repos/:owner/:repo/history', () => {
       try {
         const before = state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM commits').toArray()[0]!.count;
         const result = await internal.query({
-          repoName, ref: 'refs/heads/main', path: 'f0.txt', limit: 1, cursor: null, cachedHead: head!,
+          repoId: repo.id, repoName, ref: 'refs/heads/main', path: 'f0.txt', limit: 1, cursor: null, cachedHead: head!,
         });
         const after = state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM commits').toArray()[0]!.count;
         return { result, before, after };
@@ -282,14 +317,14 @@ describe('GET /repos/:owner/:repo/history', () => {
     await settle(repo, 'deletion-push', 'f0.txt');
     const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
     repo.fake.refs.delete('refs/heads/main');
-    expect(await stub.pushed({ ref: 'refs/heads/main', after: '0'.repeat(40), eventAt: Date.now() + 1000 })).toBe('indexed');
+    expect(await stub.pushed({ repoId: repo.id, ref: 'refs/heads/main', after: '0'.repeat(40), eventAt: Date.now() + 1000 })).toBe('indexed');
     const known = await runInDurableObject(stub, async (_obj: PathHistory, state) =>
       state.storage.sql.exec<{ known_sha: string | null }>('SELECT known_sha FROM state').toArray()[0],
     );
     expect(known?.known_sha).toBeNull();
 
     const result = await stub.query({
-      repoName: `${OWNER}--deletion-push`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: null, cachedHead: head!,
+      repoId: repo.id, repoName: `${OWNER}--deletion-push`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: null, cachedHead: head!,
     });
     expect(result.value).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
   });
@@ -302,9 +337,9 @@ describe('GET /repos/:owner/:repo/history', () => {
     const now = Date.now();
     await runInDurableObject(stub, async (_obj: PathHistory, state) => {
       state.storage.sql.exec(
-        `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
-         VALUES(1,?,'refs/heads/main',NULL,0,?,1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
-        repoName, head!, head!, now, now,
+        `INSERT INTO state(epoch,repo_id,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
+         VALUES(1,?,?,'refs/heads/main',NULL,0,?,1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
+        repo.id, repoName, head!, head!, now, now,
       );
     });
     let release!: () => void;
@@ -320,9 +355,10 @@ describe('GET /repos/:owner/:repo/history', () => {
     };
     try {
       const tables = await runInDurableObject(stub, async (object, state) => {
-        const internal = object as unknown as { targetHead: string | null; repoName: string; ref: string; start(): Promise<void> };
-        internal.targetHead = head!;
-        internal.repoName = repoName;
+      const internal = object as unknown as { targetHead: string | null; repoId: string; repoName: string; ref: string; start(): Promise<void> };
+      internal.targetHead = head!;
+      internal.repoId = repo.id;
+      internal.repoName = repoName;
         internal.ref = 'refs/heads/main';
         const build = internal.start();
         await reading;
@@ -384,7 +420,7 @@ describe('GET /repos/:owner/:repo/history', () => {
     const repo = await createRepo('push-only');
     const sha = (await linear(repo, 1))[0]!;
     const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
-    expect(await stub.pushed({ ref: 'refs/heads/main', after: sha, eventAt: Date.now() })).toBe('not indexed');
+    expect(await stub.pushed({ repoId: repo.id, ref: 'refs/heads/main', after: sha, eventAt: Date.now() })).toBe('not indexed');
     const rows = await runInDurableObject(stub, async (_obj: PathHistory, state) => state.storage.sql.exec('SELECT COUNT(*) AS n FROM state').toArray()[0]);
     expect(rows).toMatchObject({ n: 0 });
   });
