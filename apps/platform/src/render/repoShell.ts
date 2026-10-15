@@ -72,6 +72,16 @@ export function cloneBox(env: Env, requestUrl: string, repo: RepoRow, ref: strin
   </div>`;
 }
 
+/**
+ * A repository whose description opens with the word "Demo" is the
+ * deployment's example repository; the header says so with a badge. The
+ * description is the only owner-editable surface that can carry the mark,
+ * so it is the convention.
+ */
+export function isDemoRepo(description: string | null | undefined): boolean {
+  return /^demo\b/i.test((description ?? '').trim());
+}
+
 export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null, body: string, requestUrl: string): string {
   const { repo } = opts;
   const ref = opts.ref;
@@ -104,7 +114,7 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
   const shellBody = html`
 <header class="k-head repo-page-head">
   <div class="k-head-copy">
-    <p class="hud k-head-hud"><a href="/${repo.owner_login}">${repo.owner_login}</a><span aria-hidden="true">/</span><a href="/${repo.owner_login}/${repo.name}">${repo.name}</a><span class="tag">${repo.visibility}</span><span class="k-ref">${ref}</span></p>
+    <p class="hud k-head-hud"><a href="/${repo.owner_login}">${repo.owner_login}</a><span aria-hidden="true">/</span><a href="/${repo.owner_login}/${repo.name}">${repo.name}</a><span class="tag">${repo.visibility}</span>${isDemoRepo(repo.description) ? '<span class="tag demo">Demo</span>' : ''}<span class="k-ref">${ref}</span></p>
     <h1>${repo.name}</h1>
     ${raw(description)}
   </div>

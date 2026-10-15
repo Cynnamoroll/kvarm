@@ -208,6 +208,12 @@ describe('POST /mcp authentication', () => {
 });
 
 describe('MCP handshake and registry', () => {
+  it('initializes without the streamable Accept header too, so naive agents still get an answer', async () => {
+    const r = await send('POST', '/mcp', { token: tok.owner, body: rpc('initialize', INIT) });
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json.result.serverInfo).toEqual({ name: 'Kvarm', version: expect.any(String) });
+  });
+
   it('initializes with a PAT and reports the server name, version and tools capability', async () => {
     const r = await mcp(rpc('initialize', INIT), tok.owner);
     expect(r.status).toBe(200);

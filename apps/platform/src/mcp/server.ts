@@ -245,7 +245,13 @@ export async function handleMcp(request: Request, env: Env, dispatch: Dispatch):
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     try {
       await server.connect(transport);
-      const replay = new Request(request.url, { method: 'POST', headers: request.headers });
+      // The streamable transport answers a missing dual Accept header with a
+      // spec 406, which reads as a dead endpoint to a naive agent. Default
+      // the header instead; the parsed body is already in hand, so the
+      // replay only carries headers.
+      const headers = new Headers(request.headers);
+      if (!headers.get('accept')?.includes('text/event-stream')) headers.set('accept', 'application/json, text/event-stream');
+      const replay = new Request(request.url, { method: 'POST', headers });
       return await transport.handleRequest(replay, { parsedBody: body });
     } finally {
       await server.close().catch(() => undefined);

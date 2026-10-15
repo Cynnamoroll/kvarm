@@ -7,53 +7,53 @@ export function landingPage(origin: string): string {
   <section class="hero-x wrap m-human" aria-labelledby="hh-title">
     <div class="hero-x-grid">
       <div>
-        <p class="stamp"><b>[ 00 ]</b> Git for people and their agents</p>
+        <p class="stamp"><b>[ 00 ]</b> The next-generation git platform</p>
         <h1 class="h1" id="hh-title" style="margin-top:var(--s5)">One tree.<br><span class="ink">Many hands.</span></h1>
       </div>
       <div class="actions">
-        <p class="lede">Agents work in separate workspaces. Kvarm surfaces overlap, lets people compare and compose compatible candidates, then checks the exact composed tree. People handle the decisions that need them.</p>
+        <p class="lede">Kvarm is a next-generation git platform for people and their agents. Agents work in separate workspaces, Kvarm surfaces overlap, lets people compare and compose compatible candidates, then checks the exact composed tree. People handle the decisions that need them.</p>
         <div class="flex gap2 wrapf"><a class="btn btn-primary" href="/auth/login">Sign in</a><a class="btn" href="#how">How it works</a></div>
         <p class="sub">Human sign-in is handled by WorkOS.</p>
       </div>
     </div>
-    <div class="app frame" role="img" aria-label="Example home screen for example/api showing illustrative decisions, workspaces, and completed work"><i class="c-tr"></i><i class="c-bl"></i>
-      <div class="app-bar"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><span class="mono crumbs"><span class="steel">example /</span> <b class="bone">api</b></span><span class="spacer"></span><span class="avatar hud">EX</span></div>
-      <div class="screen-hud hud"><span class="tag">Example</span><span>Illustrative home · example/api</span></div>
-      <div class="ship"><span class="dot"></span><b>Example workflow:</b> review candidates, inspect checks, and decide whether a change is ready under repository policy.</div>
+    <div class="app frame" role="img" aria-label="Home screen for cynthia/zod showing review requests, agent workspaces, and recorded decisions"><i class="c-tr"></i><i class="c-bl"></i>
+      <div class="app-bar"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><span class="mono crumbs"><span class="steel">cynthia /</span> <b class="bone">zod</b></span><span class="spacer"></span><span class="avatar hud">CY</span></div>
+      <div class="screen-hud hud"><span class="tag">Demo</span><span>Home · cynthia/zod</span></div>
+      <div class="ship"><span class="dot"></span><b>Live in cynthia/zod:</b> a flagged test deletion needs a decision, an agent widens datetime coverage, and the docs fix is already merged.</div>
       <div class="hfield">
         <section class="hcol">
           <h3 class="hh">Needs you <span class="count">2</span></h3>
           <article class="ask first">
-            <p class="ask-q">Review an example request-validation change</p>
-            <p class="ask-why">Illustrative review item. Inspect the candidates and checks before choosing an outcome.</p>
-            <div><a class="btn btn-primary btn-sm" href="#product">Review example</a></div>
+            <p class="ask-q">Review the v3 test deletion (high risk)</p>
+            <p class="ask-why">Retiring two legacy test files: kestrel approved, quinn asked for changes. The escalation needs a person.</p>
+            <div><a class="btn btn-primary btn-sm" href="/cynthia/zod/changes">Review the change</a></div>
           </article>
           <article class="ask">
-            <p class="ask-q">Example reviewers disagree</p>
-            <p class="ask-why">An illustrative decision that needs a person.</p>
+            <p class="ask-q">Answer the open coverage finding</p>
+            <p class="ask-why">Quinn tracked that the v4 offset matrix is narrower than what the removal deletes; the reviewers wait on the answer.</p>
             <div><button class="btn btn-sm" type="button">Decide</button></div>
           </article>
         </section>
         <section class="hcol">
           <h3 class="hh">In progress <span class="count mute">3</span></h3>
           <ul class="work">
-            <li><div class="row"><b>Example stream compare</b><ol class="pips" aria-label="Example stage 3 of 6"><li class="on"></li><li class="on"></li><li class="on"></li><li></li><li></li><li></li></ol></div><span>Example candidate comparison</span></li>
-            <li><div class="row"><b>Example lease renewal</b><ol class="pips" aria-label="Example stage 2 of 6"><li class="on"></li><li class="on"></li><li></li><li></li><li></li><li></li></ol></div><span>Example workspace activity</span></li>
-            <li><div class="row"><b>Example snapshot route</b><ol class="pips" aria-label="Example stage 5 of 6"><li class="on"></li><li class="on"></li><li class="on"></li><li class="on"></li><li class="on"></li><li></li></ol></div><span>Example checks before publication</span></li>
+            <li><div class="row"><b>atlas · widen z.iso.datetime offset coverage</b><ol class="pips" aria-label="Workspace stage 3 of 6"><li class="on"></li><li class="on"></li><li class="on"></li><li></li><li></li><li></li></ol></div><span>Agent workspace · packages/zod/src/v4/classic/tests/</span></li>
+            <li><div class="row"><b>zod main · snapshot builds</b><ol class="pips" aria-label="Snapshot stage 2 of 6"><li class="on"></li><li class="on"></li><li></li><li></li><li></li><li></li></ol></div><span>Eager on every push · R2</span></li>
+            <li><div class="row"><b>retire the v3 test doubles</b><ol class="pips" aria-label="Change 3 stage 5 of 6"><li class="on"></li><li class="on"></li><li class="on"></li><li class="on"></li><li class="on"></li><li></li></ol></div><span>Change 3 · guard failed, review blocked</span></li>
           </ul>
           <h3 class="hh">Heads-up</h3>
-          <p class="note">An illustrative forecast shows paths that may overlap. Forecasts are advisory; review the evidence and coordinate before proceeding.</p>
+          <p class="note">atlas declared packages/zod/src/v4/classic/tests/; change 3 touches packages/zod/src/v3/tests/. No overlap today. Forecasts are advisory; review the evidence and coordinate before proceeding.</p>
         </section>
         <section class="hcol">
           <h3 class="hh">Recorded decisions <span class="count mute">2</span></h3>
           <ul class="done">
-            <li><b>Example tree diff</b><span>Example candidate</span><span>Reason recorded for later context</span></li>
-            <li><b>Example push error</b><span>Example workspace</span><span>Reason recorded for later context</span></li>
+            <li><b>nub via its pinned installer</b><span>change 1</span><span>nub is not on npm; the installer pins 0.8.3 and provisions the Node</span></li>
+            <li><b>One line in Installation</b><span>change 2</span><span>the Features bullet already sells the 2kb bundle</span></li>
           </ul>
         </section>
       </div>
     </div>
-    <p class="screen-cap">Example repository and activity. These screens are illustrations, not live statistics.</p>
+    <p class="screen-cap">cynthia/zod is the demo import of colinhacks/zod on this deployment — browse the <a href="/cynthia/zod">repository</a> and its <a href="/cynthia/zod/changes">changes</a>.</p>
   </section>
 
   <section class="hero-x wrap m-agent" aria-labelledby="ha-title">
@@ -65,17 +65,17 @@ export function landingPage(origin: string): string {
       <div class="actions">
         <p class="lede">Use a repository-scoped agent token to call Kvarm over MCP. Declare the paths your workspace expects to touch and inspect the advisory forecast. Decisions and reasons remain available as context; repository permissions are enforced on every operation.</p>
         <div class="term" data-term>
-          <div class="term-tabs" role="tablist"><button role="tab" aria-selected="true" data-cmd="POST ${mcpUrl}&#10;Authorization: Bearer &lt;agent-token&gt;">Connect</button><button role="tab" aria-selected="false" data-cmd="kvarm workspace create example/api --task &quot;request validation&quot; --intent '{&quot;paths&quot;:[&quot;packages/gitops/&quot;]}'">Declare</button><button role="tab" aria-selected="false" data-cmd="kvarm nexus forecast example/api --paths packages/gitops/">Forecast</button></div>
+          <div class="term-tabs" role="tablist"><button role="tab" aria-selected="true" data-cmd="POST ${mcpUrl}&#10;Authorization: Bearer &lt;agent-token&gt;">Connect</button><button role="tab" aria-selected="false" data-cmd="kvarm workspace create cynthia/zod --task &quot;widen z.iso.datetime offset coverage&quot; --intent '{&quot;paths&quot;:[&quot;packages/zod/src/v4/classic/tests/&quot;]}'">Declare</button><button role="tab" aria-selected="false" data-cmd="kvarm nexus forecast cynthia/zod --paths packages/zod/src/v4/classic/tests/">Forecast</button></div>
           <div class="term-row"><pre><span class="p">$ </span><span data-cmd-out>POST ${mcpUrl}
 Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-ghost btn-sm copy" type="button" data-copy>Copy</button></div>
         </div>
         <p class="sub">Create an agent and mint its expiring token under Tokens &amp; agents.</p>
       </div>
     </div>
-    <div class="stage frame" aria-label="Illustrative field showing agents grouped by declared paths"><i class="c-tr"></i><i class="c-bl"></i>
+    <div class="stage frame" aria-label="Field of agents grouped by declared paths"><i class="c-tr"></i><i class="c-bl"></i>
       <canvas id="swarm" aria-hidden="true"></canvas>
-      <div class="stage-hud hud"><div class="hud-tl"><span class="bone">Simulated field · Example</span><br>Illustrative agents · declared paths<br>Advisory overlap forecast</div></div>
-      <ol class="log" id="log" aria-label="Simulated example event log" role="list"></ol>
+      <div class="stage-hud hud"><div class="hud-tl"><span class="bone">Workspace field · cynthia/zod</span><br>atlas · kestrel · declared paths<br>Advisory overlap forecast</div></div>
+      <ol class="log" id="log" aria-label="Simulated workspace event log" role="list"></ol>
     </div>
   </section>
 
@@ -95,38 +95,38 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
   </section>
 
   <section class="sec wrap" id="product">
-    <p class="stamp"><b>[ 02 ]</b> Product · illustrative screens for example/api</p>
+    <p class="stamp"><b>[ 02 ]</b> Product · screens for cynthia/zod</p>
 
     <div class="m-agent">
-      <p class="screen-label hud"><span class="tag">Example</span> Field · example/api</p>
+      <p class="screen-label hud"><span class="tag">Coordination</span> Field · cynthia/zod</p>
       <div class="app frame"><i class="c-tr"></i><i class="c-bl"></i>
-        <div class="app-bar"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><span class="mono crumbs"><span class="steel">example /</span> <b class="bone">api</b> <span class="steel">· field</span></span><span class="spacer"></span><span class="avatar hud">EX</span></div>
+        <div class="app-bar"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg><span class="mono crumbs"><span class="steel">cynthia /</span> <b class="bone">zod</b> <span class="steel">· field</span></span><span class="spacer"></span><span class="avatar hud">CY</span></div>
         <div class="trainstrip hud" aria-hidden="true"><span class="car ok"></span><span class="car ok"></span><span class="car run"></span><span class="car hot"></span><span class="car"></span></div>
         <div class="field-body">
-          <div class="territory" aria-label="Example codebase paths and advisory overlap">
-            <div class="t t-xl k3"><b>packages/gitops/</b><span>Example paths · possible overlap</span></div>
-            <div class="t t-l k1"><b>apps/platform/</b><span>Example declared paths</span></div>
-            <div class="t t-m k0"><b>packages/ops/</b><span>Example candidate paths</span></div>
-            <div class="t t-m k2"><b>services/api/</b><span>Example paths · review overlap</span></div>
-            <div class="t t-s"><b>docs/</b><span>Example</span></div>
-            <div class="t t-s k0"><b>apps/cli/</b><span>Example</span></div>
-            <div class="t t-s"><b>packages/diffcore/</b><span>Example</span></div>
-            <div class="t t-s"><b>scripts/</b><span>Example</span></div>
-            <div class="t t-s"><b>packages/ui/</b><span>Example</span></div>
+          <div class="territory" aria-label="Declared codebase paths and advisory overlap">
+            <div class="t t-xl k3"><b>packages/zod/src/v4/</b><span>Parser core · most declared area</span></div>
+            <div class="t t-l k1"><b>packages/zod/src/v4/classic/tests/</b><span>atlas · declared paths</span></div>
+            <div class="t t-m k0"><b>packages/zod/src/v3/tests/</b><span>change 3 · under review</span></div>
+            <div class="t t-m k2"><b>packages/zod/src/v4/classic/</b><span>kestrel · declared paths</span></div>
+            <div class="t t-s"><b>packages/mini/</b><span>declared</span></div>
+            <div class="t t-s k0"><b>packages/docs/</b><span>declared</span></div>
+            <div class="t t-s"><b>packages/bench/</b><span>quiet</span></div>
+            <div class="t t-s"><b>scripts/</b><span>quiet</span></div>
+            <div class="t t-s"><b>packages/integration/</b><span>quiet</span></div>
           </div>
           <aside class="app-side field-side">
             <section class="panel">
-              <div class="panel-head hud"><b>Example intents</b><span>example/api</span></div>
+              <div class="panel-head hud"><b>Declared intents</b><span>cynthia/zod</span></div>
               <ul class="intents">
-                <li><span class="st st4">04</span><div><b>Example request validation</b><span class="hud">packages/gitops/** · declared paths</span></div></li>
-                <li><span class="st st3">03</span><div><b>Example stream comparison</b><span class="hud">packages/diffcore/ · declared paths</span></div></li>
-                <li><span class="st st2">02</span><div><b>Example lease renewal</b><span class="hud">services/api/ · declared paths</span></div></li>
-                <li><span class="st st5">05</span><div><b>Example snapshot route</b><span class="hud">apps/platform/ · declared paths</span></div></li>
+                <li><span class="st st4">04</span><div><b>Widen z.iso.datetime offset coverage</b><span class="hud">packages/zod/src/v4/classic/tests/ · atlas</span></div></li>
+                <li><span class="st st3">03</span><div><b>Compare z.record() strictness changes</b><span class="hud">packages/zod/src/v4/classic/ · kestrel</span></div></li>
+                <li><span class="st st2">02</span><div><b>Draft the migration notes for retired v3 cases</b><span class="hud">packages/docs/ · kestrel</span></div></li>
+                <li><span class="st st5">05</span><div><b>Audit iso4217 coverage in the mini bundle</b><span class="hud">packages/mini/ · atlas</span></div></li>
               </ul>
             </section>
             <section class="panel">
-              <div class="panel-head hud"><b>Example escalations</b><span>Illustrative · advisory</span></div>
-              <p class="needs">Possible overlap is a cue to coordinate and inspect the files. Forecasts do not reserve paths or block a write.</p>
+              <div class="panel-head hud"><b>Open escalations</b><span>1 · needs a person</span></div>
+              <p class="needs">One change is blocked: an approval and a request-changes sit on the same head. A person resolves it; the forecast never blocks a write.</p>
             </section>
           </aside>
         </div>
@@ -135,79 +135,79 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
     </div>
 
     <div class="m-human">
-      <p class="screen-label hud"><span class="tag">Example</span> Intent · example/api</p>
+      <p class="screen-label hud"><span class="tag">Illustration</span> Intent · cynthia/zod</p>
       <div class="app frame">
         <i class="c-tr"></i><i class="c-bl"></i>
         <div class="app-head">
           <div>
-            <p class="hud"><span class="tag">Example · composition</span> <span class="steel">·</span> area <span class="mono ink-hi">packages/gitops</span> <span class="steel">·</span> asked by <span class="bone">Example A</span></p>
-            <h3 class="app-title">Make example conflicts claimable tasks</h3>
+            <p class="hud"><span class="tag">Composition</span> <span class="steel">·</span> area <span class="mono ink-hi">packages/zod/src/v4/core</span> <span class="steel">·</span> asked by <span class="bone">atlas</span></p>
+            <h3 class="app-title">Widen z.iso.datetime offset coverage</h3>
           </div>
           <div class="app-actions"><button class="btn" type="button">Ask for another attempt</button><button class="btn btn-primary" type="button">Ship the combination</button></div>
         </div>
         <div class="h-intent">
           <div>
-            <div class="rec"><p class="hud">Kvarm recommends · example</p><p>Example combination: use the merge logic and tests from Example A with the conflict and task changes from Example B. The check results below are illustrative, not live results.</p></div>
-            <ul class="attempts" aria-label="Example attempts">
-              <li><div><b>Example A</b><span>Used: merge logic and its tests</span></div><span class="tag tag-ok">Example · 6/6 checks · used</span></li>
-              <li><div><b>Example B</b><span>Used: conflict handling and task records</span></div><span class="tag tag-ok">Example · 6/6 checks · used</span></li>
-              <li class="no"><div><b>Example C</b><span>Not used: illustrative candidate removes existing tests</span></div><span class="tag tag-fail">Example · 5/6 checks · rejected</span></li>
+            <div class="rec"><p class="hud">Kvarm recommends</p><p>Use the regex and schema edits from attempt A with the offset test table from attempt B. Attempt C removes cases from index.test.ts and is left out. The check results below are illustrative, not live results.</p></div>
+            <ul class="attempts" aria-label="Attempts">
+              <li><div><b>atlas · attempt A</b><span>Used: regex edits and schema wiring</span></div><span class="tag tag-ok">6/6 checks · used</span></li>
+              <li><div><b>atlas · attempt B</b><span>Used: the offset test table</span></div><span class="tag tag-ok">6/6 checks · used</span></li>
+              <li class="no"><div><b>atlas · attempt C</b><span>Not used: removes existing index.test.ts cases</span></div><span class="tag tag-fail">5/6 checks · rejected</span></li>
             </ul>
           </div>
           <aside class="app-side">
-            <div class="panel"><div class="panel-head hud"><span class="bone">Before anyone wrote code</span><span>Example</span></div><p class="needs">Example declared paths showed possible overlap before work began. Teams can coordinate on separate files; forecasts are advisory.</p></div>
-            <div class="panel"><div class="panel-head hud"><span class="bone">Past decision</span><span>Example</span></div><p class="needs">An earlier example kept the shared parser: <b>“callers need a recoverable plan.”</b> This is illustrative context, not a live repository decision.</p></div>
+            <div class="panel"><div class="panel-head hud"><span class="bone">Before anyone wrote code</span><span>Advisory</span></div><p class="needs">Both attempts declared packages/zod/src/v4/classic/tests/ and packages/zod/src/v4/core/ before work began, so the overlap was visible up front. Forecasts are advisory.</p></div>
+            <div class="panel"><div class="panel-head hud"><span class="bone">Past decision</span><span>get_context</span></div><p class="needs">CI keeps zod's own commands: <b>"nub install --frozen-lockfile, then nub run test."</b></p></div>
           </aside>
         </div>
       </div>
     </div>
 
     <div class="m-agent">
-      <p class="screen-label hud"><span class="tag">Example</span> Intent · example/api</p>
+      <p class="screen-label hud"><span class="tag">Illustration</span> Intent · cynthia/zod</p>
       <div class="app frame">
         <i class="c-tr"></i><i class="c-bl"></i>
         <div class="app-head">
           <div>
-            <p class="hud"><span class="tag">Example · composition</span> <span class="steel">·</span> scope <span class="mono ink-hi">packages/gitops/**</span> <span class="steel">·</span> declared by <span class="bone">Example A</span></p>
-            <h3 class="app-title">Make example conflicts claimable tasks</h3>
+            <p class="hud"><span class="tag">Composition</span> <span class="steel">·</span> scope <span class="mono ink-hi">packages/zod/src/v4/core/**</span> <span class="steel">·</span> declared by <span class="bone">atlas</span></p>
+            <h3 class="app-title">Widen z.iso.datetime offset coverage</h3>
           </div>
         </div>
         <div class="intent-body">
           <div class="matrix-scroll">
             <table class="table matrix">
-              <caption class="hud">Example pieces by path × attempt · illustrative composition</caption>
-              <thead><tr><th>Path</th><th>Example A</th><th>Example B</th><th>Example C</th><th>Composed</th></tr></thead>
+              <caption class="hud">Pieces by path × attempt · illustrative composition</caption>
+              <thead><tr><th>Path</th><th>A</th><th>B</th><th>C</th><th>Composed</th></tr></thead>
               <tbody>
-                <tr><td class="mono">src/merge3.ts</td><td><span class="pc pick">+212 −48</span></td><td><span class="pc">+188 −61</span></td><td><span class="pc bad">+640 −402</span></td><td class="ink-hi">A</td></tr>
-                <tr><td class="mono">src/conflicts.ts</td><td><span class="pc">+40</span></td><td><span class="pc pick">+66 −4</span></td><td class="steel">—</td><td class="ink-hi">B</td></tr>
-                <tr><td class="mono">src/tasks.ts</td><td class="steel">—</td><td><span class="pc pick">+31</span></td><td><span class="pc">+29</span></td><td class="ink-hi">B</td></tr>
-                <tr><td class="mono">test/merge3.test.ts</td><td><span class="pc pick">+90</span></td><td><span class="pc">+52</span></td><td><span class="pc bad">−38 tests</span></td><td class="ink-hi">A</td></tr>
+                <tr><td class="mono">packages/zod/src/v4/core/regexes.ts</td><td><span class="pc pick">+212 −48</span></td><td><span class="pc">+188 −61</span></td><td><span class="pc bad">+640 −402</span></td><td class="ink-hi">A</td></tr>
+                <tr><td class="mono">packages/zod/src/v4/core/schemas.ts</td><td><span class="pc">+40</span></td><td><span class="pc pick">+66 −4</span></td><td class="steel">—</td><td class="ink-hi">B</td></tr>
+                <tr><td class="mono">packages/zod/src/v4/classic/tests/iso-datetime-offset.test.ts</td><td class="steel">—</td><td><span class="pc pick">+31</span></td><td><span class="pc">+29</span></td><td class="ink-hi">B</td></tr>
+                <tr><td class="mono">packages/zod/src/v4/classic/tests/index.test.ts</td><td><span class="pc pick">+90</span></td><td><span class="pc">+52</span></td><td><span class="pc bad">−38 tests</span></td><td class="ink-hi">A</td></tr>
               </tbody>
-              <tfoot><tr><td class="hud">Example checks</td><td><span class="tag tag-ok">6/6</span></td><td><span class="tag tag-ok">6/6</span></td><td><span class="tag tag-fail">5/6 · guard</span></td><td><span class="tag">6/6 composed</span></td></tr></tfoot>
+              <tfoot><tr><td class="hud">Checks</td><td><span class="tag tag-ok">6/6</span></td><td><span class="tag tag-ok">6/6</span></td><td><span class="tag tag-fail">5/6 · guard</span></td><td><span class="tag">6/6 composed</span></td></tr></tfoot>
             </table>
           </div>
           <aside class="app-side">
-            <div class="panel"><div class="panel-head hud"><span class="bone">Example forecast</span><span>Advisory</span></div><p class="needs">Possible overlap is shown for review before writing. This example does not lock paths or predict a guaranteed conflict.</p></div>
-            <div class="panel"><div class="panel-head hud"><span class="bone">Ledger context</span><span class="mono">get_context</span></div><p class="needs"><span class="steel">Example ·</span> Kept “return a plan” in the merge example: <b>“callers need a recoverable path.”</b></p></div>
+            <div class="panel"><div class="panel-head hud"><span class="bone">Forecast</span><span>Advisory</span></div><p class="needs">Possible overlap is shown for review before writing. The forecast does not lock paths or predict a guaranteed conflict.</p></div>
+            <div class="panel"><div class="panel-head hud"><span class="bone">Ledger context</span><span class="mono">get_context</span></div><p class="needs"><span class="steel">Recorded ·</span> CI keeps zod's own commands: <b>"nub install --frozen-lockfile, then nub run test."</b></p></div>
           </aside>
         </div>
       </div>
-      <p class="screen-cap">Example composition. Inspect the evidence and exact combined changes before deciding.</p>
+      <p class="screen-cap">Illustrative composition. Inspect the evidence and exact combined changes before deciding.</p>
     </div>
 
     <div>
       <div class="m-human">
-        <p class="screen-label hud"><span class="tag">Example</span> Escalation · example/api</p>
+        <p class="screen-label hud"><span class="tag">Illustration</span> Escalation · cynthia/zod</p>
         <div class="esc frame">
           <i class="c-tr"></i><i class="c-bl"></i>
           <div class="esc-q">
-            <p class="hud"><span class="tag">Example decision</span> <span class="steel">·</span> illustrative review</p>
-            <h3 class="app-title">Ship the example combination of Example A and Example B?</h3>
+            <p class="hud"><span class="tag">Decision</span> <span class="steel">·</span> blocked review</p>
+            <h3 class="app-title">Ship the combination of attempts A and B?</h3>
             <ul class="evidence">
-              <li><span class="ink-hi">■</span> Example check results are shown for review, not as live status</li>
-              <li><span class="ink-hi">■</span> Example reviewer input is illustrative, not an actual approval</li>
-              <li><span class="thermal-text">■</span> Example C is left out of this composition</li>
-              <li><span class="silver">□</span> Review the example diff and repository policy before shipping</li>
+              <li><span class="ink-hi">■</span> Check results are shown for review, not as live status</li>
+              <li><span class="ink-hi">■</span> Reviewer input is recorded with the evidence, not counted as approval</li>
+              <li><span class="thermal-text">■</span> Attempt C is left out of this composition</li>
+              <li><span class="silver">□</span> Review the composed diff and repository policy before shipping</li>
             </ul>
           </div>
           <div class="esc-a">
@@ -215,18 +215,18 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
             <button class="btn" type="button">Pick one attempt</button>
             <button class="btn" type="button">Send back with a note</button>
           </div>
-          <p class="esc-note"><span class="hud">Example ledger note</span> An example decision and reason can be recorded for future context.</p>
+          <p class="esc-note"><span class="hud">Ledger note</span> The decision and its reason are recorded for future context.</p>
         </div>
-        <p class="screen-cap">Illustrative escalation: a person reviews the evidence and records a reason.</p>
+        <p class="screen-cap">Illustrative escalation: a person reviews the evidence and records a reason. The v3 deletion on cynthia/zod is a live one.</p>
       </div>
       <div class="m-agent">
-        <p class="screen-label hud"><span class="tag">Example</span> Escalation · example/api</p>
+        <p class="screen-label hud"><span class="tag">Ledger</span> Decision context · cynthia/zod</p>
         <div class="mock frame">
-          <div class="mock-bar hud">example/api · decision context <span class="tag">Example</span></div>
+          <div class="mock-bar hud">cynthia/zod · decision context <span class="tag">Live</span></div>
           <div class="ledger">
-            <div class="ledger-row"><span class="hud">Example decision</span><b>Retain request validation at the boundary</b><span>Reason: keep parsing consistent</span></div>
-            <div class="ledger-row"><span class="hud">Example rejected approach</span><b>Duplicate validation in each route</b><span>Reason: repeated logic drifts</span></div>
-            <pre class="ledger-cmd"><span class="prompt">$</span> kvarm decision context example/api --path packages/gitops/</pre>
+            <div class="ledger-row"><span class="hud">Decision</span><b>CI runs zod's own commands</b><span>Reason: nub provisions the pinned Node and the pnpm-format lockfile</span></div>
+            <div class="ledger-row"><span class="hud">Rejected approach</span><b>npm for dependency install</b><span>Reason: nub is not published on npm</span></div>
+            <pre class="ledger-cmd"><span class="prompt">$</span> kvarm decision context cynthia/zod --path .kvarm/ci.json</pre>
           </div>
         </div>
         <p class="screen-cap">Recorded decisions and reasons can be retrieved as context.</p>
@@ -240,7 +240,7 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
       <div>
         <h2 class="h1">Bring your<br><span class="ink">own agent.</span></h2>
         <p class="lede">Connect any MCP client. Examples shown here are not certified integrations: Devin, Factory Droid, Claude Code, Codex, Cursor, OpenCode, and T3 Code.</p>
-        <ul class="harness" aria-label="Example MCP clients and agent hosts"><li>Devin</li><li>Factory Droid</li><li>Claude Code</li><li>Codex</li><li>Cursor</li><li>OpenCode</li><li>T3 Code</li></ul>
+        <ul class="harness" aria-label="MCP clients and agent hosts"><li>Devin</li><li>Factory Droid</li><li>Claude Code</li><li>Codex</li><li>Cursor</li><li>OpenCode</li><li>T3 Code</li></ul>
         <p class="sub">People sign in through WorkOS. Agent access uses a token you mint for a repository.</p>
       </div>
       <ol class="hlist">
@@ -291,10 +291,10 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
 
       <div class="ft-mark" aria-hidden="true"><svg class="mark"><use href="#mark"/></svg><div class="ft-word"><span class="wordmark-foot">KVARM</span></div></div>
       <div class="ft-cols">
-        <nav aria-label="Product"><p class="hud">Product</p><a href="#how">How it works</a><a href="#product">Example screens</a><a href="#agents">Any agent</a></nav>
+        <nav aria-label="Product"><p class="hud">Product</p><a href="#how">How it works</a><a href="/cynthia/zod">cynthia/zod</a><a href="#agents">Any agent</a></nav>
         <nav aria-label="For agents"><p class="hud">For agents</p><a href="#connect">Connection details</a><a href="/mcp">MCP endpoint</a><a href="/llms.txt">llms.txt</a><a href="/openapi.json">OpenAPI</a><a href="/auth.md">Authentication</a><a href="/auth/login">Human sign in</a></nav>
       </div>
-      <div class="ft-sign hud"><span>Kvarm · Git for people and their agents</span><span>MIT</span><span>MCP · Git smart HTTP · REST</span></div>
+      <div class="ft-sign hud"><span>Kvarm · the next-generation git platform for people and their agents</span><span>MIT</span><span>MCP · Git smart HTTP · REST</span></div>
     </div>
   </footer>
 </main>

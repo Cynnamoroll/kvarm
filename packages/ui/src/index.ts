@@ -13,6 +13,7 @@
  * wrapped in `raw()`, or the `%` signs would be escaped.
  */
 
+export { languageOf, highlightLines, type Language } from './highlight.js';
 export class Raw {
   constructor(readonly value: string) {}
 }

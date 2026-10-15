@@ -35,6 +35,13 @@
   --add-bg: rgb(15 103 245 / 0.14);
   --del-bg: rgb(255 107 74 / 0.12);
 
+  /* syntax — muted hues for code rendering; never the thermal heat scale */
+  --syn-com: #6e7884;
+  --syn-str: #8fc79a;
+  --syn-num: #d9b380;
+  --syn-key: var(--signal-hi);
+  --syn-typ: #b3a7e8;
+
   /* type */
   --f-sans: 'Archivo', ui-sans-serif, system-ui, sans-serif;
   --f-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;

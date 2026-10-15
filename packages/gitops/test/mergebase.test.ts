@@ -141,6 +141,22 @@ describe('mergeBase', () => {
     expect(new Set(log).size).toBe(log.length);
   }, 30_000); // builds a 500-commit repo via git subprocesses
 
+  it('stops as soon as a tip is a common ancestor instead of chasing its own frontier', async () => {
+    // A deep chain with a short branch off its tip: the merge base is the tip
+    // itself. The stale paint trails the tip-side frontier in FIFO order, so
+    // before the early exit the walk kept reading the tip's whole ancestry
+    // until the budget reported an unknown answer for a fast-forward.
+    const g = await buildGraph(301, (i) => (i === 0 ? [] : [i - 1]));
+    const tip = g.commits[299]!.hash;
+    const head = g.commits[300]!.hash;
+    const r = await mergeBase(reader(g), tip, head, { maxCommitReads: 20 });
+    expect(r).toMatchObject({ bases: [tip], truncated: false });
+    expect(r.commitReads).toBeLessThanOrEqual(20);
+    expect(await isAncestor(reader(g), tip, head, { maxCommitReads: 20 })).toEqual({ ancestor: true, truncated: false });
+    const flipped = await mergeBase(reader(g), head, tip, { maxCommitReads: 20 });
+    expect(flipped).toMatchObject({ bases: [tip], truncated: false });
+  });
+
   it('truncates at the commit-read budget instead of walking on', async () => {
     // Two 300-commit branches off one root.
     const g = await buildGraph(601, (i) => (i === 0 ? [] : i <= 300 ? [i - 1] : i === 301 ? [0] : [i - 1]));

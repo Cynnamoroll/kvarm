@@ -15,16 +15,25 @@
  * D1 update that missed the bound.
  */
 
-import { confirmedRefs, ReportStatusReader } from '@kvarm/gitops';
+import { confirmedRefs, ReportStatusReader, sha256Hex } from '@kvarm/gitops';
 import { bumpRefGeneration, refGeneration } from '../cache/compare';
 import { touchRepoPushed, type RepoRow } from '../db/repos';
 
 /** Upper bound on how long a confirmed push reply waits for the freshness writes. */
 export const PUSH_FRESHNESS_TIMEOUT_MS = 3000;
 
-/** Cache-key generation for a repo's mutable-ref views. */
-export async function repoViewGeneration(repo: Pick<RepoRow, 'id' | 'pushed_at'>): Promise<string> {
-  return `${repo.pushed_at ?? 0}.${await refGeneration(repo.id)}`;
+/**
+ * Cache-key generation for a repo's mutable-ref views. A confirmed push moves
+ * it (`pushed_at`, colo ref generation), and so does an edit of the metadata
+ * those views render — the About card and the header's demo badge come from the
+ * description — because a metadata edit must not keep serving the pre-edit page
+ * until the next push.
+ */
+export async function repoViewGeneration(
+  repo: Pick<RepoRow, 'id' | 'pushed_at' | 'description' | 'visibility'>,
+): Promise<string> {
+  const meta = await sha256Hex(`${repo.visibility}\n${repo.description}`);
+  return `${repo.pushed_at ?? 0}.${await refGeneration(repo.id)}.${meta.slice(0, 8)}`;
 }
 
 /**

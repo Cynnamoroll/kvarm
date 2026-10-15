@@ -126,6 +126,12 @@ export async function mergeBase(reader: CommitReader, a: string, b: string, opts
     if ((f & (ONE | TWO)) === (ONE | TWO)) {
       if (!(f & STALE) && !results.includes(sha)) results.push(sha);
       carry |= STALE;
+      // A tip that is also a common ancestor is the unique best base: it was
+      // reached from the other side, so every other common ancestor is its
+      // proper ancestor. The stale paint trails the FIFO frontier, so without
+      // this exit the walk keeps reading the tip's whole ancestry until the
+      // budget reports an unknown answer for what is a plain fast-forward.
+      if (sha === a || sha === b) return { bases: [sha], truncated: false, commitReads: reads };
     }
     for (const p of info.parents) paint(p, carry);
   }
