@@ -18,11 +18,18 @@ import { CSRF_REFUSED, csrfExempt, sessionCsrf } from '../src/routes/pageCsrf';
 import { mintAgentToken } from '../src/services/agents';
 import { RESERVED_LOGINS } from '../src/services/orgs';
 import { fakeArtifacts } from './helpers/fakeArtifacts';
+import { RESERVED_LOGINS as NODE_RESERVED_LOGINS } from '../../../scripts/lib/reserved-logins.mjs';
 
 const ORIGIN = 'https://kvarm.test';
 const OWNER = 'csrf-owner';
 const REPO = 'guarded';
 const UNSAFE = ['POST', 'PUT', 'PATCH', 'DELETE'];
+
+describe('reserved login mirror', () => {
+  it('matches the platform reserved logins', () => {
+    expect([...NODE_RESERVED_LOGINS].sort()).toEqual([...RESERVED_LOGINS].sort());
+  });
+});
 
 /**
  * What is registered before the middleware: the git smart-HTTP gate (basic
