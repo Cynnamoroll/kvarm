@@ -19,7 +19,6 @@ import { workspaceCleanupStatements } from '../services/workspaces';
 import { issueCleanupStatements } from '../services/issues';
 import { arenaCleanupStatements } from '../services/candidates';
 import { compositionCleanupStatements } from '../services/compositions';
-import { historyCleanupStatements } from '../services/history';
 
 import type { ServiceResult } from './types';
 export type { ServiceResult } from './types';
@@ -162,6 +161,11 @@ export async function deleteRepo(
   } catch (err) {
     return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}`, code: 'ARTIFACTS_UNAVAILABLE' };
   }
+  try {
+    await env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id)).destroy();
+  } catch (err) {
+    console.log(JSON.stringify({ pathHistoryCleanupFailed: repo.id, error: String(err).slice(0, 200) }));
+  }
   // One batch: the repo row with its workspace, change and snapshot rows,
   // returning the tarball keys. Those rows reference the repo (and workspaces
   // their change sets), so they go first.
@@ -171,7 +175,6 @@ export async function deleteRepo(
     ...workspaceCleanupStatements(env.DB, repo.id),
     ...changeCleanupStatements(env.DB, repo.id),
     ...issueCleanupStatements(env.DB, repo.id),
-    ...historyCleanupStatements(env.DB, repo.id),
   ];
   const results = await env.DB.batch<{ r2_key: string }>([
     ...before,

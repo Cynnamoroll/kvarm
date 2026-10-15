@@ -1218,7 +1218,7 @@ describe('snapshot API', () => {
     const del = await call(`/api/v1/repos/${OWNER}/doomed`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
     expect(del.cost.d1).toBeLessThanOrEqual(2);
-    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 0 });
+    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 1 });
     expect(await objectKeys(id)).toHaveLength(0);
     expect(await commitRow(id, main.sha)).toBeNull();
     const trees = await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_trees WHERE repo_id = ?').bind(id).first();
@@ -1231,7 +1231,7 @@ describe('snapshot API', () => {
     const del = await call(`/api/v1/repos/${OWNER}/bare`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
     expect(del.cost.d1).toBeLessThanOrEqual(2);
-    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 0 });
+    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 1 });
     expect(await env.DB.prepare('SELECT id FROM repos WHERE id = ?').bind(id).first()).toBeNull();
   });
 });

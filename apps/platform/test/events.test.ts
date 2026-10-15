@@ -196,7 +196,7 @@ describe('queue dispatcher', () => {
     expect(line.outcome).toBe('processed');
     expect(line.cost.d1).toBeLessThanOrEqual(3);
     expect(line.cost.art).toBe(0);
-    expect(line.cost.do).toBe(0);
+    expect(line.cost.do).toBe(1);
     expect(line.wf).toBe(1);
   });
 
@@ -255,6 +255,7 @@ describe('queue dispatcher', () => {
       'environment-builds': { state: 'skipped', detail: 'no environment uses this base ref' },
       'issue-commits': { state: 'done', detail: 'no closing references in 0 commits; scanned 0 commits, older ones not read' },
       'issue-guard': { state: 'done', detail: 'the previous or the new tip could not be read' },
+      history: { state: 'done', detail: 'not indexed' },
     });
     const gen = await refGeneration(repo.id);
 
@@ -543,6 +544,7 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     expect(list[0]!.effects.map((e) => e.effect).sort()).toEqual([
       'change-hooks',
       'environment-builds',
+      'history',
       'intent-index',
       'issue-commits',
       'issue-guard',

@@ -44,7 +44,7 @@ import { inboxPages, reviewPages } from './routes/reviewPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
-export { TokenCache, RateLimiter, MergeLock, RepoEvents } from './do';
+export { TokenCache, RateLimiter, MergeLock, RepoEvents, PathHistory } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
 export { EnvironmentBuild } from './workflows/environmentBuild';
 export { CiRunnerSandbox } from './containers/ciRunnerSandbox';
