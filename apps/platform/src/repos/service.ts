@@ -157,14 +157,10 @@ export async function deleteRepo(
   env: Env,
   repo: RepoRow,
 ): Promise<ServiceResult<{ deleted: true }>> {
-  try {
-    await env.ARTIFACTS.delete(repo.artifacts_name);
-  } catch (err) {
-    return { ok: false, status: 502, error: `Artifacts delete failed: ${String(err)}`, code: 'ARTIFACTS_UNAVAILABLE' };
-  }
   // One batch: the repo row with its workspace, change and snapshot rows,
   // returning the tarball keys. Those rows reference the repo (and workspaces
-  // their change sets), so they go first.
+  // their change sets), so they go first. Forks hold the parent row and
+  // nothing cascades it, so they detach here too.
   const before = [
     ...compositionCleanupStatements(env.DB, repo.id),
     ...arenaCleanupStatements(env.DB, repo.id),
@@ -172,6 +168,7 @@ export async function deleteRepo(
     ...changeCleanupStatements(env.DB, repo.id),
     ...issueCleanupStatements(env.DB, repo.id),
     ...historyCleanupStatements(env.DB, repo.id),
+    env.DB.prepare('UPDATE repos SET fork_parent_id = NULL WHERE fork_parent_id = ?').bind(repo.id),
   ];
   const results = await env.DB.batch<{ r2_key: string }>([
     ...before,
@@ -179,6 +176,19 @@ export async function deleteRepo(
     ...snapshotCleanupStatements(env.DB, repo.id),
   ]);
   const keys = results[before.length + 1];
+  // D1 before Artifacts: the batch is one transaction, so a failure leaves the
+  // registry intact and the delete retryable. The opposite order removed the
+  // storage first and left listed rows whose every page 500ed when the batch
+  // failed. Storage that reports itself already gone is the normal case when
+  // re-deleting such a leftover; any other delete failure only leaks
+  // unreachable storage.
+  try {
+    await env.ARTIFACTS.delete(repo.artifacts_name);
+  } catch (err) {
+    if (!/not ?found|does not exist|no such/i.test(String(err))) {
+      console.log(JSON.stringify({ artifactsDeleteFailed: repo.id, error: String(err).slice(0, 200) }));
+    }
+  }
   await purgeGitTokens(repo.artifacts_name);
   try {
     await deleteSnapshotObjects(env, (keys?.results ?? []).map((r) => r.r2_key));

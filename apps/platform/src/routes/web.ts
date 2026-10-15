@@ -222,6 +222,9 @@ web.get('/', async (c) => {
       jsonLd: homeJsonLd(c.env, origin),
     });
     res.headers.set('vary', 'Accept');
+    // The signed-out page must not be replayed by a heuristic cache on Back
+    // after a sign-in: it would read as a session that vanished.
+    res.headers.set('cache-control', 'no-store');
     return res;
   }
 

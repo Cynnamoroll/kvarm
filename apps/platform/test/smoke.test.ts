@@ -17,6 +17,8 @@ describe('worker smoke', () => {
     const res = await call(env as unknown as Env, 'GET', '/', { headers: { accept: 'text/html' } });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    // Heuristic caches must not replay the signed-out page on Back after sign-in.
+    expect(res.headers.get('cache-control')).toBe('no-store');
     expect(res.text).toContain('<body class="k-app k-landing">');
     expect(res.text).toContain('/assets/landing.css');
     expect(res.text).toContain('href="/auth/login">Sign in</a>');
