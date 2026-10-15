@@ -46,6 +46,11 @@ func Main(argv []string, env map[string]string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	reg := registry.Load()
 	out, errOut := ui.New(stdout), ui.New(stderr)
+	// The token must not reach a terminal, a log or a pipe. Registering it
+	// here covers every writer at once, including the one path that could
+	// echo it back: a platform error body quoting the Authorization header.
+	out.AddSecret(env["KVARM_PAT"])
+	errOut.AddSecret(env["KVARM_PAT"])
 	opIO := opcli.IO{Env: env, Stdout: out, Stderr: errOut, Client: httpx.New()}
 
 	command, rest := "", argv

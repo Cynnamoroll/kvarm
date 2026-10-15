@@ -60,10 +60,15 @@ func Root(reg *registry.Registry, out *ui.Output, env map[string]string) string 
 	return b.String()
 }
 
+// configLine renders one configuration variable as its set/not-set state
+// and what it is for. The value itself is never printed: KVARM_PAT is a
+// credential, and this screen is the one every invocation without arguments
+// prints. That is also what the README documents the root screen as showing.
+// The state is padded before styling, so ANSI codes do not count as columns.
 func configLine(env map[string]string, name, description string, out *ui.Output) string {
-	state := out.Dim("not set")
-	if v := env[name]; v != "" {
-		state = out.Green("set") + out.Dim(" → "+v)
+	state := out.Dim(ui.Pad("not set", 10))
+	if env[name] != "" {
+		state = out.Green(ui.Pad("set", 10))
 	}
 	return fmt.Sprintf("  %s  %s  %s\n", ui.Pad(name, 14), state, out.Dim(description))
 }
