@@ -25,7 +25,8 @@ const TAR_SIZE_HEADER = 'x-kvarm-snapshot-tar-size';
 const MAX_CACHED_BYTES = 512 * 1024 * 1024;
 
 export function snapshotCacheKey(repoId: string, sha: string): Request {
-  const url = new URL('https://kvarm.internal/snapshot/v1/tar');
+  // v1 entries may hold pre-#56 objects, so never read them again.
+  const url = new URL('https://kvarm.internal/snapshot/v2/tar');
   url.searchParams.set('repo', repoId);
   url.searchParams.set('sha', sha);
   return new Request(url.toString(), { method: 'GET' });

@@ -4,8 +4,10 @@
  * Tarballs are keyed by (repo, root tree) and encoding, so commits with
  * identical trees share one object; commit metadata stays per commit. New
  * builds store zstd frames (one per batch step, concatenated in the object)
- * under the v2 key; a build resumed from a resolve output that predates
- * encodings stays a plain tar under its persisted v1 key. Steps:
+ * under the v3 key; ready objects under the retired v2 prefix are rebuilt
+ * because the pre-#56 encoder truncated their first frame. A build resumed
+ * from a resolve output that predates encodings stays a plain tar under its
+ * persisted v1 key. Steps:
  *
  *   resolve   commit -> tree, then claim the tree build in one D1 batch. A
  *             tree that is already built marks the commit ready (reuse); a
@@ -130,7 +132,14 @@ export function emptyCost(): BuildCost {
 }
 
 export function snapshotKey(repoId: string, tree: string, encoding: SnapshotEncoding = 'identity'): string {
-  return encoding === 'zstd' ? `trees/v2/${repoId}/${tree}.tar.zst` : `trees/v1/${repoId}/${tree}.tar`;
+  return encoding === 'zstd' ? `trees/v3/${repoId}/${tree}.tar.zst` : `trees/v1/${repoId}/${tree}.tar`;
+}
+
+/** Pre-#56 encoder objects have a truncated first frame and are rebuilt on demand. */
+export const RETIRED_SNAPSHOT_PREFIX = 'trees/v2/';
+
+export function isRetiredSnapshotKey(key: string | null): boolean {
+  return key?.startsWith(RETIRED_SNAPSHOT_PREFIX) ?? false;
 }
 
 function contentType(encoding: SnapshotEncoding): string {
@@ -150,6 +159,8 @@ interface StepNote {
   excluded?: Excluded;
   /** R2 key of a finished tarball removed because its repo was deleted during the build. */
   discarded?: string;
+  /** R2 key of a retired snapshot removed after its replacement was stored. */
+  retired?: string;
 }
 
 function errorMessage(err: unknown): string {
@@ -223,12 +234,26 @@ type Resolved =
   | { action: 'done'; reason: string; cost: BuildCost }
   // `encoding` is absent in a persisted resolve output from before encodings
   // existed; such a build must stay a plain tar at its persisted v1 key.
-  | { action: 'build'; tree: string; key: string; encoding?: 'zstd'; artifactsName: string; mtime: number; cost: BuildCost };
+  | {
+      action: 'build';
+      tree: string;
+      key: string;
+      encoding?: 'zstd';
+      artifactsName: string;
+      mtime: number;
+      retiredKey?: string;
+      cost: BuildCost;
+    };
 
 interface ClaimRow {
   tree_state: string | null;
   builder: string | null;
   commit_state: string;
+}
+
+interface PreviousTreeRow {
+  r2_key: string;
+  state: string;
 }
 
 /** Counters metered so far in this step, as a one-step reuse/wait cost. */
@@ -278,6 +303,9 @@ async function resolveStep(env: Env, p: Required<SnapshotParams> & { instanceId:
     // attempt once it has failed; a superseded attempt leaves it alone.
     const results = await db.batch([
       db
+        .prepare('SELECT r2_key, state FROM snapshot_trees WHERE repo_id = ?1 AND tree = ?2')
+        .bind(p.repoId, tree),
+      db
         .prepare(
           `INSERT INTO snapshot_trees (repo_id, tree, state, builder, r2_key, created_at)
            VALUES (?1, ?2, 'building', ?3, ?4, ?5)
@@ -285,9 +313,10 @@ async function resolveStep(env: Env, p: Required<SnapshotParams> & { instanceId:
              state = 'building', builder = excluded.builder, r2_key = excluded.r2_key,
              created_at = excluded.created_at, error = NULL
            WHERE snapshot_trees.state = 'failed'
-              OR (snapshot_trees.state = 'building' AND snapshot_trees.created_at < ?6)`,
+              OR (snapshot_trees.state = 'building' AND snapshot_trees.created_at < ?6)
+              OR (snapshot_trees.state = 'ready' AND snapshot_trees.r2_key LIKE (?7 || '%'))`,
         )
-        .bind(p.repoId, tree, p.instanceId, key, now, now - STALE_BUILD_MS),
+        .bind(p.repoId, tree, p.instanceId, key, now, now - STALE_BUILD_MS, RETIRED_SNAPSHOT_PREFIX),
       db
         .prepare(
           `INSERT INTO snapshot_commits (repo_id, sha, tree, state, trigger, instance_id, requested_at, build_cost)
@@ -315,14 +344,24 @@ async function resolveStep(env: Env, p: Required<SnapshotParams> & { instanceId:
         )
         .bind(p.repoId, p.sha),
     ]);
-    const row = (results[3]?.results as ClaimRow[] | undefined)?.[0];
+    const previous = (results[0]?.results as PreviousTreeRow[] | undefined)?.[0];
+    const row = (results[4]?.results as ClaimRow[] | undefined)?.[0];
     if (row && row.tree_state === 'building' && row.builder === p.instanceId && row.commit_state !== 'ready') {
       // The cost is stored when the build finishes.
-      return { action: 'build', tree, key, encoding, artifactsName: repo.artifacts_name, mtime: commit.committedAt, cost };
+      return {
+        action: 'build',
+        tree,
+        key,
+        encoding,
+        artifactsName: repo.artifacts_name,
+        mtime: commit.committedAt,
+        ...(previous?.state === 'ready' && isRetiredSnapshotKey(previous.r2_key) ? { retiredKey: previous.r2_key } : {}),
+        cost,
+      };
     }
     // This attempt claimed the commit and needs nothing more (reuse, or a
     // wait on another builder): store its measured cost over the placeholder.
-    const claimed = (results[1]?.meta?.changes ?? 0) > 0;
+    const claimed = (results[2]?.meta?.changes ?? 0) > 0;
     if (claimed) {
       const measured = JSON.stringify(settledCost(meter));
       note.excluded = await measureD1(meter, () =>
@@ -372,6 +411,7 @@ interface BuildTarget {
   encoding: SnapshotEncoding;
   artifactsName: string;
   mtime: number;
+  retiredKey?: string;
 }
 
 export interface BuildOptions {
@@ -893,9 +933,13 @@ async function finishStep(
     if ((treeReady?.meta?.changes ?? 0) === 0) {
       repoGone = !(await db.prepare('SELECT 1 AS ok FROM repos WHERE id = ?').bind(p.repoId).first());
       if (repoGone) {
-        await env.SNAPSHOTS.delete(target.key);
+        await env.SNAPSHOTS.delete(target.retiredKey ? [target.key, target.retiredKey] : target.key);
         note.discarded = target.key;
+        if (target.retiredKey) note.retired = target.retiredKey;
       }
+    } else if (target.retiredKey) {
+      await env.SNAPSHOTS.delete(target.retiredKey);
+      note.retired = target.retiredKey;
     }
     const final = structuredClone(cost);
     addMeter(final, meter);
@@ -993,6 +1037,7 @@ export async function buildSnapshot(
       encoding: resolved.encoding ?? 'identity',
       artifactsName: resolved.artifactsName,
       mtime: resolved.mtime,
+      ...(resolved.retiredKey ? { retiredKey: resolved.retiredKey } : {}),
     };
     let state: BatchState = {
       stack: [{ path: '', hash: resolved.tree, next: 0 }],

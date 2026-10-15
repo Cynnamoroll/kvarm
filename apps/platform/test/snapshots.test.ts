@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { type CostCounters } from '../src/cost/meter';
 import { snapshotInstanceId } from '../src/services/events';
+import { isReady } from '../src/services/snapshots';
 import { tarEnd, tarHeader, tarPadding } from '@kvarm/gitops';
 import { matchSnapshot, snapshotCacheKey, streamAndStore, zstdDecompressAll } from '../src/cache/snapshot';
 import { acceptsZstd } from '../src/routes/api/snapshots';
@@ -151,7 +152,7 @@ async function commitRow(repoId: string, sha: string) {
 
 async function objectKeys(repoId: string): Promise<string[]> {
   const keys: string[] = [];
-  for (const prefix of [`trees/v1/${repoId}/`, `trees/v2/${repoId}/`]) {
+  for (const prefix of [`trees/v1/${repoId}/`, `trees/v2/${repoId}/`, `trees/v3/${repoId}/`]) {
     const list = await env.SNAPSHOTS.list({ prefix });
     keys.push(...list.objects.map((o) => o.key));
   }
@@ -647,6 +648,45 @@ describe('SnapshotBuilder', () => {
     expect(finish?.excluded).toBeUndefined();
   });
 
+  it('deleting a repo during a retired snapshot rebuild removes both tarballs', async () => {
+    const { id, repo } = await seedRepo('vanish-retired');
+    const c = await commit(repo, SMALL);
+    repo.refs.set('refs/heads/main', c.sha);
+    const retiredKey = `trees/v2/${id}/${c.tree}.tar.zst`;
+    const garbage = new Uint8Array([0x28, 0xb5, 0x2f, 0xfd]);
+    await env.SNAPSHOTS.put(retiredKey, garbage);
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO snapshot_trees
+           (repo_id, tree, state, builder, r2_key, size, files, created_at, built_at, encoding, encoded_size)
+         VALUES (?, ?, 'ready', 'retired', ?, 1, 1, ?, ?, 'zstd', ?)`,
+      ).bind(id, c.tree, retiredKey, now, now, garbage.length),
+      env.DB.prepare(
+        `INSERT INTO snapshot_commits (repo_id, sha, tree, state, trigger, instance_id, attempt, requested_at, built_at)
+         VALUES (?, ?, ?, 'ready', 'push', 'retired', 0, ?, ?)`,
+      ).bind(id, c.sha, c.tree, now, now),
+    ]);
+
+    const demand = await call(snap('vanish-retired', 'main'), { method: 'POST', token: tok.owner });
+    expect(demand.status).toBe(202);
+    const instanceId = snapshotInstanceId(id, c.sha);
+    builder.ran.add(instanceId);
+    const runner = new Runner();
+    const batch = runner.pauseAt('batch-1');
+    const build = buildSnapshot(env, { repoId: id, sha: c.sha, trigger: 'demand', instanceId }, runner);
+    await batch.reached;
+
+    const del = await call(`/api/v1/repos/${OWNER}/vanish-retired`, { method: 'DELETE', token: tok.owner });
+    expect(del.status).toBe(200);
+    expect(await env.SNAPSHOTS.get(retiredKey)).not.toBeNull();
+    expect(await env.SNAPSHOTS.get(snapshotKey(id, c.tree, 'zstd'))).toBeNull();
+
+    batch.release();
+    await expect(build).resolves.toMatchObject({ outcome: 'built' });
+    expect(await objectKeys(id)).toEqual([]);
+  });
+
   it('an attempt superseded while its repo is alive deletes nothing when it finishes late', async () => {
     const { id, repo } = await seedRepo('late');
     const files: Files = { 'late.txt': 'late finisher\n' };
@@ -829,6 +869,85 @@ describe('snapshot API', () => {
     expect((await call(snap('api', 'agents/w1/download'), { token: tok.owner })).status).toBe(409);
     expect(builder.creates.length).toBe(before);
     expect(await commitRow(fx.id, fx.feature.sha)).toBeNull();
+  });
+
+  it('rebuilds a ready zstd snapshot from the retired encoder and ignores its cache entry', async () => {
+    const { id, repo } = await seedRepo('retired');
+    const c = await commit(repo, SMALL);
+    repo.refs.set('refs/heads/main', c.sha);
+    const oldKey = `trees/v2/${id}/${c.tree}.tar.zst`;
+    const garbage = new Uint8Array([0x28, 0xb5, 0x2f, 0xfd]);
+    await env.SNAPSHOTS.put(oldKey, garbage, { httpMetadata: { contentType: 'application/zstd' } });
+    const now = Date.now();
+    expect(
+      isReady({
+        sha: c.sha,
+        tree: c.tree,
+        state: 'ready',
+        trigger: 'push',
+        instance_id: 'retired',
+        attempt: 0,
+        reused: 0,
+        build_cost: null,
+        error: null,
+        requested_at: now,
+        built_at: now,
+        size: 1,
+        files: 1,
+        r2_key: oldKey,
+        encoding: 'zstd',
+        encoded_size: garbage.length,
+      }),
+    ).toBe(false);
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO snapshot_trees
+           (repo_id, tree, state, builder, r2_key, size, files, created_at, built_at, encoding, encoded_size)
+         VALUES (?, ?, 'ready', 'retired', ?, 1, 1, ?, ?, 'zstd', ?)`,
+      ).bind(id, c.tree, oldKey, now, now, garbage.length),
+      env.DB.prepare(
+        `INSERT INTO snapshot_commits (repo_id, sha, tree, state, trigger, instance_id, attempt, requested_at, built_at)
+         VALUES (?, ?, ?, 'ready', 'push', 'retired', 0, ?, ?)`,
+      ).bind(id, c.sha, c.tree, now, now),
+    ]);
+    const oldCacheKey = new Request(
+      `https://kvarm.internal/snapshot/v1/tar?repo=${encodeURIComponent(id)}&sha=${encodeURIComponent(c.sha)}`,
+    );
+    await caches.default.put(
+      oldCacheKey,
+      new Response(garbage, {
+        headers: {
+          'x-kvarm-snapshot-tree': c.tree,
+          'x-kvarm-snapshot-size': String(garbage.length),
+          'x-kvarm-snapshot-encoding': 'zstd',
+          'x-kvarm-snapshot-tar-size': '1',
+        },
+      }),
+    );
+
+    expect(await matchSnapshot(id, c.sha)).toBeNull();
+    const meta = await call(snap('retired', 'main'), { token: tok.owner });
+    expect(meta.status).toBe(202);
+    expect(meta.json).toMatchObject({ state: 'absent', sha: c.sha });
+    const oldDownload = await call(snap('retired', `${c.sha}/download`), { token: tok.owner });
+    expect(oldDownload.status).toBe(409);
+    expect(oldDownload.json).toMatchObject({ state: 'absent', code: 'SNAPSHOT_NOT_READY' });
+
+    const demand = await call(snap('retired', 'main'), { method: 'POST', token: tok.owner });
+    expect(demand.status).toBe(202);
+    expect(demand.json).toMatchObject({ state: 'building', started: true });
+    await builder.drain();
+
+    const ready = await call(snap('retired', 'main'), { token: tok.owner });
+    expect(ready.status).toBe(200);
+    expect(ready.json).toMatchObject({ state: 'ready', sha: c.sha, encoding: 'zstd' });
+    expect((await treeRow(id, c.tree))?.r2_key).toBe(snapshotKey(id, c.tree, 'zstd'));
+    const downloaded = await call(snap('retired', `${c.sha}/download`), { token: tok.owner });
+    expect(downloaded.status).toBe(200);
+    const expectedTar = await tarball(id, c.tree);
+    expect(downloaded.bytes).toEqual(expectedTar);
+    checkTar(readTar(downloaded.bytes), SMALL);
+    expect(await env.SNAPSHOTS.get(oldKey)).toBeNull();
   });
 
   it('demand needs an identified caller with read access', async () => {
