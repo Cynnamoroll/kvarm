@@ -397,10 +397,12 @@ Scale claims rest on one measured live run of 100 workspaces through the train, 
 
 ### 11.10 Path history
 
-`GET history?path=` answers which commits on the default branch's first-parent chain changed a path, newest first. A repository's `PathHistory` Durable Object owns its SQLite index; `0045_path_history_do` clears the retired D1 index. The service validates and resolves the cached head, then delegates to the DO.
+`get_path_history` (`kvarm file history`) answers which commits on the default branch's first-parent chain changed a path, newest first. `apps/platform/src/services/history.ts` validates and resolves the cached head, then delegates to the repository's `PathHistory` Durable Object; `packages/gitops/src/history.ts` provides the shared indexing logic. Migration `0045_path_history_do` clears the retired D1 index.
 
 - The DO indexes in alarm-driven slices. It reads first-parent log windows of 1,000, indexes batches of 200 with eight concurrent diffs and a 20,000-tree LRU cache, and arms another alarm when work remains. Per-commit limits are 2,000 changes and 5,000 tree reads; paths over 4,096 bytes are omitted. Oversized commits and a lost tail are explicit gaps.
-- The DO owns epoch/ref/head/tail state, commits, path ids and compact per-path postings. Rewrites start a new epoch; cursors from an earlier epoch return `409 STALE_CURSOR`. First pages may wait up to two seconds for indexing, while cursor pages only read the current index.
-- Push events update an activated index and arm its alarm. A push to a repository that has never been queried performs no DO write. Repository deletion calls `PathHistory.destroy()`.
+- First pages wait only until the index is current and the path has `limit+1` entries or the root is reached, for up to two seconds; cursor pages only read the current index.
+- **Freshness.** Pushes feed the known head to an activated index; agreement with the cached head costs no Artifacts read. A disagreement costs one uncached `log` per 30 seconds per repository, memoized and shared by readers. Deletion pushes are recorded.
+- **Concurrency.** Readers share one single-flight build inside the DO and never do per-reader indexing Artifacts work; ten concurrent cold readers read each tree once.
+- **Storage.** Each repository has a DO SQLite index with interned paths and one posting row per path per batch. An epoch restart drops old index tables; repository deletion calls `PathHistory.destroy()`.
 - A missing tree or failed Artifacts read records an error, logs one bounded warning and retries from an alarm. A deleted default branch answers an empty complete history.
 - Platform-test measurements: a cold short-history read costs `{"d1":1,"rr":6,"rw":1,"art":3,"do":1,"r2a":0,"r2b":0,"q":0,"sub":1,"cache":"none"}`; its warm read costs `{"d1":1,"rr":4,"rw":0,"art":0,"do":1,"r2a":0,"r2b":0,"q":0,"sub":0,"cache":"none"}`. Ten concurrent cold readers of a 24-commit chain read 24 trees once each and issue two distinct log reads total.

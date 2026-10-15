@@ -116,6 +116,47 @@ describe('GET /repos/:owner/:repo/history', () => {
     expect(indexWindows).toBe(3);
   }, 60_000);
 
+  it('keeps a window-boundary change distinct from a root addition', async () => {
+    const repo = await createRepo('window-boundary');
+    const shas: string[] = [];
+    let files: Files = {};
+    let parents: string[] = [];
+    for (let i = 0; i < 1005; i++) {
+      if (i === 0) files = { ...files, 'root-only.txt': 'root\n', 'boundary.txt': 'before\n' };
+      if (i === 5) files = { ...files, 'boundary.txt': 'after\n' };
+      const result = await commit(repo.fake, { ...files }, parents);
+      shas.push(result.sha);
+      parents = [result.sha];
+    }
+    await setMain(repo, shas.at(-1)!);
+
+    const rootOnly = await settle(repo, 'window-boundary', 'root-only.txt');
+    expect(rootOnly.json.commits.map((entry: { sha: string; status: string }) => ({ sha: entry.sha, status: entry.status }))).toEqual([
+      { sha: shas[0], status: 'added' },
+    ]);
+    const boundary = await history('window-boundary', 'path=boundary.txt&limit=100');
+    expect(boundary.json.commits.find((entry: { sha: string }) => entry.sha === shas[5])?.status).toBe('modified');
+  }, 60_000);
+
+  it('pages through a path without duplicates across a posting-row cursor', async () => {
+    const repo = await createRepo('paging');
+    const shas = await linear(repo, 12, 1);
+    await setMain(repo, shas.at(-1)!);
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const query = `path=f0.txt&limit=3${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      const result = await history('paging', query);
+      expect(result.status).toBe(200);
+      seen.push(...result.json.commits.map((entry: { sha: string }) => entry.sha));
+      cursor = result.json.nextCursor as string | null;
+    } while (cursor);
+
+    expect(seen).toEqual([...shas].reverse());
+    expect(new Set(seen).size).toBe(shas.length);
+  });
+
   it('rebuilds a rewritten branch in a new epoch and rejects old cursors', async () => {
     const repo = await createRepo('rewrite');
     const old = await linear(repo, 12, 1);
@@ -140,8 +181,10 @@ describe('GET /repos/:owner/:repo/history', () => {
     const child = await commit(repo.fake, { 'f0.txt': 'next\n', 'f1.txt': 'next\n', 'f2.txt': 'next\n' }, [initial.at(-1)!]);
     await setMain(repo, child.sha);
     const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    repo.fake.calls.length = 0;
     expect(await stub.pushed({ ref: 'refs/heads/main', after: child.sha, eventAt: Date.now() + 1000 })).toBe('indexed');
     await runDurableObjectAlarm(stub);
+    expect(repo.fake.calls.filter((entry) => entry.startsWith('log:'))).toEqual([`log:${child.sha}`]);
     const state = await runInDurableObject(stub, async (_obj: PathHistory, storage) =>
       storage.storage.sql.exec<{ known_sha: string; head_sha: string }>('SELECT known_sha,head_sha FROM state').toArray()[0],
     );
@@ -168,6 +211,135 @@ describe('GET /repos/:owner/:repo/history', () => {
     });
     for (let i = 0; i < 5; i++) await query();
     expect(repo.fake.calls.filter((entry) => entry === 'log:main')).toEqual(['log:main']);
+  });
+
+  it('answers a full current page without waiting for the remaining root batch', async () => {
+    const repo = await createRepo('full-page');
+    const [root, middle, head] = await linear(repo, 3, 1);
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    const repoName = `${OWNER}--full-page`;
+    const now = Date.now();
+    await runInDurableObject(stub, async (_obj: PathHistory, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
+         VALUES(1,?,'refs/heads/main',?,0,?,-1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
+        repoName, head!, root!, head!, now, now,
+      );
+      state.storage.sql.exec(
+        'INSERT INTO commits(seq,sha,author_name,author_email,committed_at,summary,gap) VALUES(0,?,?,?,?,?,0),(-1,?,?,?,?,?,0)',
+        head!, 'author', 'author@example.test', now, 'head',
+        middle!, 'author', 'author@example.test', now, 'middle',
+      );
+      state.storage.sql.exec("INSERT INTO paths(path) VALUES('f0.txt')");
+      const pathId = state.storage.sql.exec<{ id: number }>("SELECT id FROM paths WHERE path='f0.txt'").toArray()[0]!.id;
+      state.storage.sql.exec('INSERT INTO postings(path_id,top,bottom,data) VALUES(?,0,-1,?)', pathId, '0m,-1m');
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    repo.fake.hook = async (call) => {
+      if (call.startsWith('readTree:')) {
+        repo.fake.hook = null;
+        entered();
+        await blocked;
+      }
+    };
+    const outcome = await runInDurableObject(stub, async (object, state) => {
+      const internal = object as unknown as {
+        targetHead: string | null;
+        repoName: string;
+        ref: string;
+        start(): Promise<void>;
+        query(input: Parameters<PathHistory['query']>[0]): ReturnType<PathHistory['query']>;
+      };
+      internal.targetHead = head!;
+      internal.repoName = repoName;
+      internal.ref = 'refs/heads/main';
+      const build = internal.start();
+      await reading;
+      try {
+        const before = state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM commits').toArray()[0]!.count;
+        const result = await internal.query({
+          repoName, ref: 'refs/heads/main', path: 'f0.txt', limit: 1, cursor: null, cachedHead: head!,
+        });
+        const after = state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM commits').toArray()[0]!.count;
+        return { result, before, after };
+      } finally {
+        release();
+        repo.fake.hook = null;
+        await build;
+      }
+    });
+    expect(outcome.result).toMatchObject({ ok: true, value: { commits: [{ sha: head! }], index: { current: true, rootReached: false, progressed: false } } });
+    expect(outcome.after).toBe(outcome.before);
+  });
+
+  it('records a deletion push as a null known head and rejects a stale cached head', async () => {
+    const repo = await createRepo('deletion-push');
+    const [head] = await linear(repo, 2);
+    await setMain(repo, head!);
+    await settle(repo, 'deletion-push', 'f0.txt');
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    repo.fake.refs.delete('refs/heads/main');
+    expect(await stub.pushed({ ref: 'refs/heads/main', after: '0'.repeat(40), eventAt: Date.now() + 1000 })).toBe('indexed');
+    const known = await runInDurableObject(stub, async (_obj: PathHistory, state) =>
+      state.storage.sql.exec<{ known_sha: string | null }>('SELECT known_sha FROM state').toArray()[0],
+    );
+    expect(known?.known_sha).toBeNull();
+
+    const result = await stub.query({
+      repoName: `${OWNER}--deletion-push`, ref: 'refs/heads/main', path: 'f0.txt', limit: 30, cursor: null, cachedHead: head!,
+    });
+    expect(result.value).toMatchObject({ headSha: null, commits: [], index: { complete: true } });
+  });
+
+  it('does not recreate SQLite tables when destroyed during a blocked build', async () => {
+    const repo = await createRepo('destroy-race');
+    const [head] = await linear(repo, 1);
+    const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
+    const repoName = `${OWNER}--destroy-race`;
+    const now = Date.now();
+    await runInDurableObject(stub, async (_obj: PathHistory, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO state(epoch,repo_name,ref,head_sha,head_seq,tail_next,tail_seq,gaps,known_sha,known_at,memo_cached,memo_known,memo_fresh,memo_at,last_error,updated_at)
+         VALUES(1,?,'refs/heads/main',NULL,0,?,1,0,?,?,NULL,NULL,NULL,0,NULL,?)`,
+        repoName, head!, head!, now, now,
+      );
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    repo.fake.hook = async (call) => {
+      if (call.startsWith('readTree:')) {
+        repo.fake.hook = null;
+        entered();
+        await blocked;
+      }
+    };
+    try {
+      const tables = await runInDurableObject(stub, async (object, state) => {
+        const internal = object as unknown as { targetHead: string | null; repoName: string; ref: string; start(): Promise<void> };
+        internal.targetHead = head!;
+        internal.repoName = repoName;
+        internal.ref = 'refs/heads/main';
+        const build = internal.start();
+        await reading;
+        try {
+          await object.destroy();
+        } finally {
+          release();
+          repo.fake.hook = null;
+        }
+        await build;
+        return state.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table'").toArray();
+      });
+      expect(tables).toEqual([]);
+    } finally {
+      release();
+      repo.fake.hook = null;
+    }
   });
 
   it('does not record missing trees and retains the indexing error', async () => {

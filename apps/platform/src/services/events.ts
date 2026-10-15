@@ -499,7 +499,6 @@ const historyEffect: PushEffect = {
   name: 'history',
   async run(ctx) {
     if (ctx.event.ref !== `refs/heads/${ctx.defaultBranch}`) return { state: 'skipped', detail: 'not the default branch' };
-    if (ctx.event.after === ZERO_OID) return { state: 'skipped', detail: 'ref deleted' };
     if (ctx.superseded) return { state: 'skipped', detail: 'superseded' };
     const stub = ctx.env.PATH_HISTORY.get(ctx.env.PATH_HISTORY.idFromName(ctx.repoId));
     const result = await stub.pushed({ ref: ctx.event.ref, after: ctx.event.after, eventAt: ctx.eventAt });

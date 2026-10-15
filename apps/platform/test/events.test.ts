@@ -484,6 +484,7 @@ describe('queue dispatcher', () => {
     expect(byRef['refs/heads/agents/ws1/fix']!['intent-index']).toEqual({ state: 'skipped', detail: 'no workspace for this ref' });
     expect(byRef['refs/heads/main']!['intent-index']).toEqual({ state: 'skipped', detail: 'not a workspace ref' });
     expect(byRef['refs/heads/trunk']!.snapshot).toEqual({ state: 'skipped', detail: 'ref deleted' });
+    expect(byRef['refs/heads/trunk']!.history).toEqual({ state: 'done', detail: 'not indexed' });
     expect(wf.instances.size).toBe(0);
     expect(await refRow(repo.id, 'refs/heads/trunk')).toMatchObject({ sha: ZERO });
   });
