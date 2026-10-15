@@ -9,6 +9,9 @@ const COPY_JS = `document.addEventListener('click',e=>{const b=e.target.closest(
 
 export type RepoTab = 'code' | 'changes' | 'commits' | 'branches' | 'issues' | 'environments' | 'compare' | 'activity' | 'train' | 'settings';
 
+/** Tab text where the route name is not self-explanatory. */
+const TAB_LABEL: Partial<Record<RepoTab, string>> = { train: 'merge queue' };
+
 export interface ShellOptions extends Pick<PageOptions, 'active' | 'needsYouCount' | 'inboxCount' | 'runningCount'> {
   repo: RepoRow;
   ref: string;
@@ -98,7 +101,7 @@ export function repoPage(env: Env, opts: ShellOptions, userLogin: string | null,
   if (userLogin) secondary.push('environments');
   if (userLogin === repo.owner_login) secondary.push('settings');
   const tabLink = (t: RepoTab) =>
-    `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${repoTabHref(repo, t, ref)}"${opts.tab === t ? ' aria-current="page"' : ''}>${t}</a>`;
+    `<a class="tab ${opts.tab === t ? 'active' : ''}" href="${repoTabHref(repo, t, ref)}"${opts.tab === t ? ' aria-current="page"' : ''}>${TAB_LABEL[t] ?? t}</a>`;
   const tabHtml = `${primary.map(tabLink).join('')}<span class="tab-sep" aria-hidden="true"></span>${secondary.map(tabLink).join('')}`;
 
   const description = repo.description ? html`<p class="lede">${repo.description}</p>` : '';

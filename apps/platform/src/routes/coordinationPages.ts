@@ -610,7 +610,7 @@ coordinationPages.get('/train', async (c) => {
   if (!resolved) return notFound(c);
   const repo = resolved.repo;
   const r = await trainView(c.env, repo, { base: c.req.query('base') ?? undefined });
-  if (!r.ok) return errorCard(c, resolved, 'train', 'Train unavailable', r);
+  if (!r.ok) return errorCard(c, resolved, 'train', 'Merge queue unavailable', r);
   const tv = r.value;
 
   // Entries arrive grouped by target, in train order; render one card each.
@@ -652,7 +652,7 @@ coordinationPages.get('/train', async (c) => {
         <div class="pair-row">
           <div><strong>#${e.number}</strong> ${stateBadge(e.state)} <span class="muted">${e.mergePolicy}</span></div>
           <div>${e.reason ? raw(html`<code>${e.reason.code}</code> ${e.reason.message ?? ''}`) : '<span class="muted">no reason recorded</span>'}</div>
-          <div class="muted">left the train ${ago(e.exitedAt)}</div>
+          <div class="muted">left the queue ${ago(e.exitedAt)}</div>
         </div>
       `,
     )
@@ -685,11 +685,11 @@ coordinationPages.get('/train', async (c) => {
     <div data-live-repo="${repo.owner_login}/${repo.name}" data-live-root><div data-live-region="train">
     <div class="card">
       <div class="card-title">
-        Integration train
+        Merge queue
         <span class="muted">window ${limits.window} · ${limits.runnerCapacity} checking at once · admission ${limits.admissionCapacity} · auto-refreshes every ${TRAIN_REFRESH_SECONDS}s</span>
       </div>
       ${tv.train.truncated ? raw(`<div class="flash warn">Only the first ${TRAIN_VIEW_LIMITS.entries} entries are shown; older entries exist.</div>`) : ''}
-      ${raw(groupHtml || '<p class="muted">the train is empty — enqueued changes appear here</p>')}
+      ${raw(groupHtml || '<p class="muted">the merge queue is empty — enqueued changes appear here</p>')}
     </div>
     <div class="card">
       <div class="card-title">Recent exits</div>
@@ -705,7 +705,7 @@ coordinationPages.get('/train', async (c) => {
   `;
   return respond(
     c,
-    repoPage(c.env, { repo, ref: repo.default_branch || 'main', tab: 'train', title: 'Train' }, resolved.viewer?.user.login ?? null, body, c.req.url),
+    repoPage(c.env, { repo, ref: repo.default_branch || 'main', tab: 'train', title: 'Merge queue' }, resolved.viewer?.user.login ?? null, body, c.req.url),
     200,
     { refresh: TRAIN_REFRESH_SECONDS },
   );

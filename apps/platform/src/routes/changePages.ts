@@ -380,7 +380,7 @@ function remainingPanel(items: readonly RemainingItem[], state: string, queueSta
       ${agentMode ? raw(html`<code class="remaining-code">${item.code}</code>`) : ''}
     </div>
   </li>`).join('');
-  const empty = queueState !== null ? 'In the train.' : 'Nothing left. Ready to merge.';
+  const empty = queueState !== null ? 'In the merge queue.' : 'Nothing left. Ready to merge.';
   return html`<section class="card remaining-panel">
     <div class="card-title">What’s left</div>
     ${items.length ? raw(html`<ol class="remaining-list">${raw(rows)}</ol>`) : html`<p class="muted">${empty}</p>`}
