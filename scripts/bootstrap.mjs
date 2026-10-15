@@ -5,8 +5,11 @@
  * snapshot bucket, the event queue and its dead-letter queue, the Artifacts
  * namespace (which comes into existence with its first repository) and the
  * account-level Artifacts `repo.pushed` subscription on the event queue.
- * Durable Objects, Workflows, the Container class, the rate limiters and the
- * queue consumer are created by `npm run deploy`.
+ * Durable Objects, Workflows, the Container classes, the rate limiters and
+ * the queue consumer are created by `npm run deploy`. Three Durable Object
+ * classes (CiRunnerSandbox, EnvironmentBuilder, AgentSandbox) run on
+ * Cloudflare Containers, which needs the Workers Paid plan; this script
+ * does not check the plan.
  *
  *   node scripts/bootstrap.mjs            dry run: list the account, print the plan, create nothing
  *   node scripts/bootstrap.mjs --apply    create what is missing, list again to verify, and
@@ -109,6 +112,7 @@ try {
   }
   if (opts.apply) {
     console.log('next: set KVARM_APP_ORIGIN in apps/platform/.env.deploy, then `npm run db:migrate:remote --workspace apps/platform` and `npm run deploy`');
+    console.log('note: the deploy creates Container-backed Durable Objects, and Cloudflare Containers needs the Workers Paid plan');
   }
   process.exitCode = opts.apply && !out.verified ? 1 : 0;
 } catch (e) {
