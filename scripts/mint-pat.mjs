@@ -17,6 +17,7 @@
  *   node scripts/mint-pat.mjs --login <login> --scopes read,write,api,ci \
  *     --name my-token --token-file .env.local \
  *     --key KVARM_PAT [--email you@example.invalid] [--rotate] [--local]
+ * Reserved platform route logins such as `api` and `users` cannot be used.
  *
  * Remote mode requires `wrangler` (logged in) resolvable through npx, and
  * KVARM_D1_DATABASE_ID in the environment or apps/platform/.env.deploy.
@@ -30,6 +31,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { RESERVED_LOGINS } from './lib/reserved-logins.mjs';
 import { localD1Args, remoteD1Args } from './lib/wrangler-target.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -60,6 +62,9 @@ const { values: args } = parseArgs({
 
 const login = args.login ?? fail('--login is required');
 if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(login)) fail('--login must match [a-z0-9-]{1,39}');
+if (RESERVED_LOGINS.has(login)) {
+  fail(`--login "${login}" is reserved (it would collide with platform routes such as /${login}/...)`);
+}
 const scopes = (args.scopes ?? fail('--scopes is required')).split(',').map((s) => s.trim());
 for (const s of scopes) {
   if (!ALLOWED_SCOPES.includes(s)) fail(`unknown scope "${s}" (allowed: ${ALLOWED_SCOPES.join(',')})`);
