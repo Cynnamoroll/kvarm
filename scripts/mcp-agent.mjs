@@ -82,13 +82,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
 import { parseCost } from './lib/fleet.mjs';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 import { writeAskpass } from './lib/live.mjs';
 import { remoteD1Args } from './lib/wrangler-target.mjs';
 
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const OWNER = process.env.KVARM_USER ?? 'admin';
 const PLATFORM_DIR = fileURLToPath(new URL('../apps/platform/', import.meta.url));
-const CLI_BIN = fileURLToPath(new URL('../apps/cli/bin/kvarm.js', import.meta.url));
 const eq = isDeepStrictEqual;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -331,7 +331,7 @@ async function e2eChecks(argv, scratch) {
   }
   /** One `kvarm ... --json` CLI run as KVARM_USER (KVARM_PAT from the environment). */
   function kvarm(args) {
-    const r = spawnSync(process.execPath, [CLI_BIN, ...args, '--json'], { env: { ...process.env, KVARM_BASE_URL: BASE }, encoding: 'utf8' });
+    const r = spawnSync(kvarmBin(), [...args, '--json'], { env: { ...process.env, KVARM_BASE_URL: BASE }, encoding: 'utf8' });
     let data = null;
     try {
       data = JSON.parse(r.stdout);
@@ -1207,7 +1207,7 @@ async function e2eChecks(argv, scratch) {
     console.log(`agent-one stale complete_task (generation ${gen1}) -> isError=${stale.isError} ${stale.text.slice(0, 250)}\nGET tasks/${aTask?.id} -> status=${afterStale?.status} claimedBy=${afterStale?.claimedBy} workspace=${afterStale?.workspace}; GET changes/${changes.auto.number} head=${changeAfterStale?.headSha} state=${changeAfterStale?.state}`);
     check('VAL-WORKFLOW-002', 'the stale generation completion is refused 409 STALE_GENERATION; task and change unchanged', stale.isError && stale.data?.code === 'STALE_GENERATION' && afterStale?.status === 'claimed' && afterStale?.claimedBy === 'agent-two' && afterStale?.workspace === a1.data?.workspace?.id && changeAfterStale?.headSha === before?.headSha && changeAfterStale?.headSha === heads.auto && changeAfterStale?.state === 'conflicted');
     const done = kvarm(['task', 'complete', env.repo, aTask?.id, '--generation', String(gen2), '--agent', 'agent-two', '--sha', aRes.sha]);
-    const runner = spawnSync(process.execPath, [CLI_BIN, 'runner', '--repo', env.repo, '--once'], {
+    const runner = spawnSync(kvarmBin(), ['runner', '--repo', env.repo, '--once'], {
       env: { ...process.env, KVARM_BASE_URL: BASE },
       encoding: 'utf8',
       timeout: 120_000,

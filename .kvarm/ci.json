@@ -2,6 +2,7 @@
   "jobs": [
     { "name": "typecheck", "run": "npm install --no-audit --no-fund && npm run typecheck", "required": true, "timeoutSeconds": 1200 },
     { "name": "lint", "run": "npm install --no-audit --no-fund && npm run lint", "required": true, "timeoutSeconds": 1200 },
-    { "name": "test", "run": "git init -q && npm install --no-audit --no-fund && npm run test -- --maxWorkers=3", "required": true, "timeoutSeconds": 2400 }
+    { "name": "test", "run": "git init -q && npm install --no-audit --no-fund && npm run test -- --maxWorkers=3", "required": true, "timeoutSeconds": 2400 },
+    { "name": "cli", "run": "npm install --no-audit --no-fund && npm run cli", "required": true, "timeoutSeconds": 1200 }
   ]
 }

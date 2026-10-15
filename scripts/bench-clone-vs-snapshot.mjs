@@ -36,6 +36,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 
 const { values: args } = parseArgs({
   options: {
@@ -51,7 +52,6 @@ const OWNER = process.env.KVARM_USER ?? 'admin';
 const RUNS = Math.max(3, Number(args.runs) || 3);
 const ONLY = new Set(args.only.split(','));
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const KVARM_BIN = join(ROOT, 'apps', 'cli', 'bin', 'kvarm.js');
 const FIXTURE = { repo: 'fixture-1m', ref: 'bench-head', sha: '08333c79998f410b9c40a84cc430ce9762c29ae8' };
 const PREFIX = 'm4-cli-checkout';
 const READY_BOUND_MS = 15 * 60_000;
@@ -138,7 +138,7 @@ const VARIANTS = {
   },
   snapshot(t, dir) {
     const env = { PATH: process.env.PATH, HOME: process.env.HOME, KVARM_BASE_URL: BASE, KVARM_PAT: process.env.KVARM_PAT };
-    const r = run(process.execPath, [KVARM_BIN, 'checkout', `${OWNER}/${t.repo}`, t.ref, dir], { env });
+    const r = run(kvarmBin(), ['checkout', `${OWNER}/${t.repo}`, t.ref, dir], { env });
     const first = r.out.split('\n')[0];
     if (r.code !== 0 || first !== 'source: snapshot') throw new Error(`kvarm checkout did not use the snapshot (exit ${r.code}, ${first}): ${r.err}`);
     const field = (k) => r.out.split('\n').find((l) => l.startsWith(`${k}: `))?.slice(k.length + 2);
@@ -280,7 +280,7 @@ function markdown(record) {
     '  TypeScript-like files on `main`, created by the script and deleted afterwards.',
     '- **Variants.** `clone` = `git clone --no-checkout <url>` then `git checkout <ref>` (what the',
     '  CLI fallback does: full history, every branch). `shallow` = `git clone --depth=1',
-    '  --single-branch --branch <ref>`. `snapshot` = `node apps/cli/bin/kvarm.js checkout',
+    '  --single-branch --branch <ref>`. `snapshot` = `kvarm checkout',
     '  <owner/repo> <ref> <dir>`, which demands the snapshot (`POST …/snapshots/<ref>`, already',
     '  ready), downloads the tarball by commit SHA and extracts it; the run fails unless it prints',
     '  `source: snapshot`.',

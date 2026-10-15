@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 
 const { values: opts } = parseArgs({
   options: { keep: { type: 'boolean', default: false }, only: { type: 'string' } },
@@ -458,7 +459,7 @@ await scenario('forecast', async (repo) => {
   );
   await pushRetry(dir, url, [`${y}:refs/heads/feat-y`]);
   const ch2 = await http(`${api}/changes`, { method: 'POST', json: { title: 'touch never again', base: 'main', head: 'feat-y', mergePolicy: 'auto' } });
-  const runner = spawnSync(process.execPath, ['apps/cli/bin/kvarm.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once'], {
+  const runner = spawnSync(kvarmBin(), ['runner', '--repo', `${OWNER}/${repo}`, '--once'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
     encoding: 'utf8',

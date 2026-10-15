@@ -6,13 +6,13 @@ By contributing you agree that your work is released under the [MIT License](LIC
 
 ## Fresh clone, no credentials
 
-Everything below runs against local state; only `npm ci` uses the network, to download dependencies. You need Node 20 or later, npm, and git with `user.name` and `user.email` set (several tests create commits in temporary repositories with your configured identity). You do not need a Cloudflare account, a login or anyone's token.
+Everything below runs against local state; only `npm ci` and the Go toolchain use the network, to download dependencies. You need Node 20 or later, npm, Go 1.25 or later, and git with `user.name` and `user.email` set (several tests create commits in temporary repositories with your configured identity). You do not need a Cloudflare account, a login or anyone's token.
 
 ```sh
 git clone https://github.com/kvarm-git/kvarm.git && cd kvarm
 npm ci                                                 # npm may say it skipped workerd/esbuild install scripts; the binaries work
 npm run db:migrate:local --workspace apps/platform     # every migration, applied to the local D1 under apps/platform/.wrangler
-npm run typecheck && npm run lint && npm run test -- --maxWorkers=3
+npm run typecheck && npm run lint && npm run test -- --maxWorkers=3 && npm run cli
 ```
 
 To run the Worker locally, use the offline configuration `apps/platform/wrangler.dev.jsonc`. It drops the Artifacts binding, which only exists remotely, so routing, authentication, the REST API over D1, the pages that need no repository content and the static assets all work, while anything that reads git content answers with an error.
@@ -76,7 +76,7 @@ Pull requests on GitHub do not trigger Kvarm CI automatically yet. Until they do
 ### Pull requests
 
 - **Scope:** one concern per pull request. A fix, a feature or a refactor, not all three. Split large work into a reviewable series.
-- **Tests:** new behavior comes with tests, written to fail first; a bug fix comes with a test that reproduces it. Pure logic is tested in Node under `packages/*/test`, `apps/cli/test` or `scripts/test`; platform behavior in workerd under `apps/platform/test`.
+- **Tests:** new behavior comes with tests, written to fail first; a bug fix comes with a test that reproduces it. Pure logic is tested in Node under `packages/*/test` or `scripts/test`; platform behavior in workerd under `apps/platform/test`; the CLI in Go under `apps/cli` (`npm run cli`).
 - **The required gate:** the three gate commands pass locally, and the pull request's head passes Kvarm CI (`typecheck`, `lint` and `test` check runs succeeded and the change is mergeable). Put the `scripts/dogfood-ci.mjs` summary in the pull request.
 - **Description:** what changed and why, how you verified it (commands and their results), and anything a reviewer should look at closely. For an endpoint you added or changed, give its measured `x-kvarm-cost` and how it fits the budget model in [architecture §10](docs/architecture.md#10-cost-metering-and-budgets).
 - **Schema:** D1 changes are a new numbered migration that only adds. Applied migrations are never edited.

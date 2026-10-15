@@ -48,11 +48,12 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 | path | contents |
 | --- | --- |
 | `apps/platform` | the Worker: routes, services, Durable Objects (`TokenCache`, `RateLimiter`, `MergeLock`, `CiRunnerSandbox`), Workflows (`snapshot-builder`, `ci-pipeline`, `merge`, `repo-import`), migrations, workerd tests |
-| `apps/cli` | the `kvarm` CLI: snapshot checkout, user-owned CI runner, status and every registry operation ([`apps/cli/README.md`](apps/cli/README.md)) |
+| `apps/cli` | the `kvarm` CLI (Go): snapshot checkout, user-owned CI runner, status and every registry operation ([`apps/cli/README.md`](apps/cli/README.md)) |
 | `packages/gitops` | packfile writer, receive-pack client, merge base, three-way merge, deterministic conflict rules, tar writer, notes |
 | `packages/diffcore` | tree and line diffs with work budgets |
 | `packages/review` | risk classification, change rating and the `kvarm/guard` rules (secrets, CI gaming, suspicious dependencies) |
 | `packages/ops` | the shared operation registry (REST, MCP, CLI) |
+| `packages/container-runner` | the Node payload the hosted Container CI runner writes into its container |
 | `packages/ui` | server-side rendering helpers for the existing pages |
 | `scripts` | ops (`mint-pat.mjs`, `license-audit.mjs`), live end-to-end drivers (`*-e2e.mjs`), the demo harness, benchmarks and the cost sweep |
 
@@ -78,8 +79,8 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 | surface | name |
 | --- | --- |
-| npm workspaces | `@kvarm/platform`, `@kvarm/cli`, `@kvarm/ops`, `@kvarm/gitops`, `@kvarm/diffcore`, `@kvarm/review`, `@kvarm/issues`, `@kvarm/ui` |
-| CLI and its environment | `kvarm` (`apps/cli/bin/kvarm.js`), `KVARM_BASE_URL`, `KVARM_PAT` |
+| npm workspaces | `@kvarm/platform`, `@kvarm/container-runner`, `@kvarm/ops`, `@kvarm/gitops`, `@kvarm/diffcore`, `@kvarm/review`, `@kvarm/issues`, `@kvarm/ui` |
+| CLI and its environment | `kvarm` (`apps/cli`, a Go module built with `go build ./cmd/kvarm`), `KVARM_BASE_URL`, `KVARM_PAT` |
 | tokens | `kvarm_pat_<64 hex>` (personal access), `kvarm_agt_<64 hex>` (agent) |
 | CI configuration | `.kvarm/ci.json` |
 | platform check names | `kvarm/guard`, `kvarm/ci-config`, `kvarm/checks-window` (job names may not start with `kvarm/`) |
@@ -106,7 +107,7 @@ Stable surfaces that never carry the brand:
 
 These are the steps for a new Cloudflare account. `scripts/bootstrap.mjs` provisions the resources idempotently; read [Bootstrap limits](#bootstrap-limits) for what has and has not been verified. For the existing deployment, skip to [Redeploy an existing deployment](#redeploy-an-existing-deployment).
 
-Requirements: Node 20 or later, git, and a Cloudflare account on the Workers Paid plan with access to Artifacts (open beta) and Containers (public beta).
+Requirements: Node 20 or later, Go 1.25 or later, git, and a Cloudflare account on the Workers Paid plan with access to Artifacts (open beta) and Containers (public beta).
 
 1. **Clone, install and authenticate.**
 
@@ -262,22 +263,22 @@ node scripts/mint-pat.mjs --local --login dev --scopes read,write,api,ci --name 
 
 The `platform` project runs the Worker in workerd with real D1 (every migration applied) and in-memory fakes for Artifacts; the real binding is exercised by the live drivers. Plain `npm run dev` uses `wrangler.jsonc` and needs `CLOUDFLARE_API_TOKEN`, because the Artifacts binding is remote-only. Live end-to-end drivers (`scripts/*-e2e.mjs`, for example `ci-e2e.mjs`, `merge-queue-e2e.mjs`, `review-approvals-e2e.mjs`) create their own repositories against a deployed worker using `KVARM_BASE_URL` and `KVARM_PAT`, and delete them afterwards.
 
-This repository's automated gate is Kvarm's own CI: [`.kvarm/ci.json`](.kvarm/ci.json) runs the typecheck, lint and test jobs on a Kvarm deployment, and `scripts/dogfood-ci.mjs` drives one change through it. There is no third-party CI. See [Kvarm CI](CONTRIBUTING.md#kvarm-ci-the-gate-runs-on-kvarm), and [AGENTS.md](AGENTS.md) for agent contributors.
+This repository's automated gate is Kvarm's own CI: [`.kvarm/ci.json`](.kvarm/ci.json) runs the typecheck, lint, test and cli (Go) jobs on a Kvarm deployment, and `scripts/dogfood-ci.mjs` drives one change through it. There is no third-party CI. See [Kvarm CI](CONTRIBUTING.md#kvarm-ci-the-gate-runs-on-kvarm), and [AGENTS.md](AGENTS.md) for agent contributors.
 
 ## CLI
 
 ```sh
-npm install                                           # links the `kvarm` bin
+go build -C apps/cli -o kvarm ./cmd/kvarm              # a Go module (Go 1.25 or later)
 export KVARM_BASE_URL=https://kvarm-platform.<your-subdomain>.workers.dev
 export KVARM_PAT=kvarm_pat_...                        # or an agent token kvarm_agt_...
-npx kvarm checkout <owner>/<repo> main ./work         # snapshot checkout, git clone fallback
-npx kvarm runner --repo <owner>/<repo> --once         # claim and run one CI job (PAT with the ci scope)
-npx kvarm runner --repo <owner>/<repo> --drain        # claim until the queue is empty, then exit
-npx kvarm ci jobs <owner>/<repo>                      # the CI queue: queued, running and finished jobs
-npx kvarm status <owner>/<repo>                       # workspaces with their pins, the train, open tasks
-npx kvarm change merge <owner>/<repo> 3               # any registry operation: kvarm <group> <verb>
-npx kvarm revert create <owner>/<repo> --change-number 3 --reason "p99 doubled"  # a draft revert change
-npx kvarm help change merge                           # usage, REST endpoint and MCP tool name
+./kvarm checkout <owner>/<repo> main ./work           # snapshot checkout, git clone fallback
+./kvarm runner --repo <owner>/<repo> --once          # claim and run one CI job (PAT with the ci scope)
+./kvarm runner --repo <owner>/<repo> --drain         # claim until the queue is empty, then exit
+./kvarm ci jobs <owner>/<repo>                       # the CI queue: queued, running and finished jobs
+./kvarm status <owner>/<repo>                        # workspaces with their pins, the train, open tasks
+./kvarm change merge <owner>/<repo> 3                # any registry operation: kvarm <group> <verb>
+./kvarm revert create <owner>/<repo> --change-number 3 --reason "p99 doubled"  # a draft revert change
+./kvarm help change merge                            # usage, REST endpoint and MCP tool name
 ```
 
 CI configuration lives at `.kvarm/ci.json` in the repository:

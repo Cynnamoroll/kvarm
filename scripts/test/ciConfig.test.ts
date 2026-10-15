@@ -20,14 +20,15 @@ describe('the repository .kvarm/ci.json', () => {
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
   });
 
-  it('defines the required typecheck, lint and test jobs over the package.json gate scripts', () => {
+  it('defines the required typecheck, lint and test jobs over the package.json gate scripts, and the Go CLI gate job', () => {
     if (!parsed.ok) throw new Error(parsed.error);
     const byName = new Map(parsed.value.jobs.map((j) => [j.name, j]));
-    expect([...byName.keys()].sort()).toEqual(['lint', 'test', 'typecheck']);
+    expect([...byName.keys()].sort()).toEqual(['cli', 'lint', 'test', 'typecheck']);
     for (const [name, script] of [
       ['typecheck', 'npm run typecheck'],
       ['lint', 'npm run lint'],
       ['test', 'npm run test'],
+      ['cli', 'npm run cli'],
     ] as const) {
       const job = byName.get(name)!;
       expect(job.required, name).toBe(true);

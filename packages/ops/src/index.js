@@ -1,12 +1,13 @@
 // @ts-check
 /**
- * The one operation registry shared by the `kvarm` CLI (apps/cli) and the MCP
- * server (apps/platform/src/mcp). Each entry maps one MCP tool and one CLI
- * command onto exactly one REST route under /api/v1, so both adapters reach
- * the same route handler, the same authority lookup and the same services.
+ * The one operation registry shared by the `kvarm` CLI (apps/cli, embedded as
+ * generated JSON through scripts/gen-cli-registry.mjs) and the MCP server
+ * (apps/platform/src/mcp). Each entry maps one MCP tool and one CLI command
+ * onto exactly one REST route under /api/v1, so both adapters reach the same
+ * route handler, the same authority lookup and the same services.
  *
- * Plain JavaScript with JSDoc types so the dependency-free CLI can run it on
- * Node directly; the Worker bundles it like any other module.
+ * Plain JavaScript with JSDoc types so any adapter can read it on Node
+ * directly; the Worker bundles it like any other module.
  *
  * Later features add their operations here (attribution, queue, tasks,
  * reviews, dependencies). This file is the registry of record; `kvarm help

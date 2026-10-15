@@ -14,12 +14,13 @@ Kvarm is a git platform for teams of people and coding agents, built as one Clou
 | `apps/platform/src/do`, `workflows`, `containers` | Durable Objects, Workflows and the Container CI runner (opt-in hosted drain and the single-run showcase) |
 | `apps/platform/migrations` | D1 schema as numbered SQL migrations |
 | `apps/platform/test` | workerd tests (real D1, in-memory Artifacts fakes) |
-| `apps/cli` | the `kvarm` CLI: snapshot checkout, user-owned CI runner, every registry operation |
+| `apps/cli` | the `kvarm` CLI (Go): snapshot checkout, user-owned CI runner, every registry operation |
 | `packages/gitops` | packfile writer, receive-pack client, merge base, three-way merge, tar writer, notes |
 | `packages/diffcore` | tree and line diffs with work budgets |
 | `packages/review` | risk classification, change rating and the `kvarm/guard` rules |
 | `packages/issues` | issue references in change text and branch names, issue fingerprints |
 | `packages/ops` | the operation registry: each entry is a REST endpoint, an MCP tool and a CLI command |
+| `packages/container-runner` | the Node payload the Container CI runner writes into its container (claim → checkout → sync → run → report) |
 | `packages/ui` | server-side rendering helpers for the existing pages |
 | `scripts` | ops scripts (`bootstrap.mjs`, `mint-pat.mjs`, `wrangler-target.mjs`), live drivers (`*-e2e.mjs`, `dogfood-ci.mjs`), benchmarks; pure helpers in `scripts/lib`, Node tests in `scripts/test` |
 | `.kvarm/ci.json` | this repository's own CI jobs, run by Kvarm CI |
@@ -27,26 +28,27 @@ Kvarm is a git platform for teams of people and coding agents, built as one Clou
 
 ## The gate
 
-These are the root `package.json` scripts. Run all three before you commit; all must exit 0.
+These are the root `package.json` scripts. Run all four before you commit; all must exit 0.
 
 ```sh
-npm run typecheck                  # tsc over packages and scripts, the Worker, and the CLI
+npm run typecheck                  # tsc over packages and scripts, the Worker, and the container runner payload
 npm run lint                       # oxlint
 npm run test -- --maxWorkers=3     # vitest: `packages` (Node) and `platform` (workerd) projects
+npm run cli                        # go build, go vet and go test over the CLI (apps/cli)
 ```
 
-Narrower loops while you work: `npx vitest run --project packages`, `npx vitest run --project platform`, or a single file (`npx vitest run scripts/test/ciConfig.test.ts`). No Cloudflare account or token is needed for any of them.
+Narrower loops while you work: `npx vitest run --project packages`, `npx vitest run --project platform`, a single file (`npx vitest run scripts/test/ciConfig.test.ts`), or `cd apps/cli && go test ./...`. No Cloudflare account or token is needed for any of them.
 
-The same three commands are the jobs of [`.kvarm/ci.json`](.kvarm/ci.json). The repository's only automated gate is Kvarm's own CI: a change pushed to a Kvarm deployment gets those jobs as check runs, a `kvarm runner` claims and reports them, and the change's checks and mergeability show the result (`node scripts/dogfood-ci.mjs`, see CONTRIBUTING.md). There is no GitHub Actions workflow or any other third-party CI here, and none should be added.
+The same four commands are the jobs of [`.kvarm/ci.json`](.kvarm/ci.json). The repository's only automated gate is Kvarm's own CI: a change pushed to a Kvarm deployment gets those jobs as check runs, a `kvarm runner` claims and reports them, and the change's checks and mergeability show the result (`node scripts/dogfood-ci.mjs`, see CONTRIBUTING.md). There is no GitHub Actions workflow or any other third-party CI here, and none should be added.
 
 ## Conventions
 
-- **TypeScript, strict**, with `noUncheckedIndexedAccess`. The CLI and scripts are plain ESM JavaScript with JSDoc or `.d.mts` declarations; keep a script's declaration file in step with it.
+- **TypeScript, strict**, with `noUncheckedIndexedAccess`. Scripts and the container runner payload are plain ESM JavaScript with JSDoc or `.d.mts` declarations; keep a script's declaration file in step with it. The CLI (`apps/cli`) is Go: gofmt-clean, `go vet` clean, stdlib-first (one external module, `klauspost/compress`).
 - **Thin adapters.** Routes and MCP tools only adapt requests. Behavior goes in `apps/platform/src/services/*`; pure algorithms go in `packages/*` and are tested in Node. New operations are added once, in `packages/ops/src/index.js`.
 - **Service results.** Service functions return `ServiceResult<T>` (`{ok: true, value}` or `{ok: false, status, error, code}`). API errors are `{"error": "...", "code": "..."}` JSON. JSON is camelCase; timestamps are ISO 8601 UTC.
 - **Storage rules.** Artifacts is the only git store: read through the binding, write only through the receive-pack client in `packages/gitops`. D1 holds the registry and state, never file content. Schema changes are new numbered migrations (`apps/platform/migrations/00NN_*.sql`) that only add; never edit an applied migration.
 - **Budgets.** Every walk has read, size and time budgets and returns `truncated` rather than failing. Every response carries an `x-kvarm-cost` work counter; keep new endpoints within the budget model of architecture §10 and state their measured `x-kvarm-cost` in the change request.
-- **Tests.** Node tests in `packages/*/test`, `apps/cli/test` and `scripts/test`; workerd tests in `apps/platform/test`, with fakes for Artifacts (the real binding is exercised by the live drivers). Write the failing test first for new behavior.
+- **Tests.** Node tests in `packages/*/test` and `scripts/test`; workerd tests in `apps/platform/test`, with fakes for Artifacts (the real binding is exercised by the live drivers); Go tests in `apps/cli` (`npm run cli`). Write the failing test first for new behavior.
 - **Comments** explain a reason the code cannot show: a constraint, an invariant, a workaround. Do not narrate the code.
 - **Formatting.** There is no formatter config. Do not run a formatter over whole files; match the surrounding style.
 - **Secrets.** Never commit tokens or `.env*`/`.dev.vars*` files (only the `*.example` templates are tracked). Live drivers read tokens from the environment, pass them to git through a secret-free `GIT_ASKPASS` with `-c credential.helper=`, and never print them.

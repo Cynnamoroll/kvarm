@@ -21,7 +21,7 @@ We aim to acknowledge a report within a few days, keep you updated while we inve
 
 ## Scope
 
-In scope: the code in this repository, including the Worker (`apps/platform`), the CLI and CI runner (`apps/cli`), the packages and the scripts. Examples of what we want to hear about:
+In scope: the code in this repository, including the Worker (`apps/platform`), the CLI and CI runner (`apps/cli`), the container runner payload (`packages/container-runner`), the packages and the scripts. Examples of what we want to hear about:
 
 - access to a repository, organization, token or agent principal you should not reach, on any surface (git, REST, MCP or pages), including through caching
 - a private repository whose existence an outsider can detect

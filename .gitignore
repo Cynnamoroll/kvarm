@@ -15,6 +15,9 @@ coverage/
 .idea/
 .vscode/
 
+# A locally built kvarm binary (go build -o kvarm ./cmd/kvarm in apps/cli)
+apps/cli/kvarm
+
 # Local UI design reference: third-party media (not MIT-licensed) and the notes
 # that describe it, kept on disk only
 planning/aesthetic/
