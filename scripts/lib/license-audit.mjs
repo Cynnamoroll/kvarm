@@ -237,6 +237,17 @@ export function renderLicenseReport(lock) {
     );
   }
 
+  // Kept by hand: dependencies that live outside package-lock.json. The Go
+  // module has no npm entry, but it ships in the built CLI the same way.
+  lines.push(
+    '',
+    '## Non-npm dependencies',
+    '',
+    row(['workspace', 'dependency', 'version', 'license', 'class']),
+    '| --- | --- | --- | --- | --- |',
+    ...NON_NPM_DEPENDENCIES.map((d) => row([d.workspace, d.name, d.version, d.license, d.class])),
+  );
+
   lines.push(
     '',
     '## All packages',
@@ -248,3 +259,8 @@ export function renderLicenseReport(lock) {
   );
   return lines.join('\n');
 }
+
+/** Dependencies of workspaces that no lockfile describes (the Go CLI's module). */
+const NON_NPM_DEPENDENCIES = [
+  { workspace: '@kvarm/cli (Go, apps/cli)', name: 'github.com/klauspost/compress', version: 'v1.20.3', license: 'BSD-3-Clause', class: 'permissive' },
+];

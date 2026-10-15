@@ -16,6 +16,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 
 const { values } = parseArgs({ options: { keep: { type: 'boolean', default: false }, 'skip-lease': { type: 'boolean', default: false } } });
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
@@ -80,7 +81,7 @@ async function waitChecks(number, predicate, ms = 60_000) {
   throw new Error(`checks timeout: ${JSON.stringify(last?.json)}`);
 }
 function runCli() {
-  const r = spawnSync(process.execPath, ['apps/cli/bin/kvarm.js', 'runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', join(root, 'runner')], {
+  const r = spawnSync(kvarmBin(), ['runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', join(root, 'runner')], {
     cwd: new URL('..', import.meta.url).pathname,
     env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
     encoding: 'utf8',

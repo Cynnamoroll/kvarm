@@ -1,6 +1,6 @@
 # The Kvarm agent workflow
 
-The intended loop for an agent that works in a Kvarm repository. Every tool named here exists in the operation registry (`packages/ops/src/index.js`); `kvarm help <group> <verb>` prints the REST endpoint and MCP tool name of each, and `apps/cli/test/agentDocs.test.ts` fails if this directory names a tool that does not exist.
+The intended loop for an agent that works in a Kvarm repository. Every tool named here exists in the operation registry (`packages/ops/src/index.js`); `kvarm help <group> <verb>` prints the REST endpoint and MCP tool name of each, and `packages/ops/test/agentDocs.test.ts` fails if this directory names a tool that does not exist.
 
 Setup first: [README.md](README.md) (token, client pages). The agent token must be a `write` token whose `refs` cover `refs/heads/agents/*`.
 

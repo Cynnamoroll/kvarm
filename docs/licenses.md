@@ -8,12 +8,12 @@ Classes: `permissive` (MIT, ISC, Apache-2.0, BSD, 0BSD, CC0-1.0, PSF-2.0 and sim
 
 ## Summary
 
-291 packages: 107 runtime, 184 development.
+286 packages: 101 runtime, 185 development.
 
 | license | class | runtime | development | total |
 | --- | --- | ---: | ---: | ---: |
-| MIT | permissive | 94 | 127 | 221 |
-| Apache-2.0 | permissive | 1 | 21 | 22 |
+| MIT | permissive | 89 | 127 | 216 |
+| Apache-2.0 | permissive | 0 | 22 | 22 |
 | MPL-2.0 | weak-copyleft | 0 | 12 | 12 |
 | ISC | permissive | 7 | 3 | 10 |
 | LGPL-3.0-or-later | weak-copyleft | 0 | 10 | 10 |
@@ -34,20 +34,20 @@ Runtime dependencies with a non-permissive or unknown license: none.
 
 | package | version | license | class | scope | lockfile path |
 | --- | --- | --- | --- | --- | --- |
-| @img/sharp-libvips-darwin-arm64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-darwin-arm64 |
-| @img/sharp-libvips-darwin-x64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-darwin-x64 |
-| @img/sharp-libvips-linux-arm | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-arm |
-| @img/sharp-libvips-linux-arm64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-arm64 |
-| @img/sharp-libvips-linux-ppc64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-ppc64 |
-| @img/sharp-libvips-linux-riscv64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-riscv64 |
-| @img/sharp-libvips-linux-s390x | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-s390x |
-| @img/sharp-libvips-linux-x64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-x64 |
-| @img/sharp-libvips-linuxmusl-arm64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linuxmusl-arm64 |
-| @img/sharp-libvips-linuxmusl-x64 | 1.3.3 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linuxmusl-x64 |
-| @img/sharp-wasm32 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later AND MIT | weak-copyleft | development | node_modules/@img/sharp-wasm32 |
-| @img/sharp-win32-arm64 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-win32-arm64 |
-| @img/sharp-win32-ia32 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-win32-ia32 |
-| @img/sharp-win32-x64 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-win32-x64 |
+| @img/sharp-libvips-darwin-arm64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-darwin-arm64 |
+| @img/sharp-libvips-darwin-x64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-darwin-x64 |
+| @img/sharp-libvips-linux-arm | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-arm |
+| @img/sharp-libvips-linux-arm64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-arm64 |
+| @img/sharp-libvips-linux-ppc64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-ppc64 |
+| @img/sharp-libvips-linux-riscv64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-riscv64 |
+| @img/sharp-libvips-linux-s390x | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-s390x |
+| @img/sharp-libvips-linux-x64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linux-x64 |
+| @img/sharp-libvips-linuxmusl-arm64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linuxmusl-arm64 |
+| @img/sharp-libvips-linuxmusl-x64 | 1.3.4 | LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-libvips-linuxmusl-x64 |
+| @img/sharp-wasm32 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later AND MIT | weak-copyleft | development | node_modules/@img/sharp-wasm32 |
+| @img/sharp-win32-arm64 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-win32-arm64 |
+| @img/sharp-win32-ia32 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-win32-ia32 |
+| @img/sharp-win32-x64 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | weak-copyleft | development | node_modules/@img/sharp-win32-x64 |
 | lightningcss | 1.33.0 | MPL-2.0 | weak-copyleft | development | node_modules/lightningcss |
 | lightningcss-android-arm64 | 1.33.0 | MPL-2.0 | weak-copyleft | development | node_modules/lightningcss-android-arm64 |
 | lightningcss-darwin-arm64 | 1.33.0 | MPL-2.0 | weak-copyleft | development | node_modules/lightningcss-darwin-arm64 |
@@ -67,9 +67,10 @@ The repository's own packages. One without a `license` field is covered by the r
 
 | package | path | license |
 | --- | --- | --- |
-| @kvarm/cli | apps/cli | MIT |
+| @kvarm/container-runner | packages/container-runner | MIT |
 | @kvarm/diffcore | packages/diffcore | MIT |
 | @kvarm/gitops | packages/gitops | MIT |
+| @kvarm/issues | packages/issues | MIT |
 | @kvarm/ops | packages/ops | MIT |
 | @kvarm/platform | apps/platform | MIT |
 | @kvarm/review | packages/review | MIT |
@@ -80,10 +81,15 @@ The repository's own packages. One without a `license` field is covered by the r
 | workspace | dependency | version | license | class |
 | --- | --- | --- | --- | --- |
 | @kvarm/platform | @modelcontextprotocol/sdk | 1.32.1 | MIT | permissive |
-| @kvarm/platform | @workos/authkit-session | 0.7.1 | MIT | permissive |
 | @kvarm/platform | hono | 4.13.13 | MIT | permissive |
 | @kvarm/platform | markdown-it | 15.0.2 | MIT | permissive |
-| @kvarm/platform | zod | 4.4.3 | MIT | permissive |
+| @kvarm/platform | zod | 4.6.5 | MIT | permissive |
+
+## Non-npm dependencies
+
+| workspace | dependency | version | license | class |
+| --- | --- | --- | --- | --- |
+| @kvarm/cli (Go, apps/cli) | github.com/klauspost/compress | v1.20.3 | BSD-3-Clause | permissive |
 
 ## All packages
 
@@ -91,7 +97,7 @@ The repository's own packages. One without a `license` field is covered by the r
 | --- | --- | --- | --- | --- |
 | @cloudflare/kv-asset-handler | 0.5.0 | MIT OR Apache-2.0 | development | permissive |
 | @cloudflare/unenv-preset | 2.16.2 | MIT OR Apache-2.0 | development | permissive |
-| @cloudflare/vitest-plugin | 1.3.7 | MIT | development | permissive |
+| @cloudflare/vitest-plugin | 1.4.1 | MIT | development | permissive |
 | @cloudflare/workerd-darwin-64 | 1.20261006.1 | Apache-2.0 | development | permissive |
 | @cloudflare/workerd-darwin-arm64 | 1.20261006.1 | Apache-2.0 | development | permissive |
 | @cloudflare/workerd-linux-64 | 1.20261006.1 | Apache-2.0 | development | permissive |
@@ -100,60 +106,60 @@ The repository's own packages. One without a `license` field is covered by the r
 | @cloudflare/workers-types | 5.20261007.1 | MIT OR Apache-2.0 | development | permissive |
 | @cspotcode/source-map-support | 0.8.1 | MIT | development | permissive |
 | @emnapi/runtime | 1.11.3 | MIT | development | permissive |
-| @esbuild/aix-ppc64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/android-arm | 0.28.1 | MIT | development | permissive |
-| @esbuild/android-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/android-x64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/darwin-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/darwin-x64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/freebsd-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/freebsd-x64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-arm | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-ia32 | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-loong64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-mips64el | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-ppc64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-riscv64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-s390x | 0.28.1 | MIT | development | permissive |
-| @esbuild/linux-x64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/netbsd-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/netbsd-x64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/openbsd-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/openbsd-x64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/openharmony-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/sunos-x64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/win32-arm64 | 0.28.1 | MIT | development | permissive |
-| @esbuild/win32-ia32 | 0.28.1 | MIT | development | permissive |
-| @esbuild/win32-x64 | 0.28.1 | MIT | development | permissive |
+| @esbuild/aix-ppc64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/android-arm | 0.28.2 | MIT | development | permissive |
+| @esbuild/android-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/android-x64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/darwin-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/darwin-x64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/freebsd-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/freebsd-x64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-arm | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-ia32 | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-loong64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-mips64el | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-ppc64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-riscv64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-s390x | 0.28.2 | MIT | development | permissive |
+| @esbuild/linux-x64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/netbsd-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/netbsd-x64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/openbsd-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/openbsd-x64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/openharmony-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/sunos-x64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/win32-arm64 | 0.28.2 | MIT | development | permissive |
+| @esbuild/win32-ia32 | 0.28.2 | MIT | development | permissive |
+| @esbuild/win32-x64 | 0.28.2 | MIT | development | permissive |
 | @hono/node-server | 2.1.3 | MIT | runtime | permissive |
 | @img/colour | 1.1.0 | MIT | development | permissive |
-| @img/sharp-darwin-arm64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-darwin-x64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-freebsd-wasm32 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-libvips-darwin-arm64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-darwin-x64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linux-arm | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linux-arm64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linux-ppc64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linux-riscv64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linux-s390x | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linux-x64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linuxmusl-arm64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-libvips-linuxmusl-x64 | 1.3.3 | LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-linux-arm | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-linux-arm64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-linux-ppc64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-linux-riscv64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-linux-s390x | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-linux-x64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-linuxmusl-arm64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-linuxmusl-x64 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-wasm32 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later AND MIT | development | weak-copyleft |
-| @img/sharp-webcontainers-wasm32 | 0.35.4 | Apache-2.0 | development | permissive |
-| @img/sharp-win32-arm64 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-win32-ia32 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later | development | weak-copyleft |
-| @img/sharp-win32-x64 | 0.35.4 | Apache-2.0 AND LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-darwin-arm64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-darwin-x64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-freebsd-wasm32 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-libvips-darwin-arm64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-darwin-x64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linux-arm | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linux-arm64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linux-ppc64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linux-riscv64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linux-s390x | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linux-x64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linuxmusl-arm64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-libvips-linuxmusl-x64 | 1.3.4 | LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-linux-arm | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-linux-arm64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-linux-ppc64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-linux-riscv64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-linux-s390x | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-linux-x64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-linuxmusl-arm64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-linuxmusl-x64 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-wasm32 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later AND MIT | development | weak-copyleft |
+| @img/sharp-webcontainers-wasm32 | 0.35.5 | Apache-2.0 | development | permissive |
+| @img/sharp-win32-arm64 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-win32-ia32 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | development | weak-copyleft |
+| @img/sharp-win32-x64 | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | development | weak-copyleft |
 | @jridgewell/resolve-uri | 3.1.2 | MIT | development | permissive |
 | @jridgewell/sourcemap-codec | 1.6.0 | MIT | development | permissive |
 | @jridgewell/trace-mapping | 0.3.9 | MIT | development | permissive |
@@ -214,8 +220,6 @@ The repository's own packages. One without a `license` field is covered by the r
 | @vitest/snapshot | 4.1.11 | MIT | development | permissive |
 | @vitest/spy | 4.1.11 | MIT | development | permissive |
 | @vitest/utils | 4.1.11 | MIT | development | permissive |
-| @workos-inc/node | 10.14.0 | MIT | runtime | permissive |
-| @workos/authkit-session | 0.7.1 | MIT | runtime | permissive |
 | accepts | 2.0.0 | MIT | runtime | permissive |
 | ajv | 8.20.0 | MIT | runtime | permissive |
 | ajv-formats | 3.0.1 | MIT | runtime | permissive |
@@ -251,7 +255,7 @@ The repository's own packages. One without a `license` field is covered by the r
 | es-errors | 1.3.0 | MIT | runtime | permissive |
 | es-module-lexer | 2.3.2 | MIT | development | permissive |
 | es-object-atoms | 1.1.2 | MIT | runtime | permissive |
-| esbuild | 0.28.1 | MIT | development | permissive |
+| esbuild | 0.28.2 | MIT | development | permissive |
 | escape-html | 1.0.3 | MIT | runtime | permissive |
 | estree-walker | 3.0.3 | MIT | development | permissive |
 | etag | 1.8.1 | MIT | runtime | permissive |
@@ -279,7 +283,6 @@ The repository's own packages. One without a `license` field is covered by the r
 | inherits | 2.0.4 | ISC | runtime | permissive |
 | ip-address | 10.7.3 | MIT | runtime | permissive |
 | ipaddr.js | 1.9.1 | MIT | runtime | permissive |
-| iron-webcrypto | 2.0.0 | MIT | runtime | permissive |
 | is-promise | 4.0.0 | MIT | runtime | permissive |
 | isexe | 2.0.0 | ISC | runtime | permissive |
 | jose | 6.2.12 | MIT | runtime | permissive |
@@ -307,7 +310,7 @@ The repository's own packages. One without a `license` field is covered by the r
 | merge-descriptors | 2.0.0 | MIT | runtime | permissive |
 | mime-db | 1.54.0 | MIT | runtime | permissive |
 | mime-types | 3.0.2 | MIT | runtime | permissive |
-| miniflare | 5.20261006.0-alpha | MIT | development | permissive |
+| miniflare | 5.20261006.2-beta | MIT | development | permissive |
 | ms | 2.1.3 | MIT | runtime | permissive |
 | nanoid | 3.3.20 | MIT | development | permissive |
 | negotiator | 1.1.0 | MIT | runtime | permissive |
@@ -339,7 +342,7 @@ The repository's own packages. One without a `license` field is covered by the r
 | send | 1.2.1 | MIT | runtime | permissive |
 | serve-static | 2.2.1 | MIT | runtime | permissive |
 | setprototypeof | 1.2.0 | ISC | runtime | permissive |
-| sharp | 0.35.4 | Apache-2.0 | development | permissive |
+| sharp | 0.35.5 | Apache-2.0 | development | permissive |
 | shebang-command | 2.0.0 | MIT | runtime | permissive |
 | shebang-regex | 3.0.0 | MIT | runtime | permissive |
 | side-channel | 1.1.1 | MIT | runtime | permissive |
@@ -359,24 +362,22 @@ The repository's own packages. One without a `license` field is covered by the r
 | toidentifier | 1.0.1 | MIT | runtime | permissive |
 | tslib | 2.8.1 | 0BSD | development | permissive |
 | type-is | 2.1.0 | MIT | runtime | permissive |
-| typescript | 5.9.3 | Apache-2.0 | runtime (optional) | permissive |
+| typescript | 5.9.3 | Apache-2.0 | development | permissive |
 | uc.micro | 3.0.0 | MIT | runtime | permissive |
-| uint8array-extras | 1.6.0 | MIT | runtime | permissive |
 | undici | 7.29.1 | MIT | development | permissive |
 | undici-types | 7.24.6 | MIT | development | permissive |
 | unenv | 2.0.0-rc.24 | MIT | development | permissive |
 | unpipe | 1.0.0 | MIT | runtime | permissive |
-| valibot | 1.5.0 | MIT | runtime | permissive |
 | vary | 1.1.2 | MIT | runtime | permissive |
 | vite | 8.3.3 | MIT | development | permissive |
 | vitest | 4.1.11 | MIT | development | permissive |
 | which | 2.0.2 | ISC | runtime | permissive |
 | why-is-node-running | 2.3.0 | MIT | development | permissive |
 | workerd | 1.20261006.1 | Apache-2.0 | development | permissive |
-| wrangler | 4.148.0 | MIT OR Apache-2.0 | development | permissive |
+| wrangler | 4.150.0 | MIT OR Apache-2.0 | development | permissive |
 | wrappy | 1.0.2 | ISC | runtime | permissive |
 | ws | 8.21.0 | MIT | development | permissive |
 | youch | 4.1.0-beta.10 | MIT | development | permissive |
 | youch-core | 0.3.3 | MIT | development | permissive |
-| zod | 4.4.3 | MIT | runtime | permissive |
+| zod | 4.6.5 | MIT | runtime | permissive |
 | zod-to-json-schema | 3.25.2 | ISC | runtime | permissive |

@@ -1,0 +1,5176 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "name": "user",
+      "blurb": "your account"
+    },
+    {
+      "name": "repo",
+      "blurb": "create, list, fork, update and delete repositories"
+    },
+    {
+      "name": "tree",
+      "blurb": "list a directory of a repository at a ref"
+    },
+    {
+      "name": "file",
+      "blurb": "read one file at a ref"
+    },
+    {
+      "name": "event",
+      "blurb": "push events recorded for a repository"
+    },
+    {
+      "name": "snapshot",
+      "blurb": "snapshot metadata for a ref (and build demands)"
+    },
+    {
+      "name": "compare",
+      "blurb": "changed files between two commit-ishes"
+    },
+    {
+      "name": "commit",
+      "blurb": "one commit's diff"
+    },
+    {
+      "name": "workspace",
+      "blurb": "agent workspaces"
+    },
+    {
+      "name": "deps",
+      "blurb": "pinned dependencies between workspaces"
+    },
+    {
+      "name": "change",
+      "blurb": "change sets: open, review, update and merge"
+    },
+    {
+      "name": "queue",
+      "blurb": "the merge queue"
+    },
+    {
+      "name": "train",
+      "blurb": "the integration train"
+    },
+    {
+      "name": "review",
+      "blurb": "reviews, approvals and escalations"
+    },
+    {
+      "name": "review-policy",
+      "blurb": "the repository review policy"
+    },
+    {
+      "name": "task",
+      "blurb": "agent tasks and their claim leases"
+    },
+    {
+      "name": "intent",
+      "blurb": "workspace intent declarations"
+    },
+    {
+      "name": "nexus",
+      "blurb": "the overlap forecast between workspaces"
+    },
+    {
+      "name": "candidates",
+      "blurb": "compare and compose candidate workspaces"
+    },
+    {
+      "name": "composition",
+      "blurb": "recorded compositions"
+    },
+    {
+      "name": "arena",
+      "blurb": "candidate arenas"
+    },
+    {
+      "name": "org",
+      "blurb": "organizations, members and their repositories"
+    },
+    {
+      "name": "grant",
+      "blurb": "explicit repository grants"
+    },
+    {
+      "name": "agent",
+      "blurb": "agent principals and their tokens"
+    },
+    {
+      "name": "attribution",
+      "blurb": "commit attribution notes"
+    },
+    {
+      "name": "decision",
+      "blurb": "recorded decisions and their context"
+    },
+    {
+      "name": "issue",
+      "blurb": "issues and their dispatch to agents"
+    },
+    {
+      "name": "audit",
+      "blurb": "audit export of a repository"
+    },
+    {
+      "name": "provenance-key",
+      "blurb": "trusted execution keys"
+    },
+    {
+      "name": "branch-rule",
+      "blurb": "branch protection rules"
+    },
+    {
+      "name": "environment",
+      "blurb": "reusable Linux build environments"
+    },
+    {
+      "name": "sandbox",
+      "blurb": "agent sandboxes"
+    },
+    {
+      "name": "ci",
+      "blurb": "CI jobs, flakes and hosted execution"
+    },
+    {
+      "name": "webhook",
+      "blurb": "outbound webhooks and their deliveries"
+    },
+    {
+      "name": "revert",
+      "blurb": "revert commits and change sets"
+    },
+    {
+      "name": "incident",
+      "blurb": "the incident webhook"
+    }
+  ],
+  "operations": [
+    {
+      "name": "get_user",
+      "command": [
+        "user",
+        "get"
+      ],
+      "family": "user",
+      "description": "Show the authenticated human account (login, email, admin flag). Agent tokens are refused.",
+      "method": "GET",
+      "path": "/user",
+      "params": [],
+      "readOnly": true
+    },
+    {
+      "name": "list_repos",
+      "command": [
+        "repo",
+        "list"
+      ],
+      "family": "repos",
+      "description": "List the repositories owned by the authenticated user (same set as GET /api/v1/repos).",
+      "method": "GET",
+      "path": "/repos",
+      "params": [],
+      "readOnly": true
+    },
+    {
+      "name": "get_repo",
+      "command": [
+        "repo",
+        "get"
+      ],
+      "family": "repos",
+      "description": "Repository metadata (visibility, default branch, clone URL). Private repos you cannot read are not found.",
+      "method": "GET",
+      "path": "/repos/{repo}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_repo",
+      "command": [
+        "repo",
+        "create"
+      ],
+      "family": "repos",
+      "description": "Create a repository owned by the authenticated user. Visibility defaults to private.",
+      "method": "POST",
+      "path": "/repos",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Repository name",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "in": "body",
+          "description": "Short description"
+        },
+        {
+          "name": "visibility",
+          "type": "string",
+          "in": "body",
+          "description": "public or private (default private)",
+          "enum": [
+            "public",
+            "private"
+          ]
+        },
+        {
+          "name": "defaultBranch",
+          "type": "string",
+          "in": "body",
+          "description": "Default branch name (default main)"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "update_repo",
+      "command": [
+        "repo",
+        "update"
+      ],
+      "family": "repos",
+      "description": "Change a repository description or visibility. Needs the admin role on the repository.",
+      "method": "PATCH",
+      "path": "/repos/{repo}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "in": "body",
+          "description": "New description"
+        },
+        {
+          "name": "visibility",
+          "type": "string",
+          "in": "body",
+          "description": "public or private",
+          "enum": [
+            "public",
+            "private"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "delete_repo",
+      "command": [
+        "repo",
+        "delete"
+      ],
+      "family": "repos",
+      "description": "Delete a repository with its git data, workspaces, changes and snapshots. Needs the admin role; agent tokens are refused.",
+      "method": "DELETE",
+      "path": "/repos/{repo}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "fork_repo",
+      "command": [
+        "repo",
+        "fork"
+      ],
+      "family": "repos",
+      "description": "Fork a repository you can read into a new private repository owned by you. Agent tokens are refused.",
+      "method": "POST",
+      "path": "/repos/{repo}/forks",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Fork name (default <name>-fork)"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "import_repo",
+      "command": [
+        "repo",
+        "import"
+      ],
+      "family": "repos",
+      "description": "Import an HTTPS git remote into a new repository owned by you (status importing). Agent tokens are refused.",
+      "method": "POST",
+      "path": "/import",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "in": "body",
+          "description": "HTTPS git remote to import",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Repository name (default: the last segment of the URL)"
+        },
+        {
+          "name": "branch",
+          "type": "string",
+          "in": "body",
+          "description": "Branch to import (optional)"
+        },
+        {
+          "name": "visibility",
+          "type": "string",
+          "in": "body",
+          "description": "public or private (default private)",
+          "enum": [
+            "public",
+            "private"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_tree",
+      "command": [
+        "tree",
+        "get"
+      ],
+      "family": "content",
+      "description": "List the entries (name, type, mode, hash) of a directory at a ref, like git ls-tree <ref> [<dir>].",
+      "method": "GET",
+      "path": "/repos/{repo}/tree",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "in": "query",
+          "description": "Directory path (default: the repository root)",
+          "positional": true
+        },
+        {
+          "name": "ref",
+          "type": "string",
+          "in": "query",
+          "description": "Branch, tag or commit SHA (default: the default branch)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "read_file",
+      "command": [
+        "file",
+        "read"
+      ],
+      "family": "content",
+      "description": "Read one file at a ref. Text comes back as utf-8, anything else as base64 (encoding field).",
+      "method": "GET",
+      "path": "/repos/{repo}/contents",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "in": "query",
+          "description": "File path",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "ref",
+          "type": "string",
+          "in": "query",
+          "description": "Branch, tag or commit SHA (default: the default branch)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_events",
+      "command": [
+        "event",
+        "list"
+      ],
+      "family": "content",
+      "description": "Push events recorded for the repository, newest first, with the per-effect processing state.",
+      "method": "GET",
+      "path": "/repos/{repo}/events",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_snapshot",
+      "command": [
+        "snapshot",
+        "get"
+      ],
+      "family": "content",
+      "description": "Snapshot metadata for a ref (ready, building, absent or failed). Never starts a build.",
+      "method": "GET",
+      "path": "/repos/{repo}/snapshots/{ref}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "ref",
+          "type": "string",
+          "in": "path",
+          "description": "Branch, tag or commit SHA",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "request_snapshot",
+      "command": [
+        "snapshot",
+        "request"
+      ],
+      "family": "content",
+      "description": "Demand a snapshot build for a ref; returns the metadata view plus started:true|false.",
+      "method": "POST",
+      "path": "/repos/{repo}/snapshots/{ref}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "ref",
+          "type": "string",
+          "in": "path",
+          "description": "Branch, tag or commit SHA",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "compare",
+      "command": [
+        "compare",
+        "get"
+      ],
+      "family": "compare",
+      "description": "Changed files between two commit-ishes (direct two-tree diff) with totals and a risk rating.",
+      "method": "GET",
+      "path": "/repos/{repo}/compare/{base}...{head}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "path",
+          "description": "Base branch, tag, full ref or commit SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "head",
+          "type": "string",
+          "in": "path",
+          "description": "Head branch, tag, full ref or commit SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "order",
+          "type": "string",
+          "in": "query",
+          "description": "File order: path (default) or risk",
+          "enum": [
+            "path",
+            "risk"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-5000)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_file_diff",
+      "command": [
+        "compare",
+        "file"
+      ],
+      "family": "compare",
+      "description": "Hunks of one changed file between two commit-ishes (git -U3 numbering).",
+      "method": "GET",
+      "path": "/repos/{repo}/compare/{base}...{head}/file",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "path",
+          "description": "Base branch, tag, full ref or commit SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "head",
+          "type": "string",
+          "in": "path",
+          "description": "Head branch, tag, full ref or commit SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "in": "query",
+          "description": "Changed file path",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_commit_diff",
+      "command": [
+        "commit",
+        "diff"
+      ],
+      "family": "compare",
+      "description": "Changed files of one commit against its first parent (the empty tree for a root commit).",
+      "method": "GET",
+      "path": "/repos/{repo}/commits/{sha}/diff",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "sha",
+          "type": "string",
+          "in": "path",
+          "description": "Full 40-hex commit SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "order",
+          "type": "string",
+          "in": "query",
+          "description": "File order: path (default) or risk",
+          "enum": [
+            "path",
+            "risk"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-5000)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_workspace",
+      "command": [
+        "workspace",
+        "create"
+      ],
+      "family": "workspaces",
+      "description": "Create an agent workspace: a server-side ref refs/heads/agents/<id>/<slug> at the base head, with an optional intent declaration.",
+      "method": "POST",
+      "path": "/repos/{repo}/workspaces",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "body",
+          "description": "What the workspace is for (1-500 characters)",
+          "required": true
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "in": "body",
+          "description": "Agent display name (default: the token agent or your login)"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "body",
+          "description": "Base branch (default: the default branch)"
+        },
+        {
+          "name": "intent",
+          "type": "json",
+          "in": "body",
+          "description": "Optional intent declaration {paths: string[], prefixes?: string[], ttlSeconds?: number}"
+        },
+        {
+          "name": "issue",
+          "type": "integer",
+          "in": "body",
+          "description": "Open issue the workspace resolves: the change it opens closes the issue when it merges into the default branch"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_workspaces",
+      "command": [
+        "workspace",
+        "list"
+      ],
+      "family": "workspaces",
+      "description": "Workspaces of the repository, newest first.",
+      "method": "GET",
+      "path": "/repos/{repo}/workspaces",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "in": "query",
+          "description": "active, merged, abandoned or all (default all)",
+          "enum": [
+            "active",
+            "merged",
+            "abandoned",
+            "all"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_workspace",
+      "command": [
+        "workspace",
+        "get"
+      ],
+      "family": "workspaces",
+      "description": "One workspace with its live head.",
+      "method": "GET",
+      "path": "/repos/{repo}/workspaces/{workspace}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_change_set",
+      "command": [
+        "workspace",
+        "change-set"
+      ],
+      "family": "workspaces",
+      "description": "Open the change set of a workspace (head = the workspace branch) with an explicit merge policy.",
+      "method": "POST",
+      "path": "/repos/{repo}/workspaces/{workspace}/change-set",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "in": "body",
+          "description": "Change title (1-256 characters)",
+          "required": true
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "Change description"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "body",
+          "description": "Target branch (default: the default branch)"
+        },
+        {
+          "name": "mergePolicy",
+          "type": "string",
+          "in": "body",
+          "description": "review (default), auto or draft",
+          "enum": [
+            "review",
+            "auto",
+            "draft"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "abandon_workspace",
+      "command": [
+        "workspace",
+        "abandon"
+      ],
+      "family": "workspaces",
+      "description": "Abandon a workspace: closes its open change set and deletes its ref. Idempotent.",
+      "method": "POST",
+      "path": "/repos/{repo}/workspaces/{workspace}/abandon",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "add_dependency",
+      "command": [
+        "deps",
+        "add"
+      ],
+      "family": "dependencies",
+      "description": "Pin a workspace to another live workspace of the same repository at its exact current revision. The dependent's change cannot merge until the pinned revision lands (an enqueued dependent waits in the train). Chains are limited to 4 workspaces and cycles are refused with the path.",
+      "method": "POST",
+      "path": "/repos/{repo}/workspaces/{workspace}/dependencies",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "onWorkspace",
+          "type": "string",
+          "in": "body",
+          "description": "Source workspace id (same repository)",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "type": "string",
+          "in": "body",
+          "description": "The source's current head commit (40 hex); refused 422 REVISION_NOT_CURRENT naming currentRevision otherwise",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_dependencies",
+      "command": [
+        "deps",
+        "list"
+      ],
+      "family": "dependencies",
+      "description": "A workspace's pins with their state (active, stale, broken or satisfied), reason, depth and the source's current head.",
+      "method": "GET",
+      "path": "/repos/{repo}/workspaces/{workspace}/dependencies",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "repin_dependency",
+      "command": [
+        "deps",
+        "repin"
+      ],
+      "family": "dependencies",
+      "description": "Explicitly recover a stale or broken pin: move it to the current revision of the same source or of another live workspace. The platform never repins on its own; the dependent's ref and commits are untouched. Reports the previous pin.",
+      "method": "POST",
+      "path": "/repos/{repo}/workspaces/{workspace}/dependencies/{dependency}/repin",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "dependency",
+          "type": "string",
+          "in": "path",
+          "description": "Dependency id from list_dependencies",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "revision",
+          "type": "string",
+          "in": "body",
+          "description": "The source's current head commit (40 hex)",
+          "required": true
+        },
+        {
+          "name": "onWorkspace",
+          "type": "string",
+          "in": "body",
+          "description": "Another live source workspace (default: keep the source)"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "detach_dependency",
+      "command": [
+        "deps",
+        "detach"
+      ],
+      "family": "dependencies",
+      "description": "Remove a pin explicitly; the dependent then publishes without that constraint. The dependent's ref, base and change are untouched.",
+      "method": "DELETE",
+      "path": "/repos/{repo}/workspaces/{workspace}/dependencies/{dependency}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "dependency",
+          "type": "string",
+          "in": "path",
+          "description": "Dependency id from list_dependencies",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "create_change",
+      "command": [
+        "change",
+        "create"
+      ],
+      "family": "changes",
+      "description": "Open a change set from a head branch into a base branch.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "in": "body",
+          "description": "Change title (1-256 characters)",
+          "required": true
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "body",
+          "description": "Target branch",
+          "required": true
+        },
+        {
+          "name": "head",
+          "type": "string",
+          "in": "body",
+          "description": "Source branch",
+          "required": true
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "Change description"
+        },
+        {
+          "name": "mergePolicy",
+          "type": "string",
+          "in": "body",
+          "description": "review (default), auto or draft",
+          "enum": [
+            "review",
+            "auto",
+            "draft"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_changes",
+      "command": [
+        "change",
+        "list"
+      ],
+      "family": "changes",
+      "description": "Change sets of the repository, newest number first.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "in": "query",
+          "description": "open (default), closed, merged, conflicted or all",
+          "enum": [
+            "open",
+            "closed",
+            "merged",
+            "conflicted",
+            "all"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_change",
+      "command": [
+        "change",
+        "get"
+      ],
+      "family": "changes",
+      "description": "One change set with its risk rating, live mergeability and check runs.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "update_change",
+      "command": [
+        "change",
+        "update"
+      ],
+      "family": "changes",
+      "description": "Edit a change set title, body, merge policy or open/closed state. Setting auto merges it when mergeable.",
+      "method": "PATCH",
+      "path": "/repos/{repo}/changes/{number}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "in": "body",
+          "description": "New title"
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "New description"
+        },
+        {
+          "name": "mergePolicy",
+          "type": "string",
+          "in": "body",
+          "description": "review, auto or draft",
+          "enum": [
+            "review",
+            "auto",
+            "draft"
+          ]
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "in": "body",
+          "description": "open or closed",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "merge_change",
+      "command": [
+        "change",
+        "merge"
+      ],
+      "family": "changes",
+      "description": "Explicitly merge a change set into its base (fast-forward or a two-parent merge commit) under branch rules and required checks.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/merge",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "attribution",
+          "type": "json",
+          "in": "body",
+          "description": "Attribution note for a two-parent merge commit: {agent?, session?, promptHash?, model?}; omitted fields name the merging principal"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_mergeability",
+      "command": [
+        "change",
+        "mergeability"
+      ],
+      "family": "changes",
+      "description": "Whether a change set merges cleanly now: status, conflicts and the checks-gate answer for the merge tree.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}/mergeability",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_checks",
+      "command": [
+        "change",
+        "checks"
+      ],
+      "family": "changes",
+      "description": "Check runs of a change set, newest first.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}/checks",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "enqueue_change",
+      "command": [
+        "queue",
+        "add"
+      ],
+      "family": "queue",
+      "description": "Enqueue a change set for the integration train. Enqueue approves the change's current head; the train merges it once the exact composed tree passes required checks. Drafts are refused (409); a full queue answers 429 with Retry-After.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/enqueue",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "headSha",
+          "type": "string",
+          "in": "body",
+          "description": "Expected head commit (40 hex); refused 409 HEAD_MOVED if the change has moved"
+        },
+        {
+          "name": "mergePolicy",
+          "type": "string",
+          "in": "body",
+          "description": "Expected merge policy; refused 409 POLICY_CHANGED if it differs",
+          "enum": [
+            "review",
+            "auto",
+            "draft"
+          ]
+        },
+        {
+          "name": "attribution",
+          "type": "json",
+          "in": "body",
+          "description": "Attribution note for a two-parent merge commit: {agent?, session?, promptHash?, model?}; omitted fields name the enqueuing principal"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "dequeue_change",
+      "command": [
+        "queue",
+        "remove"
+      ],
+      "family": "queue",
+      "description": "Take a change set out of the merge queue (not while it is being published). The change itself stays open.",
+      "method": "DELETE",
+      "path": "/repos/{repo}/changes/{number}/enqueue",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_queue",
+      "command": [
+        "queue",
+        "list"
+      ],
+      "family": "queue",
+      "description": "Active merge-queue entries in train order per target branch: position, state, approved head, exact composition identity and reason.",
+      "method": "GET",
+      "path": "/repos/{repo}/queue",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "query",
+          "description": "Only this target branch"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_train",
+      "command": [
+        "train",
+        "status"
+      ],
+      "family": "queue",
+      "description": "Integration train status: active entries per target branch with their pins and, for an entry held back by an unresolved pin, a machine-readable waiting reason {code, message, dependencies}.",
+      "method": "GET",
+      "path": "/repos/{repo}/train",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "query",
+          "description": "Only this target branch"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_reviews",
+      "command": [
+        "review",
+        "get"
+      ],
+      "family": "reviews",
+      "description": "The review packet of a change: required and counted approvals of the current head, reviews with principal, model family and differentFamily, blockers and escalations.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}/reviews",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "review_change",
+      "command": [
+        "review",
+        "submit"
+      ],
+      "family": "reviews",
+      "description": "Review the change's current head (approve or request-changes) as a human or agent principal other than the author. A request-changes, or an approval next to one, escalates to a human.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/reviews",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "verdict",
+          "type": "string",
+          "in": "body",
+          "description": "Review verdict",
+          "required": true,
+          "enum": [
+            "approve",
+            "request-changes"
+          ]
+        },
+        {
+          "name": "headSha",
+          "type": "string",
+          "in": "body",
+          "description": "The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved"
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "Review comment"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "approve_change",
+      "command": [
+        "review",
+        "approve"
+      ],
+      "family": "reviews",
+      "description": "Approve the change's current head. The approval is bound to that exact head; a head movement stales it.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/approve",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "headSha",
+          "type": "string",
+          "in": "body",
+          "description": "The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved"
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "Review comment"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "request_changes",
+      "command": [
+        "review",
+        "request-changes"
+      ],
+      "family": "reviews",
+      "description": "Request changes on the change's current head. Publication is blocked and escalated to a human until one approves or resolves it.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/request-changes",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "headSha",
+          "type": "string",
+          "in": "body",
+          "description": "The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved"
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "Review comment"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_pending_reviews",
+      "command": [
+        "review",
+        "pending"
+      ],
+      "family": "reviews",
+      "description": "Live changes still short of the required approvals of their current head or with an open escalation, newest first.",
+      "method": "GET",
+      "path": "/repos/{repo}/reviews/pending",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "assign_reviewer",
+      "command": [
+        "review",
+        "assign"
+      ],
+      "family": "reviews",
+      "description": "Pick a reviewer among the agents holding a live write token for the repository (or the given ones), preferring a different model family than the author; reports whether the preference was met.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/reviewers/assign",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "candidates",
+          "type": "string[]",
+          "in": "body",
+          "description": "Only consider these agent ids"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "resolve_escalation",
+      "command": [
+        "review",
+        "resolve"
+      ],
+      "family": "reviews",
+      "description": "Close an open escalation as a human (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/escalations/{id}/resolve",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Escalation id from get_reviews",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "resolution",
+          "type": "string",
+          "in": "body",
+          "description": "How the escalation was handled (default resolve)",
+          "enum": [
+            "acknowledge",
+            "resolve"
+          ]
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "in": "body",
+          "description": "Note recorded with the resolution"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_review_policy",
+      "command": [
+        "review-policy",
+        "get"
+      ],
+      "family": "reviews",
+      "description": "The repository review policy: approving reviews required per change from distinct principals other than the author.",
+      "method": "GET",
+      "path": "/repos/{repo}/review-policy",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "set_review_policy",
+      "command": [
+        "review-policy",
+        "set"
+      ],
+      "family": "reviews",
+      "description": "Set how many approving reviews of the current head (humans or agents, distinct, not the author) a change needs (repo admins only).",
+      "method": "PUT",
+      "path": "/repos/{repo}/review-policy",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "requiredReviews",
+          "type": "integer",
+          "in": "body",
+          "description": "Required approving reviews (0-10)",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_tasks",
+      "command": [
+        "task",
+        "list"
+      ],
+      "family": "tasks",
+      "description": "Agent tasks of a repository, newest first: resolve-conflict tasks name the conflicted change, its head and base commits and the conflicting paths (lockfiles marked needsRegeneration); fix-issue tasks name the issue to fix.",
+      "method": "GET",
+      "path": "/repos/{repo}/tasks",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "in": "query",
+          "description": "Task status (default open)",
+          "enum": [
+            "open",
+            "claimed",
+            "completed",
+            "obsolete",
+            "all"
+          ]
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "in": "query",
+          "description": "Only tasks of this kind, e.g. resolve-conflict"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_task",
+      "command": [
+        "task",
+        "get"
+      ],
+      "family": "tasks",
+      "description": "One agent task with its claim lease (holder, generation, expiry), claim workspace and resolution.",
+      "method": "GET",
+      "path": "/repos/{repo}/tasks/{task}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "path",
+          "description": "Task id from list_tasks",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "claim_task",
+      "command": [
+        "task",
+        "claim"
+      ],
+      "family": "tasks",
+      "description": "Claim an open task under an expiring lease. Creates (or on a reclaim reuses) a workspace: for resolve-conflict at the conflicting change's head (push the resolution there), for fix-issue at the default branch, linked to the issue. A live claim by another agent is refused 409 CLAIMED; a lapsed lease is taken over under the next generation.",
+      "method": "POST",
+      "path": "/repos/{repo}/tasks/{task}/claim",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "path",
+          "description": "Task id from list_tasks",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "in": "body",
+          "description": "Agent display name (default: the token agent or your login; an agent token always claims as its agent)"
+        },
+        {
+          "name": "ttlSeconds",
+          "type": "integer",
+          "in": "body",
+          "description": "Lease length in seconds (default 600, max 3600)"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "heartbeat_task",
+      "command": [
+        "task",
+        "heartbeat"
+      ],
+      "family": "tasks",
+      "description": "Extend the claim lease of a task you hold. Refused 409 STALE_GENERATION when the claim was taken over.",
+      "method": "POST",
+      "path": "/repos/{repo}/tasks/{task}/heartbeat",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "path",
+          "description": "Task id from list_tasks",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "generation",
+          "type": "integer",
+          "in": "body",
+          "description": "Lease generation returned by claim_task",
+          "required": true
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "in": "body",
+          "description": "Agent display name used when claiming"
+        },
+        {
+          "name": "ttlSeconds",
+          "type": "integer",
+          "in": "body",
+          "description": "New lease length in seconds (default 600, max 3600)"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "complete_task",
+      "command": [
+        "task",
+        "complete"
+      ],
+      "family": "tasks",
+      "description": "Complete a claimed task. resolve-conflict: the workspace head must descend from the change's head and merge with the base without conflicts; the change moves to the resolution, reopens and follows its merge policy (auto merges, review waits, draft stays draft). fix-issue: the claim workspace must have opened a change (create_change_set); that change closes the issue when it merges.",
+      "method": "POST",
+      "path": "/repos/{repo}/tasks/{task}/complete",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "path",
+          "description": "Task id from list_tasks",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "generation",
+          "type": "integer",
+          "in": "body",
+          "description": "Lease generation returned by claim_task",
+          "required": true
+        },
+        {
+          "name": "sha",
+          "type": "string",
+          "in": "body",
+          "description": "Expected resolution commit (40 hex); refused 409 if the workspace head differs"
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "in": "body",
+          "description": "Agent display name used when claiming"
+        },
+        {
+          "name": "attribution",
+          "type": "json",
+          "in": "body",
+          "description": "Attribution note for the resolution commit: {agent?, session?, promptHash?, model?}"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_intent",
+      "command": [
+        "intent",
+        "get"
+      ],
+      "family": "nexus",
+      "description": "A workspace intent: declared paths, observed paths from pushes and what lies outside the declaration.",
+      "method": "GET",
+      "path": "/repos/{repo}/workspaces/{workspace}/intent",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "set_intent",
+      "command": [
+        "intent",
+        "set"
+      ],
+      "family": "nexus",
+      "description": "Replace a workspace intent declaration (advisory; nothing is locked).",
+      "method": "POST",
+      "path": "/repos/{repo}/workspaces/{workspace}/intent",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "path",
+          "description": "Workspace id (16 hex characters)",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "paths",
+          "type": "string[]",
+          "in": "body",
+          "description": "Declared paths; a trailing / marks a directory prefix",
+          "required": true
+        },
+        {
+          "name": "prefixes",
+          "type": "string[]",
+          "in": "body",
+          "description": "Directory prefixes (paths with / appended)"
+        },
+        {
+          "name": "ttlSeconds",
+          "type": "integer",
+          "in": "body",
+          "description": "Declaration lifetime in seconds (60-2592000)"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "forecast",
+      "command": [
+        "nexus",
+        "forecast"
+      ],
+      "family": "nexus",
+      "description": "Advisory forecast: active workspaces whose declared or observed paths intersect the given paths, plus semantic dependency matches (imports, export changes, contract families).",
+      "method": "GET",
+      "path": "/repos/{repo}/forecast",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "paths",
+          "type": "string[]",
+          "in": "query",
+          "description": "Paths to forecast (at most 20; a trailing / marks a prefix)",
+          "required": true,
+          "literal": true
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "query",
+          "description": "Only workspaces on this base branch"
+        },
+        {
+          "name": "exclude",
+          "type": "string",
+          "in": "query",
+          "description": "Workspace id to leave out (usually your own); its own import edges are also matched semantically"
+        },
+        {
+          "name": "semantic",
+          "type": "boolean",
+          "in": "query",
+          "description": "Include the advisory semantic dependency layer on the first page (default true)"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_overlap",
+      "command": [
+        "nexus",
+        "overlap"
+      ],
+      "family": "nexus",
+      "description": "Pairs of active workspaces whose pushed changes touch the same paths, plus semantic dependency pairs (advisory, from the Nexus index).",
+      "method": "GET",
+      "path": "/repos/{repo}/workspaces/overlap",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "query",
+          "description": "Base branch (default: the default branch)"
+        },
+        {
+          "name": "semantic",
+          "type": "boolean",
+          "in": "query",
+          "description": "Include advisory semantic dependency pairs on the first page (default true)"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_candidates",
+      "command": [
+        "candidates",
+        "get"
+      ],
+      "family": "candidates",
+      "description": "Compare 1-8 workspaces against a base: per-candidate summaries, pairwise diffs, overlap and a deterministic ranking.",
+      "method": "GET",
+      "path": "/repos/{repo}/candidates",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspaces",
+          "type": "string[]",
+          "in": "query",
+          "description": "Workspace ids (1-8)",
+          "required": true
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "query",
+          "description": "Base branch (default: the default branch)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "compose_candidates",
+      "command": [
+        "candidates",
+        "compose"
+      ],
+      "family": "candidates",
+      "description": "Compose selected workspace pieces onto the base into a new workspace and change set (refused on textual conflicts).",
+      "method": "POST",
+      "path": "/repos/{repo}/candidates/compose",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "workspaces",
+          "type": "json",
+          "in": "body",
+          "description": "Workspace ids or {workspace, paths?} objects (2-8), in fold order",
+          "required": true
+        },
+        {
+          "name": "paths",
+          "type": "json",
+          "in": "body",
+          "description": "Optional {<workspace id>: [paths]} selection"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "body",
+          "description": "Base branch (default: the default branch)"
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "in": "body",
+          "description": "Title of the composed change set"
+        },
+        {
+          "name": "mergePolicy",
+          "type": "string",
+          "in": "body",
+          "description": "review (default), auto or draft",
+          "enum": [
+            "review",
+            "auto",
+            "draft"
+          ]
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "in": "body",
+          "description": "Agent display name for the composed workspace"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_compositions",
+      "command": [
+        "composition",
+        "list"
+      ],
+      "family": "candidates",
+      "description": "Compositions of the repository, newest first.",
+      "method": "GET",
+      "path": "/repos/{repo}/compositions",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_composition",
+      "command": [
+        "composition",
+        "get"
+      ],
+      "family": "candidates",
+      "description": "One composition: sources, composed tree and commit, its workspace and change set, and the checks answer.",
+      "method": "GET",
+      "path": "/repos/{repo}/compositions/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Composition id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_arena",
+      "command": [
+        "arena",
+        "create"
+      ],
+      "family": "candidates",
+      "description": "Create 2-8 sibling candidate workspaces from one brief at the base head. Nothing is spawned or selected automatically.",
+      "method": "POST",
+      "path": "/repos/{repo}/arenas",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "brief",
+          "type": "string",
+          "in": "body",
+          "description": "Shared brief (1-500 characters)",
+          "required": true
+        },
+        {
+          "name": "candidates",
+          "type": "integer",
+          "in": "body",
+          "description": "Number of candidate workspaces (2-8)",
+          "required": true
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "body",
+          "description": "Base branch (default: the default branch)"
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "in": "body",
+          "description": "Agent display name for the workspaces"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_arenas",
+      "command": [
+        "arena",
+        "list"
+      ],
+      "family": "candidates",
+      "description": "Arenas of the repository, newest first.",
+      "method": "GET",
+      "path": "/repos/{repo}/arenas",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_arena",
+      "command": [
+        "arena",
+        "get"
+      ],
+      "family": "candidates",
+      "description": "One arena with its candidate workspaces and recorded selection.",
+      "method": "GET",
+      "path": "/repos/{repo}/arenas/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Arena id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "rank_arena",
+      "command": [
+        "arena",
+        "rank"
+      ],
+      "family": "candidates",
+      "description": "Ranked candidates of an arena (same factors as list_candidates) plus the separate duplication report.",
+      "method": "GET",
+      "path": "/repos/{repo}/arenas/{id}/candidates",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Arena id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "select_arena_winner",
+      "command": [
+        "arena",
+        "select"
+      ],
+      "family": "candidates",
+      "description": "Record the chosen arena candidate. Merges, closes and abandons nothing; the winner merges through its own change set.",
+      "method": "POST",
+      "path": "/repos/{repo}/arenas/{id}/select",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Arena id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "body",
+          "description": "Winning workspace id",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "create_org",
+      "command": [
+        "org",
+        "create"
+      ],
+      "family": "orgs",
+      "description": "Create an organization; the caller becomes its owner.",
+      "method": "POST",
+      "path": "/orgs",
+      "params": [
+        {
+          "name": "login",
+          "type": "string",
+          "in": "body",
+          "description": "Organization login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Display name"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_org",
+      "command": [
+        "org",
+        "get"
+      ],
+      "family": "orgs",
+      "description": "An organization and your role in it.",
+      "method": "GET",
+      "path": "/orgs/{org}",
+      "params": [
+        {
+          "name": "org",
+          "type": "string",
+          "in": "path",
+          "description": "Organization login",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_my_orgs",
+      "command": [
+        "org",
+        "list"
+      ],
+      "family": "orgs",
+      "description": "Organizations the authenticated user belongs to, with roles.",
+      "method": "GET",
+      "path": "/user/orgs",
+      "params": [],
+      "readOnly": true
+    },
+    {
+      "name": "list_org_members",
+      "command": [
+        "org",
+        "members"
+      ],
+      "family": "orgs",
+      "description": "Members of an organization (members only).",
+      "method": "GET",
+      "path": "/orgs/{org}/members",
+      "params": [
+        {
+          "name": "org",
+          "type": "string",
+          "in": "path",
+          "description": "Organization login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-200)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "set_org_member",
+      "command": [
+        "org",
+        "member-set"
+      ],
+      "family": "orgs",
+      "description": "Add a member or change a role (org owners only). The last owner cannot be demoted.",
+      "method": "PUT",
+      "path": "/orgs/{org}/members/{login}",
+      "params": [
+        {
+          "name": "org",
+          "type": "string",
+          "in": "path",
+          "description": "Organization login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "login",
+          "type": "string",
+          "in": "path",
+          "description": "User login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "in": "body",
+          "description": "owner, maintainer or member",
+          "required": true,
+          "enum": [
+            "owner",
+            "maintainer",
+            "member"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "remove_org_member",
+      "command": [
+        "org",
+        "member-remove"
+      ],
+      "family": "orgs",
+      "description": "Remove a member (org owners only); also deletes the user's grants on the org's repositories.",
+      "method": "DELETE",
+      "path": "/orgs/{org}/members/{login}",
+      "params": [
+        {
+          "name": "org",
+          "type": "string",
+          "in": "path",
+          "description": "Organization login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "login",
+          "type": "string",
+          "in": "path",
+          "description": "User login",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "list_org_repos",
+      "command": [
+        "org",
+        "repos"
+      ],
+      "family": "orgs",
+      "description": "Repositories of an organization visible to you.",
+      "method": "GET",
+      "path": "/orgs/{org}/repos",
+      "params": [
+        {
+          "name": "org",
+          "type": "string",
+          "in": "path",
+          "description": "Organization login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_org_repo",
+      "command": [
+        "org",
+        "repo-create"
+      ],
+      "family": "orgs",
+      "description": "Create a repository owned by an organization (owners and maintainers).",
+      "method": "POST",
+      "path": "/orgs/{org}/repos",
+      "params": [
+        {
+          "name": "org",
+          "type": "string",
+          "in": "path",
+          "description": "Organization login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Repository name",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "in": "body",
+          "description": "Short description"
+        },
+        {
+          "name": "visibility",
+          "type": "string",
+          "in": "body",
+          "description": "public or private (default private)",
+          "enum": [
+            "public",
+            "private"
+          ]
+        },
+        {
+          "name": "defaultBranch",
+          "type": "string",
+          "in": "body",
+          "description": "Default branch name (default main)"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_grants",
+      "command": [
+        "grant",
+        "list"
+      ],
+      "family": "orgs",
+      "description": "Explicit repository grants (repo admins only).",
+      "method": "GET",
+      "path": "/repos/{repo}/grants",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "set_grant",
+      "command": [
+        "grant",
+        "set"
+      ],
+      "family": "orgs",
+      "description": "Grant a user read, write or admin on a repository (repo admins only).",
+      "method": "PUT",
+      "path": "/repos/{repo}/grants/{login}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "login",
+          "type": "string",
+          "in": "path",
+          "description": "User login",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "in": "body",
+          "description": "read, write or admin",
+          "required": true,
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "revoke_grant",
+      "command": [
+        "grant",
+        "revoke"
+      ],
+      "family": "orgs",
+      "description": "Revoke a user's explicit grant on a repository (repo admins only).",
+      "method": "DELETE",
+      "path": "/repos/{repo}/grants/{login}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "login",
+          "type": "string",
+          "in": "path",
+          "description": "User login",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "create_agent",
+      "command": [
+        "agent",
+        "create"
+      ],
+      "family": "agents",
+      "description": "Create an agent principal owned by you or by an organization you own.",
+      "method": "POST",
+      "path": "/agents",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Agent name (lowercase, unique per owner)",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "owner",
+          "type": "string",
+          "in": "body",
+          "description": "Your login or an org login (default: you)"
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "in": "body",
+          "description": "Description (at most 500 characters)"
+        },
+        {
+          "name": "modelFamily",
+          "type": "string",
+          "in": "body",
+          "description": "Model family of the agent (e.g. claude, gpt); reviewer assignment prefers a different family than the author"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_agents",
+      "command": [
+        "agent",
+        "list"
+      ],
+      "family": "agents",
+      "description": "Agents of an account you manage, sorted by name (revoked included).",
+      "method": "GET",
+      "path": "/agents",
+      "params": [
+        {
+          "name": "owner",
+          "type": "string",
+          "in": "query",
+          "description": "Account login (default: you)"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-200)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_agent",
+      "command": [
+        "agent",
+        "get"
+      ],
+      "family": "agents",
+      "description": "One agent you manage (status, owner, creator).",
+      "method": "GET",
+      "path": "/agents/{id}",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Agent id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "revoke_agent",
+      "command": [
+        "agent",
+        "revoke"
+      ],
+      "family": "agents",
+      "description": "Revoke an agent; all of its tokens stop working immediately.",
+      "method": "DELETE",
+      "path": "/agents/{id}",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Agent id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "create_agent_token",
+      "command": [
+        "agent",
+        "token-create"
+      ],
+      "family": "agents",
+      "description": "Mint an expiring agent token for one repository (read, or write with ref patterns). The token is shown once.",
+      "method": "POST",
+      "path": "/agents/{id}/tokens",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Agent id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "body",
+          "description": "Repository as owner/name",
+          "required": true
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "in": "body",
+          "description": "read or write",
+          "required": true,
+          "enum": [
+            "read",
+            "write"
+          ]
+        },
+        {
+          "name": "refs",
+          "type": "string[]",
+          "in": "body",
+          "description": "Ref patterns a write token may update (1-16, e.g. refs/heads/agents/*)"
+        },
+        {
+          "name": "expiresIn",
+          "type": "integer",
+          "in": "body",
+          "description": "Lifetime in seconds (60-2592000, default 3600)"
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Token label"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_agent_tokens",
+      "command": [
+        "agent",
+        "tokens"
+      ],
+      "family": "agents",
+      "description": "Token metadata of an agent (prefix only, never the token).",
+      "method": "GET",
+      "path": "/agents/{id}/tokens",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Agent id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "revoke_agent_token",
+      "command": [
+        "agent",
+        "token-revoke"
+      ],
+      "family": "agents",
+      "description": "Revoke one agent token.",
+      "method": "DELETE",
+      "path": "/agents/{id}/tokens/{tokenId}",
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Agent id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "tokenId",
+          "type": "string",
+          "in": "path",
+          "description": "Token id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "set_attribution",
+      "command": [
+        "attribution",
+        "set"
+      ],
+      "family": "attribution",
+      "description": "Attach the attribution note {agent, session, promptHash, model?, actor, at} to a commit on refs/notes/kvarm-attribution (replaces an earlier note).",
+      "method": "POST",
+      "path": "/repos/{repo}/commits/{sha}/attribution",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "sha",
+          "type": "string",
+          "in": "path",
+          "description": "Full 40-character commit sha",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "agent",
+          "type": "string",
+          "in": "body",
+          "description": "Agent identity, e.g. claude-code-1",
+          "required": true
+        },
+        {
+          "name": "session",
+          "type": "string",
+          "in": "body",
+          "description": "Agent session id",
+          "required": true
+        },
+        {
+          "name": "promptHash",
+          "type": "string",
+          "in": "body",
+          "description": "Hash of the prompt that produced the commit",
+          "required": true
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "in": "body",
+          "description": "Model name"
+        },
+        {
+          "name": "evidence",
+          "type": "json",
+          "in": "body",
+          "description": "Signed execution evidence {keyId, runId, signature} from a trusted execution service; verified on write"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_attribution",
+      "command": [
+        "attribution",
+        "get"
+      ],
+      "family": "attribution",
+      "description": "A commit's attribution note (agent, session, promptHash, model, actor, at) with its evidence level (declared, authenticated or verified); not found when it has none.",
+      "method": "GET",
+      "path": "/repos/{repo}/commits/{sha}/attribution",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "sha",
+          "type": "string",
+          "in": "path",
+          "description": "Full 40-character commit sha",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "record_decision",
+      "command": [
+        "decision",
+        "record"
+      ],
+      "family": "attribution",
+      "description": "Record which candidate was chosen for a task and/or paths, the rejected candidates and why, for later agents to read with get_context.",
+      "method": "POST",
+      "path": "/repos/{repo}/decisions",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "body",
+          "description": "Task id the decision belongs to (task and/or paths)"
+        },
+        {
+          "name": "paths",
+          "type": "string[]",
+          "in": "body",
+          "description": "Repository paths the decision covers (at most 100)",
+          "literal": true
+        },
+        {
+          "name": "chosen",
+          "type": "string",
+          "in": "body",
+          "description": "Chosen candidate, workspace or change id",
+          "required": true
+        },
+        {
+          "name": "rejected",
+          "type": "json",
+          "in": "body",
+          "description": "Rejected candidates: ids or {id, reason} objects (at most 50)",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "in": "body",
+          "description": "Why the chosen candidate won",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_context",
+      "command": [
+        "decision",
+        "context"
+      ],
+      "family": "attribution",
+      "description": "Prior decisions for a task and/or paths, newest first: chosen and rejected candidates with their reasons. Bounded pages with truncated/nextCursor.",
+      "method": "GET",
+      "path": "/repos/{repo}/context",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "query",
+          "description": "Task id"
+        },
+        {
+          "name": "path",
+          "type": "string[]",
+          "in": "query",
+          "description": "Repository paths (at most 20)",
+          "literal": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-50)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_issue",
+      "command": [
+        "issue",
+        "create"
+      ],
+      "family": "issues",
+      "description": "File an issue, e.g. a bug found outside the current task. With a fingerprint, a repeat report while an issue with that fingerprint is open counts one more occurrence on it (200, created false) instead of filing a duplicate (201).",
+      "method": "POST",
+      "path": "/repos/{repo}/issues",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "in": "body",
+          "description": "Title (1-256 characters)",
+          "required": true
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "Description: what happens, how to reproduce it"
+        },
+        {
+          "name": "paths",
+          "type": "string[]",
+          "in": "body",
+          "description": "Repository paths the issue is about (at most 100)",
+          "literal": true
+        },
+        {
+          "name": "fingerprint",
+          "type": "string",
+          "in": "body",
+          "description": "Stable identity of the problem (e.g. a failing test id) used to deduplicate reports"
+        },
+        {
+          "name": "evidence",
+          "type": "json",
+          "in": "body",
+          "description": "Evidence {sha?, check?, runId?, workspace?, url?}"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_issues",
+      "command": [
+        "issue",
+        "list"
+      ],
+      "family": "issues",
+      "description": "Issues of the repository, newest first, filtered by state (default open) and by source (human, agent, ci, flake, guard).",
+      "method": "GET",
+      "path": "/repos/{repo}/issues",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "in": "query",
+          "description": "Issue state (default open)",
+          "enum": [
+            "open",
+            "closed",
+            "all"
+          ]
+        },
+        {
+          "name": "source",
+          "type": "string",
+          "in": "query",
+          "description": "Who filed it",
+          "enum": [
+            "human",
+            "agent",
+            "ci",
+            "flake",
+            "guard"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_issue",
+      "command": [
+        "issue",
+        "get"
+      ],
+      "family": "issues",
+      "description": "One issue with its occurrences, evidence, how it was closed, its links to changes and workspaces, and its newest comments.",
+      "method": "GET",
+      "path": "/repos/{repo}/issues/{number}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Issue number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "update_issue",
+      "command": [
+        "issue",
+        "update"
+      ],
+      "family": "issues",
+      "description": "Edit an issue, close it (closedReason completed, not_planned or duplicate) or reopen it.",
+      "method": "PATCH",
+      "path": "/repos/{repo}/issues/{number}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Issue number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "in": "body",
+          "description": "New title"
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "New description"
+        },
+        {
+          "name": "paths",
+          "type": "string[]",
+          "in": "body",
+          "description": "Repository paths the issue is about (replaces the list)",
+          "literal": true
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "in": "body",
+          "description": "open or closed",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        {
+          "name": "closedReason",
+          "type": "string",
+          "in": "body",
+          "description": "Why it is closed (with state closed)",
+          "enum": [
+            "completed",
+            "not_planned",
+            "duplicate"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "dispatch_issue",
+      "command": [
+        "issue",
+        "dispatch"
+      ],
+      "family": "issues",
+      "description": "Hand an open issue to agents as a fix-issue task (one live task per issue; 201 created, 200 the live one). An agent claims it with claim_task, gets a workspace at the default branch that declares the issue's paths as its intent, opens a change from it (create_change_set) and completes the task; the change closes the issue when it merges.",
+      "method": "POST",
+      "path": "/repos/{repo}/issues/{number}/dispatch",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Issue number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "comment_issue",
+      "command": [
+        "issue",
+        "comment"
+      ],
+      "family": "issues",
+      "description": "Comment on an issue (people and agents alike, closed issues included); get_issue returns the newest 50 comments.",
+      "method": "POST",
+      "path": "/repos/{repo}/issues/{number}/comments",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Issue number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "in": "body",
+          "description": "The comment (Markdown)",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_change_issues",
+      "command": [
+        "issue",
+        "linked"
+      ],
+      "family": "issues",
+      "description": "Issues linked to a change: closing keywords in its title or body (confirmed), an issue number in its branch name (proposed), its workspace's issue, and manual links; willClose tells which close when it merges into the default branch.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}/issues",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "link_issue",
+      "command": [
+        "issue",
+        "link"
+      ],
+      "family": "issues",
+      "description": "Confirm or reject a link between a change and an issue, e.g. accept a proposed link from the branch name. A confirmed closes link closes the issue when the change merges into the default branch; a manual decision is never recomputed away.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/issues",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "issue",
+          "type": "integer",
+          "in": "body",
+          "description": "Issue number",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "in": "body",
+          "description": "closes (default) or refs",
+          "enum": [
+            "closes",
+            "refs"
+          ]
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "in": "body",
+          "description": "confirmed (default) or rejected",
+          "enum": [
+            "confirmed",
+            "rejected"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_audit",
+      "command": [
+        "audit",
+        "export"
+      ],
+      "family": "provenance",
+      "description": "Audit export (repo admins): one record per commit with agent, session, promptHash, model, evidence level, token prefix, pushes and merges, in first-recorded order. Bounded pages with nextCursor.",
+      "method": "GET",
+      "path": "/repos/{repo}/audit",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "since",
+          "type": "string",
+          "in": "query",
+          "description": "Earliest first-seen time, ISO 8601 (inclusive)"
+        },
+        {
+          "name": "until",
+          "type": "string",
+          "in": "query",
+          "description": "Latest first-seen time, ISO 8601 (exclusive)"
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "in": "query",
+          "description": "json (default) or ndjson: one record per line, then a {page} line",
+          "enum": [
+            "json",
+            "ndjson"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-200)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_provenance_keys",
+      "command": [
+        "provenance-key",
+        "list"
+      ],
+      "family": "provenance",
+      "description": "Trusted execution-service public keys for verified attribution: the repository keys and the instance keys (repo admins).",
+      "method": "GET",
+      "path": "/repos/{repo}/provenance-keys",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "add_provenance_key",
+      "command": [
+        "provenance-key",
+        "add"
+      ],
+      "family": "provenance",
+      "description": "Trust an execution service: add its raw Ed25519 public key (base64url); its id is the key fingerprint (repo admins).",
+      "method": "POST",
+      "path": "/repos/{repo}/provenance-keys",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Label of the execution service",
+          "required": true
+        },
+        {
+          "name": "publicKey",
+          "type": "string",
+          "in": "body",
+          "description": "Raw 32-byte Ed25519 public key, base64url",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "revoke_provenance_key",
+      "command": [
+        "provenance-key",
+        "revoke"
+      ],
+      "family": "provenance",
+      "description": "Stop trusting a provenance key for new attribution writes; levels already recorded stay as they were (repo admins).",
+      "method": "DELETE",
+      "path": "/repos/{repo}/provenance-keys/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Key id (fingerprint) from list_provenance_keys",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "list_branch_rules",
+      "command": [
+        "branch-rule",
+        "list"
+      ],
+      "family": "branch-rules",
+      "description": "Branch protection rules of the repository.",
+      "method": "GET",
+      "path": "/repos/{repo}/branch-rules",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_branch_rule",
+      "command": [
+        "branch-rule",
+        "create"
+      ],
+      "family": "branch-rules",
+      "description": "Protect matching refs from direct pushes and set required checks/approvals and guard completeness (repo admins only).",
+      "method": "POST",
+      "path": "/repos/{repo}/branch-rules",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "pattern",
+          "type": "string",
+          "in": "body",
+          "description": "Branch name or ref pattern (main, release/*, refs/tags/*)",
+          "required": true
+        },
+        {
+          "name": "requiredChecks",
+          "type": "string[]",
+          "in": "body",
+          "description": "Required check names"
+        },
+        {
+          "name": "requiredApprovals",
+          "type": "integer",
+          "in": "body",
+          "description": "Required distinct human approvals (0-10)"
+        },
+        {
+          "name": "guardCompleteness",
+          "type": "string",
+          "in": "body",
+          "description": "advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)",
+          "enum": [
+            "advisory",
+            "required"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_branch_rule",
+      "command": [
+        "branch-rule",
+        "get"
+      ],
+      "family": "branch-rules",
+      "description": "One branch rule with its required checks and approvals.",
+      "method": "GET",
+      "path": "/repos/{repo}/branch-rules/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Rule id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "update_branch_rule",
+      "command": [
+        "branch-rule",
+        "update"
+      ],
+      "family": "branch-rules",
+      "description": "Change a branch rule's required checks, approvals or guard completeness (the pattern is immutable).",
+      "method": "PATCH",
+      "path": "/repos/{repo}/branch-rules/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Rule id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "requiredChecks",
+          "type": "string[]",
+          "in": "body",
+          "description": "Required check names"
+        },
+        {
+          "name": "requiredApprovals",
+          "type": "integer",
+          "in": "body",
+          "description": "Required distinct human approvals (0-10)"
+        },
+        {
+          "name": "guardCompleteness",
+          "type": "string",
+          "in": "body",
+          "description": "advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)",
+          "enum": [
+            "advisory",
+            "required"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "delete_branch_rule",
+      "command": [
+        "branch-rule",
+        "delete"
+      ],
+      "family": "branch-rules",
+      "description": "Delete a branch rule (repo admins only).",
+      "method": "DELETE",
+      "path": "/repos/{repo}/branch-rules/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Rule id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "get_branch_policy",
+      "command": [
+        "branch-rule",
+        "policy"
+      ],
+      "family": "branch-rules",
+      "description": "The effective policy for one ref: protected, direct push, required checks, approvals and guard completeness.",
+      "method": "GET",
+      "path": "/repos/{repo}/branch-policy",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "ref",
+          "type": "string",
+          "in": "query",
+          "description": "Branch name or full ref",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_environments",
+      "command": [
+        "environment",
+        "list"
+      ],
+      "family": "environments",
+      "description": "List reusable Linux build environments for a repository.",
+      "method": "GET",
+      "path": "/repos/{repo}/environments",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_environment",
+      "command": [
+        "environment",
+        "create"
+      ],
+      "family": "environments",
+      "description": "Create a Linux build environment; requires repository admin and queues its initial build.",
+      "method": "POST",
+      "path": "/repos/{repo}/environments",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "in": "body",
+          "description": "Environment name",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "os",
+          "type": "string",
+          "in": "body",
+          "description": "Only linux is currently available"
+        },
+        {
+          "name": "baseRef",
+          "type": "string",
+          "in": "body",
+          "description": "Base branch (defaults to the repository default)"
+        },
+        {
+          "name": "instance",
+          "type": "string",
+          "in": "body",
+          "description": "Container instance type"
+        },
+        {
+          "name": "setupScript",
+          "type": "string",
+          "in": "body",
+          "description": "Setup script"
+        },
+        {
+          "name": "validateScript",
+          "type": "string",
+          "in": "body",
+          "description": "Validation script"
+        },
+        {
+          "name": "envVars",
+          "type": "json",
+          "in": "body",
+          "description": "Non-secret build environment variables"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "rebuild_environment",
+      "command": [
+        "environment",
+        "rebuild"
+      ],
+      "family": "environments",
+      "description": "Request a new environment build without changing its configuration (repository admin only).",
+      "method": "POST",
+      "path": "/repos/{repo}/environments/{environment}/rebuild",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "environment",
+          "type": "string",
+          "in": "path",
+          "description": "Environment id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "start_sandbox",
+      "command": [
+        "sandbox",
+        "start"
+      ],
+      "family": "sandboxes",
+      "description": "Resume the caller principal’s running or sleeping sandbox for this environment, or start one. Set fresh=true to force a separate sandbox.",
+      "method": "POST",
+      "path": "/repos/{repo}/sandboxes",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "environment",
+          "type": "string",
+          "in": "body",
+          "description": "Environment id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "workspace",
+          "type": "string",
+          "in": "body",
+          "description": "Workspace id to reuse or resume"
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "in": "body",
+          "description": "Workspace task"
+        },
+        {
+          "name": "ttlHours",
+          "type": "integer",
+          "in": "body",
+          "description": "Run-window duration (1-168 hours)"
+        },
+        {
+          "name": "fresh",
+          "type": "boolean",
+          "in": "body",
+          "description": "Always create a new sandbox"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_sandboxes",
+      "command": [
+        "sandbox",
+        "list"
+      ],
+      "family": "sandboxes",
+      "description": "List repository sandboxes, including sleeping snapshots.",
+      "method": "GET",
+      "path": "/repos/{repo}/sandboxes",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_my_sandboxes",
+      "command": [
+        "sandbox",
+        "mine"
+      ],
+      "family": "sandboxes",
+      "description": "List human-owned sandboxes across the owner’s agents; agent credentials see only their own repository and agent.",
+      "method": "GET",
+      "path": "/sandboxes/mine",
+      "params": [
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "exec_sandbox",
+      "command": [
+        "sandbox",
+        "exec"
+      ],
+      "family": "sandboxes",
+      "description": "Run an audited command in the caller-owned sandbox; deny rules precede single-use human approval.",
+      "method": "POST",
+      "path": "/repos/{repo}/sandboxes/{sandbox}/exec",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "sandbox",
+          "type": "string",
+          "in": "path",
+          "description": "Sandbox id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "command",
+          "type": "string",
+          "in": "body",
+          "description": "Command string",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "cwd",
+          "type": "string",
+          "in": "body",
+          "description": "Working directory within the workspace"
+        },
+        {
+          "name": "timeoutSeconds",
+          "type": "integer",
+          "in": "body",
+          "description": "Timeout from 1 to 600 seconds"
+        },
+        {
+          "name": "approvalId",
+          "type": "string",
+          "in": "body",
+          "description": "Previously approved exact-command approval id"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "stop_sandbox",
+      "command": [
+        "sandbox",
+        "stop"
+      ],
+      "family": "sandboxes",
+      "description": "Sleep the caller-owned sandbox by default; discard=true destroys its resumable snapshot.",
+      "method": "POST",
+      "path": "/repos/{repo}/sandboxes/{sandbox}/stop",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "sandbox",
+          "type": "string",
+          "in": "path",
+          "description": "Sandbox id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "discard",
+          "type": "boolean",
+          "in": "body",
+          "description": "Discard rather than sleep"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_ci_jobs",
+      "command": [
+        "ci",
+        "jobs"
+      ],
+      "family": "ci",
+      "description": "The repository CI job queue, newest first: queued, running and finished runner jobs with claims, leases and the change they belong to.",
+      "method": "GET",
+      "path": "/repos/{repo}/ci/jobs",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_ci_flakes",
+      "command": [
+        "ci",
+        "flakes"
+      ],
+      "family": "ci",
+      "description": "Flaky-check registry: required runner checks that failed once and passed on the automatic retry, plus the checks currently quarantined for the repository.",
+      "method": "GET",
+      "path": "/repos/{repo}/ci/flakes",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "quarantine_ci_check",
+      "command": [
+        "ci",
+        "quarantine"
+      ],
+      "family": "ci",
+      "description": "Quarantine a check name (repo admins only). The check still runs but its runs never satisfy or block a required-checks gate, and its failures never retry.",
+      "method": "POST",
+      "path": "/repos/{repo}/ci/flakes/{check}/quarantine",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "check",
+          "type": "string",
+          "in": "path",
+          "description": "Check name to quarantine",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "restore_ci_check",
+      "command": [
+        "ci",
+        "restore"
+      ],
+      "family": "ci",
+      "description": "Restore a quarantined check name to normal handling (repo admins only); its recorded runs count again.",
+      "method": "POST",
+      "path": "/repos/{repo}/ci/flakes/{check}/restore",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "check",
+          "type": "string",
+          "in": "path",
+          "description": "Check name to restore",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_ci_hosted",
+      "command": [
+        "ci",
+        "hosted"
+      ],
+      "family": "ci",
+      "description": "Hosted CI status: the enabled flag, claimable and running jobs, the live drain state and the last drain report of the platform container runner.",
+      "method": "GET",
+      "path": "/repos/{repo}/ci/hosted",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "enable_ci_hosted",
+      "command": [
+        "ci",
+        "enable"
+      ],
+      "family": "ci",
+      "description": "Enable hosted CI execution for the repository (repo admins only): the platform container runner drains queued jobs, starting with any backlog; the user-owned runner keeps racing on the same queue.",
+      "method": "POST",
+      "path": "/repos/{repo}/ci/hosted/enable",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "disable_ci_hosted",
+      "command": [
+        "ci",
+        "disable"
+      ],
+      "family": "ci",
+      "description": "Disable hosted CI execution for the repository (repo admins only). Queued jobs stay claimable by user-owned runners.",
+      "method": "POST",
+      "path": "/repos/{repo}/ci/hosted/disable",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_webhooks",
+      "command": [
+        "webhook",
+        "list"
+      ],
+      "family": "webhooks",
+      "description": "Outbound webhooks of the repository with their subscribed events, state and failure count (never the secret).",
+      "method": "GET",
+      "path": "/repos/{repo}/webhooks",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_webhook",
+      "command": [
+        "webhook",
+        "create"
+      ],
+      "family": "webhooks",
+      "description": "Create an outbound webhook (https only, no private or internal hosts). The signing secret is in this reply only; deliveries are signed CloudEvents.",
+      "method": "POST",
+      "path": "/repos/{repo}/webhooks",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "in": "body",
+          "description": "https URL that receives the events",
+          "required": true
+        },
+        {
+          "name": "events",
+          "type": "string[]",
+          "in": "body",
+          "description": "Event types to deliver, e.g. kvarm.change.merged, kvarm.check_run.completed (list_webhooks returns the accepted set as eventTypes)",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_webhook",
+      "command": [
+        "webhook",
+        "get"
+      ],
+      "family": "webhooks",
+      "description": "One webhook: URL, events, active, consecutive failures, last delivery and status.",
+      "method": "GET",
+      "path": "/repos/{repo}/webhooks/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Webhook id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "update_webhook",
+      "command": [
+        "webhook",
+        "update"
+      ],
+      "family": "webhooks",
+      "description": "Change a webhook's URL or events, or disable/re-enable it (re-enabling clears the failure count).",
+      "method": "PATCH",
+      "path": "/repos/{repo}/webhooks/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Webhook id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "in": "body",
+          "description": "New https URL"
+        },
+        {
+          "name": "events",
+          "type": "string[]",
+          "in": "body",
+          "description": "New list of event types"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "in": "body",
+          "description": "false disables the webhook; true re-enables it"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "delete_webhook",
+      "command": [
+        "webhook",
+        "delete"
+      ],
+      "family": "webhooks",
+      "description": "Delete a webhook; its pending deliveries are cancelled.",
+      "method": "DELETE",
+      "path": "/repos/{repo}/webhooks/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Webhook id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    },
+    {
+      "name": "rotate_webhook_secret",
+      "command": [
+        "webhook",
+        "rotate-secret"
+      ],
+      "family": "webhooks",
+      "description": "Replace the signing secret of a webhook; the new secret is in this reply only.",
+      "method": "POST",
+      "path": "/repos/{repo}/webhooks/{id}/rotate-secret",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Webhook id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "ping_webhook",
+      "command": [
+        "webhook",
+        "ping"
+      ],
+      "family": "webhooks",
+      "description": "Send a signed kvarm.webhook.ping to one webhook through the delivery queue; returns the pending delivery.",
+      "method": "POST",
+      "path": "/repos/{repo}/webhooks/{id}/ping",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Webhook id",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_webhook_deliveries",
+      "command": [
+        "webhook",
+        "deliveries"
+      ],
+      "family": "webhooks",
+      "description": "Delivery log of a webhook, newest first: state, attempts, response status, latency, error and a truncated response.",
+      "method": "GET",
+      "path": "/repos/{repo}/webhooks/{id}/deliveries",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Webhook id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "in": "query",
+          "description": "Only deliveries in this state",
+          "enum": [
+            "pending",
+            "delivered",
+            "failed",
+            "cancelled"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-50)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "create_revert",
+      "command": [
+        "revert",
+        "create"
+      ],
+      "family": "reverts",
+      "description": "Revert a commit or a merged change set: builds the revert commit (git revert; merges relative to their first parent) on a kvarm-revert/ branch and opens a change set of kind revert (draft by default) that runs guard, CI and the merge queue like any change. 404 unknown commit; 409 REVERT_CONFLICT with the conflicting paths, nothing written.",
+      "method": "POST",
+      "path": "/repos/{repo}/reverts",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "sha",
+          "type": "string",
+          "in": "body",
+          "description": "Commit to revert (40 hex); or pass changeNumber"
+        },
+        {
+          "name": "changeNumber",
+          "type": "integer",
+          "in": "body",
+          "description": "Merged change set to revert, relative to the target it landed on; or pass sha"
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "in": "body",
+          "description": "Why: added to the revert commit message and the change body"
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "in": "body",
+          "description": "Branch the revert applies to (default: the reverted change set base, else the default branch)"
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "in": "body",
+          "description": "Change title (default: Revert \"<subject>\")"
+        },
+        {
+          "name": "mergePolicy",
+          "type": "string",
+          "in": "body",
+          "description": "draft (default), review or auto",
+          "enum": [
+            "review",
+            "auto",
+            "draft"
+          ]
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_incident_webhook",
+      "command": [
+        "incident",
+        "webhook"
+      ],
+      "family": "reverts",
+      "description": "Incident webhook status for the repository (repo admins): whether a secret exists, its generation and fingerprint, and the signature headers. The secret itself is never shown again.",
+      "method": "GET",
+      "path": "/repos/{repo}/incidents/webhook",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "rotate_incident_secret",
+      "command": [
+        "incident",
+        "rotate"
+      ],
+      "family": "reverts",
+      "description": "Create or rotate the incident webhook secret (repo admins). The reply shows the new secret once; the previous secret stops verifying immediately. Deliveries sign \"<x-kvarm-timestamp>.<raw body>\" with HMAC-SHA256.",
+      "method": "POST",
+      "path": "/repos/{repo}/incidents/webhook/rotate",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "delete_incident_webhook",
+      "command": [
+        "incident",
+        "delete"
+      ],
+      "family": "reverts",
+      "description": "Remove the incident webhook secret (repo admins); every later delivery is refused with 401.",
+      "method": "DELETE",
+      "path": "/repos/{repo}/incidents/webhook",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        }
+      ],
+      "readOnly": false,
+      "destructive": true
+    }
+  ]
+}

@@ -29,6 +29,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 
 const { values } = parseArgs({ options: { samples: { type: 'string', default: '5' }, keep: { type: 'boolean', default: false }, 'isolated-npm-cache': { type: 'boolean', default: false }, 'snapshot-ready': { type: 'boolean', default: false } } });
 const SAMPLES = Number(values.samples);
@@ -44,14 +45,13 @@ const work = join(root, 'work');
 const workRoot = join(root, 'runner');
 const slotWork = (n) => join(workRoot, OWNER, repo, `slot-${n}`, 'work');
 const askpass = join(root, 'askpass.sh');
-const CLI = new URL('../apps/cli/bin/kvarm.js', import.meta.url).pathname;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SKIP = new Set(['node_modules', '.cache', '.git']);
 const results = [];
 
 writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
 chmodSync(askpass, 0o700);
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function check(label, ok, detail = '') {
   results.push(Boolean(ok));
   console.log(`${ok ? 'PASS' : 'FAIL'} ${label}${detail ? ` -> ${detail}` : ''}`);
@@ -99,7 +99,7 @@ async function snapshotReady(sha, ms = 120_000) {
 function runner(extra = []) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
-    const child = spawn(process.execPath, [CLI, 'runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', workRoot, ...extra], {
+    const child = spawn(kvarmBin(), ['runner', '--repo', `${OWNER}/${repo}`, '--once', '--workdir', workRoot, ...extra], {
       env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

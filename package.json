@@ -12,8 +12,9 @@
   "scripts": {
     "dev": "npm run dev --workspace apps/platform",
     "deploy": "npm run deploy --workspace apps/platform",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/platform/tsconfig.json --noEmit && tsc -p apps/cli/tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/platform/tsconfig.json --noEmit && tsc -p packages/container-runner/tsconfig.json --noEmit && tsc -p packages/ops/tsconfig.json --noEmit",
     "lint": "oxlint .",
+    "cli": "cd apps/cli && go build ./... && go vet ./... && go test ./...",
     "test": "vitest run",
     "test:watch": "vitest"
   },

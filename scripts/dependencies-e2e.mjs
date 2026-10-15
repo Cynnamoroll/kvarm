@@ -38,17 +38,16 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { OPERATIONS } from '@kvarm/ops';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 
 const { values: opts } = parseArgs({ options: { keep: { type: 'boolean', default: false }, only: { type: 'string' }, 'api-doc': { type: 'string' } } });
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
 const OWNER = process.env.KVARM_USER ?? 'admin';
 const PAT = process.env.KVARM_PAT ?? die('KVARM_PAT is not set');
 const BOT = process.env.KVARM_PAT_BOT ?? '';
-const CLI_BIN = fileURLToPath(new URL('../apps/cli/bin/kvarm.js', import.meta.url));
 const TS = Math.floor(Date.now() / 1000);
 const PREFIX = 'nexus-deps';
 const only = opts.only ? new Set(opts.only.split(',')) : null;
@@ -257,7 +256,7 @@ async function waitMerged(env, n, ms = 180_000) {
 }
 
 function kvarm(args, { json = true } = {}) {
-  const r = spawnSync(process.execPath, [CLI_BIN, ...args, ...(json ? ['--json'] : [])], {
+  const r = spawnSync(kvarmBin(), [...args, ...(json ? ['--json'] : [])], {
     env: { PATH: process.env.PATH, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -562,7 +561,7 @@ await scenario('cli', async (env) => {
     ['invalid argument', kvarm(['deps', 'add', env.full, f.id, '--bogus', 'x'])],
   ];
   if (BOT) {
-    const r = spawnSync(process.execPath, [CLI_BIN, 'deps', 'add', env.full, f.id, '--on-workspace', g.id, '--revision', g.head, '--json'], {
+    const r = spawnSync(kvarmBin(), ['deps', 'add', env.full, f.id, '--on-workspace', g.id, '--revision', g.head, '--json'], {
       env: { PATH: process.env.PATH, KVARM_BASE_URL: BASE, KVARM_PAT: BOT },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -648,8 +647,10 @@ await scenario('cli', async (env) => {
   const help = kvarm(['--help'], { json: false });
   const perCommand = OPERATIONS.map((op) => [op, kvarm([...op.command, '--help'], { json: false })]);
   const statusHelp = kvarm(['status', '--help'], { json: false });
-  check('VAL-CLI-001', 'kvarm --help lists every registry command, checkout and status', help.code === 0 && OPERATIONS.every((op) => help.out.includes(op.command.join(' '))) && /\n {2}status <owner\/repo>/.test(help.out) && /\n {2}checkout /.test(help.out));
-  check('VAL-CLI-001', 'every command prints usage text with its REST route and MCP tool', perCommand.every(([op, r]) => r.code === 0 && r.out.includes(`usage: kvarm ${op.command.join(' ')}`) && r.out.includes(`MCP tool: ${op.name}`) && r.out.includes(op.description)) && statusHelp.out.includes('usage: kvarm status'));
+  const groups = [...new Set(OPERATIONS.map((op) => op.command[0]))];
+  const groupScreens = new Map(groups.map((g) => [g, kvarm([g], { json: false })]));
+  check('VAL-CLI-001', 'kvarm --help lists every command group plus checkout, runner and status (the hierarchy: groups, never every verb at once)', help.code === 0 && groups.every((g) => new RegExp(`^  ${g}  `, 'm').test(help.out)) && /^\s+checkout /m.test(help.out) && /^\s+runner /m.test(help.out) && /^\s+status /m.test(help.out));
+  check('VAL-CLI-001', 'every command prints its usage, REST route and MCP tool; a bare group lists only its verbs', perCommand.every(([op, r]) => r.code === 0 && r.out.includes(`kvarm ${op.command.join(' ')}`) && r.out.includes(`MCP tool: ${op.name}`) && r.out.includes(op.description)) && groups.every((g) => OPERATIONS.filter((op) => op.command[0] === g).every((op) => groupScreens.get(g).out.includes(op.command[1]))) && statusHelp.out.includes('kvarm status'));
   const doc = opts['api-doc'];
   if (doc && existsSync(doc)) {
     const rows = [...readFileSync(doc, 'utf8').matchAll(/^\| [a-z-]+ \| `([a-z_]+)` \| `kvarm ([a-z-]+ [a-z-]+)` \|/gm)].map((m) => [m[1], m[2]]);

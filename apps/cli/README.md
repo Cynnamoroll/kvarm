@@ -1,16 +1,21 @@
 # kvarm CLI
 
-`apps/cli` is the Kvarm command-line client. It needs Node 20 or later. Its
-only runtime dependency is the workspace package `@kvarm/ops`, the operation
-registry it shares with the MCP server.
+`apps/cli` is the Kvarm command-line client, a Go module. Its only external
+dependency is `github.com/klauspost/compress` (zstd decoding); everything
+else is the Go standard library. The operation registry it serves is the
+same one the MCP server serves: `scripts/gen-cli-registry.mjs` emits
+`internal/registry/operations.json` from `packages/ops`, the JSON is
+embedded into the binary, and `packages/ops/test/cliRegistry.test.ts` fails when
+the committed copy is stale.
 
 ```bash
-npm install                      # from the repo root; links the `kvarm` bin
+go build -o kvarm ./cmd/kvarm    # from apps/cli (Go 1.25 or later)
 export KVARM_BASE_URL=https://kvarm.example.com   # your deployment's origin
 export KVARM_PAT=...             # personal access or agent token
-npx kvarm checkout <owner>/demo main ./demo
-# or: node apps/cli/bin/kvarm.js checkout <owner>/demo main ./demo
+./kvarm checkout <owner>/demo main ./demo
 ```
+
+`npm run cli` (from the repo root) builds, vets and tests the module.
 
 ## Configuration
 
@@ -25,15 +30,27 @@ basic-auth header scoped to `KVARM_BASE_URL`. It is passed through
 credential helpers disabled and terminal prompts off, so no credential store
 is read or written.
 
+## Help: one level at a time
+
+Help is hierarchical, so no screen dumps every command at once:
+
+- `kvarm` lists the core commands (`checkout`, `runner`, `status`) and one
+  line per API group, plus whether `KVARM_BASE_URL`/`KVARM_PAT` are set.
+- `kvarm <group>` (or `kvarm help <group>`) lists only that group's verbs.
+- `kvarm <group> <verb> --help` (or `kvarm help <group> <verb>`) shows one
+  command's usage, arguments, REST endpoint and MCP tool.
+- A typo answers with `did you mean …?` and the one screen that helps next.
+
+Output is colored on a terminal and plain when piped (`NO_COLOR` and
+`CLICOLOR_FORCE` are honored); replies print as indented JSON, or one line
+with `--json`.
+
 ## API commands (`kvarm <group> <verb>`)
 
 Every entry of the shared operation registry (`packages/ops/src/index.js`) is
 a CLI command, a REST endpoint and an MCP tool at the same time. The MCP
 server at `POST /mcp` lists the same entries as tools, so the CLI, REST and
-MCP surfaces cannot drift apart. `kvarm --help` lists every command;
-`kvarm help <group> <verb>` (or `<group> <verb> --help`) shows its usage,
-arguments, REST endpoint and MCP tool name; `kvarm <group>` alone lists the
-group's verbs.
+MCP surfaces cannot drift apart.
 
 ```bash
 kvarm repo list --json
@@ -51,8 +68,7 @@ Positional arguments come in the order shown by the usage line; the other
 parameters are kebab-case flags (`--merge-policy review` or
 `--merge-policy=review`). List flags repeat or take commas
 (`--paths a.ts --paths src/` or `--paths a.ts,src/`); JSON flags take a JSON
-value. The reply is printed as indented JSON, or as one line with `--json`.
-Commands send `Authorization: Bearer $KVARM_PAT` when it is set and run
+value. Commands send `Authorization: Bearer $KVARM_PAT` when it is set and run
 anonymously otherwise (public reads). The token is never printed.
 
 Exit status: 0 on success; 1 on an API or network failure, with
@@ -75,11 +91,10 @@ missing or empty.
 2. If the snapshot is ready, checkout downloads
    `…/snapshots/<sha>/download` by commit SHA, so a branch that moves mid-run
    cannot swap the content. Snapshot tarballs are stored zstd-compressed;
-   checkout advertises `application/zstd` and decodes the stored frames when
-   the platform serves them (Node ≥ 22.15; older runtimes receive the plain
-   tar). It checks that the tar byte count equals the metadata `size` (and
-   the wire bytes equal `encodedSize` when compressed) and extracts the
-   tarball. Output: `source: snapshot`.
+   checkout advertises `application/zstd`, decodes the stored frames and
+   extracts while streaming. It checks that the tar byte count equals the
+   metadata `size` (and the wire bytes equal `encodedSize` when compressed)
+   and extracts the tarball. Output: `source: snapshot`.
 3. Otherwise it runs `git clone --no-checkout` + `git checkout <ref>`.
    Output: `source: clone`. This covers a build in progress (including the one
    this checkout just demanded), an absent or failed snapshot, a refused
@@ -220,7 +235,9 @@ is a full snapshot checkout, and the slot records the exact tree it produced
 (every tracked path with its git blob hash and mode). Later jobs, including
 later `--once` processes, sync the delta instead of downloading the tree:
 the runner asks the compare API which paths changed between the recorded
-commit and the new head and fetches only those files. Deleted paths
+commit and the new head and fetches those files concurrently (a bounded pool
+of eight, under one aggregate read budget), so a warm sync costs one round
+of latency rather than one round per changed file. Deleted paths
 disappear, changed and added paths are written with their exact bytes and
 modes, and any tracked file a previous job dirtied is restored from the
 recorded hashes even when the delta does not touch it. Parent directories
@@ -239,18 +256,33 @@ rematerializes every job from an empty directory (caches included). The
 runner prints `workdir: warm` or `workdir: fresh` per job and
 `reported <conclusion> for <job> (<id>) in <ms> ms` (claim to report).
 
+## The container runner payload (`packages/container-runner`)
+
+The platform's hosted Container CI runner writes a Node payload into its
+container (`packages/container-runner/src`, generated into
+`apps/platform/src/containers/runnerSource.ts` by
+`scripts/gen-container-runner-source.mjs`): the same claim → snapshot
+checkout → workdir sync → execute → report flow, in the Node the container
+image runs. The payload is the runner modules (`runner.js`, `executor.js`,
+`checkout.js`, `workdir.js`, `git.js`, `guards.js`, `http.js`, `untar.js`)
+plus the `@kvarm/zstd` frame splitter, which the generator inlines flat as
+`zstd.js`; the generator refuses a module that reaches for anything the
+container would not carry. `packages/container-runner/test` runs that exact
+payload with a local node.
+
 ## Performance
 
-See `docs/benchmarks/clone-vs-snapshot.md` (`scripts/bench-clone-vs-snapshot.mjs`).
-Downloads go through `node:https` rather than the global `fetch`. On the
-benchmark host, `fetch` streamed the 33 MB fixture tarball at about half the
-throughput of `node:https` and curl.
+See `docs/benchmarks/clone-vs-snapshot.md`
+(`scripts/bench-clone-vs-snapshot.mjs`). Downloads stream through Go's
+`net/http` with an idle watchdog; extraction and zstd decoding run as one
+stream, with no intermediate file.
 
 ## Tests
 
-`apps/cli/test` runs in the root vitest `packages` project
-(`npx vitest run --project packages apps/cli`). The tests extract archives
-built with `@kvarm/gitops`'s tar writer and with `git archive`, and compare
-the result against real `git checkout` trees. They also cover path-traversal
-and symlink-escape archives, every fallback path, and the `kvarm` bin against
-a local server: a fake snapshot API plus `git http-backend` for the clone.
+`npm run cli` from the repo root (or `go test ./...` in `apps/cli`) builds,
+vets and runs the Go tests: extraction against archives built with
+`@kvarm/gitops`'s tar writer and `git archive` compared with real
+`git checkout` trees, path-traversal and symlink-escape archives, every
+checkout fallback path, the runner's claim/materialize/report loop against a
+local server, and the operation registry against `packages/ops`
+(`packages/ops/test/cliRegistry.test.ts`).

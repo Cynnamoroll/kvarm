@@ -40,10 +40,10 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 
 const { values: args } = parseArgs({ options: { only: { type: 'string' }, keep: { type: 'boolean', default: false } } });
 const BASE = (process.env.KVARM_BASE_URL ?? 'http://localhost:8787').replace(/\/+$/, '');
@@ -52,7 +52,6 @@ if (!process.env.KVARM_PAT) throw new Error('env KVARM_PAT is not set');
 const SECTIONS = new Set((args.only ?? 'ready,lazy,private').split(','));
 const READY_BOUND_MS = 120_000;
 const PREFIX = 'm4-cli-checkout';
-const KVARM_BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'cli', 'bin', 'kvarm.js');
 const ts = Date.now();
 
 const results = [];
@@ -98,7 +97,7 @@ function kvarm(cliArgs, token) {
   const env = { PATH: process.env.PATH, HOME: process.env.HOME, KVARM_BASE_URL: BASE };
   if (token) env.KVARM_PAT = process.env[token];
   const t0 = Date.now();
-  const r = spawnSync(process.execPath, [KVARM_BIN, ...cliArgs], { env, encoding: 'utf8', maxBuffer: 64 << 20 });
+  const r = spawnSync(kvarmBin(), cliArgs, { env, encoding: 'utf8', maxBuffer: 64 << 20 });
   const out = { code: r.status, stdout: r.stdout ?? '', stderr: (r.stderr ?? '').trim(), ms: Date.now() - t0 };
   console.log(`#   kvarm ${cliArgs.join(' ')} [${token ?? 'no token'}] exit ${out.code} in ${out.ms} ms`);
   for (const line of out.stdout.trim().split('\n')) console.log(`#     stdout: ${line}`);

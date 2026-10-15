@@ -37,7 +37,7 @@ function rand() {
 const hex = (n) => Array.from({ length: n }, () => Math.floor(rand() * 16).toString(16)).join('');
 const pick = (xs) => xs[Math.floor(rand() * xs.length)];
 
-const DIRS = ['src', 'src/services', 'src/routes/api', 'packages/gitops/src', 'apps/cli/src', 'test/fixtures', 'docs/guide'];
+const DIRS = ['src', 'src/services', 'src/routes/api', 'packages/gitops/src', 'packages/container-runner/src', 'test/fixtures', 'docs/guide'];
 const EXT = ['ts', 'js', 'json', 'md', 'sql', 'tsx'];
 const TAGS = ['config', 'migration', 'auth', 'deps', 'generated', 'tests', 'large', 'binary'];
 

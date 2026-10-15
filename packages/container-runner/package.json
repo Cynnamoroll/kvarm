@@ -1,0 +1,14 @@
+{
+  "name": "@kvarm/container-runner",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The `kvarm runner` modules the Container CI runner writes into its container: claim, snapshot checkout, workdir sync, execute and report, importing only node: builtins and packages the generator inlines",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "@kvarm/zstd": "*"
+  },
+  "devDependencies": {
+    "@kvarm/gitops": "*"
+  }
+}

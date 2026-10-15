@@ -31,6 +31,7 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createLive, ROOT, sleep } from './lib/live.mjs';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 
 let opts;
 try {
@@ -124,7 +125,7 @@ async function main() {
   for (let i = 0; i < jobs.length * 2 && !jobs.every((j) => checks.some((c) => c.name === j && terminal(c))); i++) {
     if (Date.now() > deadline) break;
     log(`kvarm runner --once (${i + 1})`);
-    const r = spawnSync(process.execPath, ['apps/cli/bin/kvarm.js', 'runner', '--repo', `${OWNER}/${opts.repo}`, '--once', '--workdir', workdir, ...policy], {
+    const r = spawnSync(kvarmBin(), ['runner', '--repo', `${OWNER}/${opts.repo}`, '--once', '--workdir', workdir, ...policy], {
       cwd: ROOT,
       env: { ...process.env, KVARM_BASE_URL: BASE, KVARM_PAT: PAT },
       encoding: 'utf8',

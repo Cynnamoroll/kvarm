@@ -32,6 +32,7 @@ import { parseArgs } from 'node:util';
 import { CATALOG } from './lib/cost-catalog.mjs';
 import { evaluateEntry, matchCatalog, parseCostTables, summarizeVerdicts } from './lib/cost-sweep.mjs';
 import { parseCost } from './lib/fleet.mjs';
+import { kvarmBin } from './lib/kvarm-bin.mjs';
 import { ROOT, createLive, sleep, tailLogLines } from './lib/live.mjs';
 import { runContainerShowcase } from './lib/container-runner-demo.mjs';
 
@@ -451,7 +452,7 @@ await phase('compare, content reads, snapshots, checkout', async () => {
   rec('checkout.ready', await http(`${R(A)}/snapshots/main`, { method: 'POST', headers: { accept: 'application/json' } }), { kind: 'demand' });
   rec('checkout.ready', await http(`${R(A)}/snapshots/${sha}/download`, { binary: true }), { kind: 'download' });
   const out = join(live.work, 'checkout');
-  const co = spawnSync(process.execPath, [join(ROOT, 'apps/cli/bin/kvarm.js'), 'checkout', `${OWNER}/${A}`, 'main', out], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME, KVARM_BASE_URL: BASE, KVARM_PAT: PAT } });
+  const co = spawnSync(kvarmBin(), ['checkout', `${OWNER}/${A}`, 'main', out], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME, KVARM_BASE_URL: BASE, KVARM_PAT: PAT } });
   say(`  kvarm checkout -> exit ${co.status}; ${(co.stdout.match(/source: \w+/) ?? ['source: ?'])[0]}`);
   rec('snap.demand.noApi', await http(`${R(A)}/snapshots/main`, { method: 'POST', token: TOKENS.noApi }));
 
