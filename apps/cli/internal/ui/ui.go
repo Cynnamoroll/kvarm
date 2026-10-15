@@ -1,13 +1,16 @@
 // Package ui is the CLI's presentation layer: TTY-aware styling so output
 // is colorful for a person and plain for a pipe (scripts, tests, CI logs),
-// command suggestions, a terminal progress line and a JSON colorizer.
-// The words of a line never change with color — only the ANSI wrappers.
+// command suggestions, a terminal progress line, a JSON colorizer and
+// secret redaction. The words of a line never change with color — only the
+// ANSI wrappers.
 package ui
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -23,11 +26,22 @@ const (
 	ansiMag    = "\x1b[35m"
 )
 
+// Redacted replaces a secret in output: no part of the value survives, so
+// a masked line never discloses its length or prefix.
+const Redacted = "[redacted]"
+
+// tokenShape matches the token formats the platform mints (`kvarm_pat_…`
+// and `kvarm_agt_…`, AGENTS.md), so a token this process never saw — one a
+// platform error body echoed back, say — is still masked.
+var tokenShape = regexp.MustCompile(`kvarm_(?:pat|agt)_[A-Za-z0-9_-]+`)
+
 // Output writes to one stream, styling only when that stream is an
-// interactive terminal and the environment allows color.
+// interactive terminal and the environment allows color. Every write is
+// passed through redact, so no call site has to remember to mask a secret.
 type Output struct {
-	w     io.Writer
-	color bool
+	w       io.Writer
+	color   bool
+	secrets []string
 }
 
 // New wraps a writer. A nil or non-terminal writer never gets color, so
@@ -38,6 +52,35 @@ func New(w io.Writer) *Output {
 		color = colorEnabled()
 	}
 	return &Output{w: w, color: color}
+}
+
+// AddSecret registers a value that must never appear in this output. The
+// token itself is registered, plus the two base64 forms git carries it in
+// (basic auth hides it from a literal match), so a leak through any of them
+// is masked. An empty value registers nothing.
+func (o *Output) AddSecret(secret string) {
+	if secret == "" {
+		return
+	}
+	o.secrets = append(o.secrets,
+		secret,
+		base64.StdEncoding.EncodeToString([]byte(secret)),
+		base64.StdEncoding.EncodeToString([]byte("kvarm:"+secret)),
+	)
+}
+
+// redact masks every registered secret and any token-shaped value.
+func (o *Output) redact(s string) string {
+	if s == "" {
+		return s
+	}
+	for _, secret := range o.secrets {
+		s = strings.ReplaceAll(s, secret, Redacted)
+	}
+	if strings.Contains(s, "kvarm_pat_") || strings.Contains(s, "kvarm_agt_") {
+		s = tokenShape.ReplaceAllString(s, Redacted)
+	}
+	return s
 }
 
 func isTerminal(f *os.File) bool {
@@ -61,14 +104,18 @@ func colorEnabled() bool {
 func (o *Output) Color() bool { return o.color }
 
 // Write emits raw bytes; used for JSON payloads that must never be styled.
-func (o *Output) Write(p []byte) (int, error) { return o.w.Write(p) }
+// Secrets are still masked: a reply body is no place for a credential.
+func (o *Output) Write(p []byte) (int, error) {
+	_, err := io.WriteString(o.w, o.redact(string(p)))
+	return len(p), err
+}
 
 // Line prints one line, newline included, when the text is non-empty.
 func (o *Output) Line(s string) {
 	if s == "" {
 		return
 	}
-	fmt.Fprintln(o.w, s)
+	fmt.Fprintln(o.w, o.redact(s))
 }
 
 // Plain prints s without styling; format arguments behave like fmt.Sprintln's.

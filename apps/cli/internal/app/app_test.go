@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"kvarm/cli/internal/registry"
+	"kvarm/cli/internal/ui"
 )
 
 // recordedRequest is what a test server saw of one request.
@@ -106,17 +107,25 @@ func TestMainRootScreen(t *testing.T) {
 		})
 	}
 
-	t.Run("configuration state is shown", func(t *testing.T) {
+	t.Run("configuration state is shown but never its value", func(t *testing.T) {
+		const token = "kvarm_pat_test-token"
 		env := map[string]string{
 			"KVARM_BASE_URL": "http://platform.example.com",
-			"KVARM_PAT":      "kvarm_pat_test-token",
+			"KVARM_PAT":      token,
 		}
-		stdout, _, code := runMain(nil, env)
+		stdout, stderr, code := runMain(nil, env)
 		if code != 2 {
 			t.Errorf("Main = %d, want 2", code)
 		}
-		if !strings.Contains(stdout, "set → http://platform.example.com") {
-			t.Errorf("root screen missing the set KVARM_BASE_URL:\n%s", stdout)
+		if !strings.Contains(stdout, "set") {
+			t.Errorf("root screen does not say the configuration is set:\n%s", stdout)
+		}
+		// The value is a credential: the screen reports state, never the
+		// secret (README: it shows whether the variables are set).
+		for _, leak := range []string{token, "platform.example.com"} {
+			if strings.Contains(stdout+stderr, leak) {
+				t.Errorf("root screen leaked %q:\n%s%s", leak, stdout, stderr)
+			}
 		}
 		// Without the environment the same line says "not set".
 		stdout, _, _ = runMain(nil, map[string]string{})
@@ -362,6 +371,96 @@ func TestMainRegistryCommandRun(t *testing.T) {
 			"hint: platform or storage error; retry shortly\n"
 		if stderr != want {
 			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	})
+
+	t.Run("a platform that echoes the token back does not leak it", func(t *testing.T) {
+		// Not token-shaped on purpose: this proves the value registered from
+		// KVARM_PAT is masked, not just the token-shape regex.
+		const token = "opaque-credential-abcdef0123456789"
+		// A buggy or hostile platform quoting the Authorization header, in
+		// the error text, the details and the raw non-JSON fallback.
+		rs := newRecordingServer(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(500)
+			io.WriteString(w, `{"error":"bad header `+auth+`","code":"AUTH","seen":"`+auth+`"}`)
+		})
+		defer rs.Close()
+		env := map[string]string{"KVARM_BASE_URL": rs.URL, "KVARM_PAT": token}
+		stdout, stderr, code := runMain([]string{"change", "list", "acme/app"}, env)
+		if code != 1 {
+			t.Fatalf("Main = %d, want 1", code)
+		}
+		if strings.Contains(stdout+stderr, token) {
+			t.Errorf("the token reached the output:\n%s%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, ui.Redacted) {
+			t.Errorf("stderr does not mark the redaction:\n%s", stderr)
+		}
+
+		// Same reply without the token registered: the token shape alone
+		// must still be masked.
+		stdout, stderr, code = runMain([]string{"change", "list", "acme/app"}, map[string]string{"KVARM_BASE_URL": rs.URL})
+		if code != 1 {
+			t.Fatalf("Main = %d, want 1", code)
+		}
+		if strings.Contains(stdout+stderr, token) {
+			t.Errorf("an unregistered token reached the output:\n%s%s", stdout, stderr)
+		}
+	})
+
+	t.Run("a token-shaped value is masked without registration", func(t *testing.T) {
+		const token = "kvarm_pat_echoed-back-token"
+		rs := newRecordingServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(500)
+			io.WriteString(w, `{"error":"bad header `+r.Header.Get("Authorization")+`","code":"AUTH"}`)
+		})
+		defer rs.Close()
+		// No KVARM_PAT: the shape alone must still be masked.
+		stdout, stderr, code := runMain([]string{"change", "list", "acme/app"}, map[string]string{"KVARM_BASE_URL": rs.URL})
+		if code != 1 {
+			t.Fatalf("Main = %d, want 1", code)
+		}
+		if strings.Contains(stdout+stderr, token) {
+			t.Errorf("the token reached the output:\n%s%s", stdout, stderr)
+		}
+	})
+
+	t.Run("a non-JSON failure body is redacted too", func(t *testing.T) {
+		const token = "opaque-raw-body"
+		rs := newRecordingServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(502)
+			io.WriteString(w, "gateway saw Authorization: Bearer "+token)
+		})
+		defer rs.Close()
+		env := map[string]string{"KVARM_BASE_URL": rs.URL, "KVARM_PAT": token}
+		stdout, stderr, code := runMain([]string{"change", "list", "acme/app"}, env)
+		if code != 1 {
+			t.Fatalf("Main = %d, want 1", code)
+		}
+		if strings.Contains(stdout+stderr, token) {
+			t.Errorf("the token reached the output:\n%s%s", stdout, stderr)
+		}
+	})
+
+	t.Run("--json failures are redacted as well", func(t *testing.T) {
+		const token = "opaque-json-mode"
+		rs := newRecordingServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(403)
+			io.WriteString(w, `{"error":"token `+r.Header.Get("Authorization")+` rejected","code":"FORBIDDEN"}`)
+		})
+		defer rs.Close()
+		env := map[string]string{"KVARM_BASE_URL": rs.URL, "KVARM_PAT": token}
+		stdout, stderr, code := runMain([]string{"change", "list", "acme/app", "--json"}, env)
+		if code != 1 {
+			t.Fatalf("Main = %d, want 1", code)
+		}
+		if strings.Contains(stdout+stderr, token) {
+			t.Errorf("the token reached the --json output:\n%s%s", stdout, stderr)
 		}
 	})
 
