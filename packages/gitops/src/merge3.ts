@@ -292,9 +292,22 @@ function sideOps(changes: TreeChange[]): SideOps {
  */
 function renamesAmbiguous(s: SideOps, other: SideOps): boolean {
   if (s.retyped) return true;
-  const removed = [...s.src.values()].some((op) => op.op === 'delete');
+  const removedPaths = [...s.src].flatMap(([path, op]) => (op.op === 'delete' ? [path] : []));
   const added = [...s.adds.values()].some((a) => a.from === undefined);
-  if (removed && added) return true;
+  const vacated = new Set<string>();
+  const markVacated = (path: string) => {
+    for (let d = dirname(path); d !== ''; d = dirname(d)) vacated.add(d);
+  };
+  const otherAddsUnderVacated = () => {
+    for (const q of other.adds.keys()) {
+      for (let d = dirname(q); d !== ''; d = dirname(d)) if (vacated.has(d)) return true;
+    }
+    return false;
+  };
+  if (removedPaths.length > 0 && added) {
+    for (const path of removedPaths) markVacated(path);
+    if (removedPaths.some((path) => other.src.has(path)) || otherAddsUnderVacated()) return true;
+  }
   if (s.renames.length === 0) return false;
   const sources = new Map<string, number>();
   const targets = new Map<string, number>();
@@ -304,17 +317,13 @@ function renamesAmbiguous(s: SideOps, other: SideOps): boolean {
     sources.set(h, (sources.get(h) ?? 0) + 1);
   }
   for (const { entry } of s.adds.values()) targets.set(entry.hash, (targets.get(entry.hash) ?? 0) + 1);
-  const vacated = new Set<string>();
   for (const [from, to] of s.renames) {
     const was = s.base.get(from)!;
     const now = s.adds.get(to)!.entry;
     if (was.mode !== now.mode || sources.get(was.hash) !== 1 || targets.get(now.hash) !== 1) return true;
-    for (let d = dirname(from); d !== ''; d = dirname(d)) vacated.add(d);
+    markVacated(from);
   }
-  for (const q of other.adds.keys()) {
-    for (let d = dirname(q); d !== ''; d = dirname(d)) if (vacated.has(d)) return true;
-  }
-  return false;
+  return otherAddsUnderVacated();
 }
 
 /**
