@@ -26,10 +26,12 @@ export class MemGit implements MergeSources {
     this.commitReads++;
     const raw = this.body(sha, 'commit');
     if (!raw) return null;
-    const headers = decode(raw).split('\n\n')[0]!.split('\n');
+    const head = decode(raw).split('\n\n')[0]!;
+    const headers = head.split('\n');
     return {
       treeHash: headers.find((l) => l.startsWith('tree '))!.slice(5),
       parents: headers.filter((l) => l.startsWith('parent ')).map((l) => l.slice(7)),
+      committedAt: Number(/^committer .* (\d+) [+-]\d{4}$/m.exec(head)?.[1] ?? 0),
     };
   }
 

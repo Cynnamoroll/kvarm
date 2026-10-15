@@ -315,3 +315,38 @@ body.k-app .k-term { border-radius: 0; }
   body.k-app .k-decide-form .actions .btn, body.k-app .k-decide > summary.btn { min-height: 44px; }
   body.k-app .k-decide-form .actions .btn { flex: 1 1 auto; }
 }
+
+/* Dashboard Nexus field: the landing field's layout (landing.css) on live data. */
+body.k-app .k-nexus .field-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: var(--s5); padding: var(--s5); }
+body.k-app .k-nexus .territory { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-auto-rows: 92px; grid-auto-flow: dense; align-content: start; gap: 2px; min-height: 260px; border: 1px solid var(--hairline); background: var(--hairline); }
+body.k-app .k-nexus .territory > .muted { grid-column: 1 / -1; margin: 0; padding: var(--s4); background: var(--carbon); }
+body.k-app .k-nexus .territory .t { display: flex; flex-direction: column; justify-content: space-between; gap: var(--s2); min-width: 0; padding: var(--s3); overflow: hidden; background: var(--carbon); color: var(--bone); text-decoration: none; }
+body.k-app .k-nexus .territory .t:hover, body.k-app .k-nexus .territory .t:focus-visible { outline: 1px solid var(--signal-hi); outline-offset: -1px; }
+body.k-app .k-nexus .territory .t-xl { grid-column: span 3; grid-row: span 3; }
+body.k-app .k-nexus .territory .t-l { grid-column: span 3; grid-row: span 2; }
+body.k-app .k-nexus .territory .t-m { grid-column: span 3; grid-row: span 1; }
+body.k-app .k-nexus .territory .t-s { grid-column: span 1; grid-row: span 1; }
+body.k-app .k-nexus .territory .t.k3 { background: radial-gradient(70% 60% at 62% 70%, rgb(255 107 74 / .42), rgb(212 85 201 / .25) 45%, transparent 75%), var(--carbon); }
+body.k-app .k-nexus .territory .t.k2 { background: radial-gradient(120% 90% at 50% 100%, rgb(91 61 245 / .4), transparent 70%), var(--carbon); }
+body.k-app .k-nexus .territory .t b { overflow-wrap: anywhere; font: 500 12px/1.4 var(--f-mono); }
+body.k-app .k-nexus .territory .t span { color: var(--steel); font: 400 10px/1.4 var(--f-hud); letter-spacing: .06em; text-transform: uppercase; }
+body.k-app .k-nexus .field-side { display: grid; align-content: start; gap: var(--s4); min-width: 0; }
+body.k-app .k-nexus .intents { margin: 0; padding: 0; list-style: none; }
+body.k-app .k-nexus .intents li { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: start; gap: var(--s3); padding: var(--s3); border-top: 1px solid var(--hairline); font-size: 13px; }
+body.k-app .k-nexus .intents li:first-child { border-top: 0; }
+body.k-app .k-nexus .intents b { display: block; font-weight: 500; }
+body.k-app .k-nexus .intents b a { color: var(--bone); }
+body.k-app .k-nexus .intents .hud { color: var(--steel); overflow-wrap: anywhere; }
+body.k-app .k-nexus .st { border: 1px solid var(--hairline-2); color: var(--silver); font: 400 10px/1 var(--f-hud); padding: 4px 0; text-align: center; }
+body.k-app .k-nexus .st4 { background: var(--signal); border-color: var(--signal); color: #fff; }
+body.k-app .k-nexus .st3 { border-color: var(--signal); color: var(--signal-hi); }
+body.k-app .k-nexus .st2 { color: var(--steel); }
+body.k-app .k-nexus .needs { margin: 0; padding: var(--s3); color: var(--silver); font-size: 13px; line-height: 1.55; }
+body.k-app .k-nexus .needs b { color: var(--bone); font-weight: 500; }
+body.k-app .k-nexus-note { margin: 0; padding: 0 var(--s5) var(--s4); font-size: 12px; }
+@media (max-width: 1100px) { body.k-app .k-nexus .field-body { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 760px) {
+  body.k-app .k-nexus .territory { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 80px; }
+  body.k-app .k-nexus .territory .t-xl, body.k-app .k-nexus .territory .t-l { grid-column: span 2; grid-row: span 2; }
+  body.k-app .k-nexus .territory .t-m, body.k-app .k-nexus .territory .t-s { grid-column: span 1; grid-row: span 1; }
+}

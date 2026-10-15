@@ -1072,7 +1072,7 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
                 WHERE repo_id = ?1 AND number = ?2 AND state IN ('open', 'conflicted')
                   AND EXISTS (SELECT 1 FROM repo_refs f
                                 WHERE f.repo_id = change_sets.repo_id AND f.ref = 'refs/heads/' || change_sets.head_ref
-                                  AND f.sha != '${ZERO_OID}' AND f.event_at > COALESCE(change_sets.head_event_at, 0)
+                                  AND f.sha != '${ZERO_OID}' AND f.event_at >= COALESCE(change_sets.head_event_at, 0)
                                   AND f.sha IS NOT change_sets.head_sha)`,
             ).bind(cx.repo.id, number, now),
           ]
@@ -1942,8 +1942,13 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM merge_trains WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM merge_admission WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM agent_tasks WHERE repo_id = ?').bind(repoId),
+    // Carried file hashes and reviewer requests cascade off nothing; leaving
+    // them orphans rows at the batch's commit-time FK check and rolls the
+    // whole delete back.
+    db.prepare('DELETE FROM change_review_files WHERE review_id IN (SELECT id FROM change_reviews WHERE repo_id = ?)').bind(repoId),
     db.prepare('DELETE FROM change_reviews WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_head_tiers WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
+    db.prepare('DELETE FROM change_review_requests WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
     db.prepare('DELETE FROM change_escalations WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM review_policies WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),

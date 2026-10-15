@@ -12,12 +12,13 @@
  * tree the way merge-ort does (markers kept, modify/delete keeps the base).
  * Two bases with no common ancestor merge against the empty tree, as in git.
  *
- * Differences from git: git merges the bases oldest commit first; commit
- * readers here carry no dates, so bases are merged in object-id order. The
- * order only changes conflict-marker labels inside the virtual tree, not
- * which outer paths merge cleanly in the corpus (scripts/conflict-corpus).
- * Conflicts git settles with rules merge3 does not model at depth
- * (renames, file/directory, type changes) stop with `virtualConflict`.
+ * Bases are merged oldest committer time first, as in git. When a base lacks
+ * a committer time or times tie, object-id order is a deterministic fallback;
+ * if that ambiguous fold writes a conflict, it stops with `baseOrder`.
+ * Conflict-hunk side order changes the virtual base text and can change
+ * whether the outer text merge is clean. Conflicts git settles with rules
+ * merge3 does not model at depth (renames, file/directory, type changes) stop
+ * with `virtualConflict`.
  *
  * Budgeted: the number of bases of any one pair, the recursion depth, and
  * the commit reads, tree reads, blob reads and created bytes of all inner
@@ -44,7 +45,7 @@ export interface VirtualBaseOptions extends Omit<Merge3Options, 'resolver' | 'vi
   maxVirtualDepth?: number;
 }
 
-export type VirtualBaseTruncation = Merge3Truncation | MergeBaseTruncation | 'maxMergeBases' | 'maxVirtualDepth';
+export type VirtualBaseTruncation = Merge3Truncation | MergeBaseTruncation | 'maxMergeBases' | 'maxVirtualDepth' | 'baseOrder';
 
 export interface VirtualBaseResult {
   /** The virtual base tree; null when truncated. */
@@ -60,7 +61,7 @@ export interface VirtualBaseResult {
   conflicts: number;
   truncated: boolean;
   truncatedReason?: VirtualBaseTruncation;
-  /** The conflicting path, missing object or failed read message. */
+  /** The conflicting path, missing object, failed read message or ambiguous base ids. */
   truncatedDetail?: string;
   commitReads: number;
   treeReads: number;
@@ -149,7 +150,7 @@ class VirtualMerge implements CommitReader, MergeReader {
     return this.inner.readBlob(hash);
   }
 
-  private async tree(sha: string): Promise<string> {
+  private async commitInfo(sha: string): Promise<CommitInfo> {
     let c: CommitInfo | null;
     try {
       c = await this.readCommit(sha);
@@ -158,24 +159,48 @@ class VirtualMerge implements CommitReader, MergeReader {
       throw new Stop('readError', err instanceof Error ? err.message : String(err));
     }
     if (!c) throw new Stop('missingCommit', sha);
-    return c.treeHash;
+    return c;
+  }
+
+  private async tree(sha: string): Promise<string> {
+    return (await this.commitInfo(sha)).treeHash;
   }
 
   /** The tree to merge against for `bases`, merging them at `depth` when there are several. */
   async baseTree(bases: readonly string[], depth: number): Promise<string> {
     if (bases.length === 0) return EMPTY_TREE;
     if (bases.length > this.opts.maxMergeBases) throw new Stop('maxMergeBases', String(bases.length));
-    const sorted = [...bases].sort();
-    if (sorted.length === 1) return this.tree(sorted[0]!);
+    if (bases.length === 1) return this.tree(bases[0]!);
     if (depth > this.opts.maxVirtualDepth) throw new Stop('maxVirtualDepth', String(depth));
-    let acc = sorted[0]!;
-    for (const next of sorted.slice(1)) {
+
+    const commits = await Promise.all(bases.map(async (sha) => ({ sha, info: await this.commitInfo(sha) })));
+    const missingDates = commits.filter(({ info }) => info.committedAt === undefined).map(({ sha }) => sha);
+    const dated = new Map<number, string[]>();
+    for (const { sha, info } of commits) {
+      if (info.committedAt === undefined) continue;
+      const group = dated.get(info.committedAt) ?? [];
+      group.push(sha);
+      dated.set(info.committedAt, group);
+    }
+    const tied = [...dated.values()].filter((group) => group.length > 1).flat();
+    const ambiguousShas = [...new Set([...missingDates, ...tied])].sort();
+    const ambiguous = ambiguousShas.length > 0;
+    const ordered = commits.sort((a, b) => {
+      if (missingDates.length === 0 && a.info.committedAt !== b.info.committedAt) {
+        return a.info.committedAt! - b.info.committedAt!;
+      }
+      return a.sha < b.sha ? -1 : a.sha > b.sha ? 1 : 0;
+    });
+    const conflictsBefore = this.conflicts;
+    let acc = ordered[0]!.sha;
+    for (const { sha: next } of ordered.slice(1)) {
       const treeHash = await this.mergeCommits(acc, next, depth);
       // Not an object id, so it can never collide with a real commit.
       const id = `virtual-${depth}-${this.virtualCommits.size}`;
       this.virtualCommits.set(id, { parents: [acc, next], treeHash });
       acc = id;
     }
+    if (ambiguous && this.conflicts > conflictsBefore) throw new Stop('baseOrder', ambiguousShas.join(','));
     return this.tree(acc);
   }
 

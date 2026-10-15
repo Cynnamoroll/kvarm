@@ -13,11 +13,13 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT } from '../src/auth/pat';
+import { getRepoById } from '../src/db/repos';
 import { refGeneration } from '../src/cache/compare';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import { eventIdentity, parsePushEvent, snapshotInstanceId } from '../src/services/events';
+import { createChange } from '../src/services/changes';
 import worker from '../src/index';
-import { fakeArtifacts } from './helpers/fakeArtifacts';
+import { commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 import { FakeWorkflow, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
 const seedUser = (login: string) => seedUserBase(baseEnv, login);
@@ -327,6 +329,85 @@ describe('queue dispatcher', () => {
     await deliver(env, [{ body: bc }]);
     await deliver(env, [{ body: ab }]);
     expect(await refRow(repo.id, main)).toMatchObject({ sha: C });
+  });
+
+  it('keeps a change head at the equal-time ref succession position', async () => {
+    async function setup(name: string) {
+      const repo = await seedRepo(name);
+      const artifacts = fakeRepos.get(repo.artifactsName)!;
+      const base = await commit(artifacts, { 'README.md': 'base\n' });
+      const a = await commit(artifacts, { 'README.md': 'a\n' }, [base.sha]);
+      const b = await commit(artifacts, { 'README.md': 'b\n' }, [a.sha]);
+      const c = await commit(artifacts, { 'README.md': 'c\n' }, [b.sha]);
+      artifacts.refs.set('refs/heads/main', base.sha);
+      artifacts.refs.set('refs/heads/feature', a.sha);
+      const env = envWith(new FakeWorkflow());
+      const at = Date.now() + 1000;
+      await deliver(env, [{ body: pushBody(repo.artifactsName, 'refs/heads/feature', ZERO, a.sha, iso(at)) }]);
+      const repoRow = await getRepoById(baseEnv.DB, repo.id);
+      const opened = await createChange(
+        { env, repo: repoRow!, actor: null, writeAccess: true, waitUntil: () => undefined },
+        { title: 'Equal-time succession', base: 'main', head: 'feature' },
+      );
+      expect(opened.ok).toBe(true);
+      return { repo, env, a: a.sha, b: b.sha, c: c.sha, at };
+    }
+
+    async function sourceIds(prefix: string) {
+      let older = '';
+      let newer = '';
+      for (let i = 0; i < 64 && !older; i++) {
+        const o = { namespace: 'default', sourceId: `older-${prefix}-${i}` } as Parameters<typeof eventIdentity>[0];
+        const n = { namespace: 'default', sourceId: `newer-${prefix}-${i}` } as Parameters<typeof eventIdentity>[0];
+        if ((await eventIdentity(o, 'm')) > (await eventIdentity(n, 'm'))) [older, newer] = [`older-${prefix}-${i}`, `newer-${prefix}-${i}`];
+      }
+      return { older, newer };
+    }
+    const firstIds = await sourceIds('forward');
+    const secondIds = await sourceIds('reverse');
+    expect(firstIds.older).not.toBe('');
+    expect(secondIds.older).not.toBe('');
+
+    installFakeGitRemote();
+    try {
+      const first = await setup('same-ms-change-forward');
+      const ab = pushBody(first.repo.artifactsName, 'refs/heads/feature', first.a, first.b, iso(first.at + 5000));
+      (ab as Record<string, unknown>).id = firstIds.older;
+      const bc = pushBody(first.repo.artifactsName, 'refs/heads/feature', first.b, first.c, iso(first.at + 5000));
+      (bc as Record<string, unknown>).id = firstIds.newer;
+      await deliver(first.env, [{ body: ab }]);
+      await deliver(first.env, [{ body: bc }]);
+      expect(await refRow(first.repo.id, 'refs/heads/feature')).toMatchObject({ sha: first.c });
+      expect(await baseEnv.DB.prepare('SELECT head_sha FROM change_sets WHERE repo_id = ?').bind(first.repo.id).first()).toMatchObject({
+        head_sha: first.c,
+      });
+      const firstEvents = await events(first.repo.id);
+      const abEvent = firstEvents.find((event) => event.after_sha === first.b);
+      const bcEvent = firstEvents.find((event) => event.after_sha === first.c);
+      expect((await effects(bcEvent!.id))['change-hooks']).toEqual({ state: 'done', detail: 'heads #1' });
+      await deliver(first.env, [{ body: ab }]);
+      expect(await refRow(first.repo.id, 'refs/heads/feature')).toMatchObject({ sha: first.c });
+      expect(await baseEnv.DB.prepare('SELECT head_sha FROM change_sets WHERE repo_id = ?').bind(first.repo.id).first()).toMatchObject({
+        head_sha: first.c,
+      });
+      expect(abEvent!.after_sha).toBe(first.b);
+
+      const second = await setup('same-ms-change-reverse');
+      const reverseAb = pushBody(second.repo.artifactsName, 'refs/heads/feature', second.a, second.b, iso(second.at + 5000));
+      (reverseAb as Record<string, unknown>).id = secondIds.older;
+      const reverseBc = pushBody(second.repo.artifactsName, 'refs/heads/feature', second.b, second.c, iso(second.at + 5000));
+      (reverseBc as Record<string, unknown>).id = secondIds.newer;
+      await deliver(second.env, [{ body: reverseBc }]);
+      await deliver(second.env, [{ body: reverseAb }]);
+      expect(await refRow(second.repo.id, 'refs/heads/feature')).toMatchObject({ sha: second.c });
+      expect(await baseEnv.DB.prepare('SELECT head_sha FROM change_sets WHERE repo_id = ?').bind(second.repo.id).first()).toMatchObject({
+        head_sha: second.c,
+      });
+      const reverseBcEvent = (await events(second.repo.id)).find((event) => event.after_sha === second.c);
+      expect((await effects(reverseBcEvent!.id))['change-hooks']).toEqual({ state: 'done', detail: 'heads #1' });
+    } finally {
+      restoreFetch();
+    }
   });
 
   it('never moves ref state or pushed_at backwards for out-of-order events', async () => {

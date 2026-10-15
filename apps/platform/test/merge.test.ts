@@ -333,7 +333,7 @@ describe('prepareMerge + publishMerge', () => {
     expect(pusher.calls).toHaveLength(1);
     expect(pusher.calls[0]!.command).toEqual({ ref: 'refs/heads/main', oldOid: main, newOid: prepared.value.mergeCommit });
     // The pushed objects (merge commit, merged blob, rebuilt trees) plus what the remote had close the graph.
-    expect(await store.readCommit(prepared.value.mergeCommit)).toEqual({ treeHash: mergedTree, parents: [main, head] });
+    expect(await store.readCommit(prepared.value.mergeCommit)).toEqual({ treeHash: mergedTree, parents: [main, head], committedAt: 1_790_100_000 });
     const root = (await store.readTree(mergedTree))!;
     const src = (await store.readTree(root.find((e) => e.name === 'src')!.hash))!;
     expect(decode((await store.readBlob(src.find((e) => e.name === 'a.txt')!.hash))!)).toBe('a1\nA2\na3\n');

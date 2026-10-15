@@ -228,10 +228,12 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
           WHERE repo_id = (SELECT r.id FROM repos r WHERE r.artifacts_name = ?1)
             AND head_ref = ?3 AND state IN ('open', 'conflicted')
             AND EXISTS (SELECT 1 ${currentRef}
-                         AND f.sha != '${ZERO_OID}' AND f.event_at > COALESCE(change_sets.head_event_at, 0)
+                         AND f.sha != '${ZERO_OID}'
+                         AND (f.event_at > COALESCE(change_sets.head_event_at, 0)
+                              OR (f.event_at = change_sets.head_event_at AND f.event_id = ?5))
                          AND f.sha IS NOT change_sets.head_sha)`,
       )
-      .bind(ev.repoName, ev.ref, branch, now),
+      .bind(ev.repoName, ev.ref, branch, now, id),
     db
       .prepare(
         `SELECT r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,

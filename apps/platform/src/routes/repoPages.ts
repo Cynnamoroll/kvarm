@@ -138,6 +138,39 @@ function isWarming(err: unknown): boolean {
   return /NOT_FOUND|not exist|not ready|importing/i.test(String(err));
 }
 
+/** How long a young row may read as an import still settling: its Artifacts
+ * handle can 404 briefly after the import call returns. */
+const IMPORT_SETTLING_MS = 10 * 60 * 1000;
+
+/** True when the read failed because the repo's Artifacts storage is gone. */
+function isStorageMissing(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === 'NOT_FOUND' || /not found|no such|does not exist/i.test(String(err));
+}
+
+/** A content read failed: warming keeps waiting, a row that outlived its
+ * storage says so instead of 500ing (the leftover a failed delete leaves),
+ * anything else rethrows. */
+function storageReadFailed(c: Context<App>, repo: RepoRow, viewerLogin: string | null, err: unknown): Response {
+  if (isWarming(err)) return warmingPage(c, repo, viewerLogin);
+  if (isStorageMissing(err)) {
+    if (Date.now() - repo.created_at < IMPORT_SETTLING_MS) return warmingPage(c, repo, viewerLogin);
+    console.log(JSON.stringify({ repoStorageMissing: `${repo.owner_login}/${repo.name}`, id: repo.id, error: String(err).slice(0, 120) }));
+    return finish(
+      c,
+      new Response(
+        layout(
+          c.env,
+          { title: `${repo.owner_login}/${repo.name}`, userLogin: viewerLogin },
+          `<div class="card"><p>This repository's content is no longer available.</p>
+           <p class="muted">Its git storage was removed while its registry entry remained behind. An owner can delete the repository from its settings page.</p></div>`,
+        ),
+        { status: 410, headers: { 'content-type': 'text/html; charset=utf-8' } },
+      ),
+    );
+  }
+  throw err;
+}
+
 /** Anonymous public view cache; mutable refs are keyed by the repo view generation. */
 async function cachedView(
   c: Context<App>,
@@ -180,8 +213,7 @@ async function renderTreeView(
   try {
     tree = await readTreeAtPath(c.env, resolved.repo.artifacts_name, ref, path);
   } catch (err) {
-    if (isWarming(err)) return warmingPage(c, resolved.repo, viewerLogin);
-    throw err;
+    return storageReadFailed(c, resolved.repo, viewerLogin, err);
   }
   if (!tree) return notFound(c);
 
@@ -376,8 +408,7 @@ async function renderBlob(
       ? await readFileImmutable(c.env, c.executionCtx, resolved.repo, ref, path)
       : await readFileAt(c.env, resolved.repo.artifacts_name, ref, path);
   } catch (err) {
-    if (isWarming(err)) return warmingPage(c, resolved.repo, viewerLogin);
-    throw err;
+    return storageReadFailed(c, resolved.repo, viewerLogin, err);
   }
   if (!blob) return notFound(c);
 
@@ -518,8 +549,7 @@ repoPages.get('/raw/:ref{.+}', async (c) => {
       }
       return finish(c, new Response(blob, { headers }));
     } catch (err) {
-      if (isWarming(err)) return warmingPage(c, resolved.repo, null);
-      throw err;
+      return storageReadFailed(c, resolved.repo, null, err);
     }
   };
   if (cacheable) return cachedView(c, resolved, parsed.ref, render);
@@ -540,8 +570,7 @@ repoPages.get('/commits', async (c) => {
   try {
     commits = await commitAt(c.env, resolved.repo.artifacts_name, ref, LIMIT, (page - 1) * LIMIT);
   } catch (err) {
-    if (isWarming(err)) return warmingPage(c, resolved.repo, resolved.viewer?.user.login ?? null);
-    throw err;
+    return storageReadFailed(c, resolved.repo, resolved.viewer?.user.login ?? null, err);
   }
   const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
   const rows = commits
@@ -591,8 +620,7 @@ repoPages.get('/commit/:sha', async (c) => {
   try {
     commit = await readCommit(c.env, resolved.repo.artifacts_name, sha);
   } catch (err) {
-    if (isWarming(err)) return warmingPage(c, resolved.repo, resolved.viewer?.user.login ?? null);
-    throw err;
+    return storageReadFailed(c, resolved.repo, resolved.viewer?.user.login ?? null, err);
   }
   if (!commit) return notFound(c);
   const viewerLogin = resolved.viewer?.user.login ?? null;
@@ -653,8 +681,7 @@ repoPages.get('/branches', async (c) => {
   try {
     refs = await listRefs(c.env, resolved.repo);
   } catch (err) {
-    if (isWarming(err)) return warmingPage(c, resolved.repo, resolved.viewer?.user.login ?? null);
-    throw err;
+    return storageReadFailed(c, resolved.repo, resolved.viewer?.user.login ?? null, err);
   }
   const base = `/${resolved.repo.owner_login}/${resolved.repo.name}`;
   const defaultRef = resolved.repo.default_branch || 'main';

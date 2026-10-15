@@ -87,6 +87,7 @@ const CRISS_CROSS_REFUSALS = new Map<string, string>([
   ['maxVirtualDepth', 'merging the merge bases recurses deeper than the maxVirtualDepth budget'],
   ['virtualConflict', 'the merge bases conflict in a way a virtual merge base cannot represent (rename, file/directory or type change)'],
   ['ambiguousRenames', "git's rename detection could pair the changed paths differently than an exact-rename merge would"],
+  ['baseOrder', 'two merge bases share a commit time, so the order git would merge them in (which decides the virtual base) is unknown and the bases conflict'],
 ]);
 
 /** Whether an `unknown` plan is a criss-cross the request path refuses; like a budget stop, it depends only on the two commits. */
@@ -106,9 +107,11 @@ export interface MergeSources extends CommitReader, MergeReader {}
 function parseCommitObject(o: GitObject): CommitInfo {
   const text = decode(o.raw.subarray(o.raw.indexOf(0) + 1));
   const head = text.split('\n\n')[0] ?? '';
+  const committedAt = /^committer .* (\d+) [+-]\d{4}$/m.exec(head)?.[1];
   return {
     treeHash: /^tree ([0-9a-f]{40})$/m.exec(head)?.[1] ?? '',
     parents: [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!),
+    ...(committedAt === undefined ? {} : { committedAt: Number(committedAt) }),
   };
 }
 
@@ -154,8 +157,8 @@ export interface Mergeability {
   resolved: MergeResolution[];
   /**
    * For `unknown`: the budget or read failure that stopped planning; for a
-   * criss-cross the request path refuses, `maxMergeBases`, `maxVirtualDepth`
-   * or `virtualConflict`.
+   * criss-cross the request path refuses, `maxMergeBases`, `maxVirtualDepth`,
+   * `virtualConflict`, `ambiguousRenames` or `baseOrder`.
    */
   unknownReason?: string;
   /** Required checks for `treeSha`; null when there is no tree to check. */
@@ -579,7 +582,7 @@ export function artifactsMergeSources(ctx: ResolveContext, maxBlobBytes: number 
   return {
     async readCommit(sha) {
       const c = await readCommitInfo(ctx, sha);
-      return c ? { treeHash: c.tree, parents: c.parents } : null;
+      return c ? { treeHash: c.tree, parents: c.parents, committedAt: c.committedAt } : null;
     },
     async readTree(hash): Promise<TreeEntry[] | null> {
       if (hash === EMPTY_TREE) return [];
