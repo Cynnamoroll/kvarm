@@ -3,18 +3,19 @@
  *
  * Both tips paint their ancestors; a commit reached from both sides is a
  * common ancestor, and everything below one is painted stale because it can
- * never be a best base. Without commit dates there is no reliable
- * newest-first order, so painting runs to a fixpoint: a commit is revisited
- * whenever it gains a flag. The walk stops once only stale commits remain
- * queued and at most one candidate is left; with several candidates (a
- * criss-cross) stale painting continues until candidates that are ancestors
- * of others are eliminated or the queue drains. Commit reads are bounded and
- * a spent budget reports `truncated` rather than a guess.
+ * never be a best base. The walk does not rely on a newest-first queue order:
+ * a commit is revisited whenever it gains a flag. It stops once only stale
+ * commits remain queued and at most one candidate is left; with several
+ * candidates (a criss-cross) stale painting continues until candidates that
+ * are ancestors of others are eliminated or the queue drains. Commit reads
+ * are bounded and a spent budget reports `truncated` rather than a guess.
  */
 
 export interface CommitInfo {
   parents: string[];
   treeHash: string;
+  /** Committer timestamp used to order virtual merge bases like git. */
+  committedAt?: number;
 }
 
 /** Anything that can read a commit's parents and tree by object id. */

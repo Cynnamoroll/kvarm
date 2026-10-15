@@ -32,7 +32,12 @@ beforeAll(() => {
       const o = objects.get(sha);
       if (!o || o.type !== 'commit') return null;
       const head = decode(o.content).split('\n\n')[0] ?? '';
-      return { treeHash: /^tree ([0-9a-f]{40})$/m.exec(head)![1]!, parents: [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!) };
+      const committedAt = Number(/^committer .* (\d+) [+-]\d{4}$/m.exec(head)?.[1] ?? 0);
+      return {
+        treeHash: /^tree ([0-9a-f]{40})$/m.exec(head)![1]!,
+        parents: [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]!),
+        committedAt,
+      };
     },
     async readTree(hash: string): Promise<TreeEntry[] | null> {
       const o = objects.get(hash);
