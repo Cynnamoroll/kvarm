@@ -136,7 +136,9 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
 
       const requested = await step.do('request-source-snapshot', RETRY, async () => {
         const row = await readSnapshot(this.env, source.repo.id, source.sha);
-        if (!row || row.state === 'failed') await demandSnapshot(this.env, source.repo.id, source.sha);
+        if (!row || row.state === 'failed' || (row.state === 'ready' && !isReady(row))) {
+          await demandSnapshot(this.env, source.repo.id, source.sha);
+        }
         return true;
       });
       void requested;
@@ -146,7 +148,7 @@ export class EnvironmentBuild extends WorkflowEntrypoint<Env, EnvironmentBuildRe
           readSnapshot(this.env, source.repo.id, source.sha),
         );
         if (isReady(snapshotRow)) break;
-        if (snapshotRow?.state === 'failed') {
+        if (snapshotRow?.state === 'failed' || (snapshotRow?.state === 'ready' && !isReady(snapshotRow))) {
           await step.do(`retry-source-snapshot-${attempt}`, RETRY, async () => {
             await demandSnapshot(this.env, source.repo.id, source.sha);
             return true;
