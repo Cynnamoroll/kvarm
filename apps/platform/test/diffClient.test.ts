@@ -12,10 +12,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  INLINE_MAX_ROWS,
   OVERSCAN,
   POOL_SIZE,
   ROW_HEIGHT,
   VIEWPORT_ROWS,
+  inlineOf,
   RowPool,
   rowsOf,
   windowOf,
@@ -34,6 +36,15 @@ function mulberry32(seed: number): () => number {
 }
 
 describe('row model', () => {
+  it('renders normal-sized diffs inline, without the virtualized viewport', () => {
+    // Wrapped inline rows need no scroll and no fixed-height geometry; only
+    // diffs past INLINE_MAX_ROWS fall back to the virtualized canvas.
+    expect(inlineOf(1)).toBe(true);
+    expect(inlineOf(INLINE_MAX_ROWS)).toBe(true);
+    expect(inlineOf(INLINE_MAX_ROWS + 1)).toBe(false);
+    expect(inlineOf(1_000_002)).toBe(false);
+  });
+
   it('flattens hunks into header and line rows with line numbers and width', () => {
     const model = rowsOf([
       {

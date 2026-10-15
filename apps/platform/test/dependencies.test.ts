@@ -10,44 +10,28 @@ import { createExecutionContext, createMessageBatch, getQueueResult, runInDurabl
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
+import { CostMeter, runWithMeter, type CostCounters } from '../src/cost/meter';
 import { INTENT_PREFIX, mergeLockAlarm, type MergeLock, type SettleIntent } from '../src/do/mergeLock';
 import worker from '../src/index';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
 import { DEPENDENCY_LIMITS, SETTLE_INTENT, SETTLE_LIMITS, WAKE_KIND, wakeClaimStatements, wakeSetOf } from '../src/services/dependencyGate';
 import { TRAIN_LIMITS, defaultTrainDeps, fairOrder, runTrain, type TrainDeps, type TrainEvent } from '../src/services/queue';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, installFakeGitRemote, restoreFetch, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall, type Reply } from './helpers/http';
+import { FakeWorkflow, recordingEvents, seedRepoWithCommit, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const failSends = fakeEvents.failSends;
+const onSend = fakeEvents.onSend;
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+const seedRepo = async (name: string) => { const { repo, main } = await seedRepoWithCommit(env, name, { owner: OWNER, visibility: 'public', repoIds }); repos[name] = repo; return { repo, main }; };
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'dep-owner';
 const MAIN = 'refs/heads/main';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
-const sent: Array<{ body: any; delaySeconds?: number }> = [];
-/** Sends whose body matches reject, as a failing queue would. */
-const failSends: { match: ((body: any) => boolean) | null } = { match: null };
-/** Runs while a send is in flight (before it is recorded). */
-const onSend: { fn: ((body: any) => Promise<void>) | null } = { fn: null };
-const fakeEvents = {
-  async send(body: unknown, opts?: { delaySeconds?: number }) {
-    if (failSends.match?.(body)) throw new Error('queue send rejected (test)');
-    await onSend.fn?.(body);
-    sent.push({ body, ...(opts?.delaySeconds !== undefined ? { delaySeconds: opts.delaySeconds } : {}) });
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push({ body: m.body });
-  },
-};
 
 const env = {
   ...baseEnv,
@@ -61,58 +45,7 @@ const repoIds: Record<string, string> = {};
 const userIds: Record<string, string> = {};
 const repos: Record<string, FakeRepo> = {};
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  userIds[login] = id;
-  return id;
-}
-
 /** A public repo whose main holds README.md. */
-async function seedRepo(name: string): Promise<{ repo: FakeRepo; main: string }> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  repos[name] = repo;
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  const main = await commit(repo, { 'README.md': 'readme\n' });
-  repo.refs.set(MAIN, main.sha);
-  return { repo, main: main.sha };
-}
-
-interface Reply {
-  status: number;
-  json: Record<string, any>;
-  cost: CostCounters;
-}
-
-async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, json, cost: cost! };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 const deps = (repo: string, ws: string) => api(repo, `/workspaces/${ws}/dependencies`);
@@ -828,7 +761,7 @@ describe('lifecycle', () => {
       const landed = await merge('settle-many', a.change!);
       expect(landed.status).toBe(200);
       // Within one invocation's budget: no settlement intent, no continuation.
-      expect(landed.cost.do).toBe(0);
+      expect(landed.cost.do).toBe(1);
       expect(await intentsOf('settle-many')).toEqual([]);
       for (const d of pinned) expect((await listDeps('settle-many', d.id)).json.dependencies, d.id).toEqual([expect.objectContaining({ state: 'satisfied' })]);
       expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-landed' }));
@@ -888,7 +821,7 @@ describe('lifecycle', () => {
         { type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN },
       ]);
       const first = continuations()[0];
-      expect(landed.cost.do).toBe(1);
+      expect(landed.cost.do).toBe(2);
       const [intent] = await intentsOf(name);
       expect(intent).toMatchObject({ repoId: repoIds[name], changeSetId: first.changeSetId, mergedAt: first.mergedAt, mergeCommit, ref: MAIN });
       expect(await alarmOf(name)).toBe(intent!.deadline);
@@ -1048,7 +981,7 @@ describe('lifecycle', () => {
       const landed = await merge(name, a.change!);
       expect(landed.status, JSON.stringify(landed.json)).toBe(200);
       const mergeCommit = landed.json.merge.mergeCommit as string;
-      expect(landed.cost.do).toBe(1);
+      expect(landed.cost.do).toBe(2);
       expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
       expect(await states(name, dependents)).toEqual([...Array(4).fill('satisfied'), ...Array(5).fill('stale')]);
 
@@ -1192,7 +1125,7 @@ describe('lifecycle', () => {
     sent.length = 0;
     const landed = await merge(name, a.change!);
     expect(landed.status).toBe(200);
-    expect(landed.cost.do).toBe(0);
+    expect(landed.cost.do).toBe(1);
     expect(await wakeMarks(name)).toBe(0);
     expect(await intentsOf(name)).toEqual([]);
     expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
@@ -1460,7 +1393,7 @@ describe('lifecycle', () => {
       expect(handed).toEqual([{ type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN }]);
       expect(await intentsOf(name)).toEqual([expect.objectContaining({ mergeCommit, ref: MAIN })]);
 
-      // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried, not acknowledged.
+      // While the landing's claim is live, a fresh owner does not act on the mark and its delivery is retried.
       sent.length = 0;
       const early = await deliverRaw(handed[0]);
       expect(early.explicitAcks).toEqual([]);
@@ -1511,12 +1444,12 @@ describe('lifecycle', () => {
       expect(await states(name, [...older, auto])).toEqual(Array(3).fill('satisfied'));
       expect((await getChange(name, autoN)).json.state).toBe('open');
       expect(await wakeMarks(name)).toBe(1);
-      // Not done: the delivery hands the displaced mark on (successor continuation and the kept intent) before it is acknowledged.
+      // Not done: the delivery hands the displaced mark on (successor continuation and the kept intent) before it settles.
       expect(first.explicitAcks).toHaveLength(1);
       expect(settleSends()).toEqual([msg]);
       expect(await intentsOf(name)).toHaveLength(1);
 
-      // The successor runs under a fresh owner token: the live claim is held, so its delivery is retried, not acknowledged.
+      // The successor runs under a fresh owner token: the live claim is held, so its delivery is retried.
       sent.length = 0;
       const held = await deliverRaw(msg);
       expect(held.explicitAcks).toEqual([]);

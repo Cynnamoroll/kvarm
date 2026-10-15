@@ -71,7 +71,7 @@ merge queue --> parallel preparation and checks --> short MergeLock publication 
 
 **Reverts and incidents.** `POST …/reverts` (`kvarm revert create`) reverts a commit or a merged change set server-side, with the tree `git revert` would commit (a merge reverts relative to its first parent, like `git revert -m 1`), and opens it as a change set of kind `revert` on a platform-reserved `kvarm-revert/` branch. The revert runs `kvarm/guard`, CI and the merge queue exactly like any change; it is a `draft` unless you ask for `review` or `auto`, and it queues behind earlier entries (no priority lane). A revert that does not apply cleanly answers `409 REVERT_CONFLICT` with the conflicting paths and writes nothing. An incident system can open the same revert by posting a signed CloudEvents event to the repository's incident webhook (see [Sending a Kvarm incident](#sending-a-kvarm-incident)).
 
-**Review pages.** `/inbox` lists the escalations and approvals waiting for a human across every repository you can review, grouped by reason, each linked to its change, the risk-ordered diff and the reviewers' verdicts (model family with its evidence label; approvals staled by a push are marked). From the inbox or a change page (`/<owner>/<repo>/changes/<number>`) you approve, request changes or resolve an escalation with a required note; the post goes through the same review service as REST and MCP and records a decision. Commit and change pages show a provenance panel (agent, session, prompt hash, evidence level and why it is not higher, related decisions) when there is one, and nothing when there is not. Without WorkOS sign-in, a PAT with the `api` scope does all of this as a bearer token.
+**Review pages.** `/inbox` lists the escalations and approvals waiting for a human across every repository you can review, grouped by reason, each linked to its change, the risk-ordered diff and the reviewers' verdicts (model family with its evidence label; approvals staled by a push are marked). The change page (`/<owner>/<repo>/changes/<number>`) renders the validated author guide or upstream fallback, grouped as guided, tier or file views, with stack-layer links, content-keyed acknowledgement forms, open findings, contracts, guide evidence, moved code and cached downstream impact. Approve, request changes, resolve an escalation or acknowledge a unit from the page; these posts use the same services as REST and MCP. REST and MCP also expose guide submission, unit acknowledgements, findings, impact and bounded analytics. Agent model-family evidence is `declared` in reviewer suggestions and analytics. Commit and change pages show a provenance panel (agent, session, prompt hash, evidence level and why it is not higher, related decisions) when there is one, and nothing when there is not. Without WorkOS sign-in, a PAT with the `api` scope does all of this as a bearer token.
 
 **Reading code.** Compare and per-file diffs (content-addressed cache, risk-ordered file lists), zstd-compressed snapshot tarballs in R2 for checkout without a clone, push events with per-effect processing state, and the server-rendered repository pages.
 
@@ -149,12 +149,15 @@ Requirements: Node 20 or later, Go 1.25 or later, git, and a Cloudflare account 
    npm run db:migrate:remote --workspace apps/platform
    ```
 
-6. **Deploy.** This creates the Worker, its Durable Objects, Workflows, the Container class, the rate limiters and the queue consumer.
+6. **Deploy.** `npm run deploy` is the only deploy step. It creates the Worker, its Durable Objects, Workflows, the Container classes, the rate limiters and the queue consumer, and it ships the web UI. There is no separate site build: the Worker renders every page itself, and `wrangler deploy` uploads `apps/platform/public` (stylesheets, scripts, fonts and brand assets) through the `assets` binding in `wrangler.jsonc`. The gate fails if a page links an asset the deploy would not upload (`scripts/test/wranglerAssets.test.ts`), or if `GET /` stops returning the UI (`apps/platform/test/smoke.test.ts`).
 
    ```sh
    npm run deploy            # runs `wrangler deploy` with your target (scripts/wrangler-target.mjs)
    curl -s https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # ok
+   curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://kvarm-platform.<your-subdomain>.workers.dev/   # 200 text/html; charset=utf-8
    ```
+
+   **Containers need the Workers Paid plan.** Three Durable Object classes run on Cloudflare Containers: `CiRunnerSandbox` (the hosted CI lane), and `EnvironmentBuilder` and `AgentSandbox` (fleet environments and sandboxes). Containers is included in the Workers Paid plan and needs no separate enablement; the deploy creates these classes, and `scripts/bootstrap.mjs` does not check the plan. Locally, `wrangler dev` builds container images with Docker; without Docker, pass `--enable-containers=false`. Pages, the API and MCP still run, but sandboxes, environment builds and the hosted CI lane cannot start a container.
 
 7. **Secrets.** None are required. Without the WorkOS secrets every `/auth/*` route answers `503`, session cookies are ignored and personal access tokens are the way in. To let people sign in to the web UI through WorkOS AuthKit:
 
@@ -238,9 +241,10 @@ cp apps/platform/.env.deploy.example apps/platform/.env.deploy   # once: KVARM_D
 npm run db:migrate:remote --workspace apps/platform           # applies only migrations not yet applied
 npm run deploy                                                # wrangler deploy with your target settings
 curl -s -o /dev/null -w '%{http_code}\n' https://kvarm-platform.<your-subdomain>.workers.dev/healthz   # 200 (the APP_ORIGIN host)
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://kvarm-platform.<your-subdomain>.workers.dev/   # 200 text/html: the web UI
 ```
 
-`wrangler deploy` prints the uploaded version id; `/healthz` answers `200 ok`. A deploy reuses the D1 database, bucket, queues, Artifacts namespace and subscription, and rotates no secrets.
+`wrangler deploy` prints the uploaded version id and the number of asset files it uploaded; `/healthz` answers `200 ok` and `/` serves the landing page (the signed-in home with a session). A deploy reuses the D1 database, bucket, queues, Artifacts namespace and subscription, and rotates no secrets.
 
 ## Local development and tests
 
@@ -289,7 +293,7 @@ Details (warm working directories, extraction safety, exit codes): [`apps/cli/RE
 
 `POST /mcp` is a stateless Streamable HTTP MCP server (`@modelcontextprotocol/sdk`). Authenticate with `Authorization: Bearer <token>`: a personal access token with the `api` scope or an agent token. Every tool runs the same service code and the same authorization as REST.
 
-The 130 tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`set_attribution`, `get_attribution`, `record_decision`, `get_context`), `provenance` (`get_audit`, `list_provenance_keys`, `add_provenance_key`, `revoke_provenance_key`), `branch-rules`, `issues`, `environments`, `sandboxes`, `ci` (runner jobs, flakes, hosted CI), `webhooks` and `reverts` (`create_revert`, `get_incident_webhook`, `rotate_incident_secret`, `delete_incident_webhook`). `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
+Tools come from the shared registry, grouped by family: `user`, `repos`, `content`, `compare`, `workspaces`, `dependencies`, `changes`, `queue`, `reviews`, `tasks`, `nexus` (`forecast`, `get_overlap`, intents), `candidates` (compose, arenas), `orgs`, `agents`, `attribution` (`set_attribution`, `get_attribution`, `record_decision`, `get_context`), `provenance` (`get_audit`, `list_provenance_keys`, `add_provenance_key`, `revoke_provenance_key`), `branch-rules`, `issues`, `environments`, `sandboxes`, `ci` (runner jobs, flakes, hosted CI), `webhooks` and `reverts` (`create_revert`, `get_incident_webhook`, `rotate_incident_secret`, `delete_incident_webhook`). `reviews` includes guide, acknowledgement, finding, impact and analytics operations; known agent family evidence is `declared`. `kvarm --help` lists each tool with its CLI command; `scripts/mcp-agent.mjs` is a scripted MCP client.
 
 Setup guides for Claude Code, Codex CLI, Cursor and generic MCP clients, the agent workflow and an `AGENTS.md` template are in [`docs/agents/`](docs/agents/README.md).
 
@@ -299,6 +303,22 @@ Example client configuration (Claude Code):
 claude mcp add --transport http kvarm "$KVARM_BASE_URL/mcp" --header "Authorization: Bearer $KVARM_PAT"
 ```
 
+### Agent discovery
+
+A deployment describes itself to agents that arrive without setup. Every file is public, needs no JavaScript, and builds its absolute URLs from `APP_ORIGIN`:
+
+| path | contents |
+| --- | --- |
+| `/llms.txt` (also `/.well-known/llms.txt`) | described index of the files below, the MCP endpoint and the git conventions |
+| `/index.md`, or `GET /` with `Accept: text/markdown` | the home page as Markdown (`Vary: Accept`) |
+| `/auth.md` | how an agent gets, uses and revokes a token |
+| `/openapi.json` | OpenAPI 3.1 for `/api/v1`, generated from the operation registry (`packages/ops/src/openapi.js`); each `operationId` is the MCP tool name |
+| `/.well-known/api-catalog` | RFC 9727 linkset pointing at the OpenAPI document |
+| `/.well-known/mcp/server-card.json` | the MCP server's transport, authentication and tool count |
+| `/robots.txt`, `/sitemap.xml` | crawling of landing and discovery pages (generated views and query variants are disallowed); the sitemap lists the public repositories through a partial index, one D1 read of at most 1,000 rows |
+
+Pages carry a canonical URL, a description, Open Graph tags and discovery `Link` headers. The home page also carries JSON-LD and a Markdown alternate. `?mode=agent` renders the agent view on the server. A path that does not exist answers a real `404`: Markdown for agents, a page for browsers, and JSON under `/api/v1`. To check a deployment, run `curl -s -H 'Accept: text/markdown' <origin>/`, or scan it with [is-agentic.com](https://is-agentic.com).
+
 ## API reference
 
 All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 UTC timestamps, and fail with `{"error": "...", "code": "..."}`. Authenticate with `Authorization: Bearer kvarm_pat_...` (the PAT needs the `api` scope) or an agent token; a browser signed in through WorkOS authenticates with its session cookie, and state-changing calls carrying that cookie count only when they come from the same origin. Git uses the token as the basic-auth password. Every response carries `x-kvarm-cost` (`d1`, `rr`, `rw`, `art`, `do`, `r2a`, `r2b`, `q`, `sub`, `cache`); compare responses also carry `x-kvarm-cache: hit|miss|bypass`.
@@ -307,14 +327,14 @@ All endpoints are under `/api/v1`, take and return camelCase JSON with ISO 8601 
 | --- | --- |
 | user and tokens | `GET /user`, `GET/POST /user/tokens`, `DELETE /user/tokens/:id` |
 | repositories | `GET/POST /repos`, `POST /import`, `GET/PATCH/DELETE /repos/:owner/:repo`, `POST …/forks` |
-| content | `GET …/tree`, `GET …/contents` (path and `ref` as query parameters), `GET …/events` |
+| content | `GET …/tree`, `GET …/contents` (path and `ref` as query parameters), `GET …/events`, `GET …/history?path=` (default-branch history of one path) |
 | compare | `GET …/compare/:base...:head` (`order=path\|risk`, `limit`, `cursor`), `GET …/compare/:base...:head/file?path=`, `GET …/commits/:sha/diff` |
 | snapshots | `GET/POST …/snapshots/:ref`, `GET …/snapshots/:sha/download` (zstd-compressed tar; `Accept: application/zstd` serves stored bytes, otherwise the Worker decompresses) |
 | changes | `POST/GET …/changes`, `GET/PATCH …/changes/:n`, `POST …/changes/:n/merge`, `GET …/changes/:n/mergeability`, `GET …/changes/:n/checks` |
 | merge queue | `POST/DELETE …/changes/:n/enqueue`, `GET …/queue`, `GET …/train` |
 | reverts and incidents | `POST …/reverts` (`{sha \| changeNumber, reason?, base?, title?, mergePolicy?}` → `201 {revert, change}`; `404 COMMIT_NOT_FOUND`, `409 REVERT_CONFLICT`, `409 NOTHING_TO_REVERT`), `GET/DELETE …/incidents/webhook`, `POST …/incidents/webhook/rotate` (repo admins; the secret is shown once), `POST …/incidents` (signed delivery, no token) |
 | checks and CI | `GET …/commits/:sha/status`, `POST …/check-runs`, `PATCH …/check-runs/:id`, `POST …/ci/jobs/claim`, `POST …/ci/jobs/:id/heartbeat`, `POST …/ci/jobs/:id/report` (`ci` scope), `GET …/ci/jobs` (queue view), `GET …/ci/flakes`, `POST …/ci/flakes/:check/quarantine`, `POST …/ci/flakes/:check/restore`, `GET …/ci/hosted`, `POST …/ci/hosted/enable`, `POST …/ci/hosted/disable` (repo admins) |
-| reviews | `GET/PUT …/review-policy`, `GET/POST …/changes/:n/reviews`, `POST …/changes/:n/approve`, `…/request-changes`, `…/reviewers/assign`, `…/escalations/:id/resolve`, `GET …/reviews/pending` |
+| reviews | `GET/PUT …/review-policy`, `GET/POST …/changes/:n/reviews`, `POST …/changes/:n/approve`, `…/request-changes`, `…/reviewers/assign`, `…/escalations/:id/resolve`, `GET …/reviews/pending`, `GET/POST …/changes/:n/review-guide`, `POST …/review-acks`, findings (`GET/POST/PATCH`), `GET …/review/impact`, `GET …/review/analytics` |
 | workspaces and Nexus | `POST/GET …/workspaces`, `GET …/workspaces/:id`, `POST …/workspaces/:id/change-set`, `POST …/workspaces/:id/abandon`, `GET/POST …/workspaces/:id/intent`, `GET …/forecast`, `GET …/workspaces/overlap` |
 | environments and sandboxes | `GET/POST …/environments`, `GET/PATCH/DELETE …/environments/:id`, `GET …/environments/:id/builds`, `POST …/environments/:id/rebuild`, `GET/POST …/sandboxes`, `GET /sandboxes/mine`, `POST …/sandboxes/:id/exec|stop`, `GET/PUT …/sandboxes/:id/files` |
 | dependencies | `POST/GET …/workspaces/:id/dependencies`, `POST …/workspaces/:id/dependencies/:dep/repin`, `DELETE …/workspaces/:id/dependencies/:dep` |
@@ -421,7 +441,7 @@ Configured limits (constants in the code, documented with their behavior in the 
 - Provenance: an attribution reply carries `evidence {level, reasons, principal, tokenKind, tokenPrefix, runId, keyId}`; the level is computed by the platform and never taken from the request. `GET …/commits/:sha/attribution` returns `evidence.principal` and `evidence.tokenPrefix` only to repo admins (the note's own `agent`/`actor` display names are readable by anyone with read access, including on a public repo). `POST …/commits/:sha/attribution` accepts `evidence {keyId, runId, signature}` signed by a trusted execution service over a payload that binds the repository and the submitting principal (the format is in [architecture §9](docs/architecture.md#9-pinned-behaviors)); a signature over the retired payload reads as `legacy-payload` and never verifies. Review packets and reviewer assignment label model families with `modelFamilyEvidence` and the cross-model preference with `evidence`; agent model families are `declared`.
 - Audit export: `GET …/audit` returns one record per commit (agent, session, prompt hash, model, evidence level, token prefix, pushes and merges) in the order Kvarm first recorded them, at most 200 per page with `nextCursor`; `since`/`until` filter on that first-seen time; `format=ndjson` streams one record per line followed by a `{"page": {…}}` line. A page costs `d1=2` (the authority lookup plus one read). Full tokens and secrets never appear; credentials are listed by their public prefix.
 - Criss-cross merges: histories with several merge bases merge through a virtual merge base as git's default strategy does; at most 8 merge bases per pair and a recursion depth of 3, sharing the merge's read budgets (then `422 MULTIPLE_MERGE_BASES` with a `reason`). Bases that conflict on a rename, file/directory or type change are refused the same way.
-- Known engine limits: renames are detected only when exact; Artifacts `log()` follows first parents and is capped at 1,000 entries; multi-ref atomicity is not assumed, so the platform pushes one ref per write.
+- Known engine limits: renames are detected only when exact (a criss-cross merge where git could pair renames differently is refused, `422 MULTIPLE_MERGE_BASES` with reason `ambiguousRenames`); Artifacts `log()` follows first parents and is capped at 1,000 entries; multi-ref atomicity is not assumed, so the platform pushes one ref per write.
 
 ## Deferred roadmap
 

@@ -9,7 +9,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -315,14 +315,32 @@ describe('container runner hosted drain', () => {
       // Restore: the container filesystem is the snapshot, on a host with another name.
       rmSync(workRoot, { recursive: true, force: true });
       cpSync(snapshots, workRoot, { recursive: true, verbatimSymlinks: true });
-      for (const lock of ['slot-0.lock', 'slot-1.lock']) {
-        const p = join(workRoot, 'o', 'r', lock);
-        writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), host: 'the-snapshotted-container' }));
+      // The snapshot is taken at the first worker's prepared point, so only
+      // that worker's slot is a complete manifest; the other may have been
+      // caught mid-checkout. Both workers take slots in index order, so the
+      // prepared slot is not necessarily slot-0: keep it as slot-0, which the
+      // single warm worker takes first, and drop the other.
+      const slots = ['slot-0', 'slot-1'];
+      const complete = slots.find((slot) => {
+        try {
+          const state = JSON.parse(readFileSync(join(workRoot, 'o', 'r', slot, 'state.json'), 'utf8'));
+          return state.version === 2 && /^[0-9a-f]{40}$/.test(state.sha);
+        } catch {
+          return false;
+        }
+      });
+      expect(complete).toBeDefined();
+      for (const slot of slots) {
+        if (slot === complete) continue;
+        rmSync(join(workRoot, 'o', 'r', slot), { recursive: true, force: true });
+        rmSync(join(workRoot, 'o', 'r', `${slot}.lock`), { force: true });
       }
-      // One worker: the snapshot provably holds the first worker's completed
-      // slot (its prepared point), while the second worker's slot may have
-      // been caught mid-checkout, which on resume would fall back to a full
-      // checkout instead of the warm sync this phase asserts.
+      if (complete !== 'slot-0') {
+        renameSync(join(workRoot, 'o', 'r', complete!), join(workRoot, 'o', 'r', 'slot-0'));
+        renameSync(join(workRoot, 'o', 'r', `${complete}.lock`), join(workRoot, 'o', 'r', 'slot-0.lock'));
+      }
+      const lock = join(workRoot, 'o', 'r', 'slot-0.lock');
+      if (existsSync(lock)) writeFileSync(lock, JSON.stringify({ ...JSON.parse(readFileSync(lock, 'utf8')), host: 'the-snapshotted-container' }));
       jobs.push('job-4', 'job-5');
       const warmEvents: string[] = [];
       const warm = await drain(false, fakeContainer(workRoot, snapshots, warmEvents), 1);

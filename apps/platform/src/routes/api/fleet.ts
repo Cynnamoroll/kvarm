@@ -1,17 +1,14 @@
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, clientIp, denyJson, requestCredential, type App } from '../api';
+import { actorJson, authorizeRoute, clientIp, denyJson, requestCredential, type App, failJson,
+  jsonBody,
+  unauthJson} from '../api';
 import { resolvePAT } from '../../services/access';
 import { patActor } from '../../services/authz';
-import type { ServiceResult } from '../../repos/service';
+import { scopesAllow } from '../../auth/pat';
 import * as environments from '../../services/environments';
 import * as sandboxes from '../../services/sandboxes';
 
 export const fleetApi = new Hono<App>();
-
-function failJson(c: Context<App>, result: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = result;
-  return c.json(body, status as never);
-}
 
 async function routeContext(c: Context<App>, need: 'read' | 'write') {
   const decision = await authorizeRoute(c, need, { branchRules: need === 'write' });
@@ -31,19 +28,16 @@ async function routeContext(c: Context<App>, need: 'read' | 'write') {
   } as const;
 }
 
-async function body(c: Context<App>): Promise<unknown> {
-  return c.req.json().catch(() => undefined);
-}
-
 fleetApi.get('/sandboxes/mine', async (c) => {
   const credential = await requestCredential(c);
   let actor = credential.kind === 'session' ? credential.actor : null;
   if (credential.kind === 'pat') {
     const principal = await resolvePAT(c.env, credential.token, clientIp(c));
     if (!principal.ok) return denyJson(c, principal);
-    actor = patActor(principal.pat);
+    // Same scope gate as api.ts's PAT actor: a personal listing still needs 'api' scope.
+    actor = scopesAllow(principal.pat.scopes, 'api') ? patActor(principal.pat) : null;
   }
-  if (!actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!actor) return unauthJson(c);
   const limit = Number(c.req.query('limit'));
   const result = await sandboxes.listMySandboxes(c.env, actor, {
     cursor: c.req.query('cursor'),
@@ -64,9 +58,9 @@ fleetApi.get('/repos/:owner/:repo/environments', async (c) => {
 fleetApi.post('/repos/:owner/:repo/environments', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
-  const input = await body(c);
-  if (input === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
-  const result = await environments.createEnvironment(route.envContext, input as environments.CreateEnvironmentInput);
+  const input = await jsonBody(c);
+  if (input instanceof Response) return input;
+  const result = await environments.createEnvironment(route.envContext, input as unknown as environments.CreateEnvironmentInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value, 201);
 });
@@ -82,8 +76,8 @@ fleetApi.get('/repos/:owner/:repo/environments/:id', async (c) => {
 fleetApi.patch('/repos/:owner/:repo/environments/:id', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
-  const input = await body(c);
-  if (input === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
+  const input = await jsonBody(c);
+  if (input instanceof Response) return input;
   const result = await environments.updateEnvironment(route.envContext, c.req.param('id'), input as environments.UpdateEnvironmentInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value);
@@ -148,11 +142,9 @@ fleetApi.get('/repos/:owner/:repo/sandboxes', async (c) => {
 fleetApi.post('/repos/:owner/:repo/sandboxes', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
-  const input = await body(c);
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
-  }
-  const result = await sandboxes.startSandbox(route.sandboxContext, input as sandboxes.StartSandboxInput);
+  const input = await jsonBody(c);
+  if (input instanceof Response) return input;
+  const result = await sandboxes.startSandbox(route.sandboxContext, input as unknown as sandboxes.StartSandboxInput);
   if (!result.ok) return failJson(c, result);
   return actorJson(c, result.value, result.value.resumed ? 200 : 201);
 });
@@ -168,7 +160,8 @@ fleetApi.get('/repos/:owner/:repo/sandboxes/:id', async (c) => {
 fleetApi.post('/repos/:owner/:repo/sandboxes/:id/stop', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
-  const input = await body(c);
+  const input = await jsonBody(c);
+  if (input instanceof Response) return input;
   const discard = Boolean(input && typeof input === 'object' && (input as { discard?: unknown }).discard === true);
   const result = await sandboxes.stopSandbox(route.sandboxContext, c.req.param('id'), { discard });
   if (!result.ok) return failJson(c, result);
@@ -178,7 +171,8 @@ fleetApi.post('/repos/:owner/:repo/sandboxes/:id/stop', async (c) => {
 fleetApi.post('/repos/:owner/:repo/sandboxes/:id/exec', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
-  const input = await body(c);
+  const input = await jsonBody(c);
+  if (input instanceof Response) return input;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
   const result = await sandboxes.execSandbox(route.sandboxContext, c.req.param('id'), input as Parameters<typeof sandboxes.execSandbox>[2]);
   if (!result.ok) return failJson(c, result);
@@ -198,7 +192,8 @@ fleetApi.get('/repos/:owner/:repo/sandboxes/:id/files', async (c) => {
 fleetApi.put('/repos/:owner/:repo/sandboxes/:id/files', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
-  const input = await body(c);
+  const input = await jsonBody(c);
+  if (input instanceof Response) return input;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
   const result = await sandboxes.writeSandboxFile(route.sandboxContext, c.req.param('id'), input as { path: string; content: string });
   if (!result.ok) return failJson(c, result);
@@ -224,7 +219,8 @@ fleetApi.get('/repos/:owner/:repo/sandbox-approvals', async (c) => {
 fleetApi.post('/repos/:owner/:repo/sandbox-approvals/:approvalId', async (c) => {
   const route = await routeContext(c, 'write');
   if ('denied' in route) return route.denied;
-  const input = await body(c);
+  const input = await jsonBody(c);
+  if (input instanceof Response) return input;
   const decision = input && typeof input === 'object' ? (input as { decision?: unknown }).decision : undefined;
   if (decision !== 'approve' && decision !== 'deny') return c.json({ error: 'decision must be approve or deny', code: 'INVALID_DECISION' }, 422);
   const result = await sandboxes.decideSandboxApproval(route.sandboxContext, c.req.param('approvalId'), decision);

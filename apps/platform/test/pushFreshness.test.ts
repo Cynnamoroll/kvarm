@@ -23,6 +23,7 @@ import type { RepoRow } from '../src/db/repos';
 import { infoRefsCacheKey } from '../src/routes/git';
 import { relayReceivePackReply, repoViewGeneration } from '../src/services/pushFreshness';
 import worker from '../src/index';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -152,12 +153,7 @@ async function repoRow(repo: string): Promise<RepoRow> {
 }
 
 async function seedRepo(repo: string, report: Uint8Array, moves: boolean): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, created_at) VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, repo, nameOf(repo), remoteOf(repo), Date.now())
-    .run();
+  await seedRepoBase(env, repo, { owner: OWNER, visibility: 'public', artifactsName: nameOf(repo), artifactsRemote: remoteOf(repo), register: false });
   heads.set(nameOf(repo), 1);
   reports.set(nameOf(repo), { body: report, moves });
   for (const scope of ['read', 'write'] as const) {
@@ -230,12 +226,7 @@ const SCENARIOS: Record<string, { body: Uint8Array; label: string }> = {
 };
 
 beforeAll(async () => {
-  const userId = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
-    .run();
+  const userId = await seedUserBase(env, OWNER);
   token = (await mintPAT(env, userId, 'pf-owner', FULL)).token;
   await seedRepo('fresh', okSideband, true);
   await seedRepo('again', okPlain, true);
@@ -446,5 +437,22 @@ describe('generation-keyed caches', () => {
     const g = await repoViewGeneration(row);
     expect(await repoViewGeneration({ ...row, pushed_at: (row.pushed_at ?? 0) + 1 })).not.toBe(g);
     expect(await repoViewGeneration(row)).toBe(g);
+  });
+});
+
+describe('repo view generation covers repo metadata', () => {
+  it('changes when the description or visibility changes, with no push at all', async () => {
+    const repo = {
+      id: 'r1',
+      pushed_at: 5,
+      description: 'Imported from https://github.com/colinhacks/zod',
+      visibility: 'public',
+    } as Pick<RepoRow, 'id' | 'pushed_at' | 'description' | 'visibility'>;
+    const before = await repoViewGeneration(repo);
+    expect(await repoViewGeneration(repo)).toBe(before);
+    const edited = await repoViewGeneration({ ...repo, description: 'Demo — an example import of colinhacks/zod' });
+    expect(edited).not.toBe(before);
+    const flipped = await repoViewGeneration({ ...repo, visibility: 'private' });
+    expect(flipped).not.toBe(before);
   });
 });

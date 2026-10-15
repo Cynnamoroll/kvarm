@@ -39,12 +39,11 @@ function globRegex(glob: string): RegExp {
   for (let i = 0; i < glob.length; i += 1) {
     const char = glob[i]!;
     if (char === '*') {
-      if (glob[i + 1] === '*') {
-        source += '.*';
-        i += 1;
-      } else {
-        source += '.*';
-      }
+      // `*` matches any span, separators included: these globs have no
+      // recursive/non-recursive wildcard split, so `**` is the same match
+      // written with a second star.
+      source += '.*';
+      if (glob[i + 1] === '*') i += 1;
     } else if (char === '?') {
       source += '.';
     } else {

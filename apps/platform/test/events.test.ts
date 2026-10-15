@@ -17,7 +17,14 @@ import { refGeneration } from '../src/cache/compare';
 import { COST_HEADER, parseCostHeader } from '../src/cost/meter';
 import { eventIdentity, parsePushEvent, snapshotInstanceId } from '../src/services/events';
 import worker from '../src/index';
-import { FakeRepo, fakeArtifacts, fakeRepos } from './helpers/fakeArtifacts';
+import { fakeArtifacts } from './helpers/fakeArtifacts';
+import { FakeWorkflow, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(baseEnv, login);
+const seedRepo = async (name: string, visibility: 'public' | 'private' = 'public', defaultBranch = 'main') => {
+  const { id } = await seedRepoBase(baseEnv, name, { owner: OWNER, visibility, defaultBranch });
+  return { id, artifactsName: `${OWNER}--${name}` };
+};
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -29,26 +36,6 @@ const C = 'c'.repeat(40);
 const D = 'd'.repeat(40);
 
 /** In-memory SnapshotBuilder binding: instance ids are unique, like the real one. */
-class FakeWorkflow {
-  instances = new Map<string, unknown>();
-  creates = 0;
-  failNext = 0;
-  async create(opts: { id?: string; params?: unknown }) {
-    this.creates++;
-    if (this.failNext > 0) {
-      this.failNext--;
-      throw new Error('simulated workflow outage');
-    }
-    const id = opts.id ?? crypto.randomUUID();
-    if (this.instances.has(id)) throw new Error(`instance.already_exists: ${id}`);
-    this.instances.set(id, opts.params);
-    return { id };
-  }
-  async get(id: string) {
-    if (!this.instances.has(id)) throw new Error('instance.not_found');
-    return { id };
-  }
-}
 
 function envWith(wf: FakeWorkflow): Env {
   return { ...baseEnv, ARTIFACTS: fakeArtifacts, SNAPSHOT_BUILDER: wf as unknown as Env['SNAPSHOT_BUILDER'] } as Env;
@@ -95,20 +82,6 @@ async function deliver(env: Env, messages: Delivery[]) {
   const result = await getQueueResult(batch, ctx);
   await waitOnExecutionContext(ctx);
   return { batch, result, delays };
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private' = 'public', defaultBranch = 'main') {
-  const id = crypto.randomUUID();
-  const artifactsName = `${OWNER}--${name}`;
-  await baseEnv.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, defaultBranch, Date.now())
-    .run();
-  // An empty repository: the pushed SHAs are synthetic, so effects that read history find none.
-  fakeRepos.set(artifactsName, new FakeRepo());
-  return { id, artifactsName };
 }
 
 interface EventRow {
@@ -192,7 +165,7 @@ describe('parsePushEvent / eventIdentity', () => {
 
 describe('queue dispatcher', () => {
   it('ingests a default-branch push: ref position, pushed_at, purge and an eager snapshot', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     const env = envWith(wf);
     const repo = await seedRepo('basic');
     const genBefore = await refGeneration(repo.id);
@@ -228,7 +201,7 @@ describe('queue dispatcher', () => {
   });
 
   it('absorbs duplicate deliveries without duplicating effects', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     const env = envWith(wf);
     const repo = await seedRepo('dupes');
     const body = pushBody(repo.artifactsName, 'refs/heads/main', ZERO, A, iso(T0));
@@ -260,7 +233,7 @@ describe('queue dispatcher', () => {
   });
 
   it('retries with backoff when an effect fails and the replay finishes only the missing effect', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     wf.failNext = 1;
     const env = envWith(wf);
     const repo = await seedRepo('interrupted');
@@ -308,7 +281,7 @@ describe('queue dispatcher', () => {
   });
 
   it('keeps distinct audit rows for genuine A-B-A-B transitions while snapshots are reused', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     const env = envWith(wf);
     const repo = await seedRepo('abab');
     const main = 'refs/heads/main';
@@ -331,8 +304,32 @@ describe('queue dispatcher', () => {
     expect(await refRow(repo.id, main)).toMatchObject({ sha: B, event_id: rows[3]!.id });
   });
 
+  it('orders two pushes of the same millisecond by succession, not by identity', async () => {
+    const env = envWith(new FakeWorkflow());
+    const repo = await seedRepo('same-ms');
+    const main = 'refs/heads/main';
+    // Source ids chosen so the older push has the larger identity (the identity tiebreak alone would pick it).
+    let older = '';
+    let newer = '';
+    for (let i = 0; i < 64 && !older; i++) {
+      const o = { namespace: 'default', sourceId: `older-${i}` } as Parameters<typeof eventIdentity>[0];
+      const n = { namespace: 'default', sourceId: `newer-${i}` } as Parameters<typeof eventIdentity>[0];
+      if ((await eventIdentity(o, 'm')) > (await eventIdentity(n, 'm'))) [older, newer] = [`older-${i}`, `newer-${i}`];
+    }
+    expect(older).not.toBe('');
+    await deliver(env, [{ body: pushBody(repo.artifactsName, main, ZERO, A, iso(T0)) }]);
+    const bc = pushBody(repo.artifactsName, main, B, C, iso(T0 + 5000));
+    (bc as Record<string, unknown>).id = newer;
+    const ab = pushBody(repo.artifactsName, main, A, B, iso(T0 + 5000));
+    (ab as Record<string, unknown>).id = older;
+    // The newer push arrives first; the push it follows ties with it and must not displace it.
+    await deliver(env, [{ body: bc }]);
+    await deliver(env, [{ body: ab }]);
+    expect(await refRow(repo.id, main)).toMatchObject({ sha: C });
+  });
+
   it('never moves ref state or pushed_at backwards for out-of-order events', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     const env = envWith(wf);
     const repo = await seedRepo('ooo');
     const main = 'refs/heads/main';
@@ -364,7 +361,7 @@ describe('queue dispatcher', () => {
     ['an invalid timestamp', 'not-a-date'],
   ] as const) {
     it(`replays an untimed event (${label}) at its original position without rolling the ref back`, async () => {
-      const wf = new FakeWorkflow();
+      const wf = new FakeWorkflow(true);
       const env = envWith(wf);
       const repo = await seedRepo(`untimed-${at ?? 'none'}`);
       const main = 'refs/heads/main';
@@ -398,7 +395,7 @@ describe('queue dispatcher', () => {
   }
 
   it('skips an interrupted untimed event superseded before its replay', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     const env = envWith(wf);
     const repo = await seedRepo('untimed-interrupted');
     const main = 'refs/heads/main';
@@ -427,7 +424,7 @@ describe('queue dispatcher', () => {
   });
 
   it('does not lower a pushed_at that the git gate already advanced', async () => {
-    const env = envWith(new FakeWorkflow());
+    const env = envWith(new FakeWorkflow(true));
     const repo = await seedRepo('gate-ahead');
     await baseEnv.DB.prepare('UPDATE repos SET pushed_at = ? WHERE id = ?').bind(T0 + 9000, repo.id).run();
     await deliver(env, [{ body: pushBody(repo.artifactsName, 'refs/heads/main', ZERO, A, iso(T0)) }]);
@@ -435,7 +432,7 @@ describe('queue dispatcher', () => {
   });
 
   it('acks and ignores unknown repos and malformed messages; later messages still process', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     const env = envWith(wf);
     const repo = await seedRepo('after-unknown');
     const log = vi.spyOn(console, 'log');
@@ -470,7 +467,7 @@ describe('queue dispatcher', () => {
   });
 
   it('builds snapshots lazily for non-default and workspace refs, and skips deleted refs', async () => {
-    const wf = new FakeWorkflow();
+    const wf = new FakeWorkflow(true);
     const env = envWith(wf);
     const repo = await seedRepo('lazy', 'public', 'trunk');
     await deliver(env, [
@@ -497,16 +494,11 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
   let priv: { id: string; artifactsName: string };
 
   beforeAll(async () => {
-    const userId = crypto.randomUUID();
-    await baseEnv.DB.prepare(
-      'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-    )
-      .bind(userId, `test:${OWNER}`, OWNER, `${OWNER}@kvarm.invalid`, OWNER, Date.now())
-      .run();
+    const userId = await seedUser(OWNER);
     token = (await mintPAT(baseEnv, userId, 'events', ['read', 'write', 'api'])).token;
     pub = await seedRepo('api-public');
     priv = await seedRepo('api-private', 'private');
-    const env = envWith(new FakeWorkflow());
+    const env = envWith(new FakeWorkflow(true));
     const main = 'refs/heads/main';
     await deliver(env, [
       { body: pushBody(pub.artifactsName, main, ZERO, A, iso(T0)) },
@@ -588,5 +580,54 @@ describe('GET /api/v1/repos/:o/:r/events', () => {
     const owner = await get('api-private/events');
     expect(owner.status).toBe(200);
     expect((owner.body.events as ApiEvent[]).length).toBe(1);
+  });
+
+  it('serves an authorized instant cursor and conceals private repositories', async () => {
+    const target = baseEnv.REPO_EVENTS.get(baseEnv.REPO_EVENTS.idFromName(pub.id));
+    await target.fetch('https://repo-events/publish', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'change.updated', changeNumber: 7 }),
+    });
+    const cursor = await get('api-public/events?since=0', false);
+    expect(cursor.status).toBe(200);
+    expect(cursor.body).toMatchObject({
+      events: [{ seq: 1, type: 'change.updated', changeNumber: 7 }],
+      seq: 1,
+    });
+    expect(cursor.cost.do).toBe(1);
+    const privateCursor = await get('api-private/events?since=0', false);
+    expect(privateCursor.status).toBe(404);
+    expect(privateCursor.cost.do).toBe(0);
+  });
+
+  it('authorizes the WebSocket upgrade before forwarding it to RepoEvents', async () => {
+    const ctx = createExecutionContext();
+    const denied = await worker.fetch!(
+      new Request(`${ORIGIN}/api/v1/repos/${OWNER}/api-private/live`, { headers: { Upgrade: 'websocket' } }) as Request<
+        unknown,
+        IncomingRequestCfProperties
+      >,
+      baseEnv,
+      ctx,
+    );
+    expect(denied.status).toBe(404);
+    expect((denied as Response & { webSocket?: WebSocket | null }).webSocket ?? null).toBeNull();
+    await waitOnExecutionContext(ctx);
+
+    const authorizedContext = createExecutionContext();
+    const authorized = await worker.fetch!(
+      new Request(`${ORIGIN}/api/v1/repos/${OWNER}/api-private/live`, {
+        headers: { Upgrade: 'websocket', Authorization: `Bearer ${token}` },
+      }) as Request<unknown, IncomingRequestCfProperties>,
+      baseEnv,
+      authorizedContext,
+    );
+    expect(authorized.status).toBe(101);
+    const socket = (authorized as Response & { webSocket: WebSocket }).webSocket;
+    socket.accept();
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    socket.close(1000, 'test complete');
+    await waitOnExecutionContext(authorizedContext);
   });
 });

@@ -19,27 +19,33 @@ export function checkIsolatedName(repo, prefix) {
 
 /**
  * Creates `owner/repo`, runs `body`, then deletes the repo unless `keep`.
- * The delete happens only when this call created the repo, including when
- * `body` throws. Returns `{ok: false, reason}` without running `body` when
- * the name is not isolated, the repo already exists, or creation fails.
+ * With `org` the repo is an org repo: created through
+ * `POST /api/v1/orgs/<org>/repos` and namespaced under it for the existence
+ * check and the delete. The delete happens only when this call created the
+ * repo, including when `body` throws. Returns `{ok: false, reason}` without
+ * running `body` when the name is not isolated, the repo already exists, or
+ * creation fails.
  */
-export async function withFixtureRepo({ owner, repo, prefix, http, keep = false, visibility = 'public', log = () => {} }, body) {
+export async function withFixtureRepo({ owner, repo, prefix, org, http, keep = false, visibility = 'public', log = () => {} }, body) {
   const invalid = checkIsolatedName(repo, prefix);
   if (invalid) return { ok: false, created: false, reason: invalid };
-  const existing = await http(`/api/v1/repos/${owner}/${repo}`);
+  const ns = org ?? owner;
+  const existing = await http(`/api/v1/repos/${ns}/${repo}`);
   if (existing.status !== 404) {
-    return { ok: false, created: false, reason: `${owner}/${repo} already exists or could not be checked (${existing.status}); refusing to reuse it` };
+    return { ok: false, created: false, reason: `${ns}/${repo} already exists or could not be checked (${existing.status}); refusing to reuse it` };
   }
-  const made = await http('/api/v1/repos', { method: 'POST', json: { name: repo, visibility } });
-  if (made.status !== 201) return { ok: false, created: false, reason: `create ${owner}/${repo} failed (${made.status})` };
+  const made = org
+    ? await http(`/api/v1/orgs/${org}/repos`, { method: 'POST', json: { name: repo, visibility } })
+    : await http('/api/v1/repos', { method: 'POST', json: { name: repo, visibility } });
+  if (made.status !== 201) return { ok: false, created: false, reason: `create ${ns}/${repo} failed (${made.status})` };
   try {
     return { ok: true, created: true, value: await body() };
   } finally {
     if (keep) {
-      log(`# kept: ${owner}/${repo}`);
+      log(`# kept: ${ns}/${repo}`);
     } else {
-      const del = await http(`/api/v1/repos/${owner}/${repo}`, { method: 'DELETE' });
-      log(`# delete ${owner}/${repo} (created by this run): ${del.status}`);
+      const del = await http(`/api/v1/repos/${ns}/${repo}`, { method: 'DELETE' });
+      log(`# delete ${ns}/${repo} (created by this run): ${del.status}`);
     }
   }
 }

@@ -20,9 +20,12 @@ import { isSafeRefName, isZeroOid, type RefCommand } from '@kvarm/gitops';
 import { withLazyRepo } from '../artifacts/repo';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { WORKSPACE_REF_PREFIX } from './agentMeta';
+export { WORKSPACE_REF_PREFIX };
+import { fail, guarded as baseGuarded, objectBody } from './result';
 import { credentialMayUpdateRef, type Actor } from './authz';
 import type { BranchRule } from './branchRules';
-import { createChange, normalizeBranch, type ChangeDetail } from './changes';
+import { createChange, normalizeBranch, type CreatedChangeDetail } from './changes';
 import { RESOLVE_CONFLICT } from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
@@ -30,7 +33,7 @@ import { normalizeDeclaration, type Declaration } from './intents/paths';
 import { declaredInsertStatement, repoShareCleanup, repoSignalCleanup, workspaceSignalCleanup } from './intents/store';
 import { actorName, openIssueExists, workspaceIssueStatement } from './issues';
 
-export const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
+
 export const WORKSPACE_STATUSES = ['active', 'merged', 'abandoned'] as const;
 export type WorkspaceStatus = (typeof WORKSPACE_STATUSES)[number];
 
@@ -162,23 +165,8 @@ export interface WorkspaceDeps {
 
 export const defaultWorkspaceDeps: WorkspaceDeps = { pusher: (env, repo) => artifactsPusher(env, repo) };
 
-type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
 
-function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
-
-async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ workspacesRefStore: err.message.slice(0, 200) }));
-      return fail(503, 'repository storage is unavailable, retry shortly', 'STORAGE_UNAVAILABLE');
-    }
-    throw err;
-  }
-}
+const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('workspacesRefStore', fn);
 
 /** Fresh ref positions (one ls-refs round trip, never cached). */
 export function liveRefs(cx: Pick<WorkspaceContext, 'env' | 'repo' | 'waitUntil'>, names: string[]): Promise<Map<string, string | null>> {
@@ -245,8 +233,9 @@ interface CreateInput {
 }
 
 function parseCreate(cx: WorkspaceContext, input: unknown): ServiceResult<CreateInput> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const task = typeof b.task === 'string' ? b.task.trim() : '';
   if (task.length === 0 || task.length > WORKSPACE_LIMITS.taskMax) {
     return fail(422, `task is required (1-${WORKSPACE_LIMITS.taskMax} characters)`, 'INVALID_TASK');
@@ -494,10 +483,11 @@ export function openChangeSet(
   input: unknown,
   /** Told the internal id of the change once the workspace link is won. */
   onLinked?: (change: { id: string; number: number }) => void,
-): Promise<ServiceResult<ChangeDetail & { workspace: string }>> {
+): Promise<ServiceResult<CreatedChangeDetail & { workspace: string }>> {
   return guarded(async () => {
-    if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-    const b = input as Record<string, unknown>;
+    const parsed = objectBody(input);
+    if (!parsed.ok) return parsed;
+    const b = parsed.value;
     const row = ID_RE.test(id) ? await readRow(cx.env, cx.repo.id, id) : null;
     if (!row) return fail(404, 'workspace not found', 'WORKSPACE_NOT_FOUND');
     const denied = agentOwnershipDenial(cx.actor, row);
@@ -551,14 +541,16 @@ export function openChangeSet(
 
 /**
  * Retires the live (open or claimed) resolve-conflict task of the change
- * `changeId` names (SQL over parameters ?2...) once that change is closed;
- * a completed task is kept.
+ * `changeIdExpr` names once that change is closed; a completed task is kept.
+ * `changeIdExpr` is interpolated into the statement text, so callers pass a
+ * SQL expression over parameters ?2... ('?2' for a bound id, or a subquery)
+ * plus the matching `params` — never a bare change id.
  */
-function retireClosedChangeTask(db: D1Database, changeId: string, params: unknown[], now: number): D1PreparedStatement {
+function retireClosedChangeTask(db: D1Database, changeIdExpr: string, params: unknown[], now: number): D1PreparedStatement {
   return db
     .prepare(
       `UPDATE agent_tasks SET status = 'obsolete', updated_at = ?1
-        WHERE kind = '${RESOLVE_CONFLICT}' AND status IN ('open', 'claimed') AND change_set_id = ${changeId}
+        WHERE kind = '${RESOLVE_CONFLICT}' AND status IN ('open', 'claimed') AND change_set_id = ${changeIdExpr}
           AND EXISTS (SELECT 1 FROM change_sets c WHERE c.id = agent_tasks.change_set_id AND c.state = 'closed')`,
     )
     .bind(now, ...params);

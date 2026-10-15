@@ -8,20 +8,12 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody,
+  unauthJson} from '../api';
 import * as hooks from '../../services/webhooks';
 
 export const webhooksApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
-
-async function jsonBody(c: Context<App>): Promise<Record<string, unknown>> {
-  const body: unknown = await c.req.json().catch(() => null);
-  return body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
-}
 
 function secretJson(c: Context<App>, data: unknown, status = 200): Response {
   const res = actorJson(c, data, status);
@@ -40,8 +32,9 @@ webhooksApi.get('/repos/:owner/:repo/webhooks', async (c) => {
 webhooksApi.post('/repos/:owner/:repo/webhooks', async (c) => {
   const d = await admin(c);
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return unauthJson(c);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   const res = await hooks.createWebhook(c.env, d.repo, d.actor, { url: body.url, events: body.events });
   if (!res.ok) return failJson(c, res);
   return secretJson(c, res.value, 201);
@@ -58,8 +51,9 @@ webhooksApi.get('/repos/:owner/:repo/webhooks/:id', async (c) => {
 webhooksApi.patch('/repos/:owner/:repo/webhooks/:id', async (c) => {
   const d = await admin(c);
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return unauthJson(c);
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   const res = await hooks.updateWebhook(c.env, d.repo, d.actor, c.req.param('id'), { url: body.url, events: body.events, active: body.active });
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { webhook: res.value });
@@ -68,7 +62,7 @@ webhooksApi.patch('/repos/:owner/:repo/webhooks/:id', async (c) => {
 webhooksApi.delete('/repos/:owner/:repo/webhooks/:id', async (c) => {
   const d = await admin(c);
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return unauthJson(c);
   const res = await hooks.deleteWebhook(c.env, d.repo, d.actor, c.req.param('id'));
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { deleted: true, webhook: res.value });
@@ -77,7 +71,7 @@ webhooksApi.delete('/repos/:owner/:repo/webhooks/:id', async (c) => {
 webhooksApi.post('/repos/:owner/:repo/webhooks/:id/rotate-secret', async (c) => {
   const d = await admin(c);
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return unauthJson(c);
   const res = await hooks.rotateWebhookSecret(c.env, d.repo, d.actor, c.req.param('id'));
   if (!res.ok) return failJson(c, res);
   return secretJson(c, res.value);
@@ -86,7 +80,7 @@ webhooksApi.post('/repos/:owner/:repo/webhooks/:id/rotate-secret', async (c) => 
 webhooksApi.post('/repos/:owner/:repo/webhooks/:id/ping', async (c) => {
   const d = await admin(c);
   if (!d.ok) return denyJson(c, d);
-  if (!d.actor) return c.json({ error: 'unauthorized' }, 401);
+  if (!d.actor) return unauthJson(c);
   const res = await hooks.pingWebhook(c.env, d.repo, d.actor, c.req.param('id'));
   if (!res.ok) return failJson(c, res);
   return actorJson(c, { delivery: res.value }, 202);

@@ -13,8 +13,9 @@ import {
   type SessionInfo,
   type SessionLookup,
 } from '../auth/workos';
-import { mintPAT, revokePAT, scopesAllow, SCOPES, type Scope } from '../auth/pat';
+import { mintPAT, patListStatement, revokePAT, scopesAllow, SCOPES, type PatListRow, type Scope } from '../auth/pat';
 import * as svc from '../repos/service';
+import type { ServiceResult } from '../repos/service';
 import { patActor, type Actor, type RepoNeed } from '../services/authz';
 import {
   AGENT_FORBIDDEN,
@@ -35,6 +36,36 @@ export type ApiActor = Actor;
 
 export function clientIp(c: Context<App>): string | null {
   return c.req.header('CF-Connecting-IP') ?? null;
+}
+
+/** The canonical 401 body: {error, code}. Anonymous callers get this before any 403. */
+export function unauthJson(c: Context<App>): Response {
+  return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
+}
+
+/**
+ * The strict request-body read every JSON endpoint shares: an absent body
+ * reads as {}, while malformed JSON and non-object values answer 400
+ * INVALID_BODY here rather than falling through to a default body.
+ */
+export async function jsonBody(c: Context<App>): Promise<Record<string, unknown> | Response> {
+  const raw = await c.req.text();
+  if (raw.trim() === '') return {};
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
+  }
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : c.json({ error: 'body must be a JSON object', code: 'INVALID_BODY' }, 400);
+}
+
+/** A ServiceResult failure as its API response: {error, code} plus any extra fields the failure carries. */
+export function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
+  const { ok: _ok, status, ...body } = r;
+  return c.json(body, status as never);
 }
 
 /**
@@ -170,18 +201,7 @@ api.get('/user/tokens', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session', code: 'SESSION_REQUIRED' }, 403);
-  const { results } = await c.env.DB.prepare(
-    'SELECT id, name, prefix, scopes, created_at, last_used_at FROM pat WHERE user_id = ? ORDER BY created_at DESC',
-  )
-    .bind(actor.user.id)
-    .all<{
-      id: string;
-      name: string;
-      prefix: string;
-      scopes: string;
-      created_at: number;
-      last_used_at: number | null;
-    }>();
+  const { results } = await patListStatement(c.env.DB, actor.user.id).all<PatListRow>();
   return actorJson(c, {
     tokens: (results ?? []).map((t) => ({
       id: t.id,
@@ -198,11 +218,13 @@ api.post('/user/tokens', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
   if (actor.via !== 'session') return c.json({ error: 'manage tokens from the web session', code: 'SESSION_REQUIRED' }, 403);
-  const body = (await c.req.json().catch(() => ({}))) as { name?: string; scopes?: string[] };
-  const name = (body.name ?? 'token').slice(0, 100);
-  const scopes = (body.scopes ?? ['read', 'write', 'api']).filter((s): s is Scope =>
-    SCOPES.includes(s as Scope),
-  );
+  const body = await jsonBody(c);
+  if (body instanceof Response) return body;
+  if (typeof body.name !== 'string' || !Array.isArray(body.scopes)) {
+    return c.json({ error: 'body must be a JSON object {name, scopes}', code: 'INVALID_BODY' }, 400);
+  }
+  const name = body.name.slice(0, 100);
+  const scopes = body.scopes.filter((s): s is Scope => SCOPES.includes(s as Scope));
   if (scopes.length === 0) return c.json({ error: 'no valid scopes', code: 'INVALID_SCOPES' }, 400);
   const minted = await mintPAT(c.env, actor.user.id, name, scopes);
   return c.json(
@@ -239,7 +261,7 @@ api.get('/repos', async (c) => {
 api.post('/repos', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const body = (await c.req.json().catch(() => ({}))) as {
+  const body = (await jsonBody(c)) as {
     name?: string;
     description?: string;
     visibility?: string;
@@ -259,7 +281,7 @@ api.post('/repos', async (c) => {
 api.post('/import', async (c) => {
   const actor = await requireActor(c);
   if (actor instanceof Response) return actor;
-  const body = (await c.req.json().catch(() => ({}))) as {
+  const body = (await jsonBody(c)) as {
     url?: string;
     name?: string;
     branch?: string;
@@ -287,7 +309,7 @@ api.patch('/repos/:owner/:repo', async (c) => {
   const d = await authorizeRoute(c, 'admin', { requireActor: true });
   if (!d.ok) return denyJson(c, d);
   const repo = d.repo;
-  const body = (await c.req.json().catch(() => ({}))) as {
+  const body = (await jsonBody(c)) as {
     description?: string;
     visibility?: string;
   };
@@ -311,7 +333,7 @@ api.post('/repos/:owner/:repo/forks', async (c) => {
   if (!d.ok) return denyJson(c, d);
   if (!d.actor) return c.json({ error: 'unauthorized', code: 'UNAUTHENTICATED' }, 401);
   const repo = d.repo;
-  const body = (await c.req.json().catch(() => ({}))) as { name?: string };
+  const body = (await jsonBody(c)) as { name?: string };
   const result = await svc.forkRepo(c.env, repo, d.actor.user.login, body.name ?? `${repo.name}-fork`);
   if (!result.ok) return c.json({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status as never);
   return c.json({ repo: repoJson(c, result.value) }, 201);

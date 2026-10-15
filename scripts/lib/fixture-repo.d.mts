@@ -7,6 +7,8 @@ export function withFixtureRepo<T>(
     owner: string;
     repo: string;
     prefix: string;
+    /** When set, the repo is an org repo under this login (owner is ignored). */
+    org?: string;
     http: FixtureHttp;
     keep?: boolean;
     visibility?: 'public' | 'private';

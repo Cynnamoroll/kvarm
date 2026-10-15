@@ -23,6 +23,7 @@
  * @property {'path' | 'query' | 'body'} in
  * @property {string} description
  * @property {boolean} [required]
+ * @property {boolean} [nullable]
  * @property {boolean} [positional] CLI positional argument (in declaration order) instead of a --flag
  * @property {readonly string[]} [enum]
  * @property {'repo'} [format] `owner/name`, expanded to two encoded path segments
@@ -259,6 +260,26 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, LIMIT(100), CURSOR],
   }),
   define({
+    name: 'list_repo_events',
+    command: ['events', 'list'],
+    family: 'content',
+    description: 'Live repository state events after an event sequence cursor.',
+    method: 'GET',
+    path: '/repos/{repo}/events',
+    params: [REPO, query('since', 'integer', 'Event sequence cursor (default 0)')],
+  }),
+  define({
+    name: 'get_path_history',
+    command: ['file', 'history'],
+    family: 'content',
+    description:
+      'Commits on the default branch that changed a path, newest first (first-parent history, like git log --first-parent -- <path>). ' +
+      'The index is built on demand in bounded steps; index.complete says whether the list is the whole history, and repeating the call advances an incomplete index.',
+    method: 'GET',
+    path: '/repos/{repo}/history',
+    params: [REPO, query('path', 'string', 'File path', { required: true, positional: true }), LIMIT(100), CURSOR],
+  }),
+  define({
     name: 'get_snapshot',
     command: ['snapshot', 'get'],
     family: 'content',
@@ -468,7 +489,7 @@ export const OPERATIONS = Object.freeze([
     name: 'get_change',
     command: ['change', 'get'],
     family: 'changes',
-    description: 'One change set with its risk rating, live mergeability and check runs.',
+    description: 'One change set with its risk rating, live mergeability, check runs and ordered remaining actions.',
     method: 'GET',
     path: '/repos/{repo}/changes/{number}',
     params: [REPO, CHANGE],
@@ -506,7 +527,7 @@ export const OPERATIONS = Object.freeze([
     name: 'get_mergeability',
     command: ['change', 'mergeability'],
     family: 'changes',
-    description: 'Whether a change set merges cleanly now: status, conflicts and the checks-gate answer for the merge tree.',
+    description: 'Whether a change set merges cleanly now, including conflicts, required checks and its ordered remaining actions.',
     method: 'GET',
     path: '/repos/{repo}/changes/{number}/mergeability',
     params: [REPO, CHANGE],
@@ -583,7 +604,7 @@ export const OPERATIONS = Object.freeze([
     command: ['review', 'submit'],
     family: 'reviews',
     description:
-      "Review the change's current head (approve or request-changes) as a human or agent principal other than the author. A request-changes, or an approval next to one, escalates to a human.",
+      "Review the change's current head as a human or agent principal other than the author. An approval may also enable auto-merge when all gates pass; a request-changes, or an approval next to one, escalates to a human.",
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/reviews',
     params: [
@@ -592,13 +613,14 @@ export const OPERATIONS = Object.freeze([
       body('verdict', 'string', 'Review verdict', { required: true, enum: ['approve', 'request-changes'] }),
       body('headSha', 'string', 'The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
       body('body', 'string', 'Review comment'),
+      body('ship', 'boolean', 'Set merge policy to auto with this approval'),
     ],
   }),
   define({
     name: 'approve_change',
     command: ['review', 'approve'],
     family: 'reviews',
-    description: "Approve the change's current head. The approval is bound to that exact head; a head movement stales it.",
+    description: "Approve the change's current head. Set ship to enable auto-merge when all gates pass. The approval is bound to that exact head.",
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/approve',
     params: [
@@ -606,6 +628,7 @@ export const OPERATIONS = Object.freeze([
       CHANGE,
       body('headSha', 'string', 'The reviewed head commit (40 hex); refused 409 HEAD_MOVED if the change has moved'),
       body('body', 'string', 'Review comment'),
+      body('ship', 'boolean', 'Set merge policy to auto with this approval'),
     ],
   }),
   define({
@@ -626,10 +649,10 @@ export const OPERATIONS = Object.freeze([
     name: 'list_pending_reviews',
     command: ['review', 'pending'],
     family: 'reviews',
-    description: 'Live changes still short of the required approvals of their current head or with an open escalation, newest first.',
+    description: 'Live changes still short of approvals or with an open escalation, including current-head checks readiness; optionally filter ready or not-ready changes.',
     method: 'GET',
     path: '/repos/{repo}/reviews/pending',
-    params: [REPO, LIMIT(100), CURSOR],
+    params: [REPO, LIMIT(100), CURSOR, query('ready', 'boolean', 'Filter readiness: true for ready changes, false for not ready')],
   }),
   define({
     name: 'assign_reviewer',
@@ -642,18 +665,35 @@ export const OPERATIONS = Object.freeze([
     params: [REPO, CHANGE, body('candidates', 'string[]', 'Only consider these agent ids')],
   }),
   define({
+    name: 'request_review',
+    command: ['review', 'request'],
+    family: 'reviews',
+    description: 'Persist a request for a human or agent with current write access to review an open change.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/review-requests',
+    params: [REPO, CHANGE, body('principal', 'string', 'Reviewer principal, user:<id> or agent:<id>')],
+  }),
+  define({
+    name: 'withdraw_review_request',
+    command: ['review', 'withdraw-request'],
+    family: 'reviews',
+    description: 'Withdraw a persisted reviewer request from an open change.',
+    method: 'DELETE',
+    path: '/repos/{repo}/changes/{number}/review-requests/{principal}',
+    params: [REPO, CHANGE, pathArg('principal', 'Reviewer principal to remove')],
+  }),
+  define({
     name: 'resolve_escalation',
     command: ['review', 'resolve'],
     family: 'reviews',
-    description: 'Close an open escalation as a human (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.',
+    description: 'Resolve an open escalation as a human with a required note recorded as the reason (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.',
     method: 'POST',
     path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve',
     params: [
       REPO,
       CHANGE,
       pathArg('id', 'Escalation id from get_reviews'),
-      body('resolution', 'string', 'How the escalation was handled (default resolve)', { enum: ['acknowledge', 'resolve'] }),
-      body('note', 'string', 'Note recorded with the resolution'),
+      body('note', 'string', 'Required note recorded with the resolution'),
     ],
   }),
   define({
@@ -672,9 +712,87 @@ export const OPERATIONS = Object.freeze([
     description: 'Set how many approving reviews of the current head (humans or agents, distinct, not the author) a change needs (repo admins only).',
     method: 'PUT',
     path: '/repos/{repo}/review-policy',
-    params: [REPO, body('requiredReviews', 'integer', 'Required approving reviews (0-10)', { required: true, positional: true })],
+    params: [
+      REPO,
+      body('requiredReviews', 'integer', 'Required approving reviews (0-10)', { positional: true }),
+      body('guideRequired', 'boolean', 'Require a guide for the current head'),
+      body('blockingFindings', 'string', 'Which open findings block publication', { enum: ['none', 'high-confirmed'] }),
+      body('dangerAckRequired', 'boolean', 'Require acknowledgements for scrutinize coverage before approval'),
+      body('nudgeAfterMinutes', 'integer', 'Delay before review reminders (15-10080 minutes); null disables reminders', { nullable: true }),
+    ],
   }),
-
+  define({
+    name: 'get_review_analytics',
+    command: ['review', 'analytics'],
+    family: 'reviews',
+    description: 'Finding outcomes grouped by filer model family and its evidence level (known agent families are declared), plus review timing and guide-coverage medians for recent changes.',
+    method: 'GET',
+    path: '/repos/{repo}/review/analytics',
+    params: [REPO, query('days', 'integer', 'Window of change updates to include (1-180 days; default 30)')],
+  }),
+  define({
+    name: 'get_review_guide',
+    command: ['review', 'guide'],
+    family: 'reviews',
+    description: 'Get deterministic change coverage, the guide and acknowledgements; include hunks only when requested.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/review-guide',
+    params: [REPO, CHANGE, query('since', 'string', 'Only include units added since this commit SHA, or use parent for the focused diff'), query('unacked', 'boolean', 'Only return units not acknowledged by you'), query('include', 'string', 'Include inline hunk details', { enum: ['hunks'] })],
+  }),
+  define({
+    name: 'get_review_impact',
+    command: ['review', 'impact'],
+    family: 'reviews',
+    description: 'Show changed-file consumers, test consumers and import evidence for this change.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/review/impact',
+    params: [REPO, CHANGE],
+  }),
+  define({
+    name: 'submit_review_guide',
+    command: ['review', 'submit-guide'],
+    family: 'reviews',
+    description: 'Submit or replace a guide validated against the current coverage map.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/review-guide',
+    params: [REPO, CHANGE, body('headSha', 'string', 'Current 40-character head SHA', { required: true, positional: true }), body('guide', 'json', 'Guide chapters, tiers and contracts', { required: true })],
+  }),
+  define({
+    name: 'ack_review_units',
+    command: ['review', 'ack'],
+    family: 'reviews',
+    description: 'Acknowledge or unacknowledge up to 500 coverage keys or one guide chapter.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/review-acks',
+    params: [REPO, CHANGE, body('headSha', 'string', 'Current 40-character head SHA', { required: true, positional: true }), body('keys', 'json', 'Coverage unit keys to acknowledge'), body('chapter', 'string', 'A chapter id to acknowledge'), body('unack', 'boolean', 'Remove acknowledgements instead of adding them')],
+  }),
+  define({
+    name: 'submit_findings',
+    command: ['finding', 'submit'],
+    family: 'reviews',
+    description: 'Submit up to 50 findings tied to the current head and coverage units.',
+    method: 'POST',
+    path: '/repos/{repo}/changes/{number}/findings',
+    params: [REPO, CHANGE, body('headSha', 'string', 'Current 40-character head SHA', { required: true, positional: true }), body('findings', 'json', 'Findings with path, line, category, severity, confidence and title', { required: true })],
+  }),
+  define({
+    name: 'list_findings',
+    command: ['finding', 'list'],
+    family: 'reviews',
+    description: 'List findings for a change, with outdated and blocking state.',
+    method: 'GET',
+    path: '/repos/{repo}/changes/{number}/findings',
+    params: [REPO, CHANGE, query('status', 'string', 'Filter by finding status', { enum: ['all', 'open', 'resolved', 'irrelevant', 'wont-fix'] }), LIMIT(100), CURSOR],
+  }),
+  define({
+    name: 'update_finding',
+    command: ['finding', 'update'],
+    family: 'reviews',
+    description: 'Resolve, reopen, dismiss or mark a finding as wont-fix.',
+    method: 'PATCH',
+    path: '/repos/{repo}/changes/{number}/findings/{id}',
+    params: [REPO, CHANGE, pathArg('id', 'Finding id'), body('status', 'string', 'New finding status', { required: true, positional: true, enum: ['open', 'resolved', 'irrelevant', 'wont-fix'] }), body('note', 'string', 'Resolution note')],
+  }),
   // --- tasks: work Kvarm dispatches to agents --------------------------------
   define({
     name: 'list_tasks',
@@ -1348,6 +1466,7 @@ export const OPERATIONS = Object.freeze([
         'advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)',
         { enum: ['advisory', 'required'] },
       ),
+      body('agentApprovals', 'string', 'never (default): agent approvals do not satisfy protected-branch approval requirements; low-risk: different-family agents may approve heads without scrutinize files', { enum: ['never', 'low-risk'] }),
     ],
   }),
   define({
@@ -1377,6 +1496,7 @@ export const OPERATIONS = Object.freeze([
         'advisory (default): an incomplete kvarm/guard scan is reported only; required: it blocks publication (GUARD_INCOMPLETE)',
         { enum: ['advisory', 'required'] },
       ),
+      body('agentApprovals', 'string', 'never (default): agent approvals do not satisfy protected-branch approval requirements; low-risk: different-family agents may approve heads without scrutinize files', { enum: ['never', 'low-risk'] }),
     ],
   }),
   define({
@@ -1738,6 +1858,7 @@ function checkValue(p, v) {
   const fail = (/** @type {string} */ what) => {
     throw new OperationInputError(`argument "${p.name}" must be ${what}`, p.name);
   };
+  if (v === null && p.nullable) return null;
   switch (p.type) {
     case 'string':
       if (typeof v !== 'string') fail('a string');
@@ -1779,7 +1900,7 @@ export function buildRequest(op, args) {
   let hasBody = false;
   for (const p of op.params) {
     const raw = args[p.name];
-    if (raw === undefined || raw === null) {
+    if (raw === undefined || (raw === null && !p.nullable)) {
       if (p.required) throw new OperationInputError(`argument "${p.name}" is required (${p.description})`, p.name);
       continue;
     }

@@ -81,7 +81,9 @@ import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { withFixtureRepo } from './lib/fixture-repo.mjs';
+import { parseCost } from './lib/fleet.mjs';
 import { kvarmBin } from './lib/kvarm-bin.mjs';
+import { writeAskpass } from './lib/live.mjs';
 import { remoteD1Args } from './lib/wrangler-target.mjs';
 
 const BASE = process.env.KVARM_BASE_URL ?? 'http://localhost:8787';
@@ -133,14 +135,6 @@ async function call(conn, tool, args = {}) {
   return { isError: res.isError === true, data, text, status: ex.status, cost: ex.cost };
 }
 
-function parseCost(h) {
-  const out = {};
-  for (const part of (h ?? '').split(';')) {
-    const [k, v] = part.split('=');
-    if (k) out[k] = /^\d+$/.test(v) ? Number(v) : v;
-  }
-  return out;
-}
 
 function tokenFromEnv() {
   const name = process.env.MCP_TOKEN_ENV ?? 'KVARM_PAT';
@@ -296,9 +290,7 @@ async function e2eChecks(argv, scratch) {
   }
 
   const work = mkdtempSync(join(tmpdir(), 'mcp-agent-'));
-  const askpass = join(work, 'askpass.sh');
-  writeFileSync(askpass, '#!/bin/sh\ncase "$1" in *sername*) echo x ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
-  chmodSync(askpass, 0o700);
+  const askpass = writeAskpass(work);
 
   function git(args, cwd, token = PAT) {
     const r = spawnSync('git', ['-c', 'credential.helper=', ...args], {
@@ -427,12 +419,12 @@ async function e2eChecks(argv, scratch) {
     check('registry', 'every tool has a description and an object input schema', tools.every((t) => t.description && t.inputSchema?.type === 'object'));
     const original = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'get_attribution', 'set_attribution', 'get_context', 'list_tasks', 'claim_task', 'complete_task'];
     check('registry', 'original tools implemented so far are present', original.every((n) => names.includes(n)), original.filter((n) => !names.includes(n)).join(',') || 'all present');
-    const lifecycle = ['list_repos', 'get_repo', 'create_repo', 'update_repo', 'delete_repo', 'fork_repo', 'import_repo'];
+    const lifecycle = OPERATIONS.filter((o) => o.family === 'repos').map((o) => o.name);
     check('registry', 'every existing repos-family route is a tool (incl. delete, fork, import)', lifecycle.every((n) => names.includes(n)), lifecycle.filter((n) => !names.includes(n)).join(',') || 'all present');
     const del = tools.find((t) => t.name === 'delete_repo');
     check('registry', 'delete_repo is annotated destructive', del?.annotations?.destructiveHint === true);
     // VAL-MCP-003: the 15 original names, and tools/list = the --api-doc registry table both ways.
-    const fifteen = ['list_repos', 'get_tree', 'read_file', 'compare', 'get_file_diff', 'create_workspace', 'create_change_set', 'get_change', 'merge_change', 'enqueue_change', 'list_tasks', 'claim_task', 'complete_task', 'get_attribution', 'set_attribution'];
+    const fifteen = original.filter((n) => n !== 'get_context');
     check('VAL-MCP-003', 'all 15 original tool names are listed', fifteen.every((n) => names.includes(n)), fifteen.filter((n) => !names.includes(n)).join(',') || 'all 15 present');
     const schemaless = tools.filter((t) => !(typeof t.description === 'string' && t.description.trim() && t.inputSchema?.type === 'object' && t.inputSchema.properties)).map((t) => t.name);
     check('VAL-MCP-003', 'every tool carries a description and an input schema', schemaless.length === 0, schemaless.join(',') || `${tools.length} tools checked`);
@@ -442,6 +434,7 @@ async function e2eChecks(argv, scratch) {
       const undocumented = names.filter((n) => !documented.includes(n));
       console.log(`registry of record ${opts['api-doc']}: ${documented.length} entries; documented but not listed: ${missing.join(',') || 'none'}; listed but undocumented: ${undocumented.join(',') || 'none'}`);
       check('VAL-MCP-003', 'tools/list equals the --api-doc registry table in both directions', missing.length === 0 && undocumented.length === 0 && documented.length === names.length && fifteen.every((n) => documented.includes(n)));
+      check('VAL-MCP-003', 'the 15 original names are 15', fifteen.length === 15, String(fifteen.length));
     } else {
       console.log('(--api-doc not given: skipping the registry table comparison)');
     }

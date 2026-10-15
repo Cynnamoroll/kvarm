@@ -12,12 +12,28 @@ import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecu
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import type { RepoRow } from '../src/db/repos';
 import worker from '../src/index';
 import type { ChangeContext } from '../src/services/changes';
 import { createRevert, defaultRevertDeps, revertBranch } from '../src/services/reverts';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, installFakeGitRemote, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall, send as sendBase, type Reply } from './helpers/http';
+import { FakeWorkflow, fakeEvents, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+async function seedRepo(name: string) {
+  const { id, repo } = await seedRepoBase(env, name, { owner: OWNER, visibility: 'private', repoIds });
+  const now = Date.now();
+  const grant = (login: string, role: 'read' | 'write') =>
+    env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)')
+      .bind(id, userIds[login], role, now, now)
+      .run();
+  await grant('writer', 'write');
+  await grant('reader', 'read');
+  return repo;
+}
+const send = (req: Request, e: Env = env) => sendBase(e, req);
+const call = (method: string, path: string, token?: string, body?: unknown, e: Env = env) => apiCall(e, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -25,29 +41,12 @@ const OWNER = 'rv-owner';
 const MAIN = 'refs/heads/main';
 const MASTER = 'test-only incident master key, not a secret';
 
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
-const sent: unknown[] = [];
 const env = {
   ...baseEnv,
   ARTIFACTS: fakeArtifacts,
   SNAPSHOT_BUILDER: new FakeWorkflow() as unknown as Env['SNAPSHOT_BUILDER'],
   CI_PIPELINE: new FakeWorkflow() as unknown as Env['CI_PIPELINE'],
-  EVENTS: {
-    async send(body: unknown) {
-      sent.push(body);
-    },
-    async sendBatch(msgs: Array<{ body: unknown }>) {
-      for (const m of msgs) sent.push(m.body);
-    },
-  } as unknown as Env['EVENTS'],
+  EVENTS: fakeEvents as unknown as Env['EVENTS'],
   INCIDENT_WEBHOOK_KEY: MASTER,
 } as Env;
 const keyless = { ...env, INCIDENT_WEBHOOK_KEY: undefined } as Env;
@@ -55,62 +54,7 @@ const keyless = { ...env, INCIDENT_WEBHOOK_KEY: undefined } as Env;
 const tok = { owner: '', writer: '', reader: '', outsider: '' };
 const repoIds: Record<string, string> = {};
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
 const userIds: Record<string, string> = {};
-
-async function seedRepo(name: string): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-       VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-    ).bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, now),
-    env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)').bind(id, userIds.writer, 'write', now, now),
-    env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)').bind(id, userIds.reader, 'read', now, now),
-  ]);
-  return repo;
-}
-
-interface Reply {
-  status: number;
-  text: string;
-  json: Record<string, any>;
-  cost: CostCounters;
-}
-
-async function send(req: Request, e: Env = env): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, e, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, text, json, cost: cost! };
-}
-
-function call(method: string, path: string, token?: string, body?: unknown, e: Env = env): Promise<Reply> {
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  return send(new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }), e);
-}
 
 const R = (repo: string) => `/api/v1/repos/${OWNER}/${repo}`;
 const revert = (repo: string, body: unknown, token = tok.owner) => call('POST', `${R(repo)}/reverts`, token, body);
@@ -200,7 +144,7 @@ describe('POST reverts', () => {
     expect(queued.json.entry).toMatchObject({ number: change.number, state: 'queued', target: 'main' });
     const q = await call('GET', `${R('happy')}/queue`, tok.owner);
     expect(q.json.entries.map((e: any) => e.number)).toEqual([change.number]);
-    expect(r.cost.do).toBe(0);
+    expect(r.cost.do).toBe(1);
   });
 
   it('reverts a merged change set relative to the target it landed on, the same tree as reverting its merge commit with -m 1', async () => {

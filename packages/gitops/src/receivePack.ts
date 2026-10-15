@@ -21,7 +21,7 @@
 import { EMPTY_PACK } from './pack';
 import { isSafeRefName, isZeroOid, type RefCommand } from './refUpdates';
 import { confirmedRefs, ReportStatusReader, type ReportStatus } from './reportStatus';
-import { concat, FLUSH_PKT, parseRefAdvertisement, pktLine } from './index';
+import { concat, errText, FLUSH_PKT, parseRefAdvertisement, pktLine } from './index';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -152,7 +152,7 @@ export async function advertiseReceivePack(remote: ReceivePackRemote): Promise<R
       headers: baseHeaders(remote),
     });
   } catch (err) {
-    throw new ReceivePackError(`advertisement request failed: ${String(err).slice(0, 200)}`, 0);
+    throw new ReceivePackError(`advertisement request failed: ${errText(err)}`, 0);
   }
   if (res.status !== 200) {
     await res.body?.cancel().catch(() => undefined);
@@ -167,7 +167,7 @@ export async function advertiseReceivePack(remote: ReceivePackRemote): Promise<R
   try {
     parsed = parseRefAdvertisement(body);
   } catch (err) {
-    throw new ReceivePackError(`malformed advertisement: ${String(err).slice(0, 200)}`, res.status);
+    throw new ReceivePackError(`malformed advertisement: ${errText(err)}`, res.status);
   }
   const refs = new Map<string, string>();
   for (const r of parsed.refs) if (r.name.startsWith('refs/') && OID_RE.test(r.hash)) refs.set(r.name, r.hash);
@@ -228,7 +228,7 @@ export async function pushRefs(remote: ReceivePackRemote, req: PushRequest): Pro
     const body = requestBody(req) as Uint8Array<ArrayBuffer>;
     res = await fetchOf(remote)(`${remote.url}/git-receive-pack`, { method: 'POST', headers, body });
   } catch (err) {
-    const error = String(err).slice(0, 200);
+    const error = errText(err);
     return { ok: false, httpStatus: 0, refs: allRefs(req.commands, 'unknown'), report: null, error };
   }
   if (res.status !== 200) {
@@ -248,7 +248,7 @@ export async function pushRefs(remote: ReceivePackRemote, req: PushRequest): Pro
   try {
     report = await readReport(res, remote.maxReportBytes);
   } catch (err) {
-    const error = `receive-pack reply failed: ${String(err).slice(0, 200)}`;
+    const error = `receive-pack reply failed: ${errText(err)}`;
     return { ok: false, httpStatus: res.status, refs: allRefs(req.commands, 'unknown'), report: null, error };
   }
 

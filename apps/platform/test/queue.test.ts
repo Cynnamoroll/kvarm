@@ -11,7 +11,7 @@ import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecu
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { decode } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, CostMeter, parseCostHeader, runWithMeter, type CostCounters } from '../src/cost/meter';
+import { CostMeter, runWithMeter, type CostCounters } from '../src/cost/meter';
 import worker from '../src/index';
 import { recordGuard } from '../src/services/changes';
 import type { ChecksGate, CheckState } from '../src/services/checksGate';
@@ -24,33 +24,22 @@ import {
   type TrainDeps,
   type TrainEvent,
 } from '../src/services/queue';
-import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, lsRefsPrefixes, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
+import { FakeRepo, commit, fakeArtifacts, installFakeGitRemote, lsRefsPrefixes, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, recordingEvents, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+const seedRepo = async (name: string) => (await seedRepoBase(env, name, { owner: OWNER, visibility: 'public', repoIds })).repo;
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'mq-owner';
 const MAIN = 'refs/heads/main';
 
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
 /** Kicks recorded instead of delivered: train runs are driven by the tests. */
-const sent: Array<{ body: any; delaySeconds?: number }> = [];
-const fakeEvents = {
-  async send(body: unknown, opts?: { delaySeconds?: number }) {
-    sent.push({ body, ...(opts?.delaySeconds !== undefined ? { delaySeconds: opts.delaySeconds } : {}) });
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push({ body: m.body });
-  },
-};
 
 const env = {
   ...baseEnv,
@@ -62,56 +51,6 @@ const env = {
 const tok = { owner: '', writer: '' };
 const repoIds: Record<string, string> = {};
 const userIds: Record<string, string> = {};
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  userIds[login] = id;
-  return id;
-}
-
-async function seedRepo(name: string): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  return repo;
-}
-
-interface Reply {
-  status: number;
-  json: Record<string, any>;
-  cost: CostCounters;
-  headers: Headers;
-}
-
-async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, json, cost: cost!, headers: res.headers };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 const createChange = (repo: string, head: string, mergePolicy = 'review', token = tok.owner) =>
@@ -193,12 +132,12 @@ function trainDeps(over: Partial<TrainDeps> = {}): TrainDeps & { events: TrainEv
   };
 }
 
-async function entries(name: string): Promise<Array<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null }>> {
+async function entries(name: string): Promise<Array<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null; head_sha: string }>> {
   return (
     (
-      await env.DB.prepare('SELECT change_number, state, active, reason_code, generation, cost FROM merge_queue WHERE repo_id = ? ORDER BY seq')
+      await env.DB.prepare('SELECT change_number, state, active, reason_code, generation, cost, head_sha FROM merge_queue WHERE repo_id = ? ORDER BY seq')
         .bind(repoIds[name])
-        .all<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null }>()
+        .all<{ change_number: number; state: string; active: number; reason_code: string | null; generation: number; cost: string | null; head_sha: string }>()
     ).results ?? []
   );
 }
@@ -929,6 +868,43 @@ describe('integration train', () => {
     }
   });
 
+  it('keeps an equivalent non-auto queued entry active and re-points it after the head event', async () => {
+    const { repo, numbers } = await setup('equivalent-queue', 1);
+    const [n] = numbers as [number];
+    await enqueue('equivalent-queue', n);
+    const oldHead = repo.refs.get('refs/heads/b1')!;
+    const equivalent = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [oldHead]);
+    repo.refs.set('refs/heads/b1', equivalent.sha);
+    await deliver(pushBody('equivalent-queue', 'refs/heads/b1', oldHead, equivalent.sha, Date.now()));
+    expect((await entries('equivalent-queue')).map((entry) => [entry.state, entry.head_sha, entry.active, entry.reason_code])).toEqual([
+      ['queued', equivalent.sha, 1, null],
+    ]);
+  });
+
+  it('waits for an equivalent in-run head move, then publishes after the head event re-points the entry', async () => {
+    const { repo, main, numbers } = await setup('equivalent-live-head', 1);
+    const [n] = numbers as [number];
+    await enqueue('equivalent-live-head', n);
+    const oldHead = repo.refs.get('refs/heads/b1')!;
+    const equivalent = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [oldHead]);
+    const first = await runTrain(
+      env,
+      repoIds['equivalent-live-head']!,
+      MAIN,
+      preparing(async () => {
+        repo.refs.set('refs/heads/b1', equivalent.sha);
+      }),
+    );
+    expect(first.published).toEqual([]);
+    expect(first.ejected).toEqual([]);
+    expect(repo.refs.get(MAIN)).toBe(main);
+    expect((await entries('equivalent-live-head')).map((entry) => [entry.state, entry.active, entry.reason_code])).toEqual([['queued', 1, null]]);
+    await deliver(pushBody('equivalent-live-head', 'refs/heads/b1', oldHead, equivalent.sha, Date.now()));
+    const second = await runTrain(env, repoIds['equivalent-live-head']!, MAIN, trainDeps());
+    expect(second.published).toEqual([n]);
+    expect((await getChange('equivalent-live-head', n)).json.state).toBe('merged');
+  });
+
   it('a force-push of the head while the pack is prepared stops publication of the composed head', async () => {
     const { repo, main, numbers } = await setup('prep-head', 1);
     const [n] = numbers as [number];
@@ -1394,4 +1370,3 @@ async function deliver(body: unknown) {
   await waitOnExecutionContext(ctx);
   expect(result.explicitAcks).toHaveLength(1);
 }
-

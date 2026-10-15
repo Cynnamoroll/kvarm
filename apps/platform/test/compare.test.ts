@@ -6,7 +6,6 @@
  */
 
 import { env as cfEnv } from 'cloudflare:workers';
-import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   FLUSH_PKT,
@@ -23,12 +22,35 @@ import {
 import { getGitToken, purgeGitTokens } from '../src/artifacts/tokens';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { bumpRefGeneration, compareKeys, refGeneration } from '../src/cache/compare';
-import { COST_HEADER, countingFetch, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import { countingFetch, type CostCounters } from '../src/cost/meter';
 import { COMPARE_BUDGETS } from '../src/services/compare';
-import worker from '../src/index';
+import { call as apiCall } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string, admin = false) => seedUserBase(env, login, { admin });
+interface Reply {
+  status: number;
+  text: string;
+  json: Record<string, unknown>;
+  cost: CostCounters;
+  cache: string | null;
+  timing: string | null;
+}
+
+const seedRepo = async (name: string, visibility: 'public' | 'private'): Promise<FakeRepo> => {
+  const artifactsName = `${OWNER}--${name}`;
+  const repo = new FakeRepo();
+  repos.set(artifactsName, repo);
+  await seedRepoBase(env, name, { owner: OWNER, visibility, repoIds, register: false });
+  return repo;
+};
+
+const call = async (path: string, token?: string): Promise<Reply> => {
+  const r = await apiCall(env, 'GET', path, { token });
+  return { status: r.status, text: r.text, json: r.json, cost: r.cost, cache: r.headers.get('x-kvarm-cache'), timing: r.headers.get('server-timing') };
+};
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
@@ -178,57 +200,6 @@ async function commit(repo: FakeRepo, files: Files, parents: string[] = []): Pro
 const OWNER = 'cmp-owner';
 const tok = { owner: '', outsider: '', admin: '' };
 const repoIds: Record<string, string> = {};
-
-async function seedUser(login: string, admin = false): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string, visibility: 'public' | 'private'): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  repos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, visibility, Date.now())
-    .run();
-  return repo;
-}
-
-interface Reply {
-  status: number;
-  text: string;
-  json: Record<string, unknown>;
-  cost: CostCounters;
-  cache: string | null;
-  timing: string | null;
-}
-
-async function call(path: string, token?: string): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const res = await worker.fetch!(new Request(`${ORIGIN}${path}`, { headers }) as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: Record<string, unknown> = {};
-  try {
-    json = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    // non-JSON (e.g. the generic not-found fallback)
-  }
-  return { status: res.status, text, json, cost: cost!, cache: res.headers.get('x-kvarm-cache'), timing: res.headers.get('server-timing') };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}/${rest}`;
 

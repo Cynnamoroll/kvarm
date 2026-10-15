@@ -26,6 +26,7 @@ export * from './virtualBase';
 export * from './compose';
 export * from './notes';
 export * from './resolve';
+export * from './history';
 export * from './revert';
 
 const encoder = new TextEncoder();
@@ -63,6 +64,14 @@ export function unhex(s: string): Uint8Array {
     out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
   }
   return out;
+}
+
+/**
+ * One-line text for a caught error, capped so log lines and error replies
+ * stay bounded — `max` defaults to the repo-wide 200-char convention.
+ */
+export function errText(err: unknown, max = 200): string {
+  return String(err).slice(0, max);
 }
 
 // ---------------------------------------------------------------------------

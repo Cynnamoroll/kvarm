@@ -3,8 +3,7 @@
  *
  * index.ts installs sessionCsrf once, ahead of every router, so a page form
  * post is covered wherever and whenever it is mounted; only the paths in
- * csrfExempt skip it. Handlers keep their own sessionFormRefused /
- * requireSessionForm checks as a second layer.
+ * csrfExempt skip it. Handlers keep any checks not covered by this middleware.
  */
 
 import type { MiddlewareHandler } from 'hono';

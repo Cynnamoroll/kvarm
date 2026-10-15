@@ -35,6 +35,8 @@ export class FakeRepo {
   calls: string[] = [];
   /** Blob hashes whose next read throws once (simulated transient failure). */
   failBlobOnce = new Set<string>();
+  /** Commits whose `log` throws NOT_FOUND, as the binding does for a missing commit. */
+  logNotFound = new Set<string>();
   /** Blob hashes the binding refuses to buffer (ArtifactsError MEMORY_LIMIT). */
   memoryLimit = new Set<string>();
   /** Returned blobs not yet fully consumed, and the most held at once. */
@@ -169,6 +171,7 @@ function handle(name: string): ArtifactsRepo {
     },
     async log({ ref, limit = 50 }: { ref?: string; limit?: number } = {}) {
       r.calls.push(`log:${ref}`);
+      if (ref && r.logNotFound.has(ref)) throw Object.assign(new Error('commit not found'), { code: 'NOT_FOUND' });
       let sha = ref && /^[0-9a-f]{40}$/.test(ref) ? ref : r.refs.get(`refs/heads/${ref}`);
       const out: ArtifactsCommitMetadata[] = [];
       while (sha && out.length < limit) {

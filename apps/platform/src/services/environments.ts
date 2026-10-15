@@ -3,6 +3,7 @@ import { resolveRepoAccess, resolveRepoAccessAs } from './access';
 import type { Actor } from './authz';
 import { isValidRefName } from './refs';
 import type { ServiceResult } from '../repos/service';
+import { fail, isUniqueViolation, objectBody } from './result';
 import { sandboxProvider } from './sandboxes/provider';
 
 export const DEFAULT_ENVIRONMENT_HOSTS = [
@@ -104,6 +105,9 @@ export interface EnvironmentView {
   archivedAt: string | null;
 }
 
+/** A recorded build phase: a bare duration in ms, or a `{durationMs, status}` detail. */
+export type BuildPhase = number | { durationMs?: number; status?: string };
+
 export interface EnvironmentBuildView {
   id: string;
   environmentId: string;
@@ -114,7 +118,7 @@ export interface EnvironmentBuildView {
   configHash: string;
   snapshotId: string | null;
   snapshotSize: number | null;
-  phases: Record<string, number>;
+  phases: Record<string, BuildPhase>;
   outputTail: string;
   error: string | null;
   attempt: number;
@@ -150,16 +154,20 @@ export interface CreateEnvironmentInput extends EnvironmentInput {
 
 export type UpdateEnvironmentInput = EnvironmentInput;
 
+/** Non-archived environments an owner has, for the fleet overview count (fleetPages). */
+export async function countEnvironmentsForOwner(env: Env, ownerLogin: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM environments e JOIN repos r ON r.id = e.repo_id
+     WHERE r.owner_login = ? AND e.archived_at IS NULL`,
+  ).bind(ownerLogin).first<{ count: number }>();
+  return Number(row?.count ?? 0);
+}
+
 export interface EnvironmentBuildRequest {
   environmentId: string;
   buildId: string;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }> & Record<string, unknown>;
-
-function fail(status: number, error: string, code: string, extra: Record<string, unknown> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 function json<T>(value: string, fallback: T): T {
   try {
@@ -313,10 +321,9 @@ function parseConfig(
   maxBuildAgeHours: number;
   idleMinutes: number;
 }> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-    return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  }
-  const body = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const body = parsed.value;
   const name = body.name === undefined ? current?.name : body.name;
   if (typeof name !== 'string' || !ENVIRONMENT_NAME.test(name)) {
     return fail(422, 'name must match ^[a-z][a-z0-9-]{0,62}$', 'INVALID_ENVIRONMENT');
@@ -467,7 +474,7 @@ export async function createEnvironment(
       )
       .run();
   } catch (error) {
-    if (String(error).includes('UNIQUE')) return fail(409, 'an environment with that name already exists', 'ENVIRONMENT_NAME_TAKEN');
+    if (isUniqueViolation(error, 'environments.repo_id, environments.name')) return fail(409, 'an environment with that name already exists', 'ENVIRONMENT_NAME_TAKEN');
     throw error;
   }
   const build = await requestEnvironmentBuild(cx.env, id, 'create');

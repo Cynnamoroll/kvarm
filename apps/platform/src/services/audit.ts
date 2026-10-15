@@ -16,8 +16,10 @@
 import type { RefCommand } from '@kvarm/gitops';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail, type Fail } from './result';
 import type { Actor } from './authz';
 import { evidenceFromRow } from './attribution';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { submitterOf, type Evidence, type EvidenceLevel } from './provenance';
 
 export const AUDIT_LIMITS = {
@@ -83,8 +85,6 @@ export interface AuditQuery {
   cursor?: string | undefined;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
-const fail = (status: number, code: string, error: string): Fail => ({ ok: false, status, code, error });
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -159,22 +159,24 @@ function parseTime(raw: string | undefined, name: string): number | null | Fail 
   if (raw === undefined || raw === '') return null;
   // ISO 8601 with an explicit zone, so a query means the same instant everywhere.
   if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2}))?$/.test(raw)) {
-    return fail(400, 'INVALID_TIME', `${name} must be an ISO 8601 date or UTC time such as 2026-01-31T12:00:00Z`);
+    return fail(400, `${name} must be an ISO 8601 date or UTC time such as 2026-01-31T12:00:00Z`, 'INVALID_TIME');
   }
   const ms = Date.parse(raw);
-  if (!Number.isFinite(ms)) return fail(400, 'INVALID_TIME', `${name} is not a valid time`);
+  if (!Number.isFinite(ms)) return fail(400, `${name} is not a valid time`, 'INVALID_TIME');
   return ms;
 }
 
 const isFail = (v: unknown): v is Fail => typeof v === 'object' && v !== null && (v as Fail).ok === false;
 
 function encodeCursor(at: number, seq: number): string {
-  return btoa(JSON.stringify([at, seq])).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify([at, seq]));
 }
 
 function decodeCursor(raw: string): { at: number; seq: number } | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const v: unknown = JSON.parse(atob(raw));
+    const v: unknown = JSON.parse(text);
     if (Array.isArray(v) && v.length === 2 && Number.isSafeInteger(v[0]) && Number.isSafeInteger(v[1])) return { at: v[0] as number, seq: v[1] as number };
   } catch {
     // not one of ours
@@ -269,17 +271,17 @@ export async function readAudit(env: Env, repo: RepoRow, q: AuditQuery): Promise
   if (isFail(since)) return since;
   const until = parseTime(q.until, 'until');
   if (isFail(until)) return until;
-  if (since !== null && until !== null && until < since) return fail(400, 'INVALID_TIME', 'until must not be before since');
+  if (since !== null && until !== null && until < since) return fail(400, 'until must not be before since', 'INVALID_TIME');
   let limit: number = AUDIT_LIMITS.pageDefault;
   if (q.limit !== undefined && q.limit !== '') {
     const n = Number(q.limit);
-    if (!Number.isInteger(n) || n < 1 || n > AUDIT_LIMITS.pageMax) return fail(400, 'INVALID_LIMIT', `limit must be an integer from 1 to ${AUDIT_LIMITS.pageMax}`);
+    if (!Number.isInteger(n) || n < 1 || n > AUDIT_LIMITS.pageMax) return fail(400, `limit must be an integer from 1 to ${AUDIT_LIMITS.pageMax}`, 'INVALID_LIMIT');
     limit = n;
   }
   let after = { at: -1, seq: 0 };
   if (q.cursor) {
     const c = decodeCursor(q.cursor);
-    if (c === null) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this endpoint');
+    if (c === null) return fail(400, 'cursor is not a nextCursor from this endpoint', 'INVALID_CURSOR');
     after = c;
   }
 

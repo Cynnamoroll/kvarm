@@ -40,12 +40,13 @@ import {
   resolveCtx,
   branchRef,
   type ChangeContext,
-  type ChangeDetail,
+  type CreatedChangeDetail,
   type MergePolicy,
 } from './changes';
 import { artifactsPusher, type GitPusher } from './gitwrite';
 import { KVARM_COMMITTER, MERGE_BUDGETS, artifactsMergeSources } from './merge';
 import { lsRefs } from './refs';
+import { isUniqueViolation, objectBody } from './result';
 
 export const REVERT_LIMITS = {
   reasonMax: 4_096,
@@ -84,7 +85,7 @@ export interface RevertView {
 
 export interface RevertCreated {
   revert: RevertView;
-  change: ChangeDetail;
+  change: CreatedChangeDetail;
 }
 
 export interface RevertOrigin {
@@ -102,8 +103,9 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const READ_FAILURES = new Set(['missingObject', 'readError']);
 
 export function parseRevertRequest(input: unknown): ServiceResult<RevertRequest> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const out: RevertRequest = {};
   if ((b.sha === undefined) === (b.changeNumber === undefined)) return fail(422, 'pass exactly one of sha or changeNumber', 'INVALID_REVERT_TARGET');
   if (b.sha !== undefined) {
@@ -254,12 +256,12 @@ export function createRevert(cx: ChangeContext, input: unknown, deps: RevertDeps
 
     const title = p.title ?? message.split('\n', 1)[0]!.slice(0, CHANGE_LIMITS.titleMax);
     const body = [message.split('\n\n').slice(1).join('\n\n').trim(), origin.note].filter(Boolean).join('\n\n');
-    let change: ServiceResult<ChangeDetail>;
+    let change: ServiceResult<CreatedChangeDetail>;
     try {
       change = await createChange(cx, { title, body, base, head: branch, mergePolicy }, { kind: 'revert' });
     } catch (err) {
       // Another request opened the change on this branch first (one change per revert branch, migration 0031); the branch is its head now.
-      if (String(err).includes('UNIQUE constraint failed')) return fail(409, `the revert branch ${branch} already has a change`, 'REVERT_BRANCH_EXISTS', { ref: branch });
+      if (isUniqueViolation(err)) return fail(409, `the revert branch ${branch} already has a change`, 'REVERT_BRANCH_EXISTS', { ref: branch });
       await removeBranch();
       throw err;
     }

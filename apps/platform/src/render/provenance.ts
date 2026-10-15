@@ -93,14 +93,15 @@ export function provenancePanel(p: ProvenancePanel, opts: { id?: string; heading
         <ol>
           ${raw(
             p.decisions
-              .map(
-                (d) => html`<li>
-              <p class="k-prov-chosen"><span class="k-prov-key">Chosen</span> <code>${d.chosen}</code></p>
+              .map((d) => {
+                const resolution = d.chosen.startsWith('resolve:');
+                return html`<li>
+              <p class="k-prov-chosen">${resolution ? `Resolved by ${d.actor}` : raw(html`<span class="k-prov-key">Chosen</span> <code>${d.chosen}</code>`)}</p>
               ${raw(d.rejected.length > 0 ? html`<div class="k-prov-rejected"><span class="k-prov-key">Rejected</span><ul>${raw(d.rejected.map(rejectedItem).join(''))}</ul></div>` : '')}
               <p class="k-prov-reason">${d.reason}</p>
-              <p class="k-prov-meta">${d.agent ? d.agent.name : d.actor} · <time datetime="${d.at}">${d.at.slice(0, 16).replace('T', ' ')} UTC</time>${d.task ? raw(html` · <code>${d.task}</code>`) : ''}</p>
-            </li>`,
-              )
+              <p class="k-prov-meta">${resolution ? '' : `${d.agent ? d.agent.name : d.actor} · `}<time datetime="${d.at}">${d.at.slice(0, 16).replace('T', ' ')} UTC</time>${d.task ? raw(html` · <code>${d.task}</code>`) : ''}</p>
+            </li>`;
+              })
               .join(''),
           )}
         </ol>

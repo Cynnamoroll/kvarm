@@ -22,6 +22,10 @@
       "blurb": "push events recorded for a repository"
     },
     {
+      "name": "events",
+      "blurb": "live repository state events after a sequence cursor"
+    },
+    {
       "name": "snapshot",
       "blurb": "snapshot metadata for a ref (and build demands)"
     },
@@ -55,11 +59,15 @@
     },
     {
       "name": "review",
-      "blurb": "reviews, approvals and escalations"
+      "blurb": "reviews, approvals, escalations, guides and findings"
     },
     {
       "name": "review-policy",
       "blurb": "the repository review policy"
+    },
+    {
+      "name": "finding",
+      "blurb": "review findings tied to a change head and its coverage units"
     },
     {
       "name": "task",
@@ -468,6 +476,78 @@
           "required": true,
           "positional": true,
           "format": "repo"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "list_repo_events",
+      "command": [
+        "events",
+        "list"
+      ],
+      "family": "content",
+      "description": "Live repository state events after an event sequence cursor.",
+      "method": "GET",
+      "path": "/repos/{repo}/events",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "since",
+          "type": "integer",
+          "in": "query",
+          "description": "Event sequence cursor (default 0)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_path_history",
+      "command": [
+        "file",
+        "history"
+      ],
+      "family": "content",
+      "description": "Commits on the default branch that changed a path, newest first (first-parent history, like git log --first-parent -- <path>). The index is built on demand in bounded steps; index.complete says whether the list is the whole history, and repeating the call advances an incomplete index.",
+      "method": "GET",
+      "path": "/repos/{repo}/history",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "in": "query",
+          "description": "File path",
+          "required": true,
+          "positional": true
         },
         {
           "name": "limit",
@@ -1216,7 +1296,7 @@
         "get"
       ],
       "family": "changes",
-      "description": "One change set with its risk rating, live mergeability and check runs.",
+      "description": "One change set with its risk rating, live mergeability, check runs and ordered remaining actions.",
       "method": "GET",
       "path": "/repos/{repo}/changes/{number}",
       "params": [
@@ -1348,7 +1428,7 @@
         "mergeability"
       ],
       "family": "changes",
-      "description": "Whether a change set merges cleanly now: status, conflicts and the checks-gate answer for the merge tree.",
+      "description": "Whether a change set merges cleanly now, including conflicts, required checks and its ordered remaining actions.",
       "method": "GET",
       "path": "/repos/{repo}/changes/{number}/mergeability",
       "params": [
@@ -1602,7 +1682,7 @@
         "submit"
       ],
       "family": "reviews",
-      "description": "Review the change's current head (approve or request-changes) as a human or agent principal other than the author. A request-changes, or an approval next to one, escalates to a human.",
+      "description": "Review the change's current head as a human or agent principal other than the author. An approval may also enable auto-merge when all gates pass; a request-changes, or an approval next to one, escalates to a human.",
       "method": "POST",
       "path": "/repos/{repo}/changes/{number}/reviews",
       "params": [
@@ -1645,6 +1725,12 @@
           "type": "string",
           "in": "body",
           "description": "Review comment"
+        },
+        {
+          "name": "ship",
+          "type": "boolean",
+          "in": "body",
+          "description": "Set merge policy to auto with this approval"
         }
       ],
       "readOnly": false
@@ -1656,7 +1742,7 @@
         "approve"
       ],
       "family": "reviews",
-      "description": "Approve the change's current head. The approval is bound to that exact head; a head movement stales it.",
+      "description": "Approve the change's current head. Set ship to enable auto-merge when all gates pass. The approval is bound to that exact head.",
       "method": "POST",
       "path": "/repos/{repo}/changes/{number}/approve",
       "params": [
@@ -1688,6 +1774,12 @@
           "type": "string",
           "in": "body",
           "description": "Review comment"
+        },
+        {
+          "name": "ship",
+          "type": "boolean",
+          "in": "body",
+          "description": "Set merge policy to auto with this approval"
         }
       ],
       "readOnly": false
@@ -1742,7 +1834,7 @@
         "pending"
       ],
       "family": "reviews",
-      "description": "Live changes still short of the required approvals of their current head or with an open escalation, newest first.",
+      "description": "Live changes still short of approvals or with an open escalation, including current-head checks readiness; optionally filter ready or not-ready changes.",
       "method": "GET",
       "path": "/repos/{repo}/reviews/pending",
       "params": [
@@ -1766,6 +1858,12 @@
           "type": "string",
           "in": "query",
           "description": "Opaque cursor from the previous page (nextCursor)"
+        },
+        {
+          "name": "ready",
+          "type": "boolean",
+          "in": "query",
+          "description": "Filter readiness: true for ready changes, false for not ready"
         }
       ],
       "readOnly": true
@@ -1808,13 +1906,89 @@
       "readOnly": false
     },
     {
+      "name": "request_review",
+      "command": [
+        "review",
+        "request"
+      ],
+      "family": "reviews",
+      "description": "Persist a request for a human or agent with current write access to review an open change.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/review-requests",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "principal",
+          "type": "string",
+          "in": "body",
+          "description": "Reviewer principal, user:<id> or agent:<id>"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "withdraw_review_request",
+      "command": [
+        "review",
+        "withdraw-request"
+      ],
+      "family": "reviews",
+      "description": "Withdraw a persisted reviewer request from an open change.",
+      "method": "DELETE",
+      "path": "/repos/{repo}/changes/{number}/review-requests/{principal}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "principal",
+          "type": "string",
+          "in": "path",
+          "description": "Reviewer principal to remove",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
       "name": "resolve_escalation",
       "command": [
         "review",
         "resolve"
       ],
       "family": "reviews",
-      "description": "Close an open escalation as a human (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.",
+      "description": "Resolve an open escalation as a human with a required note recorded as the reason (agents are refused 403 HUMAN_REQUIRED). Approving the current head as a human independent of the author (not the human who minted an authoring agent) resolves every open escalation too.",
       "method": "POST",
       "path": "/repos/{repo}/changes/{number}/escalations/{id}/resolve",
       "params": [
@@ -1844,20 +2018,10 @@
           "positional": true
         },
         {
-          "name": "resolution",
-          "type": "string",
-          "in": "body",
-          "description": "How the escalation was handled (default resolve)",
-          "enum": [
-            "acknowledge",
-            "resolve"
-          ]
-        },
-        {
           "name": "note",
           "type": "string",
           "in": "body",
-          "description": "Note recorded with the resolution"
+          "description": "Required note recorded with the resolution"
         }
       ],
       "readOnly": false
@@ -1910,8 +2074,412 @@
           "type": "integer",
           "in": "body",
           "description": "Required approving reviews (0-10)",
+          "positional": true
+        },
+        {
+          "name": "guideRequired",
+          "type": "boolean",
+          "in": "body",
+          "description": "Require a guide for the current head"
+        },
+        {
+          "name": "blockingFindings",
+          "type": "string",
+          "in": "body",
+          "description": "Which open findings block publication",
+          "enum": [
+            "none",
+            "high-confirmed"
+          ]
+        },
+        {
+          "name": "dangerAckRequired",
+          "type": "boolean",
+          "in": "body",
+          "description": "Require acknowledgements for scrutinize coverage before approval"
+        },
+        {
+          "name": "nudgeAfterMinutes",
+          "type": "integer",
+          "in": "body",
+          "description": "Delay before review reminders (15-10080 minutes); null disables reminders",
+          "nullable": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "get_review_analytics",
+      "command": [
+        "review",
+        "analytics"
+      ],
+      "family": "reviews",
+      "description": "Finding outcomes grouped by filer model family and its evidence level (known agent families are declared), plus review timing and guide-coverage medians for recent changes.",
+      "method": "GET",
+      "path": "/repos/{repo}/review/analytics",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "days",
+          "type": "integer",
+          "in": "query",
+          "description": "Window of change updates to include (1-180 days; default 30)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_review_guide",
+      "command": [
+        "review",
+        "guide"
+      ],
+      "family": "reviews",
+      "description": "Get deterministic change coverage, the guide and acknowledgements; include hunks only when requested.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}/review-guide",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
           "required": true,
           "positional": true
+        },
+        {
+          "name": "since",
+          "type": "string",
+          "in": "query",
+          "description": "Only include units added since this commit SHA, or use parent for the focused diff"
+        },
+        {
+          "name": "unacked",
+          "type": "boolean",
+          "in": "query",
+          "description": "Only return units not acknowledged by you"
+        },
+        {
+          "name": "include",
+          "type": "string",
+          "in": "query",
+          "description": "Include inline hunk details",
+          "enum": [
+            "hunks"
+          ]
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "get_review_impact",
+      "command": [
+        "review",
+        "impact"
+      ],
+      "family": "reviews",
+      "description": "Show changed-file consumers, test consumers and import evidence for this change.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}/review/impact",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "submit_review_guide",
+      "command": [
+        "review",
+        "submit-guide"
+      ],
+      "family": "reviews",
+      "description": "Submit or replace a guide validated against the current coverage map.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/review-guide",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "headSha",
+          "type": "string",
+          "in": "body",
+          "description": "Current 40-character head SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "guide",
+          "type": "json",
+          "in": "body",
+          "description": "Guide chapters, tiers and contracts",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "ack_review_units",
+      "command": [
+        "review",
+        "ack"
+      ],
+      "family": "reviews",
+      "description": "Acknowledge or unacknowledge up to 500 coverage keys or one guide chapter.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/review-acks",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "headSha",
+          "type": "string",
+          "in": "body",
+          "description": "Current 40-character head SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "keys",
+          "type": "json",
+          "in": "body",
+          "description": "Coverage unit keys to acknowledge"
+        },
+        {
+          "name": "chapter",
+          "type": "string",
+          "in": "body",
+          "description": "A chapter id to acknowledge"
+        },
+        {
+          "name": "unack",
+          "type": "boolean",
+          "in": "body",
+          "description": "Remove acknowledgements instead of adding them"
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "submit_findings",
+      "command": [
+        "finding",
+        "submit"
+      ],
+      "family": "reviews",
+      "description": "Submit up to 50 findings tied to the current head and coverage units.",
+      "method": "POST",
+      "path": "/repos/{repo}/changes/{number}/findings",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "headSha",
+          "type": "string",
+          "in": "body",
+          "description": "Current 40-character head SHA",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "findings",
+          "type": "json",
+          "in": "body",
+          "description": "Findings with path, line, category, severity, confidence and title",
+          "required": true
+        }
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "list_findings",
+      "command": [
+        "finding",
+        "list"
+      ],
+      "family": "reviews",
+      "description": "List findings for a change, with outdated and blocking state.",
+      "method": "GET",
+      "path": "/repos/{repo}/changes/{number}/findings",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "in": "query",
+          "description": "Filter by finding status",
+          "enum": [
+            "all",
+            "open",
+            "resolved",
+            "irrelevant",
+            "wont-fix"
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "in": "query",
+          "description": "Page size (1-100)"
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "in": "query",
+          "description": "Opaque cursor from the previous page (nextCursor)"
+        }
+      ],
+      "readOnly": true
+    },
+    {
+      "name": "update_finding",
+      "command": [
+        "finding",
+        "update"
+      ],
+      "family": "reviews",
+      "description": "Resolve, reopen, dismiss or mark a finding as wont-fix.",
+      "method": "PATCH",
+      "path": "/repos/{repo}/changes/{number}/findings/{id}",
+      "params": [
+        {
+          "name": "repo",
+          "type": "string",
+          "in": "path",
+          "description": "Repository as owner/name",
+          "required": true,
+          "positional": true,
+          "format": "repo"
+        },
+        {
+          "name": "number",
+          "type": "integer",
+          "in": "path",
+          "description": "Change set number within the repository",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "id",
+          "type": "string",
+          "in": "path",
+          "description": "Finding id",
+          "required": true,
+          "positional": true
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "in": "body",
+          "description": "New finding status",
+          "required": true,
+          "positional": true,
+          "enum": [
+            "open",
+            "resolved",
+            "irrelevant",
+            "wont-fix"
+          ]
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "in": "body",
+          "description": "Resolution note"
         }
       ],
       "readOnly": false
@@ -4066,6 +4634,16 @@
             "advisory",
             "required"
           ]
+        },
+        {
+          "name": "agentApprovals",
+          "type": "string",
+          "in": "body",
+          "description": "never (default): agent approvals do not satisfy protected-branch approval requirements; low-risk: different-family agents may approve heads without scrutinize files",
+          "enum": [
+            "never",
+            "low-risk"
+          ]
         }
       ],
       "readOnly": false
@@ -4149,6 +4727,16 @@
           "enum": [
             "advisory",
             "required"
+          ]
+        },
+        {
+          "name": "agentApprovals",
+          "type": "string",
+          "in": "body",
+          "description": "never (default): agent approvals do not satisfy protected-branch approval requirements; low-risk: different-family agents may approve heads without scrutinize files",
+          "enum": [
+            "never",
+            "low-risk"
           ]
         }
       ],

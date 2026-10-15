@@ -14,18 +14,19 @@
  *   and escalations per change. A capped repository scan reports `truncated`.
  * - Deciding goes through the same service functions as REST and MCP
  *   (`submitReview`, `resolveEscalation`) and then records a decision linked
- *   to the change (`recordDecision`, task `change:<number>`), with the
- *   required note as its reason.
+ *   to the change (`recordDecision`, task `change:<number>`) when a note is given.
  */
 
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { fail } from './result';
 import { splitFacts, type RepoFactsRow } from './access';
 import { authorizeRepo, type Actor } from './authz';
 import { parseNumber, type ChangeContext } from './changes';
 import { changeDecisionTask, recordDecision, type DecisionView } from './decisions';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import type { EscalationReason } from './reviewGate';
-import { changeAuthorPrincipal, getReviewPacket, LIVE_FOR_REVIEW, pendingAcross, REVIEW_LIMITS, resolveEscalation, submitReview, type PendingChange, type ReviewVerdict } from './reviews';
+import { changeAuthorPrincipal, getReviewPacket, LIVE_FOR_REVIEW, pendingAcross, pendingReadiness, REVIEW_LIMITS, resolveEscalation, submitReview, type PendingChange, type PendingReview, type ReviewPacket, type ReviewVerdict } from './reviews';
 
 export const INBOX_LIMITS = {
   /** Repositories considered for one inbox read. */
@@ -39,9 +40,33 @@ export const INBOX_LIMITS = {
   scanWindow: 100,
   /** The instance admin's most recently pushed repositories considered beyond their own roles. */
   adminReposWindow: 500,
-  /** The note every page decision requires (the review body and the decision's reason). */
+  /** Maximum decision note length. */
   noteMax: REVIEW_LIMITS.noteMax,
 };
+
+export const DECISION_ERROR_TEXT: Record<string, string> = {
+  NOTE_REQUIRED: 'Add a note: overrides and change requests record why.',
+  INVALID_NOTE: `Keep the note under ${INBOX_LIMITS.noteMax} characters.`,
+  HEAD_MOVED: 'The head moved since this page loaded. Review the new head.',
+  SELF_REVIEW: 'You authored this change, so another principal has to review it.',
+  CHANGE_NOT_OPEN: 'The change is no longer open.',
+  NO_HEAD: 'The change has no head commit yet.',
+  ESCALATION_RESOLVED: 'Someone already resolved that escalation.',
+  ESCALATION_NOT_FOUND: 'That escalation no longer exists.',
+  INVALID_VERDICT: 'Pick approve or request changes.',
+  SELF_RESOLVE: 'You authored this change, so another human resolves its escalations.',
+  DECISION_NOT_RECORDED: "Your review landed, but its decision note wasn't recorded. Record it with record_decision.",
+  SHIP_REQUIRES_APPROVE: 'Approve & ship requires an approval.',
+  CHANGE_DRAFT: 'Draft changes cannot be shipped until the merge policy changes.',
+  AGENT_REF_FORBIDDEN: 'Agent refs cannot be reviewed from a page.',
+  DANGER_UNACKED: 'Acknowledge every scrutinize unit before approving this change.',
+};
+
+export function decisionErrorMessage(code: string): { text: string; fallback: boolean } {
+  return Object.hasOwn(DECISION_ERROR_TEXT, code)
+    ? { text: DECISION_ERROR_TEXT[code]!, fallback: false }
+    : { text: 'The decision was not recorded.', fallback: true };
+}
 
 /** Group order: what blocks hardest first; a change sits in the group of its first reason. */
 export const INBOX_REASONS = ['reviewer-disagreement', 'review-blocked', 'protected-path', 'final-selection', 'approvals-required'] as const;
@@ -49,12 +74,13 @@ export type InboxReason = (typeof INBOX_REASONS)[number];
 
 export interface InboxItem extends PendingChange {
   repo: { owner: string; name: string };
+  readiness: PendingReview['readiness'];
   /** Every reason the change is waiting, in group order; the first one places it. */
   reasons: InboxReason[];
 }
 
 export interface InboxGroup {
-  reason: InboxReason;
+  reason: InboxReason | 'requested';
   items: InboxItem[];
 }
 
@@ -68,16 +94,16 @@ export interface ReviewInbox {
   nextCursor: string | null;
 }
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
-const fail = (status: number, code: string, error: string): Fail => ({ ok: false, status, code, error });
 
 function encodeCursor(c: { at: number; id: string }): string {
-  return btoa(JSON.stringify([c.at, c.id])).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify([c.at, c.id]));
 }
 
 function decodeCursor(raw: string): { at: number; id: string } | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const v: unknown = JSON.parse(atob(raw));
+    const v: unknown = JSON.parse(text);
     if (Array.isArray(v) && v.length === 2 && Number.isSafeInteger(v[0]) && typeof v[1] === 'string' && v[1].length <= 64) {
       return { at: v[0] as number, id: v[1] };
     }
@@ -101,9 +127,19 @@ export function awaitingApproval(c: Pick<PendingChange, 'approvals'>): boolean {
   return c.approvals.count < c.approvals.required || c.approvals.humans < c.approvals.humansRequired;
 }
 
-/** Items grouped by their first reason, groups in INBOX_REASONS order, empty groups dropped. */
+/** Requested items lead the page; remaining items stay in their reason groups. */
 export function groupInbox(items: InboxItem[]): InboxGroup[] {
-  return INBOX_REASONS.map((reason) => ({ reason, items: items.filter((i) => i.reasons[0] === reason) })).filter((g) => g.items.length > 0);
+  const requested = items
+    .filter((item) => item.requestedForViewer)
+    .sort((a, b) => Number(b.readiness.ready) - Number(a.readiness.ready));
+  const ordinary = items.filter((item) => !item.requestedForViewer);
+  return [
+    ...(requested.length ? [{ reason: 'requested' as const, items: requested }] : []),
+    ...INBOX_REASONS.map((reason) => ({
+    reason,
+      items: ordinary.filter((i) => i.reasons[0] === reason).sort((a, b) => Number(b.readiness.ready) - Number(a.readiness.ready)),
+    })).filter((g) => g.items.length > 0),
+  ];
 }
 
 /**
@@ -157,26 +193,54 @@ export async function reviewInbox(env: Env, actor: Actor, q: { limit?: string; c
   if (q.limit !== undefined && q.limit !== '') {
     const n = Number(q.limit);
     if (!Number.isInteger(n) || n < 1 || n > INBOX_LIMITS.changesMax) {
-      return fail(400, 'INVALID_LIMIT', `limit must be an integer from 1 to ${INBOX_LIMITS.changesMax}`);
+      return fail(400, `limit must be an integer from 1 to ${INBOX_LIMITS.changesMax}`, 'INVALID_LIMIT');
     }
     limit = n;
   }
   let after: { at: number; id: string } | null = null;
   if (q.cursor) {
     after = decodeCursor(q.cursor);
-    if (!after) return fail(400, 'INVALID_CURSOR', 'cursor is not a nextCursor from this page');
+    if (!after) return fail(400, 'cursor is not a nextCursor from this page', 'INVALID_CURSOR');
   }
   const { repos, truncatedReason } = await reviewableRepos(env, actor);
   const byId = new Map(repos.map((r) => [r.id, r]));
   const repoIds = [...byId.keys()];
-  const page = await pendingAcross(env, repoIds, { limit, window: INBOX_LIMITS.scanWindow, after });
+  const requestedPrincipal = actor.agent ? `agent:${actor.agent.agentId}` : `user:${actor.user.id}`;
+  const page = await pendingAcross(env, repoIds, { limit, window: INBOX_LIMITS.scanWindow, after, requestedPrincipal });
   const changes = page.changes;
   const more = page.more;
   const cursor = page.last ?? after;
   const items: InboxItem[] = changes.map((c) => {
     const repo = byId.get(c.repoId)!;
-    return { ...c, repo: { owner: repo.owner_login, name: repo.name }, reasons: inboxReasons(c) };
+    return {
+      ...c,
+      repo: { owner: repo.owner_login, name: repo.name },
+      readiness: { ready: false, reason: 'unknown' },
+      reasons: inboxReasons(c),
+    };
   });
+  await Promise.all(
+    repos.map(async (repo) => {
+      const repoItems = items.filter((item) => item.repoId === repo.id);
+      const readiness = await pendingReadiness(
+        env,
+        repo,
+        repoItems.map((item) => ({
+          id: item.id,
+          number: item.number,
+          title: item.title,
+          state: item.state,
+          base_ref: item.base,
+          head_sha: item.headSha,
+          merge_policy: item.mergePolicy,
+        })),
+        () => undefined,
+      );
+      repoItems.forEach((item, index) => {
+        item.readiness = readiness[index] ?? { ready: false, reason: 'unknown' };
+      });
+    }),
+  );
   return {
     ok: true,
     value: {
@@ -200,23 +264,31 @@ export async function reviewInbox(env: Env, actor: Actor, q: { limit?: string; c
 // ---------------------------------------------------------------------------
 
 export type PageDecision =
-  | { kind: 'review'; verdict: ReviewVerdict; headSha: string | null }
-  | { kind: 'resolve'; escalationId: string; resolution: 'resolve' | 'acknowledge' };
+  | { kind: 'review'; verdict: ReviewVerdict; headSha: string | null; ship?: boolean }
+  | { kind: 'resolve'; escalationId: string };
 
 export interface PageDecisionOutcome {
   /** Null when the review or resolution landed but storing the decision row failed. */
   decision: DecisionView | null;
   /** The change's state after the decision (an auto change may have merged). */
   state: string;
+  noteProvided: boolean;
 }
 
 /** The note a page decision requires: the review body or resolution note, and the decision's reason. */
-export function parseDecisionNote(v: unknown): ServiceResult<string> {
-  if (typeof v !== 'string' || v.trim().length === 0) return fail(422, 'NOTE_REQUIRED', 'a note is required: say why, for the record');
+export function parseDecisionNote(v: unknown, required = true): ServiceResult<string | null> {
+  if (typeof v !== 'string' || v.trim().length === 0) {
+    return required ? fail(422, 'Add a note: overrides and change requests record why.', 'NOTE_REQUIRED') : { ok: true, value: null };
+  }
   // Browsers submit textarea line breaks as CRLF, which maxlength does not count twice.
   const note = v.replace(/\r\n/g, '\n').trim();
-  if (note.length > INBOX_LIMITS.noteMax) return fail(422, 'INVALID_NOTE', `the note is at most ${INBOX_LIMITS.noteMax} characters`);
+  if (note.length > INBOX_LIMITS.noteMax) return fail(422, `the note is at most ${INBOX_LIMITS.noteMax} characters`, 'INVALID_NOTE');
   return { ok: true, value: note };
+}
+
+export function approvalNeedsDecisionNote(packet: Pick<ReviewPacket, 'escalations' | 'blockers'>): boolean {
+  return packet.escalations.some((escalation) => escalation.state === 'open') ||
+    packet.blockers.some((blocker) => blocker.code === 'ESCALATION_OPEN');
 }
 
 /**
@@ -225,7 +297,13 @@ export function parseDecisionNote(v: unknown): ServiceResult<string> {
  * written only after it succeeded.
  */
 export async function decideFromPage(cx: ChangeContext, rawNumber: string, d: PageDecision, rawNote: unknown): Promise<ServiceResult<PageDecisionOutcome>> {
-  const note = parseDecisionNote(rawNote);
+  let noteRequired = d.kind === 'resolve' || (d.kind === 'review' && d.verdict === 'request-changes');
+  if (d.kind === 'review' && d.verdict === 'approve') {
+    const packet = await getReviewPacket(cx.env, cx.repo, rawNumber);
+    if (!packet.ok) return packet;
+    noteRequired = approvalNeedsDecisionNote(packet.value);
+  }
+  const note = parseDecisionNote(rawNote, noteRequired);
   if (!note.ok) return note;
   let chosen: string;
   let state: string;
@@ -234,14 +312,10 @@ export async function decideFromPage(cx: ChangeContext, rawNumber: string, d: Pa
     // REST may omit the head to review the current one; a page reviews only the head it rendered, so a post
     // without one (a page that loaded before the change had a head, or a hand-made post) must not bind to a
     // head nobody on the page saw.
-    if (!d.headSha) return fail(409, 'HEAD_MOVED', 'review the head the page showed: headSha is required');
+    if (!d.headSha) return fail(409, 'review the head the page showed: headSha is required', 'HEAD_MOVED');
     // Record any escalation the gate requires but nobody opened yet, so a human approval answers it now
     // instead of the approval's own packet read opening it right afterwards.
-    if (d.verdict === 'approve') {
-      const packet = await getReviewPacket(cx.env, cx.repo, rawNumber);
-      if (!packet.ok) return packet;
-    }
-    const r = await submitReview(cx, rawNumber, { headSha: d.headSha, body: note.value }, d.verdict);
+    const r = await submitReview(cx, rawNumber, { headSha: d.headSha, body: note.value ?? '', ship: d.ship === true }, d.verdict);
     if (!r.ok) return r;
     chosen = `${d.verdict}@${r.value.review.headSha}`;
     state = r.value.packet.state;
@@ -251,25 +325,27 @@ export async function decideFromPage(cx: ChangeContext, rawNumber: string, d: Pa
     // post holds to the same rule rather than trusting the hidden form; submitReview refuses SELF_REVIEW alike.
     const n = parseNumber(rawNumber);
     if (n !== null && cx.actor && (await changeAuthorPrincipal(cx.env, cx.repo.id, n)) === `user:${cx.actor.user.id}`) {
-      return fail(409, 'SELF_RESOLVE', 'the author of a change cannot resolve its escalations; another human must');
+      return fail(409, 'the author of a change cannot resolve its escalations; another human must', 'SELF_RESOLVE');
     }
-    const r = await resolveEscalation(cx, rawNumber, d.escalationId, { resolution: d.resolution, note: note.value });
+    const r = await resolveEscalation(cx, rawNumber, d.escalationId, { note: note.value! });
     if (!r.ok) return r;
-    chosen = `${d.resolution}:${r.value.escalation.reason}`;
+    chosen = `resolve:${r.value.escalation.reason}`;
     state = r.value.packet.state;
     number = r.value.packet.number;
   }
   // The review already landed and cannot be retried (a resolved escalation answers 409), so a failed
   // decision write is reported to the caller rather than turned into an error for an action that happened.
   let decision: DecisionView | null = null;
-  try {
-    const r = await recordDecision(
+  if (note.value) {
+    try {
+      const r = await recordDecision(
       { env: cx.env, repo: cx.repo, actor: cx.actor },
       { task: changeDecisionTask(number), paths: [], chosen, rejected: [], reason: note.value },
-    );
-    decision = r.ok ? r.value : null;
-  } catch (err) {
-    console.log(JSON.stringify({ inbox: 'decision-not-recorded', repo: cx.repo.id, change: number, error: String(err).slice(0, 200) }));
+      );
+      decision = r.ok ? r.value : null;
+    } catch (err) {
+      console.log(JSON.stringify({ inbox: 'decision-not-recorded', repo: cx.repo.id, change: number, error: String(err).slice(0, 200) }));
+    }
   }
-  return { ok: true, value: { decision, state } };
+  return { ok: true, value: { decision, state, noteProvided: note.value !== null } };
 }

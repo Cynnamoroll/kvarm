@@ -10,27 +10,23 @@ import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecu
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EMPTY_PACK, ZERO_OID, pktLine, readPktLines } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { getRepoById } from '../src/db/repos';
 import { deleteRepo } from '../src/repos/service';
 import { compose, defaultComposeDeps, type ComposeContext, type ComposeDeps } from '../src/services/compositions';
 import type { ChecksGate } from '../src/services/checksGate';
 import worker from '../src/index';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch, writeTree, type Files } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (name: string) => (await seedRepoBase(env, name, { owner: OWNER, visibility: 'private' })).repo;
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api', 'ci'];
 const OWNER = 'cand-owner';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
 
 const env = {
   ...baseEnv,
@@ -41,53 +37,6 @@ const env = {
 
 const tok = { owner: '', outsider: '' };
 let ownerId = '';
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(name: string): Promise<FakeRepo> {
-  const artifactsName = `${OWNER}--${name}`;
-  const repo = new FakeRepo();
-  fakeRepos.set(artifactsName, repo);
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?, ?, ?, ?, ?, 'private', 'main', ?)`,
-  )
-    .bind(crypto.randomUUID(), OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, Date.now())
-    .run();
-  return repo;
-}
-
-interface Reply {
-  status: number;
-  text: string;
-  json: Record<string, any>;
-  cost: CostCounters;
-}
-
-async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, text, json, cost: cost! };
-}
 
 const R = (repo: string) => `/api/v1/repos/${OWNER}/${repo}`;
 const createWs = (repo: string, task: string) => call('POST', `${R(repo)}/workspaces`, tok.owner, { task, agent: 'agent' });
@@ -614,9 +563,9 @@ describe('composition', () => {
       ],
     });
     expect(r.json.changeSet).toEqual(expect.any(Number));
-    // Budget row "POST …/candidates/compose (clean)": d1 ≤ 8, sub ≤ 3.
-    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(8);
-    expect(r.cost.sub).toBeLessThanOrEqual(3);
+    // Change creation now persists bounded review coverage and its per-head tier.
+    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(10);
+    expect(r.cost.sub).toBeLessThanOrEqual(4);
     expect(r.json.workspace).toMatchObject({ status: 'active', base: 'main', changeSet: r.json.changeSet });
     expect(repo.refs.get(r.json.workspace.ref)).toBe(r.json.commitSha);
     // The composed workspace's head is the composed commit, not the base, before its push event is consumed.
@@ -689,9 +638,9 @@ describe('composition', () => {
 
     const r = await call('POST', `${R(name)}/candidates/compose`, tok.owner, { base: 'main', workspaces: [a.id, b.id] });
     expect(r.status, JSON.stringify(r.json)).toBe(201);
-    // Budget row "POST …/candidates/compose (clean)" holds with the virtual merge base: its reads go to Artifacts, not D1.
-    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(8);
-    expect(r.cost.sub).toBeLessThanOrEqual(3);
+    // Change creation now persists bounded review coverage and its per-head tier.
+    expect(r.cost.d1, JSON.stringify(r.cost)).toBeLessThanOrEqual(10);
+    expect(r.cost.sub).toBeLessThanOrEqual(4);
     expect(r.json.treeSha).toBe(await writeTree(repo, { ...merged, 'src/a.ts': 'a\n', 'docs/b.md': 'b\n' }));
     expect(r.json.sources).toMatchObject([
       { workspace: a.id, mergeBase: [x1.sha, x2.sha].sort()[0], mergeBases: [x1.sha, x2.sha].sort() },

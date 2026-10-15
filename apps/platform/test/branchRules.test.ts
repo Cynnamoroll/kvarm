@@ -1,4 +1,4 @@
-import { env as cfEnv, exports } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { pktLine, readPktLines, ZERO_OID } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
@@ -11,10 +11,17 @@ import {
   RESERVED_REF_REASON,
   PROTECTED_REF_REASON,
   type BranchRule,
+  ruleFromRow,
 } from '../src/services/branchRules';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = (path: string, init: RequestInit = {}) => request(env, path, init);
+const seedUser = (login: string, admin = false) => seedUserBase(env, login, { admin });
+const seedRepo = async (owner: string, name: string, visibility: 'public' | 'private' = 'private') =>
+  seedRepoBase(env, name, { owner, visibility, register: false });
 
 const env = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -31,10 +38,6 @@ const logins: Record<Who, string> = {
 const pat = {} as Record<Who, string>;
 const REPO = `${logins.owner}/protected`;
 const PLAIN = `${logins.owner}/plain`;
-
-function call(path: string, init: RequestInit = {}): Promise<Response> {
-  return exports.default.fetch(new Request(`${ORIGIN}${path}`, init));
-}
 
 function as(who: Who, init: RequestInit & { json?: unknown } = {}): RequestInit {
   const headers: Record<string, string> = { Authorization: `Bearer ${pat[who]}` };
@@ -93,38 +96,12 @@ async function reportStatus(res: Response): Promise<string[]> {
   return pkts.map((p) => new TextDecoder().decode(p.data).trim());
 }
 
-async function seedUser(login: string, admin = false): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, admin ? 1 : 0, Date.now())
-    .run();
-  return id;
-}
-
-async function seedRepo(owner: string, name: string, visibility: 'public' | 'private'): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'main', ?7)`,
-  )
-    .bind(
-      crypto.randomUUID(),
-      owner,
-      name,
-      `${owner}--${name}`,
-      `https://artifacts.invalid/git/default/${owner}--${name}.git`,
-      visibility,
-      Date.now(),
-    )
-    .run();
-}
-
 interface RuleJson {
   id: string;
   pattern: string;
   requiredChecks: string[];
   requiredApprovals: number;
+  agentApprovals: 'never' | 'low-risk';
   createdBy: string;
   createdAt: string;
   updatedBy: string;
@@ -168,9 +145,10 @@ describe('branch rule evaluation', () => {
   const rule = (id: string, pattern: string, checks: string[] = [], approvals = 0): BranchRule => ({
     id,
     pattern,
-    requiredChecks: checks,
-    requiredApprovals: approvals,
-    guardCompleteness: 'advisory',
+      requiredChecks: checks,
+      requiredApprovals: approvals,
+      agentApprovals: 'never',
+      guardCompleteness: 'advisory',
     createdBy: null,
     createdAt: 0,
     updatedBy: null,
@@ -195,9 +173,29 @@ describe('branch rule evaluation', () => {
       directPush: 'denied',
       requiredChecks: ['ci', 'guard'],
       requiredApprovals: 2,
+      agentApprovals: 'never',
       guardCompleteness: 'advisory',
       rules: ['r1', 'r2'],
     });
+    expect(effectivePolicy([
+      { ...rule('r3', 'refs/heads/main'), agentApprovals: 'low-risk' },
+      { ...rule('r4', 'refs/heads/*'), agentApprovals: 'low-risk' },
+    ], 'refs/heads/main').agentApprovals).toBe('low-risk');
+    expect(effectivePolicy([
+      { ...rule('r3', 'refs/heads/main'), agentApprovals: 'low-risk' },
+      rule('r4', 'refs/heads/*'),
+    ], 'refs/heads/main').agentApprovals).toBe('never');
+    expect(effectivePolicy([], 'refs/heads/main').agentApprovals).toBe('never');
+    expect(ruleFromRow({
+      id: 'stored',
+      pattern: 'refs/heads/main',
+      required_checks: '[]',
+      required_approvals: 0,
+      guard_completeness: 'advisory',
+      agent_approvals: 'unexpected',
+      created_at: 0,
+      updated_at: 0,
+    }).agentApprovals).toBe('never');
     expect(effectivePolicy(rules, 'refs/tags/v1').protected).toBe(false);
     expect(directPushDenial(rules, 'refs/heads/feature')).toBe(PROTECTED_REF_REASON);
     expect(directPushDenial([rule('r', 'refs/heads/main')], 'refs/heads/main2')).toBeNull();
@@ -226,6 +224,7 @@ describe('branch rule management', () => {
       pattern: 'refs/heads/main',
       requiredChecks: ['ci/test'],
       requiredApprovals: 1,
+      agentApprovals: 'never',
       createdBy: logins.owner,
       updatedBy: logins.owner,
     });
@@ -240,6 +239,7 @@ describe('branch rule management', () => {
       [{ pattern: 'dev', requiredChecks: [''] }, 400, 'INVALID_CHECKS'],
       [{ pattern: 'dev', requiredApprovals: 11 }, 400, 'INVALID_APPROVALS'],
       [{ pattern: 'dev', requiredApprovals: 1.5 }, 400, 'INVALID_APPROVALS'],
+      [{ pattern: 'dev', agentApprovals: 'sometimes' }, 400, 'INVALID_AGENT_APPROVALS'],
       [{ pattern: 'refs/heads/main' }, 409, 'RULE_EXISTS'],
     ];
     for (const [body, code, errCode] of cases) {
@@ -247,6 +247,25 @@ describe('branch rule management', () => {
       expect(res.status, JSON.stringify(body)).toBe(code);
       expect((await json(res)).code).toBe(errCode);
     }
+  });
+
+  it('round-trips agent approval policy through REST and effective policy', async () => {
+    const rule = await createdRule('owner', PLAIN, { pattern: 'docs/*', agentApprovals: 'low-risk' });
+    expect(rule.agentApprovals).toBe('low-risk');
+    expect((await json<{ rule: RuleJson }>(await call(`/api/v1/repos/${PLAIN}/branch-rules/${rule.id}`, as('reader')))).rule.agentApprovals)
+      .toBe('low-risk');
+    const patched = await call(
+      `/api/v1/repos/${PLAIN}/branch-rules/${rule.id}`,
+      as('owner', { method: 'PATCH', json: { agentApprovals: 'never' } }),
+    );
+    expect((await json<{ rule: RuleJson }>(patched)).rule.agentApprovals).toBe('never');
+    const enabled = await call(
+      `/api/v1/repos/${PLAIN}/branch-rules/${rule.id}`,
+      as('owner', { method: 'PATCH', json: { agentApprovals: 'low-risk' } }),
+    );
+    expect((await json<{ rule: RuleJson }>(enabled)).rule.agentApprovals).toBe('low-risk');
+    expect(await json(await call(`/api/v1/repos/${PLAIN}/branch-policy?ref=docs/page`, as('reader'))))
+      .toMatchObject({ agentApprovals: 'low-risk' });
   });
 
   it('only repo admins manage rules; readers may list them; outsiders see nothing', async () => {
@@ -320,6 +339,7 @@ describe('branch rule management', () => {
       directPush: 'denied',
       requiredChecks: ['ci/test'],
       requiredApprovals: 1,
+      agentApprovals: 'never',
       guardCompleteness: 'advisory',
       rules: [mainRule.id],
     });

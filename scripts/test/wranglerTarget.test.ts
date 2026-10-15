@@ -78,6 +78,18 @@ describe('targetConfig', () => {
     expect(JSON.stringify(base)).toBe(before);
   });
 
+  it('derives the WorkOS callback URL from the origin', () => {
+    const out = targetConfig(base, { KVARM_D1_DATABASE_ID: ID, KVARM_APP_ORIGIN: 'https://kvarm.dev' }, { requireOrigin: true }) as Config;
+    expect(out.vars.WORKOS_REDIRECT_URI).toBe('https://kvarm.dev/auth/callback');
+  });
+
+  it('publishes the custom-domain route for a non-workers.dev origin only', () => {
+    const custom = targetConfig(base, { KVARM_D1_DATABASE_ID: ID, KVARM_APP_ORIGIN: 'https://kvarm.dev' }, { requireOrigin: true }) as Config & { routes?: unknown };
+    expect(custom.routes).toEqual([{ pattern: 'kvarm.dev', custom_domain: true }]);
+    const platform = targetConfig(base, { KVARM_D1_DATABASE_ID: ID, KVARM_APP_ORIGIN: 'https://kvarm-platform.example.workers.dev' }, { requireOrigin: true }) as Config & { routes?: unknown };
+    expect(platform.routes).toBeUndefined();
+  });
+
   it('renames the D1 database when KVARM_D1_DATABASE_NAME is set', () => {
     const out = targetConfig(base, { KVARM_D1_DATABASE_ID: ID, KVARM_D1_DATABASE_NAME: 'kvarm-db' }, { requireOrigin: false }) as Config;
     expect(out.d1_databases[0]!.database_name).toBe('kvarm-db');

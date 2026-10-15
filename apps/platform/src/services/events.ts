@@ -26,6 +26,7 @@ import { bumpRefGeneration } from '../cache/compare';
 import { CostMeter, runWithMeter } from '../cost/meter';
 import type { ServiceResult } from '../repos/service';
 import { onBasePushed, onHeadPushed, type ChangeOnRef } from './changes';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { reconcileObserved } from './intents/forecast';
 import { runTrain, type TrainRunResult } from './queue';
 import { isTrainMessage } from './trainKick';
@@ -38,7 +39,10 @@ import { readCommitInfo, type ResolveContext } from './refs';
 import { requestEnvironmentBuild } from './environments';
 import { commitCloseStatement, commitClosingRefs, guardScanStatements, pushedCommits, retireIssueTasksStatement } from './issues';
 import { deliverWebhook, isWebhookDeliveryMessage, pumpWebhookDeliveries, type AttemptResult } from './webhooks';
+import { isNudgeMessage, processReviewNudge } from './reviewNudges';
 import type { RepoRow } from '../db/repos';
+import { WORKSPACE_REF_PREFIX } from './agentMeta';
+import { publishRepoEvent } from './live';
 
 export interface PushEvent {
   namespace: string;
@@ -55,7 +59,7 @@ export interface PushEvent {
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const PUSH_TYPE = 'cf.artifacts.repo.pushed';
-const WORKSPACE_REF_PREFIX = 'refs/heads/agents/';
+
 
 function record(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -194,8 +198,10 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
          WHERE r.artifacts_name = ?1`,
       )
       .bind(ev.repoName, id),
-    // Only a newer event (event time, then id as a deterministic tiebreak)
-    // moves the ref, so a late older delivery never rolls state back.
+    // Only a newer event moves the ref, so a late older delivery never rolls
+    // state back. Two events of one time are ordered by succession: never
+    // the one the current position follows, always the one that follows the
+    // current position, and by id only when neither follows the other.
     db
       .prepare(
         `INSERT INTO repo_refs (repo_id, ref, sha, event_id, event_at, updated_at)
@@ -204,9 +210,11 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
          ON CONFLICT (repo_id, ref) DO UPDATE SET
            sha = excluded.sha, event_id = excluded.event_id, event_at = excluded.event_at, updated_at = excluded.updated_at
          WHERE excluded.event_at > repo_refs.event_at
-            OR (excluded.event_at = repo_refs.event_at AND excluded.event_id > repo_refs.event_id)`,
+            OR (excluded.event_at = repo_refs.event_at AND excluded.event_id != repo_refs.event_id
+                AND NOT EXISTS (SELECT 1 FROM push_events c WHERE c.id = repo_refs.event_id AND c.before_sha = ?4)
+                AND (?6 = repo_refs.sha OR excluded.event_id > repo_refs.event_id))`,
       )
-      .bind(ev.repoName, id, ev.ref, ev.after, now),
+      .bind(ev.repoName, id, ev.ref, ev.after, now, ev.before),
     // Head refresh: open changes on this branch follow the ref position just
     // reconciled above, and only when it is newer than the event that last
     // set their head (creation time at first), so an old delivery never
@@ -229,6 +237,7 @@ async function ingest(db: D1Database, ev: PushEvent, id: string, deliveryId: str
         `SELECT r.id AS repo_id, r.default_branch, p.deliveries, p.event_at, f.event_id AS head_event_id,
            (SELECT json_group_array(x.effect) FROM push_event_effects x WHERE x.event_id = ?2) AS done,
            (SELECT json_group_array(json_object('id', c.id, 'number', c.number, 'state', c.state, 'policy', c.merge_policy, 'headSha', c.head_sha,
+                     'nudgeAfterMinutes', (SELECT n.nudge_after_minutes FROM review_policies n WHERE n.repo_id = c.repo_id),
                      'queuedHead', (SELECT q.head_sha FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1)))
               FROM change_sets c WHERE c.repo_id = r.id AND c.head_ref = ?4 AND c.state IN ('open', 'conflicted')) AS changes,
            (SELECT json_object('id', w.id, 'status', w.status, 'baseSha', w.base_sha)
@@ -503,7 +512,7 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [
 /** Webhook attempts one consumer invocation runs at once. */
 export const WEBHOOK_ATTEMPT_LANES = 3;
 
-export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'webhook';
+export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'nudge' | 'webhook';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
 export function retryDelaySeconds(attempts: number): number {
@@ -523,6 +532,7 @@ interface MessageResult {
 async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
   if (isTrainMessage(msg.body)) {
     const run = await runTrain(env, msg.body.repoId, msg.body.ref);
+    await publishRepoEvent(env, msg.body.repoId, { type: 'train.updated', ref: msg.body.ref, state: run.state });
     return { outcome: 'train', train: { reason: msg.body.reason, ...run } };
   }
   if (isSettleMessage(msg.body)) {
@@ -531,6 +541,10 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
   // An endpoint failure is a recorded attempt with its own delayed retry, never a queue retry.
   if (isWebhookDeliveryMessage(msg.body)) {
     return { outcome: 'webhook', webhook: await deliverWebhook(env, msg.body.deliveryId) };
+  }
+  if (isNudgeMessage(msg.body)) {
+    await processReviewNudge(env, msg.body);
+    return { outcome: 'nudge' };
   }
   const event = parsePushEvent(msg.body);
   if (!event) return { outcome: 'ignored' };
@@ -704,17 +718,12 @@ interface PushEventListRow {
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function encodeCursor(eventAt: number, id: string): string {
-  return btoa(`${eventAt}:${id}`).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return encodeCursorPayload(`${eventAt}:${id}`);
 }
 
 function decodeCursor(cursor: string): { eventAt: number; id: string } | null {
-  try {
-    const text = atob(cursor.replace(/-/g, '+').replace(/_/g, '/'));
-    const m = /^(\d{1,16}):([0-9a-f]{64})$/.exec(text);
-    return m ? { eventAt: Number(m[1]), id: m[2]! } : null;
-  } catch {
-    return null;
-  }
+  const m = /^(\d{1,16}):([0-9a-f]{64})$/.exec(decodeCursorPayload(cursor) ?? '');
+  return m ? { eventAt: Number(m[1]), id: m[2]! } : null;
 }
 
 /** One bounded page of a repo's push events, newest source time first, with their effects. */

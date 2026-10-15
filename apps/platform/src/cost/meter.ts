@@ -58,6 +58,7 @@ export const METERED_BINDINGS: Readonly<Record<string, BindingKind>> = {
   CI_SANDBOX: 'do',
   ENV_BUILDER: 'do',
   AGENT_SANDBOX: 'do',
+  REPO_EVENTS: 'do',
 };
 
 interface D1Meta {

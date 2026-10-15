@@ -8,18 +8,13 @@
  *   POST check-runs   {headSha, name, status? | conclusion?, detailsUrl?, required?, summary?}
  */
 
-import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { Hono } from 'hono';
+import { actorJson, authorizeRoute, denyJson, type App, failJson} from '../api';
 import * as checks from '../../services/checks';
 import { guarded, resolveCtx, resumeAfterCheck } from '../../services/changes';
 import { withLazyRepo } from '../../artifacts/repo';
 
 export const checksApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
 
 checksApi.get('/repos/:owner/:repo/commits/:sha/status', async (c) => {
   const d = await authorizeRoute(c, 'read');

@@ -1,5 +1,6 @@
 import { newAgentToken } from '../auth/agentTokens';
 import type { RepoRow } from '../db/repos';
+import { revokeAgentTokenStatement, updateSandboxStatement } from '../db/sandboxes';
 import { hashAgentToken } from './agents';
 import { resolveRepoAccessAs } from './access';
 import type { Actor } from './authz';
@@ -7,6 +8,7 @@ import { matchCommandPolicy, sandboxPath, tailText } from '../containers/fleetJo
 import { createWorkspace, type WorkspaceContext, type WorkspaceRow } from './workspaces';
 import { sandboxProvider } from './sandboxes/provider';
 import type { ServiceResult } from '../repos/service';
+import { fail } from './result';
 
 const RETENTION_MS = 25 * 24 * 60 * 60 * 1000;
 const MAX_TTL_HOURS = 24 * 7;
@@ -115,9 +117,6 @@ export interface StartSandboxInput {
   fresh?: boolean;
 }
 
-function fail<T>(status: number, error: string, code: string, extra: Record<string, unknown> = {}): ServiceResult<T> {
-  return { ok: false, status, error, code, ...extra };
-}
 
 function iso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
@@ -398,12 +397,14 @@ export async function startSandbox(
   const sleepSnapshotId = existing?.sleep_snapshot_id ?? null;
   if (existing) {
     await cx.env.DB.batch([
-      cx.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
-        .bind(existing.token_id, now),
-      cx.env.DB.prepare(
-        `UPDATE sandboxes SET status = 'starting', token_id = ?2, expires_at = ?3, run_expires_at = ?4,
-          last_active_at = ?5, error = NULL WHERE id = ?1 AND status = 'sleeping'`,
-      ).bind(id, minted.id, expiresAt, runExpiresAt, now),
+      revokeAgentTokenStatement(cx.env.DB, existing.token_id, now),
+      updateSandboxStatement(
+        cx.env.DB,
+        id,
+        "status = 'starting', token_id = ?2, expires_at = ?3, run_expires_at = ?4, last_active_at = ?5, error = NULL",
+        [minted.id, expiresAt, runExpiresAt, now],
+        ['sleeping'],
+      ),
     ]);
   } else {
     await cx.env.DB.prepare(
@@ -437,19 +438,12 @@ export async function startSandbox(
   if (!rpcSuccess<{ started: true; localDiverged: boolean }>(doResult)) {
     const failure = rpcFailure(doResult) ? doResult : { status: 503, code: 'CONTAINER_UNAVAILABLE', error: 'sandbox container could not start' };
     await cx.env.DB.batch([
-      cx.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1').bind(minted.id, Date.now()),
-      cx.env.DB.prepare(
-        `UPDATE sandboxes SET status = ?2, token_id = NULL, error = ?3
-          WHERE id = ?1 AND status = 'starting'`,
-      ).bind(id, existing ? 'sleeping' : 'failed', failure.error.slice(0, 1000)),
+      revokeAgentTokenStatement(cx.env.DB, minted.id, Date.now()),
+      updateSandboxStatement(cx.env.DB, id, 'status = ?2, token_id = NULL, error = ?3', [existing ? 'sleeping' : 'failed', failure.error.slice(0, 1000)], ['starting']),
     ]);
     return fail(failure.status, failure.error, failure.code);
   }
-  await cx.env.DB.prepare(
-    "UPDATE sandboxes SET status = 'running', sleep_snapshot_id = NULL, last_active_at = ?2 WHERE id = ?1",
-  )
-    .bind(id, Date.now())
-    .run();
+  await updateSandboxStatement(cx.env.DB, id, "status = 'running', sleep_snapshot_id = NULL, last_active_at = ?2", [Date.now()]).run();
   const row = await sandboxRow(cx.env, cx.repo.id, id);
   if (!row) return fail(500, 'sandbox could not be read after start', 'SANDBOX_START_FAILED');
   return {
@@ -519,20 +513,21 @@ async function wakeSandbox(
   );
   if (!minted) return fail(409, 'sandbox agent is revoked', 'AGENT_REVOKED');
   const updated = await cx.env.DB.batch([
-    cx.env.DB.prepare(
-      `UPDATE sandboxes SET status = 'starting', token_id = ?2, expires_at = ?3,
-        run_expires_at = ?4, last_active_at = ?5, error = NULL
-        WHERE id = ?1 AND status = 'sleeping' AND token_id IS ?6`,
-    ).bind(row.id, minted.id, expiresAt, runExpiresAt, now, row.token_id),
+    updateSandboxStatement(
+      cx.env.DB,
+      row.id,
+      "status = 'starting', token_id = ?2, expires_at = ?3, run_expires_at = ?4, last_active_at = ?5, error = NULL",
+      [minted.id, expiresAt, runExpiresAt, now, row.token_id],
+      ['sleeping'],
+      'token_id IS ?6',
+    ),
     cx.env.DB.prepare(
       `UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2)
         WHERE id = ?1 AND EXISTS (SELECT 1 FROM sandboxes WHERE id = ?3 AND token_id = ?4)`,
     ).bind(row.token_id, now, row.id, minted.id),
   ]);
   if ((updated[0]?.meta?.changes ?? 0) !== 1) {
-    await cx.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
-      .bind(minted.id, Date.now())
-      .run();
+    await revokeAgentTokenStatement(cx.env.DB, minted.id, Date.now()).run();
     return fail(409, 'sandbox is already being woken', 'SANDBOX_BUSY');
   }
   const provider = sandboxProvider(environment.os);
@@ -566,21 +561,12 @@ async function wakeSandbox(
       ? result
       : { status: 503, code: 'CONTAINER_UNAVAILABLE', error: 'sandbox container could not start' };
     await cx.env.DB.batch([
-      cx.env.DB.prepare('UPDATE agent_tokens SET revoked_at = COALESCE(revoked_at, ?2) WHERE id = ?1')
-        .bind(minted.id, Date.now()),
-      cx.env.DB.prepare(
-        `UPDATE sandboxes SET status = 'sleeping', token_id = NULL, error = ?2
-          WHERE id = ?1 AND status = 'starting' AND token_id = ?3`,
-      ).bind(row.id, failure.error.slice(0, 1000), minted.id),
+      revokeAgentTokenStatement(cx.env.DB, minted.id, Date.now()),
+      updateSandboxStatement(cx.env.DB, row.id, "status = 'sleeping', token_id = NULL, error = ?2", [failure.error.slice(0, 1000), minted.id], ['starting'], 'token_id = ?3'),
     ]);
     return fail(failure.status, failure.error, failure.code);
   }
-  await cx.env.DB.prepare(
-    `UPDATE sandboxes SET status = 'running', sleep_snapshot_id = NULL, last_active_at = ?2
-      WHERE id = ?1 AND status IN ('starting','running')`,
-  )
-    .bind(row.id, Date.now())
-    .run();
+  await updateSandboxStatement(cx.env.DB, row.id, "status = 'running', sleep_snapshot_id = NULL, last_active_at = ?2", [Date.now()], ['starting', 'running']).run();
   const current = await sandboxRow(cx.env, cx.repo.id, row.id);
   if (!current) return fail(500, 'sandbox could not be read after wake', 'SANDBOX_WAKE_FAILED');
   return { ok: true, value: { row: current, localDiverged: result.value.localDiverged } };
@@ -990,6 +976,24 @@ export async function listSandboxApprovals(
       expiresAt: new Date(row.expires_at).toISOString(),
     })),
   };
+}
+
+/** The header badge counts behind "Needs you" and running sandboxes (web/render appLayout). */
+export async function sandboxBadgeCounts(
+  env: Env,
+  userId: string,
+): Promise<{ running: number; needsYou: number }> {
+  const counts = await env.DB.prepare(
+    `SELECT
+      (SELECT COUNT(*) FROM sandboxes
+       WHERE owner_user_id = ? AND status IN ('running', 'starting')) AS running,
+      (SELECT COUNT(*) FROM sandbox_approvals a
+       JOIN sandboxes s ON s.id = a.sandbox_id
+       WHERE s.owner_user_id = ? AND a.status = 'pending' AND a.expires_at > ?) AS approvals`,
+  )
+    .bind(userId, userId, Date.now())
+    .first<{ running: number; approvals: number }>();
+  return { running: Number(counts?.running ?? 0), needsYou: Number(counts?.approvals ?? 0) };
 }
 
 export async function listMyPendingApprovals(

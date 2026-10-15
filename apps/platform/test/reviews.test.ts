@@ -9,38 +9,27 @@
 
 import { env as cfEnv } from 'cloudflare:workers';
 import { createExecutionContext, createMessageBatch, getQueueResult, waitOnExecutionContext } from 'cloudflare:test';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
-import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
+import type { RepoRow } from '../src/db/repos';
 import worker from '../src/index';
+import { headFingerprint } from '../src/services/approvalCarry';
+import { suggestedReviewers } from '../src/services/reviews';
 import type { ChecksGate } from '../src/services/checksGate';
 import { defaultTrainDeps, runTrain, type TrainDeps } from '../src/services/queue';
 import { FakeRepo, commit, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { call as apiCall } from './helpers/http';
+import { FakeWorkflow, recordingEvents, seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const fakeEvents = recordingEvents();
+const sent = fakeEvents.sent;
+const seedUser = (login: string) => seedUserBase(env, login, { userIds });
+const call = (method: string, path: string, token?: string, body?: unknown) => apiCall(env, method, path, { token, body });
 
 const baseEnv = cfEnv as unknown as Env;
-const ORIGIN = 'https://kvarm.test';
 const FULL: Scope[] = ['read', 'write', 'api'];
 const OWNER = 'rv-owner';
 const MAIN = 'refs/heads/main';
-
-class FakeWorkflow {
-  async create(opts: { id?: string }) {
-    return { id: opts.id ?? crypto.randomUUID() };
-  }
-  async get(id: string) {
-    return { id };
-  }
-}
-
-const sent: unknown[] = [];
-const fakeEvents = {
-  async send(body: unknown) {
-    sent.push(body);
-  },
-  async sendBatch(msgs: Array<{ body: unknown }>) {
-    for (const m of msgs) sent.push(m.body);
-  },
-};
 
 const env = {
   ...baseEnv,
@@ -52,40 +41,6 @@ const env = {
 const tok = { owner: '', human2: '', human3: '', reader: '' };
 const userIds: Record<string, string> = {};
 const repoIds: Record<string, string> = {};
-
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)')
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  userIds[login] = id;
-  return id;
-}
-
-interface Reply {
-  status: number;
-  json: Record<string, any>;
-  cost: CostCounters;
-}
-
-async function call(method: string, path: string, token?: string, body?: unknown): Promise<Reply> {
-  const ctx = createExecutionContext();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  const req = new Request(`${ORIGIN}${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  const res = await worker.fetch!(req as Request<unknown, IncomingRequestCfProperties>, env, ctx);
-  const text = await res.text();
-  await waitOnExecutionContext(ctx);
-  const cost = parseCostHeader(res.headers.get(COST_HEADER));
-  expect(cost, `${COST_HEADER}: ${res.headers.get(COST_HEADER)}`).not.toBeNull();
-  let json: Record<string, any> = {};
-  try {
-    json = JSON.parse(text) as Record<string, any>;
-  } catch {
-    // non-JSON body
-  }
-  return { status: res.status, json, cost: cost! };
-}
 
 const api = (repo: string, rest: string) => `/api/v1/repos/${OWNER}/${repo}${rest}`;
 
@@ -113,15 +68,10 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
   const artifactsName = `${OWNER}--${name}`;
   const repo = new FakeRepo();
   fakeRepos.set(artifactsName, repo);
-  const id = crypto.randomUUID();
-  repoIds[name] = id;
+  const { id } = await seedRepoBase(env, name, { owner: OWNER, visibility: 'public', register: false, repoIds });
   const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility, default_branch, created_at)
-       VALUES (?, ?, ?, ?, ?, 'public', 'main', ?)`,
-    ).bind(id, OWNER, name, artifactsName, `https://artifacts.invalid/git/default/${artifactsName}.git`, now),
-    ...['rv-human2', 'rv-human3'].map((login) =>
+  await env.DB.batch(
+    ['rv-human2', 'rv-human3'].map((login) =>
       env.DB.prepare('INSERT INTO repo_grants (repo_id, user_id, role, granted_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(
         id,
         userIds[login],
@@ -131,7 +81,7 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
         now,
       ),
     ),
-  ]);
+  );
   const main = await commit(repo, { 'README.md': 'readme\n' });
   repo.refs.set(MAIN, main.sha);
   for (let i = 1; i <= count; i++) {
@@ -142,9 +92,19 @@ async function setup(name: string, count = 1): Promise<{ repo: FakeRepo; main: s
   return { repo, main: main.sha };
 }
 
+async function setupDocs(name: string): Promise<{ repo: FakeRepo; main: string; docs: string }> {
+  const { repo, main } = await setup(name, 0);
+  const docs = await commit(repo, { 'README.md': 'readme\n', 'docs/guide.md': 'guide\n' }, [main]);
+  repo.refs.set('refs/heads/docs', docs.sha);
+  repo.refs.set('refs/heads/agents/docs', docs.sha);
+  return { repo, main, docs: docs.sha };
+}
+
 const createChange = (repo: string, head: string, token = tok.owner, mergePolicy = 'review') =>
   call('POST', api(repo, '/changes'), token, { title: `Change ${head}`, base: 'main', head, mergePolicy });
 const setPolicy = (repo: string, requiredReviews: number, token = tok.owner) => call('PUT', api(repo, '/review-policy'), token, { requiredReviews });
+const setBranchRule = (repo: string, agentApprovals: 'never' | 'low-risk', requiredApprovals = 1) =>
+  call('POST', api(repo, '/branch-rules'), tok.owner, { pattern: 'main', requiredApprovals, agentApprovals });
 const approve = (repo: string, n: number, token: string, body: Record<string, unknown> = {}) => call('POST', api(repo, `/changes/${n}/approve`), token, body);
 const requestChanges = (repo: string, n: number, token: string, body: Record<string, unknown> = {}) =>
   call('POST', api(repo, `/changes/${n}/request-changes`), token, body);
@@ -203,10 +163,143 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('review policy', () => {
+  it('carries an approval only when every base-to-head file fingerprint still matches', async () => {
+    const full = await setup('carry-full');
+    await setPolicy('carry-full', 1);
+    await createChange('carry-full', 'b1');
+    const fullHead = full.repo.refs.get('refs/heads/b1')!;
+    const reviewer = await agent('carry-full', 'carry-agent', 'claude');
+    const approved = await approve('carry-full', 1, reviewer.token, { headSha: fullHead });
+    const approvalId = approved.json.review.id as string;
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_files WHERE review_id = ?').bind(approvalId).first<{ n: number }>())?.n).toBe(1);
+    const equivalent = await commit(full.repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [fullHead]);
+    full.repo.refs.set('refs/heads/b1', equivalent.sha);
+    await deliver(pushBody('carry-full', 'refs/heads/b1', fullHead, equivalent.sha));
+    const carried = await packet('carry-full', 1);
+    expect(carried.json.approvals.count).toBe(1);
+    expect(carried.json.reviews).toContainEqual(expect.objectContaining({ headSha: equivalent.sha, carriedFromHead: fullHead }));
+    const carriedRow = await env.DB.prepare(
+      `SELECT id, principal, user_id, user_login, agent_id, token_id, model_family, body, carried_from_head, carried_from_review
+         FROM change_reviews WHERE repo_id = ? AND head_sha = ?`,
+    ).bind(repoIds['carry-full'], equivalent.sha).first<Record<string, unknown>>();
+    const originalToken = await env.DB.prepare('SELECT token_id FROM change_reviews WHERE id = ?').bind(approvalId).first<{ token_id: string }>();
+    expect(carriedRow).toMatchObject({
+      principal: `agent:${reviewer.id}`,
+      user_id: userIds[OWNER],
+      agent_id: reviewer.id,
+      token_id: originalToken?.token_id,
+      model_family: 'claude',
+      body: null,
+      carried_from_head: fullHead,
+      carried_from_review: approvalId,
+    });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_files WHERE review_id = ?').bind(carriedRow!.id).first<{ n: number }>())?.n).toBe(1);
+    await env.DB.prepare('UPDATE agents SET revoked_at = ? WHERE id = ?').bind(Date.now(), reviewer.id).run();
+    expect((await packet('carry-full', 1)).json.approvals.count).toBe(0);
+
+    const partial = await setup('carry-partial');
+    await setPolicy('carry-partial', 1);
+    const partialHead = await commit(partial.repo, { 'README.md': 'new readme\n', 'f1.txt': 'file 1\n' }, [partial.main]);
+    partial.repo.refs.set('refs/heads/b1', partialHead.sha);
+    await createChange('carry-partial', 'b1');
+    await approve('carry-partial', 1, tok.human2, { headSha: partialHead.sha });
+    const changed = await commit(partial.repo, { 'README.md': 'new readme\n', 'f1.txt': 'file 1 changed\n' }, [partialHead.sha]);
+    partial.repo.refs.set('refs/heads/b1', changed.sha);
+    await deliver(pushBody('carry-partial', 'refs/heads/b1', partialHead.sha, changed.sha));
+    const partialPacket = await packet('carry-partial', 1);
+    expect(partialPacket.json.approvals.count).toBe(0);
+    expect(partialPacket.json.carry).toContainEqual(expect.objectContaining({
+      fromHead: partialHead.sha,
+      carried: false,
+      unchangedPaths: ['README.md'],
+      changedPaths: ['f1.txt'],
+    }));
+  });
+
+  it('does not fingerprint truncated or unavailable comparisons', async () => {
+    const { repo, main } = await setup('carry-budget');
+    const files = Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`file-${index}.txt`, `content ${index}\n`]));
+    const large = await commit(repo, files, [main]);
+    const repoRow = await env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(repoIds['carry-budget']).first<RepoRow>();
+    expect(repoRow).not.toBeNull();
+    expect(await headFingerprint(env, repoRow!, { base: 'main' }, large.sha)).toBeNull();
+    expect(await headFingerprint(env, repoRow!, { base: 'main' }, 'f'.repeat(40))).toBeNull();
+  });
+
+  it('does not carry request-changes or resolve an escalation while carrying another approver', async () => {
+    const { repo } = await setup('carry-escalation');
+    await setPolicy('carry-escalation', 1);
+    await createChange('carry-escalation', 'b1');
+    const oldHead = repo.refs.get('refs/heads/b1')!;
+    await approve('carry-escalation', 1, tok.human2);
+    await requestChanges('carry-escalation', 1, tok.human3);
+    const escalation = ((await packet('carry-escalation', 1)).json.escalations as Array<Record<string, any>>).find((item) => item.state === 'open');
+    expect(escalation).toBeTruthy();
+    const equivalent = await commit(repo, { 'README.md': 'readme\n', 'f1.txt': 'file 1\n' }, [oldHead]);
+    repo.refs.set('refs/heads/b1', equivalent.sha);
+    await deliver(pushBody('carry-escalation', 'refs/heads/b1', oldHead, equivalent.sha));
+    const result = await packet('carry-escalation', 1);
+    expect(result.json.approvals.count).toBe(1);
+    expect(result.json.escalations).toContainEqual(expect.objectContaining({ id: escalation!.id, state: 'open' }));
+    expect(result.json.reviews).not.toContainEqual(expect.objectContaining({ principal: `user:${userIds['rv-human3']}`, headSha: equivalent.sha }));
+  });
+
+  it('approve-and-ship sets auto policy in the same review and refuses invalid ships without writes', async () => {
+    const success = await setup('ship-success');
+    await setPolicy('ship-success', 1);
+    await createChange('ship-success', 'b1');
+    const shipped = await approve('ship-success', 1, tok.human2, { ship: true, headSha: success.repo.refs.get('refs/heads/b1') });
+    expect(shipped.status, JSON.stringify(shipped.json)).toBe(201);
+    expect(shipped.json.packet).toMatchObject({ mergePolicy: 'auto', state: 'merged', satisfied: true });
+
+    await setup('ship-pending');
+    await setPolicy('ship-pending', 2);
+    await createChange('ship-pending', 'b1');
+    const pending = await approve('ship-pending', 1, tok.human2, { ship: true });
+    expect(pending.json.packet).toMatchObject({ mergePolicy: 'auto', state: 'open', satisfied: false });
+    const later = await approve('ship-pending', 1, tok.human3);
+    expect(later.json.packet.state).toBe('merged');
+
+    const requestRepo = await setup('ship-request');
+    await createChange('ship-request', 'b1');
+    const beforeRequest = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-request']).first<{ n: number }>();
+    const request = await requestChanges('ship-request', 1, tok.human2, { ship: true });
+    expect([request.status, request.json.code]).toEqual([422, 'SHIP_REQUIRES_APPROVE']);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-request']).first<{ n: number }>())?.n).toBe(beforeRequest?.n);
+    expect((await env.DB.prepare('SELECT merge_policy FROM change_sets WHERE repo_id = ?').bind(repoIds['ship-request']).first<{ merge_policy: string }>())?.merge_policy).toBe('review');
+    expect(requestRepo.repo.refs.get(MAIN)).not.toBe(requestRepo.repo.refs.get('refs/heads/b1'));
+
+    await setup('ship-draft');
+    await createChange('ship-draft', 'b1', tok.owner, 'draft');
+    const beforeDraft = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-draft']).first<{ n: number }>();
+    const draft = await approve('ship-draft', 1, tok.human2, { ship: true });
+    expect([draft.status, draft.json.code]).toEqual([409, 'CHANGE_DRAFT']);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-draft']).first<{ n: number }>())?.n).toBe(beforeDraft?.n);
+    expect((await env.DB.prepare('SELECT merge_policy FROM change_sets WHERE repo_id = ?').bind(repoIds['ship-draft']).first<{ merge_policy: string }>())?.merge_policy).toBe('draft');
+
+    await setup('ship-agent');
+    const restricted = await agent('ship-agent', 'ship-restricted', 'claude');
+    await createChange('ship-agent', 'b1');
+    const beforeAgent = await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-agent']).first<{ n: number }>();
+    const denied = await approve('ship-agent', 1, restricted.token, { ship: true });
+    expect([denied.status, denied.json.code]).toEqual([403, 'AGENT_REF_FORBIDDEN']);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_reviews WHERE repo_id = ?').bind(repoIds['ship-agent']).first<{ n: number }>())?.n).toBe(beforeAgent?.n);
+    expect((await env.DB.prepare('SELECT merge_policy FROM change_sets WHERE repo_id = ?').bind(repoIds['ship-agent']).first<{ merge_policy: string }>())?.merge_policy).toBe('review');
+  });
+
   it('is unset by default (review merges unchanged), admin-only to change and validated', async () => {
     const { repo } = await setup('policy-unset');
     const unset = await call('GET', api('policy-unset', '/review-policy'), tok.reader);
-    expect([unset.status, unset.json]).toEqual([200, { requiredReviews: 0, configured: false, updatedBy: null, updatedAt: null }]);
+    expect([unset.status, unset.json]).toEqual([200, {
+      requiredReviews: 0,
+      guideRequired: false,
+      blockingFindings: 'high-confirmed',
+      dangerAckRequired: false,
+      nudgeAfterMinutes: null,
+      configured: false,
+      updatedBy: null,
+      updatedAt: null,
+    }]);
     expect((await createChange('policy-unset', 'b1')).status).toBe(201);
     const p = await packet('policy-unset', 1);
     expect(p.json).toMatchObject({ satisfied: true, blockers: [], approvals: { count: 0, required: 0 }, escalations: [] });
@@ -217,7 +310,16 @@ describe('review policy', () => {
     expect((await setPolicy('policy-unset', 11)).json.code).toBe('INVALID_REQUIRED_REVIEWS');
     expect((await call('PUT', api('policy-unset', '/review-policy'), tok.owner, { requiredReviews: 1.5 })).status).toBe(400);
     const set = await setPolicy('policy-unset', 2);
-    expect([set.status, set.json]).toEqual([200, { requiredReviews: 2, configured: true, updatedBy: OWNER, updatedAt: expect.any(String) }]);
+    expect([set.status, set.json]).toEqual([200, {
+      requiredReviews: 2,
+      guideRequired: false,
+      blockingFindings: 'high-confirmed',
+      dangerAckRequired: false,
+      nudgeAfterMinutes: null,
+      configured: true,
+      updatedBy: OWNER,
+      updatedAt: expect.any(String),
+    }]);
     const audit = await env.DB.prepare(`SELECT payload FROM events WHERE type = 'review_policy.updated' AND json_extract(payload, '$.repoId') = ?`)
       .bind(repoIds['policy-unset'])
       .first<{ payload: string }>();
@@ -252,6 +354,8 @@ describe('review policy', () => {
       body: 'looks right',
     });
     expect(first.json.packet).toMatchObject({ approvals: { count: 1, required: 2 }, satisfied: false, author: { kind: 'user', modelFamily: 'human' } });
+    const liveEvents = await env.REPO_EVENTS.get(env.REPO_EVENTS.idFromName(repoIds['n-distinct']!)).fetch('https://repo-events/since?seq=0');
+    expect(await liveEvents.json()).toMatchObject({ events: [expect.objectContaining({ type: 'change.updated' }), expect.objectContaining({ type: 'review.submitted', changeNumber: 1 })] });
     const again = await approve('n-distinct', 1, claude.token);
     expect([again.status, again.json.created, again.json.packet.approvals.count]).toEqual([200, false, 1]);
     expect((await merge('n-distinct', 1)).json.code).toBe('REVIEWS_REQUIRED');
@@ -261,7 +365,14 @@ describe('review policy', () => {
     // A human non-author counts as one more distinct principal, recorded with the human sentinel family.
     const human = await approve('n-distinct', 1, tok.human2);
     expect(human.json.review).toMatchObject({ principal: `user:${userIds['rv-human2']}`, modelFamily: 'human', differentFamily: false });
-    expect(human.json.packet.approvals).toEqual({ count: 3, required: 2, humans: 1, humansRequired: 0 });
+    expect(human.json.packet.approvals).toEqual({
+      count: 3,
+      required: 2,
+      humans: 1,
+      humansRequired: 0,
+      agentFamilyApprovals: 2,
+      lowRisk: false,
+    });
     expect((await merge('n-distinct', 1)).json.state).toBe('merged');
   });
 
@@ -278,6 +389,51 @@ describe('review policy', () => {
     expect((await approve('bad-review', 1, tok.human3)).json.code).toBe('CHANGE_NOT_OPEN');
   });
 });
+
+describe('review nudges', () => {
+  it('suggests a different-family reviewer and does not duplicate the event on redelivery', async () => {
+    await setup('nudge-idempotent');
+    await call('PUT', api('nudge-idempotent', '/review-policy'), tok.owner, { requiredReviews: 1, nudgeAfterMinutes: 15 });
+    await setBranchRule('nudge-idempotent', 'low-risk', 0);
+    const author = await agent('nudge-idempotent', 'nudge-author', 'claude');
+    const candidate = await agent('nudge-idempotent', 'nudge-reviewer', 'gpt');
+    expect((await createChange('nudge-idempotent', 'agents/b1', author.token)).status).toBe(201);
+    const change = await env.DB.prepare('SELECT id FROM change_sets WHERE repo_id = ?1 AND number = 1')
+      .bind(repoIds['nudge-idempotent']).first<{ id: string }>();
+    const first = sent.map((item) => item.body).find((item) => (item as { kind?: string }).kind === 'review.nudge' &&
+      (item as { changeId?: string }).changeId === change!.id) as Record<string, unknown>;
+    expect(first).toMatchObject({ waitingOn: 'reviewers', seq: 1 });
+
+    const consume = async () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      await deliver({ ...first, notBefore: Date.now() - 1 });
+      log.mockRestore();
+    };
+    await consume();
+    const eventRows = () => env.DB.prepare(
+      `SELECT payload FROM events WHERE type = 'review.nudged' AND json_extract(payload, '$.changeId') = ?1`,
+    ).bind(change!.id).all<{ payload: string }>();
+    const events = (await eventRows()).results ?? [];
+    expect(events).toHaveLength(1);
+    const payload = JSON.parse(events[0]!.payload) as {
+      suggestedReviewer: { principal: string; modelFamily: string; modelFamilyEvidence: string; differentFamily: boolean; differentFamilyEvidence: string };
+    };
+    expect(payload.suggestedReviewer).toMatchObject({
+      principal: `agent:${candidate.id}`,
+      modelFamily: 'gpt',
+      modelFamilyEvidence: 'declared',
+      differentFamily: true,
+      differentFamilyEvidence: 'declared',
+    });
+
+    await consume();
+    expect((await eventRows()).results).toHaveLength(1);
+  });
+});
+
+function byIdOf(cands: Array<Record<string, any>>): Record<string, Record<string, any>> {
+  return Object.fromEntries(cands.map((c) => [c.agent.id, c]));
+}
 
 describe('model families and assignment', () => {
   it('records the agent modelFamily, refuses agent self-review and prefers a different family than the author', async () => {
@@ -301,7 +457,7 @@ describe('model families and assignment', () => {
     // Agent model families are self-declared, so the cross-model claim is labeled declared.
     expect(assigned.json.preference).toEqual({ rule: 'different-model-family', authorModelFamily: 'claude', met: true, evidence: 'declared' });
     expect(assigned.json.assigned).toMatchObject({ principal: `agent:${other.id}`, modelFamily: 'gpt', differentFamily: true, eligible: true });
-    const byId = Object.fromEntries((assigned.json.candidates as Array<Record<string, any>>).map((c) => [c.agent.id, c]));
+    const byId = byIdOf(assigned.json.candidates as Array<Record<string, any>>);
     expect(byId[author.id]).toMatchObject({ eligible: false, ineligibleReason: 'author' });
     expect(byId[sameFamily.id]).toMatchObject({ eligible: true, differentFamily: false, modelFamily: 'claude' });
     expect(byId[unknown.id]).toMatchObject({ eligible: true, differentFamily: false, modelFamily: null });
@@ -323,9 +479,257 @@ describe('model families and assignment', () => {
   });
 });
 
-function byIdOf(cands: Array<Record<string, any>>): Record<string, Record<string, any>> {
-  return Object.fromEntries(cands.map((c) => [c.agent.id, c]));
-}
+describe('persisted reviewer routing', () => {
+  it('requests idempotently, publishes the event, and withdraws the request', async () => {
+    await setup('review-request-routing');
+    await createChange('review-request-routing', 'b1');
+    const principal = `user:${userIds['rv-human2']}`;
+    const path = api('review-request-routing', '/changes/1/review-requests');
+    const first = await call('POST', path, tok.owner, { principal });
+    const duplicate = await call('POST', path, tok.owner, { principal });
+    expect([first.status, first.json.created]).toEqual([201, true]);
+    expect([duplicate.status, duplicate.json.created]).toEqual([200, false]);
+    expect(first.json.request).toMatchObject({ principal, requestedBy: `user:${userIds[OWNER]}` });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_requests WHERE principal = ?').bind(principal).first<{ n: number }>())?.n).toBe(1);
+
+    const stream = env.REPO_EVENTS.get(env.REPO_EVENTS.idFromName(repoIds['review-request-routing']!));
+    const cursor = await stream.fetch('https://repo-events/since?seq=0');
+    const events = (await cursor.json() as { events: Array<{ type: string }> }).events;
+    expect(events.map((event) => event.type)).toContain('review.requested');
+
+    const withdrawn = await call('DELETE', `${path}/${encodeURIComponent(principal)}`, tok.owner);
+    expect([withdrawn.status, withdrawn.json.withdrawn]).toEqual([200, true]);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM change_review_requests WHERE principal = ?').bind(principal).first<{ n: number }>())?.n).toBe(0);
+    const afterWithdraw = await stream.fetch('https://repo-events/since?seq=0');
+    const withdrawalEvents = (await afterWithdraw.json() as { events: Array<{ type: string }> }).events;
+    expect(withdrawalEvents.map((event) => event.type)).toContain('review.withdrawn');
+
+    await env.DB.prepare("UPDATE change_sets SET state = 'conflicted' WHERE repo_id = ?").bind(repoIds['review-request-routing']).run();
+    const requester = await agent('review-request-routing', 'rr-requester', 'gpt');
+    const agentRequest = await call('POST', path, requester.token, { principal: `user:${userIds['rv-human3']}` });
+    expect([agentRequest.status, agentRequest.json.request.requestedBy]).toEqual([201, `agent:${requester.id}`]);
+  });
+
+  it('refuses callers without write, author targets, revoked agents, and closed changes', async () => {
+    await setup('review-request-refusals');
+    await createChange('review-request-refusals', 'b1');
+    const path = api('review-request-refusals', '/changes/1/review-requests');
+    const noWrite = await call('POST', path, tok.reader, { principal: `user:${userIds['rv-human2']}` });
+    expect(noWrite.status).toBe(403);
+
+    const author = await call('POST', path, tok.owner, { principal: `user:${userIds[OWNER]}` });
+    expect([author.status, author.json.code]).toEqual([409, 'SELF_REVIEW']);
+
+    const revoked = await agent('review-request-refusals', 'rr-revoked', 'gpt');
+    await env.DB.prepare('UPDATE agents SET revoked_at = ? WHERE id = ?').bind(Date.now(), revoked.id).run();
+    const revokedTarget = await call('POST', path, tok.owner, { principal: `agent:${revoked.id}` });
+    expect([revokedTarget.status, revokedTarget.json.code]).toEqual([403, 'FORBIDDEN']);
+
+    await env.DB.prepare("UPDATE change_sets SET state = 'closed' WHERE repo_id = ? AND number = 1").bind(repoIds['review-request-refusals']).run();
+    const closed = await call('POST', path, tok.owner, { principal: `user:${userIds['rv-human2']}` });
+    expect([closed.status, closed.json.code]).toEqual([409, 'CHANGE_NOT_OPEN']);
+  });
+
+  it('ranks requested reviewers first, then overlap and recency, excluding the author and revoked agents', async () => {
+    await setup('review-suggestion-routing');
+    await createChange('review-suggestion-routing', 'b1');
+    const change = await env.DB.prepare('SELECT id, head_sha FROM change_sets WHERE repo_id = ? AND number = 1')
+      .bind(repoIds['review-suggestion-routing']).first<{ id: string; head_sha: string }>();
+    const requested = await call('POST', api('review-suggestion-routing', '/changes/1/review-requests'), tok.owner, {
+      principal: `user:${userIds['rv-human3']}`,
+    });
+    expect(requested.status).toBe(201);
+
+    const live = await agent('review-suggestion-routing', 'rr-live', 'gpt');
+    const revoked = await agent('review-suggestion-routing', 'rr-expired', 'claude');
+    for (const token of [tok.human2, tok.human3, live.token, revoked.token]) {
+      expect((await approve('review-suggestion-routing', 1, token)).status).toBe(201);
+    }
+    await env.DB.prepare(
+      'UPDATE change_reviews SET head_sha = ? WHERE change_set_id = ? AND principal IN (?, ?)',
+    ).bind('0'.repeat(40), change!.id, `user:${userIds['rv-human2']}`, `user:${userIds['rv-human3']}`).run();
+    expect(await env.DB.prepare(
+      "SELECT 1 AS found FROM change_reviews WHERE change_set_id = ? AND principal = ? AND head_sha = ? AND verdict = 'approve'",
+    ).bind(change!.id, `agent:${live.id}`, change!.head_sha).first<{ found: number }>()).not.toBeNull();
+    await env.DB.prepare('UPDATE agents SET revoked_at = ? WHERE id = ?').bind(Date.now(), revoked.id).run();
+
+    const principalReview = async (principal: string) =>
+      env.DB.prepare('SELECT id FROM change_reviews WHERE change_set_id = ? AND principal = ?')
+        .bind(change!.id, principal).first<{ id: string }>();
+    const addPaths = async (principal: string, paths: string[]) => {
+      const review = await principalReview(principal);
+      expect(review).not.toBeNull();
+      await env.DB.batch(paths.map((path) =>
+        env.DB.prepare('INSERT OR IGNORE INTO change_review_files (review_id, path) VALUES (?, ?)').bind(review!.id, path),
+      ));
+    };
+    await addPaths(`user:${userIds['rv-human2']}`, ['a.ts', 'b.ts']);
+    await addPaths(`user:${userIds['rv-human3']}`, ['a.ts']);
+    await addPaths(`agent:${live.id}`, ['a.ts', 'b.ts', 'c.ts']);
+    await addPaths(`agent:${revoked.id}`, ['a.ts', 'b.ts', 'c.ts']);
+    await env.DB.prepare(
+      'INSERT INTO change_review_requests (change_set_id, principal, requested_by, requested_at) VALUES (?, ?, ?, ?)',
+    ).bind(change!.id, `user:${userIds[OWNER]}`, `user:${userIds[OWNER]}`, Date.now()).run();
+
+    const repoRow = await env.DB.prepare('SELECT * FROM repos WHERE id = ?')
+      .bind(repoIds['review-suggestion-routing']).first<RepoRow>();
+    const suggestions = await suggestedReviewers(
+      env,
+      repoRow!,
+      change!.id,
+      ['a.ts', 'b.ts', 'c.ts'],
+      `user:${userIds[OWNER]}`,
+      change!.head_sha,
+    );
+    expect(suggestions.map(({ principal }) => principal)).toEqual([
+      `user:${userIds['rv-human3']}`,
+      `user:${userIds['rv-human2']}`,
+    ]);
+    expect(suggestions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ principal: `user:${userIds['rv-human3']}`, reason: 'requested', reviewedPaths: 1 }),
+      expect.objectContaining({ principal: `user:${userIds['rv-human2']}`, reviewedPaths: 2 }),
+    ]));
+    expect(suggestions.some(({ principal }) => principal === `agent:${live.id}`)).toBe(false);
+    expect(suggestions.some(({ principal }) => principal === `agent:${revoked.id}`)).toBe(false);
+    expect(suggestions.some(({ principal }) => principal === `user:${userIds[OWNER]}`)).toBe(false);
+  });
+});
+
+describe('agent approval head tiers', () => {
+  it('records a docs-only tier before pre-seeding and auto-merges a different-family agent approval', async () => {
+    const { docs } = await setupDocs('agent-docs-auto');
+    const reviewer = await agent('agent-docs-auto', 'da-gpt', 'gpt');
+    await setPolicy('agent-docs-auto', 1);
+    expect((await setBranchRule('agent-docs-auto', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-docs-auto', 'agents/docs', tok.owner, 'auto')).status).toBe(201);
+    const tier = await env.DB.prepare(
+      'SELECT max_tier, truncated FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-docs-auto'], docs).first<{ max_tier: string; truncated: number }>();
+    expect(tier).toMatchObject({ max_tier: 'read', truncated: 0 });
+    expect(await openEscalation('agent-docs-auto', 1, 'protected-path')).toBeUndefined();
+    const approval = await approve('agent-docs-auto', 1, reviewer.token);
+    expect(approval.json.packet.approvals).toMatchObject({ humans: 0, agentFamilyApprovals: 1, lowRisk: true });
+    expect(approval.json.packet.state).toBe('merged');
+  });
+
+  it('records a protected-path escalation on packet read when agent approvals are off', async () => {
+    await setupDocs('agent-approvals-never-read');
+    expect((await createChange('agent-approvals-never-read', 'docs')).status).toBe(201);
+    expect(await openEscalation('agent-approvals-never-read', 1, 'protected-path')).toBeUndefined();
+    expect((await setBranchRule('agent-approvals-never-read', 'never')).status).toBe(201);
+    const result = await packet('agent-approvals-never-read', 1);
+    expect(result.json.escalations).toEqual([
+      expect.objectContaining({ reason: 'protected-path', state: 'open', openedBy: 'system' }),
+    ]);
+  });
+
+  it('pre-seeds for a scrutinize creation and stores truncated coverage as scrutinize', async () => {
+    const { repo, main } = await setupDocs('agent-scrutinize-create');
+    const contract = await commit(repo, {
+      'README.md': 'readme\n',
+      'docs/guide.md': 'guide\n',
+      'apps/platform/migrations/0999_contract.sql': 'CREATE TABLE x (id TEXT);\n',
+    }, [main]);
+    repo.refs.set('refs/heads/contract', contract.sha);
+    expect((await setBranchRule('agent-scrutinize-create', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-scrutinize-create', 'contract')).status).toBe(201);
+    const seeded = await env.DB.prepare(
+      'SELECT max_tier, truncated FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-scrutinize-create'], contract.sha).first<{ max_tier: string; truncated: number }>();
+    expect(seeded).toMatchObject({ max_tier: 'scrutinize', truncated: 0 });
+    expect(await openEscalation('agent-scrutinize-create', 1, 'protected-path')).toMatchObject({ state: 'open' });
+
+    const { repo: largeRepo, main: largeMain } = await setupDocs('agent-truncated-create');
+    const files: Record<string, string> = { 'README.md': 'readme\n' };
+    for (let i = 0; i < 31; i++) files[`docs/file-${i}.md`] = `file ${i}\n`;
+    const large = await commit(largeRepo, files, [largeMain]);
+    largeRepo.refs.set('refs/heads/large', large.sha);
+    expect((await createChange('agent-truncated-create', 'large')).status).toBe(201);
+    const truncated = await env.DB.prepare(
+      'SELECT max_tier, truncated FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-truncated-create'], large.sha).first<{ max_tier: string; truncated: number }>();
+    expect(truncated).toMatchObject({ max_tier: 'scrutinize', truncated: 1 });
+  });
+
+  it('excludes same-family and null-family agents, and refuses a scrutinize head after a push', async () => {
+    const { repo, main } = await setupDocs('agent-family-and-push');
+    const author = await agent('agent-family-and-push', 'fp-author', 'claude');
+    const same = await agent('agent-family-and-push', 'fp-same', 'claude');
+    const unknown = await agent('agent-family-and-push', 'fp-unknown', null);
+    await setPolicy('agent-family-and-push', 1);
+    expect((await setBranchRule('agent-family-and-push', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-family-and-push', 'agents/docs', author.token)).status).toBe(201);
+    await approve('agent-family-and-push', 1, same.token);
+    const excluded = await approve('agent-family-and-push', 1, unknown.token);
+    expect(excluded.json.packet.approvals).toMatchObject({ agentFamilyApprovals: 0, lowRisk: true });
+    expect((await merge('agent-family-and-push', 1)).json.code).toBe('APPROVALS_REQUIRED');
+
+    const { repo: pushedRepo, main: pushedMain } = await setupDocs('agent-scrutinize-push');
+    const reviewer = await agent('agent-scrutinize-push', 'sp-gpt', 'gpt');
+    await setPolicy('agent-scrutinize-push', 1);
+    expect((await setBranchRule('agent-scrutinize-push', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-scrutinize-push', 'docs')).status).toBe(201);
+    await approve('agent-scrutinize-push', 1, reviewer.token);
+    const old = pushedRepo.refs.get('refs/heads/docs')!;
+    const next = await commit(pushedRepo, {
+      'README.md': 'readme\n',
+      'docs/guide.md': 'guide\n',
+      'apps/platform/migrations/0999_contract.sql': 'CREATE TABLE x (id TEXT);\n',
+    }, [old]);
+    pushedRepo.refs.set('refs/heads/docs', next.sha);
+    await deliver(pushBody('agent-scrutinize-push', 'refs/heads/docs', old, next.sha));
+    const tier = await env.DB.prepare(
+      'SELECT max_tier FROM change_head_tiers WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1) AND head_sha = ?',
+    ).bind(repoIds['agent-scrutinize-push'], next.sha).first<{ max_tier: string }>();
+    expect(tier?.max_tier).toBe('scrutinize');
+    await approve('agent-scrutinize-push', 1, reviewer.token);
+    const refused = await merge('agent-scrutinize-push', 1);
+    expect(refused.json.code).toBe('APPROVALS_REQUIRED');
+    expect(refused.json.review.approvals).toMatchObject({ agentFamilyApprovals: 1, lowRisk: false });
+    expect(repo.refs.get(MAIN)).toBe(main);
+    expect(pushedRepo.refs.get(MAIN)).toBe(pushedMain);
+  });
+
+  it('does not count any agent-family approval for an agent author with no family', async () => {
+    const { repo } = await setupDocs('agent-author-family-unknown');
+    const author = await agent('agent-author-family-unknown', 'auf-author', null);
+    const reviewer = await agent('agent-author-family-unknown', 'auf-gpt', 'gpt');
+    await setPolicy('agent-author-family-unknown', 1);
+    expect((await setBranchRule('agent-author-family-unknown', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-author-family-unknown', 'agents/docs', author.token)).status).toBe(201);
+    await approve('agent-author-family-unknown', 1, reviewer.token);
+    const packetResult = await packet('agent-author-family-unknown', 1);
+    expect(packetResult.json.approvals).toMatchObject({ agentFamilyApprovals: 0, lowRisk: true });
+    expect((await merge('agent-author-family-unknown', 1)).json.code).toBe('APPROVALS_REQUIRED');
+    expect(repo.refs.get(MAIN)).toBeTruthy();
+  });
+
+  it('re-reads tier facts immediately before train publication', async () => {
+    const { repo } = await setupDocs('agent-train-reread');
+    const reviewer = await agent('agent-train-reread', `phase-c-tr-gpt-${crypto.randomUUID().slice(0, 8)}`, 'gpt');
+    await setPolicy('agent-train-reread', 1);
+    expect((await setBranchRule('agent-train-reread', 'low-risk')).status).toBe(201);
+    expect((await createChange('agent-train-reread', 'docs')).status).toBe(201);
+    await approve('agent-train-reread', 1, reviewer.token);
+    expect((await enqueue('agent-train-reread', 1)).status).toBe(201);
+    let changed = false;
+    const gate: ChecksGate = {
+      async requiredChecksFor(_repo, treeSha, configId) {
+        if (!changed) {
+          changed = true;
+          await env.DB.prepare("UPDATE change_head_tiers SET max_tier = 'scrutinize' WHERE change_set_id = (SELECT id FROM change_sets WHERE repo_id = ? AND number = 1)")
+            .bind(repoIds['agent-train-reread']).run();
+        }
+        return { treeSha, configId, required: [], state: 'success' };
+      },
+    };
+    const run = await runTrain(env, repoIds['agent-train-reread']!, MAIN, trainDeps({ gate: () => gate }));
+    expect(changed).toBe(true);
+    expect(run.published).toEqual([]);
+    expect(run.ejected).toEqual([{ number: 1, code: 'APPROVALS_REQUIRED' }]);
+    expect(repo.refs.get(MAIN)).not.toBe(repo.refs.get('refs/heads/docs'));
+  });
+});
 
 describe('escalations', () => {
   it('reviewer disagreement blocks merge and enqueue until a human approves the current head', async () => {
@@ -360,7 +764,7 @@ describe('escalations', () => {
     expect((await merge('disagree', 1)).json.state).toBe('merged');
   });
 
-  it('a lone request-changes is a block a human acknowledges; a later disagreement escalates again', async () => {
+  it('a lone request-changes is a block a human resolves; a later disagreement escalates again', async () => {
     await setup('blocked');
     const claude = await agent('blocked', 'blk-claude', 'claude');
     const gpt = await agent('blocked', 'blk-gpt', 'gpt');
@@ -372,10 +776,9 @@ describe('escalations', () => {
     const m = await merge('blocked', 1);
     expect(m.json.review.blockers.map((b: any) => b.code)).toEqual(['ESCALATION_OPEN', 'REVIEWS_REQUIRED']);
 
-    expect((await resolve('blocked', 1, esc!.id, tok.human2, { resolution: 'nope' })).json.code).toBe('INVALID_RESOLUTION');
-    const ack = await resolve('blocked', 1, esc!.id, tok.human2, { resolution: 'acknowledge', note: 'addressed offline' });
-    expect(ack.status).toBe(200);
-    expect(ack.json.escalation).toMatchObject({ state: 'resolved', resolution: 'acknowledge', resolvedBy: 'rv-human2', note: 'addressed offline' });
+    const resolution = await resolve('blocked', 1, esc!.id, tok.human2, { note: 'addressed offline' });
+    expect(resolution.status).toBe(200);
+    expect(resolution.json.escalation).toMatchObject({ state: 'resolved', resolution: 'resolve', resolvedBy: 'rv-human2', note: 'addressed offline' });
     expect((await resolve('blocked', 1, esc!.id, tok.human2)).json.code).toBe('ESCALATION_RESOLVED');
     expect((await resolve('blocked', 1, 'nope', tok.human2)).json.code).toBe('ESCALATION_NOT_FOUND');
     expect((await merge('blocked', 1)).json.code).toBe('REVIEWS_REQUIRED');
@@ -569,13 +972,59 @@ describe('pending reviews and budgets', () => {
     await createChange('budget', 'b1');
     const a = await approve('budget', 1, claude.token);
     const p = await packet('budget', 1);
+    expect(Object.hasOwn(p.json, 'remaining')).toBe(false);
     const pend = await call('GET', api('budget', '/reviews/pending'), tok.owner);
     const assign = await call('POST', api('budget', '/changes/1/reviewers/assign'), tok.owner, {});
-    expect(a.cost).toMatchObject({ art: 0, do: 0 });
-    expect(a.cost.d1).toBeLessThanOrEqual(3);
+    expect(a.cost).toMatchObject({ art: 0, do: 1 });
+    expect(a.cost.d1).toBeLessThanOrEqual(4);
     for (const r of [p, pend, assign]) {
       expect(r.cost).toMatchObject({ art: 0, do: 0, rw: 0 });
       expect(r.cost.d1).toBeLessThanOrEqual(2);
     }
+  });
+
+  it('reports every readiness reason and filters pending changes by readiness', async () => {
+    const { repo } = await setup('readiness', 5);
+    await setPolicy('readiness', 1);
+    for (let n = 1; n <= 5; n++) await createChange('readiness', `b${n}`);
+    const rows = await env.DB.prepare('SELECT id, number FROM change_sets WHERE repo_id = ? ORDER BY number')
+      .bind(repoIds.readiness).all<{ id: string; number: number }>();
+    const byNumber = new Map((rows.results ?? []).map((row) => [row.number, row.id]));
+    await env.DB.prepare(
+      "UPDATE check_runs SET status = 'running', conclusion = NULL WHERE change_set_id = ? AND name = 'kvarm/guard'",
+    ).bind(byNumber.get(2)).run();
+    await env.DB.prepare(
+      "UPDATE check_runs SET status = 'failure', conclusion = 'failure' WHERE change_set_id = ? AND name = 'kvarm/guard'",
+    ).bind(byNumber.get(3)).run();
+    await env.DB.prepare("UPDATE change_sets SET base_ref = 'missing' WHERE id = ?").bind(byNumber.get(4)).run();
+    await env.DB.prepare("UPDATE change_sets SET state = 'conflicted' WHERE id = ?").bind(byNumber.get(5)).run();
+
+    const all = await call('GET', api('readiness', '/reviews/pending'), tok.owner);
+    expect(all.json.changes.map((change: any) => [change.number, change.readiness])).toEqual([
+      [5, { ready: false, reason: 'conflicted' }],
+      [4, { ready: false, reason: 'unknown' }],
+      [3, { ready: false, reason: 'checks-failed' }],
+      [2, { ready: false, reason: 'checks-pending' }],
+      [1, { ready: true, reason: null }],
+    ]);
+    const ready = await call('GET', api('readiness', '/reviews/pending?ready=true'), tok.owner);
+    expect(ready.json.changes.map((change: any) => change.number)).toEqual([1]);
+    const notReady = await call('GET', api('readiness', '/reviews/pending?ready=false'), tok.owner);
+    expect(notReady.json.changes.map((change: any) => change.number)).toEqual([5, 4, 3, 2]);
+    expect((await call('GET', api('readiness', '/reviews/pending?ready=yes'), tok.owner)).json.code).toBe('INVALID_READY');
+    expect(repo.refs.get(MAIN)).toBeTruthy();
+  });
+
+  it('keeps default pending readiness read-only for three rows apart from PAT-use stamping', async () => {
+    await setup('pending-default-cost', 3);
+    await setPolicy('pending-default-cost', 1);
+    for (let n = 1; n <= 3; n++) await createChange('pending-default-cost', `b${n}`);
+    const freshToken = (await mintPAT(env, userIds[OWNER]!, 'pending-default-cost', FULL)).token;
+    const first = await call('GET', api('pending-default-cost', '/reviews/pending'), freshToken);
+    const second = await call('GET', api('pending-default-cost', '/reviews/pending'), freshToken);
+    expect(first.json.changes).toHaveLength(3);
+    expect(first.cost.rw).toBe(1);
+    expect(second.json.changes).toHaveLength(3);
+    expect(second.cost.rw).toBe(0);
   });
 });

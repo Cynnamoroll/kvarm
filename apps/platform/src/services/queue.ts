@@ -41,7 +41,7 @@ import { toUserRow, type UserRow } from '../db/users';
 import type { ServiceResult } from '../repos/service';
 import { attributeMerge, attributeMerges, mergeAttributionDefaults, parseAttributionInput, type AttributionInput, type MergeAttributionItem } from './attribution';
 import { credentialMayUpdateRef, isOrgRole, isRepoNeed, repoRole, type Actor } from './authz';
-import { BRANCH_RULE_COLUMNS, effectivePolicy, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
+import { BRANCH_RULE_COLUMNS, effectivePolicy, repoBranchRulesSelect, ruleFromRow, type BranchPolicy, type BranchRule, type BranchRuleRow } from './branchRules';
 import {
   HEAD_MOVED_HOOKS,
   MERGE_POLICIES,
@@ -69,6 +69,7 @@ import {
   type MergePolicy,
 } from './changes';
 import { guardPending } from './checks';
+import { headFingerprint, sameFingerprint } from './approvalCarry';
 import type { ChecksGate, RequiredChecks } from './checksGate';
 import {
   blockFromRows,
@@ -93,9 +94,11 @@ import { conflictRecord, markConflictedStatements } from './conflicts';
 import type { GitPusher } from './gitwrite';
 import { artifactsMergeSources, overlaySources, prepareMerge, type MergeSources, type PreparedMerge } from './merge';
 import { RefStoreUnavailable, lsRefs, type ResolveContext } from './refs';
+import { decodeCursorPayload, encodeCursorPayload } from './pagination';
 import { parseReviewFacts, recordMissingEscalation, reviewFactsColumns, reviewGate, reviewGuardCondition, type ReviewFactsRow } from './reviewGate';
 import { kickTrain } from './trainKick';
 import { hasCiJobs, queueExactTreeCi, type CiConfigMemo } from './ci';
+import { objectBody } from './result';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -383,8 +386,9 @@ interface EnqueueInput {
 function parseEnqueue(cx: ChangeContext, number: number, body: unknown): ServiceResult<EnqueueInput> {
   const out: EnqueueInput = { headSha: null, mergePolicy: null, attribution: null };
   if (body === undefined || body === null) return { ok: true, value: out };
-  if (typeof body !== 'object' || Array.isArray(body)) return fail(400, 'body must be a JSON object {headSha?, mergePolicy?, attribution?}', 'INVALID_BODY');
-  const b = body as Record<string, unknown>;
+  const parsed = objectBody(body, '{headSha?, mergePolicy?, attribution?}');
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   if (b.headSha !== undefined && b.headSha !== null) {
     if (typeof b.headSha !== 'string' || !SHA_RE.test(b.headSha)) return fail(422, 'headSha must be a full 40-character commit SHA', 'INVALID_HEAD_SHA');
     out.headSha = b.headSha;
@@ -458,7 +462,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
                FROM change_sets c
               WHERE c.repo_id = ?1 AND c.number = ?2 AND c.state = 'open' AND c.merge_policy != 'draft' AND c.head_sha IS NOT NULL
                 AND (?9 IS NULL OR c.head_sha = ?9) AND (?10 IS NULL OR c.merge_policy = ?10)
-                AND ${reviewGuardCondition('c', '?13', '?14')}
+                AND ${reviewGuardCondition('c', '?13', '?14', '?16')}
                 AND ${noBlockedPinCondition('c')}
              RETURNING ${RETURNING_COLUMNS}`,
           )
@@ -478,6 +482,7 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
             target ? target.requiredApprovals : null,
             target?.protected ? 1 : 0,
             principal,
+            target?.agentApprovals ?? 'never',
           )
           .all<EntryRow>();
         return res.results?.[0];
@@ -508,10 +513,11 @@ export function enqueueChange(cx: ChangeContext, rawNumber: string, body: unknow
       db
         .prepare(
           `SELECT c.id AS c_id, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.base_ref AS c_base,
-                  a.active AS a_active, ${ENTRY_COLUMNS}, ${reviewFactsColumns('c')}
+                  a.active AS a_active, ${ENTRY_COLUMNS}, ${reviewFactsColumns('c', 'rp')}
              FROM change_sets c
              LEFT JOIN merge_queue q ON q.change_set_id = c.id AND q.active = 1
              LEFT JOIN merge_admission a ON a.repo_id = c.repo_id
+             LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id
             WHERE c.repo_id = ?1 AND c.number = ?2`,
         )
         .bind(cx.repo.id, number),
@@ -634,12 +640,14 @@ interface Cursor {
 }
 
 function encodeCursor(c: Cursor): string {
-  return btoa(JSON.stringify(c)).replace(/=+$/, '');
+  return encodeCursorPayload(JSON.stringify(c));
 }
 
 function decodeCursor(raw: string): Cursor | null {
+  const text = decodeCursorPayload(raw);
+  if (text === null) return null;
   try {
-    const c = JSON.parse(atob(raw)) as Cursor;
+    const c = JSON.parse(text) as Cursor;
     return typeof c.ref === 'string' && Number.isInteger(c.seq) && Number.isInteger(c.pos) ? c : null;
   } catch {
     return null;
@@ -826,6 +834,7 @@ interface WindowRow extends EntryRow, ReviewFactsRow {
   c_head: string | null;
   c_title: string;
   c_head_ref: string;
+  c_base_ref: string;
   /** The prepared commit the CI jobs of the recorded composed tree run on (null when none are queued). */
   ci_staged: string | null;
 }
@@ -909,23 +918,20 @@ const WINDOW_IDS = (() => {
 function windowStatements(db: D1Database, repoId: string, ref: string): D1PreparedStatement[] {
   return [
     db.prepare('SELECT * FROM repos WHERE id = ?').bind(repoId),
-    db
-      .prepare(
-        `SELECT ${BRANCH_RULE_COLUMNS}
-           FROM branch_rules b WHERE b.repo_id = ? LIMIT 50`,
-      )
-      .bind(repoId),
+    repoBranchRulesSelect(db, repoId),
     // ci_staged: the earliest CI job of the recorded tree (the staged commit). SQLite takes a bare column from the
     // MIN() row, which reads the (repo, tree) index range once instead of reading it and then sorting it.
     db
       .prepare(
-        `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title, c.head_ref AS c_head_ref,
-                ${reviewFactsColumns('c')},
+        `SELECT ${ENTRY_COLUMNS}, c.state AS c_state, c.merge_policy AS c_policy, c.head_sha AS c_head, c.title AS c_title,
+                c.head_ref AS c_head_ref, c.base_ref AS c_base_ref,
+                ${reviewFactsColumns('c', 'rp')},
                 CASE WHEN q.tree_sha IS NOT NULL THEN
                   (SELECT head_sha FROM (SELECT j.head_sha, MIN(j.created_at) FROM ci_jobs j INDEXED BY idx_ci_jobs_tree
                     WHERE j.repo_id = q.repo_id AND j.tree_sha = q.tree_sha AND j.change_set_id = q.change_set_id))
                 END AS ci_staged
            FROM merge_queue q JOIN change_sets c ON c.id = q.change_set_id
+           LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id
           WHERE q.id IN (${WINDOW_IDS})
           ORDER BY q.seq`,
       )
@@ -1160,7 +1166,26 @@ async function trainPass(
     }
     if (e.c_head !== e.head_sha) {
       if (e.c_policy !== 'auto') {
-        exit('HEAD_MOVED', `the change's head moved from the approved ${e.head_sha} to ${e.c_head}; enqueue again to approve the new head`);
+        const oldFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, e.head_sha);
+        const newFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, e.c_head);
+        if (!sameFingerprint(oldFingerprint, newFingerprint)) {
+          exit('HEAD_MOVED', `the change's head moved from the approved ${e.head_sha} to ${e.c_head}; enqueue again to approve the new head`);
+          continue;
+        }
+        push(
+          null,
+          db
+            .prepare(
+              `UPDATE merge_queue SET head_sha = ?3, state = 'queued', generation = generation + 1, attempts = 0,
+                      base_sha = NULL, tree_sha = NULL, checks_state = NULL, updated_at = ?4
+                WHERE repo_id = ?5 AND id = ?1 AND generation = ?2 AND active = 1 AND state != 'publishing'`,
+            )
+            .bind(e.id, plan.generation, e.c_head, now, e.repo_id),
+        );
+        plan.generation += 1;
+        plan.headSha = e.c_head;
+        plan.next = 'queued';
+        out.progress = true;
         continue;
       }
       // An auto change needs no approval: the train follows its head.
@@ -1180,8 +1205,17 @@ async function trainPass(
     const headRef = branchRef(e.c_head_ref);
     const moved = liveHeadRefusal(headRef, plan.headSha, tips.get(headRef));
     if (moved) {
+      const movedHead = moved.headSha!;
       if (e.c_policy !== 'auto') {
-        exit('HEAD_MOVED', `${headRef} moved from the approved ${plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
+        const oldFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, plan.headSha);
+        const newFingerprint = await headFingerprint(env, repo, { base: e.c_base_ref }, movedHead);
+        if (sameFingerprint(oldFingerprint, newFingerprint)) {
+          plan.next = 'queued';
+          blocked = true;
+          out.waiting = true;
+          continue;
+        }
+        exit('HEAD_MOVED', `${headRef} moved from the approved ${plan.headSha} to ${movedHead}; enqueue again to approve the new head`);
         continue;
       }
       // The auto change follows its new head once its push event records it (that event kicks the train); the partition waits until then.
@@ -1992,7 +2026,8 @@ interface ChainEntry {
   plan: Plan;
   e: WindowRow;
   pv: PreparedMerge;
-  checks: RequiredChecks;
+  /** Filled by the checks-gate phase before any read; the phases below throw on a null. */
+  checks: RequiredChecks | null;
   claimedGen: number;
   /** Before the claim: `ready` at the pass's generation; after it, `publishing` at the claimed one. */
   fence: { generation: number; state: QueueState };
@@ -2064,7 +2099,7 @@ async function publishChain(
     plan,
     e: plan.e,
     pv: plan.prepared!,
-    checks: null as unknown as RequiredChecks,
+    checks: null,
     claimedGen: plan.generation + 1,
     fence: { generation: plan.generation, state: 'ready' as QueueState },
     intent: null,
@@ -2234,7 +2269,8 @@ async function publishChain(
           .bind(c.e.id, c.plan.generation, deps.now(), repo.id),
         intentInsertStatement(db, candidate),
         db
-          .prepare(`SELECT c.id, c.number, c.state, c.merge_policy, c.head_sha, c.base_ref, ${reviewFactsColumns('c')} FROM change_sets c WHERE c.id = ?1`)
+          .prepare(`SELECT c.id, c.number, c.state, c.merge_policy, c.head_sha, c.base_ref, ${reviewFactsColumns('c', 'rp')}
+            FROM change_sets c LEFT JOIN review_policies rp ON rp.repo_id = c.repo_id WHERE c.id = ?1`)
           .bind(c.e.change_set_id),
         headWorkspacePinsStatement(db, repo.id, branchRef(c.e.c_head_ref)),
         ...enqueuerFactsStatements(db, repo, c.e),
@@ -2321,6 +2357,7 @@ async function publishChain(
         await backOut(i + 1);
         break;
       }
+      if (!c.checks) throw new RefStoreUnavailable('checks not prepared');
       const block = branchPolicyBlock(freshPolicy, c.checks);
       if (block?.code === 'GUARD_INCOMPLETE' && c.checks.state !== 'failure') {
         await exit(c, 'GUARD_INCOMPLETE', block.error);
@@ -2378,6 +2415,18 @@ async function publishChain(
       // event records it (that event kicks the train). The candidates stacked
       // on it wait for the next pass.
       if (c.change?.merge_policy !== 'auto') {
+        const movedHead = moved.headSha;
+        if (movedHead) {
+          const [oldFingerprint, newFingerprint] = await Promise.all([
+            headFingerprint(env, repo, { base: c.e.c_base_ref }, c.plan.headSha),
+            headFingerprint(env, repo, { base: c.e.c_base_ref }, movedHead),
+          ]);
+          if (sameFingerprint(oldFingerprint, newFingerprint)) {
+            await back(c, 'queued');
+            c.result = { kind: 'pending' };
+            continue;
+          }
+        }
         await exit(c, 'HEAD_MOVED', `${headRef} moved from the approved ${c.plan.headSha} to ${moved.headSha}; enqueue again to approve the new head`);
       } else {
         await back(c, 'queued');
@@ -2694,7 +2743,24 @@ export async function onQueuedHeadMoved(e: HeadMoved, deps: Pick<TrainDeps, 'kic
   // must not stale the fresh approval or regress an auto entry's head.
   const active = `SELECT q.id FROM merge_queue q WHERE q.change_set_id = ?1 AND q.active = 1 AND q.state != 'publishing' AND q.head_sha = ?5`;
   let ref: string | null;
-  if (e.change.policy === 'auto') {
+  let equivalent = false;
+  if (e.change.policy !== 'auto') {
+    const found = await db
+      .prepare(
+        `SELECT r.*, c.base_ref FROM repos r JOIN change_sets c ON c.repo_id = r.id
+          WHERE r.id = ?1 AND c.id = ?2`,
+      )
+      .bind(e.repoId, e.change.id)
+      .first<RepoRow & { base_ref: string }>();
+    if (found) {
+      const [oldFingerprint, newFingerprint] = await Promise.all([
+        headFingerprint(e.env, found, { base: found.base_ref }, queued),
+        headFingerprint(e.env, found, { base: found.base_ref }, e.headSha),
+      ]);
+      equivalent = sameFingerprint(oldFingerprint, newFingerprint);
+    }
+  }
+  if (e.change.policy === 'auto' || equivalent) {
     const row = await db
       .prepare(
         `UPDATE merge_queue SET head_sha = ?2, state = 'queued', generation = generation + 1, attempts = 0, base_sha = NULL, tree_sha = NULL,

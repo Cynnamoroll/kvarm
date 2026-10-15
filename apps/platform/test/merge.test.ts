@@ -454,6 +454,22 @@ describe('prepareMerge + publishMerge', () => {
     });
   });
 
+  it('a criss-cross where git could pair a similarity rename differently is 422 MULTIPLE_MERGE_BASES (ambiguousRenames)', async () => {
+    const store = new Store();
+    const ten = (tag: string, c: Record<number, string> = {}) => Array.from({ length: 10 }, (_, i) => `${c[i + 1] ?? `${tag} ${i + 1}`}\n`).join('');
+    const o = await store.commit([], { 'f.txt': ten('f'), 'g.txt': ten('g'), 'k.txt': ten('k') });
+    const b1 = await store.commit([o], { 'f.txt': ten('f', { 2: 'B1' }), 'g.txt': ten('g'), 'k.txt': ten('k') });
+    const b2 = await store.commit([o], { 'f.txt': ten('f'), 'g.txt': ten('g'), 'k.txt': ten('k', { 2: 'B2' }) });
+    const merged = { 'f.txt': ten('f', { 2: 'B1' }), 'k.txt': ten('k', { 2: 'B2' }) };
+    // The target deletes g.txt; the head renames it with an edit. git: rename/delete conflict. The exact model: a clean delete + add.
+    const main = await store.commit([b1, b2], merged, 'main');
+    const head = await store.commit([b2, b1], { ...merged, 'h.txt': ten('g', { 9: 'head' }) }, 'feature');
+    const r = await prepareMerge(store, { targetSha: main, headSha: head, message: 'm' });
+    expect(r).toMatchObject({ ok: false, status: 422, code: 'MULTIPLE_MERGE_BASES', reason: 'ambiguousRenames' });
+    const m = await computeMergeability(store, checksGate([]), { repo: REPO, targetSha: main, headSha: head });
+    expect(m).toMatchObject({ status: 'unknown', unknownReason: 'ambiguousRenames', mergeable: false, mergeBases: [b1, b2].sort() });
+  });
+
   it('many individually permitted merged blobs over the aggregate budget are MERGE_TOO_LARGE, with nothing to publish', async () => {
     const store = new Store();
     const files = (edit: (lines: string[]) => string[]) => {

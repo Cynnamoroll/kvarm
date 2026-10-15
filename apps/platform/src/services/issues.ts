@@ -44,6 +44,7 @@ import { evaluateGuard } from './checks';
 import { changedPaths, treePairBody } from './compare';
 import { lsRefs, readCommitInfo, resolveCommitish, type ResolveContext } from './refs';
 import type { ServiceResult } from '../repos/service';
+import { fail, isUniqueViolation, objectBody } from './result';
 import type { Actor } from './authz';
 import { normalizePath } from './intents/paths';
 import {
@@ -164,8 +165,6 @@ const ISSUE_SELECT = `SELECT i.id, i.number, i.title, i.body, i.state, i.source,
 
 const LINK_COLUMNS = `(SELECT c.number FROM change_sets c WHERE c.id = l.change_set_id) AS change_number, l.workspace_id, l.kind, l.source, l.state, l.actor, l.created_at, l.updated_at`;
 
-type Fail = Extract<ServiceResult<never>, { ok: false }>;
-const fail = (status: number, error: string, code: string): Fail => ({ ok: false, status, error, code });
 const iso = (ms: number) => new Date(ms).toISOString();
 const SHA_RE = /^[0-9a-f]{40}$/;
 const textOf = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
@@ -255,8 +254,7 @@ async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceR
   try {
     return await fn();
   } catch (err) {
-    const msg = String(err);
-    if (msg.includes('UNIQUE constraint failed: issues.repo_id, issues.fingerprint')) {
+    if (isUniqueViolation(err, 'issues.repo_id, issues.fingerprint')) {
       return fail(409, 'an open issue already has this fingerprint', 'FINGERPRINT_OPEN');
     }
     throw err;
@@ -311,10 +309,9 @@ interface NewIssue {
 }
 
 function parseCreate(input: unknown): ServiceResult<NewIssue> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-    return fail(400, 'body must be a JSON object {title, body?, paths?, fingerprint?, evidence?}', 'INVALID_BODY');
-  }
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input, '{title, body?, paths?, fingerprint?, evidence?}');
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   if (!textOf(b.title, ISSUE_LIMITS.titleMax)) return fail(422, `title is required (1-${ISSUE_LIMITS.titleMax} characters)`, 'INVALID_TITLE');
   if (b.body !== undefined && b.body !== null && (typeof b.body !== 'string' || b.body.length > ISSUE_LIMITS.bodyMax)) {
     return fail(422, `body must be a string of at most ${ISSUE_LIMITS.bodyMax} characters`, 'INVALID_BODY');
@@ -666,8 +663,9 @@ export function updateIssue(cx: IssueContext, rawNumber: string, input: unknown)
   return guarded(async () => {
     const number = parseNumber(rawNumber);
     if (number === null) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
-    if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-    const b = input as Record<string, unknown>;
+    const parsed = objectBody(input);
+    if (!parsed.ok) return parsed;
+    const b = parsed.value;
     const sets: string[] = [];
     const args: unknown[] = [];
     const set = (sql: string, v: unknown) => {
@@ -736,8 +734,9 @@ export function createComment(cx: IssueContext, rawNumber: string, input: unknow
   return guarded(async () => {
     const number = parseNumber(rawNumber);
     if (number === null) return fail(404, 'issue not found', 'ISSUE_NOT_FOUND');
-    if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object {body}', 'INVALID_BODY');
-    const body = (input as Record<string, unknown>).body;
+    const parsed = objectBody(input, '{body}');
+    if (!parsed.ok) return parsed;
+    const body = parsed.value.body;
     if (!textOf(body, ISSUE_LIMITS.bodyMax)) return fail(422, `body is required (1-${ISSUE_LIMITS.bodyMax} characters)`, 'INVALID_BODY');
     const agent = cx.actor?.agent;
     const id = crypto.randomUUID();
@@ -1008,8 +1007,9 @@ export async function listChangeIssues(cx: IssueContext, rawNumber: string): Pro
 export async function linkIssue(cx: IssueContext, rawNumber: string, input: unknown): Promise<ServiceResult<ChangeIssues>> {
   const number = parseNumber(rawNumber);
   if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object {issue, kind?, state?}', 'INVALID_BODY');
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input, '{issue, kind?, state?}');
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   if (typeof b.issue !== 'number' || !Number.isInteger(b.issue) || b.issue < 1) return fail(422, 'issue must be an issue number', 'INVALID_ISSUE');
   const kind = b.kind ?? 'closes';
   if (kind !== 'closes' && kind !== 'refs') return fail(422, 'kind must be "closes" or "refs"', 'INVALID_KIND');

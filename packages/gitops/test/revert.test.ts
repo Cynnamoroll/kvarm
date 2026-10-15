@@ -10,10 +10,11 @@ import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, unlinkSync, writ
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { decode, parseTree, type GitObject, type TreeEntry } from '../src/index';
+import { decode, parseTree, type TreeEntry } from '../src/index';
 import type { MergeReader } from '../src/merge3';
 import type { CommitInfo, CommitReader } from '../src/mergebase';
 import { revertMessage, revertTree } from '../src/revert';
+import { closed } from './helpers';
 
 let root = '';
 let n = 0;
@@ -110,19 +111,6 @@ class Repo {
       },
     };
   }
-}
-
-/** Every object under `tree` is one the revert created or one the repository holds. */
-async function closed(reader: MergeReader, tree: string, created: readonly GitObject[]): Promise<boolean> {
-  const own = created.find((o) => o.hash === tree);
-  const entries = own ? parseTree(own.raw.subarray(own.raw.indexOf(0) + 1)) : await reader.readTree(tree);
-  if (!entries) return false;
-  for (const e of entries) {
-    if (e.mode === '40000') {
-      if (!(await closed(reader, e.hash, created))) return false;
-    } else if (!created.some((o) => o.hash === e.hash) && !(await reader.readBlob(e.hash))) return false;
-  }
-  return true;
 }
 
 async function expectParity(repo: Repo, sha: string, mainline?: number, gitMainline = mainline) {

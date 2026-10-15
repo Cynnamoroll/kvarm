@@ -24,6 +24,7 @@ import { isSafeRefName, isValidRefPattern, refMatchesPattern } from '@kvarm/gito
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
 import type { Actor } from './authz';
+import { fail } from './result';
 
 export const BRANCH_RULES_MAX = 50;
 export const REQUIRED_CHECKS_MAX = 32;
@@ -33,6 +34,9 @@ export const REQUIRED_APPROVALS_MAX = 10;
 /** `advisory`: an incomplete guard is reported only. `required`: it blocks publication like a failure. */
 export const GUARD_COMPLETENESS = ['advisory', 'required'] as const;
 export type GuardCompleteness = (typeof GUARD_COMPLETENESS)[number];
+
+export const AGENT_APPROVALS = ['never', 'low-risk'] as const;
+export type AgentApprovals = (typeof AGENT_APPROVALS)[number];
 
 export const PROTECTED_REF_REASON = 'protected branch: direct pushes are not allowed';
 export const RESERVED_REF_REASON = 'platform-reserved branch: direct pushes are not allowed';
@@ -55,6 +59,7 @@ export interface BranchRule {
   pattern: string;
   requiredChecks: string[];
   requiredApprovals: number;
+  agentApprovals: AgentApprovals;
   guardCompleteness: GuardCompleteness;
   createdBy: string | null;
   createdAt: number;
@@ -69,6 +74,7 @@ export interface BranchRuleRow {
   required_approvals: number;
   /** Migration 0023; read through BRANCH_RULE_COLUMNS. */
   guard_completeness: string | null;
+  agent_approvals: string | null;
   created_by_login?: string | null;
   created_at: number;
   updated_by_login?: string | null;
@@ -81,13 +87,11 @@ export interface BranchPolicy {
   directPush: 'allowed' | 'denied';
   requiredChecks: string[];
   requiredApprovals: number;
+  agentApprovals: AgentApprovals;
   guardCompleteness: GuardCompleteness;
   rules: string[];
 }
 
-function fail<T>(status: number, error: string, code: string): ServiceResult<T> {
-  return { ok: false, status, error, code };
-}
 
 /**
  * Accepts a branch name (`main`, `release/*`) or a full ref pattern
@@ -131,21 +135,33 @@ export function parseGuardCompleteness(input: unknown): GuardCompleteness | null
   return typeof input === 'string' && (GUARD_COMPLETENESS as readonly string[]).includes(input) ? (input as GuardCompleteness) : null;
 }
 
-function parseStoredChecks(json: string): string[] {
+export function parseAgentApprovals(input: unknown): AgentApprovals | null {
+  return typeof input === 'string' && (AGENT_APPROVALS as readonly string[]).includes(input) ? (input as AgentApprovals) : null;
+}
+
+/** A check name nothing can report, standing in for a required_checks row that failed to parse. */
+const CORRUPT_CHECKS_SENTINEL = 'kvarm/corrupt-required-checks';
+
+function parseStoredChecks(json: string, ruleId: string): string[] {
   try {
     const parsed: unknown = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === 'string');
   } catch {
-    return [];
+    // falls through to the fail-closed path
   }
+  // Fails closed like guard_completeness below: a corrupt stored row must not
+  // silently relax the rule to 'no required checks' and open the merge gate.
+  console.warn(JSON.stringify({ branchRuleCorruptChecks: { rule: ruleId, value: json.slice(0, 200) } }));
+  return [CORRUPT_CHECKS_SENTINEL];
 }
 
 export function ruleFromRow(row: BranchRuleRow): BranchRule {
   return {
     id: row.id,
     pattern: row.pattern,
-    requiredChecks: parseStoredChecks(row.required_checks),
+    requiredChecks: parseStoredChecks(row.required_checks, row.id),
     requiredApprovals: Number(row.required_approvals) || 0,
+    agentApprovals: row.agent_approvals === 'low-risk' ? 'low-risk' : 'never',
     // Fails closed: a statement that forgot the column must not relax a required rule.
     guardCompleteness: row.guard_completeness === 'advisory' ? 'advisory' : 'required',
     createdBy: row.created_by_login ?? null,
@@ -169,10 +185,12 @@ export function effectivePolicy(rules: readonly BranchRule[], ref: string): Bran
   const checks = new Set<string>();
   let approvals = 0;
   let completeness: GuardCompleteness = 'advisory';
+  let agentApprovals: AgentApprovals = 'low-risk';
   for (const r of matched) {
     for (const c of r.requiredChecks) checks.add(c);
     approvals = Math.max(approvals, r.requiredApprovals);
     if (r.guardCompleteness === 'required') completeness = 'required';
+    if (r.agentApprovals !== 'low-risk') agentApprovals = 'never';
   }
   return {
     ref,
@@ -180,6 +198,7 @@ export function effectivePolicy(rules: readonly BranchRule[], ref: string): Bran
     directPush: matched.length > 0 ? 'denied' : 'allowed',
     requiredChecks: [...checks].sort(),
     requiredApprovals: approvals,
+    agentApprovals: matched.length > 0 ? agentApprovals : 'never',
     guardCompleteness: completeness,
     rules: matched.map((r) => r.id),
   };
@@ -230,7 +249,7 @@ export function agentReservedRefDenial(ref: string): string | null {
  * judge a publication: a select that omitted guard_completeness would
  * silently relax a `required` rule to advisory.
  */
-export const BRANCH_RULE_COLUMNS = 'b.id, b.pattern, b.required_checks, b.required_approvals, b.guard_completeness, b.created_at, b.updated_at';
+export const BRANCH_RULE_COLUMNS = 'b.id, b.pattern, b.required_checks, b.required_approvals, b.guard_completeness, b.agent_approvals, b.created_at, b.updated_at';
 
 const RULE_SELECT = `SELECT ${BRANCH_RULE_COLUMNS},
        cu.login AS created_by_login, uu.login AS updated_by_login
@@ -283,7 +302,8 @@ function auditRule(db: D1Database, type: string, ruleId: string, repo: RepoRow, 
        SELECT ?1, ?2, json_object('repoId', b.repo_id, 'repo', ?5, 'ruleId', b.id, 'pattern', b.pattern,
                                   'requiredChecks', json(b.required_checks),
                                   'requiredApprovals', b.required_approvals,
-                                  'guardCompleteness', b.guard_completeness, 'actor', ?6),
+                                  'guardCompleteness', b.guard_completeness,
+                                  'agentApprovals', b.agent_approvals, 'actor', ?6),
               ?7, ?7
          FROM branch_rules b WHERE b.id = ?3 AND b.repo_id = ?4`,
     )
@@ -294,6 +314,7 @@ export interface RuleSettingsInput {
   requiredChecks?: unknown;
   requiredApprovals?: unknown;
   guardCompleteness?: unknown;
+  agentApprovals?: unknown;
 }
 
 export interface RuleInput extends RuleSettingsInput {
@@ -302,10 +323,11 @@ export interface RuleInput extends RuleSettingsInput {
 
 function validateSettings(
   input: RuleSettingsInput,
-): ServiceResult<{ checks: string[] | undefined; approvals: number | undefined; completeness: GuardCompleteness | undefined }> {
+): ServiceResult<{ checks: string[] | undefined; approvals: number | undefined; completeness: GuardCompleteness | undefined; agentApprovals: AgentApprovals | undefined }> {
   let checks: string[] | undefined;
   let approvals: number | undefined;
   let completeness: GuardCompleteness | undefined;
+  let agentApprovals: AgentApprovals | undefined;
   if (input.requiredChecks !== undefined) {
     const parsed = parseRequiredChecks(input.requiredChecks);
     if (!parsed) {
@@ -329,7 +351,12 @@ function validateSettings(
     if (!parsed) return fail(400, `guardCompleteness must be one of ${GUARD_COMPLETENESS.join(', ')}`, 'INVALID_GUARD_COMPLETENESS');
     completeness = parsed;
   }
-  return { ok: true, value: { checks, approvals, completeness } };
+  if (input.agentApprovals !== undefined) {
+    const parsed = parseAgentApprovals(input.agentApprovals);
+    if (!parsed) return fail(400, `agentApprovals must be one of ${AGENT_APPROVALS.join(', ')}`, 'INVALID_AGENT_APPROVALS');
+    agentApprovals = parsed;
+  }
+  return { ok: true, value: { checks, approvals, completeness, agentApprovals } };
 }
 
 export async function createRule(
@@ -352,9 +379,9 @@ export async function createRule(
   const now = Date.now();
   const results = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals, guard_completeness,
+      `INSERT INTO branch_rules (id, repo_id, pattern, required_checks, required_approvals, guard_completeness, agent_approvals,
                                  created_by, created_at, updated_by, updated_at)
-       SELECT ?1, ?2, ?3, ?4, ?5, ?9, ?6, ?7, ?6, ?7
+       SELECT ?1, ?2, ?3, ?4, ?5, ?9, ?10, ?6, ?7, ?6, ?7
         WHERE (SELECT COUNT(*) FROM branch_rules WHERE repo_id = ?2) < ?8
        ON CONFLICT (repo_id, pattern) DO NOTHING`,
     ).bind(
@@ -367,6 +394,7 @@ export async function createRule(
       now,
       BRANCH_RULES_MAX,
       settings.value.completeness ?? 'advisory',
+      settings.value.agentApprovals ?? 'never',
     ),
     auditRule(env.DB, 'branch_rule.created', id, repo, actor, now),
     env.DB.prepare(`${RULE_SELECT} WHERE b.id = ?`).bind(id),
@@ -390,7 +418,7 @@ export async function updateRule(
 ): Promise<ServiceResult<BranchRule>> {
   const settings = validateSettings(input);
   if (!settings.ok) return settings;
-  const { checks, approvals, completeness } = settings.value;
+  const { checks, approvals, completeness, agentApprovals } = settings.value;
   const now = Date.now();
   const results = await env.DB.batch([
     env.DB.prepare(
@@ -398,9 +426,10 @@ export async function updateRule(
           SET required_checks = COALESCE(?3, required_checks),
               required_approvals = COALESCE(?4, required_approvals),
               guard_completeness = COALESCE(?7, guard_completeness),
+              agent_approvals = COALESCE(?8, agent_approvals),
               updated_by = ?5, updated_at = ?6
         WHERE id = ?1 AND repo_id = ?2`,
-    ).bind(id, repo.id, checks === undefined ? null : JSON.stringify(checks), approvals ?? null, actor.user.id, now, completeness ?? null),
+    ).bind(id, repo.id, checks === undefined ? null : JSON.stringify(checks), approvals ?? null, actor.user.id, now, completeness ?? null, agentApprovals ?? null),
     auditRule(env.DB, 'branch_rule.updated', id, repo, actor, now),
     env.DB.prepare(`${RULE_SELECT} WHERE b.id = ? AND b.repo_id = ?`).bind(id, repo.id),
   ]);

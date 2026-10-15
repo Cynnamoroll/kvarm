@@ -13,16 +13,11 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson,
+  jsonBody} from '../api';
 import * as svc from '../../services/workspaces';
 
 export const workspacesApi = new Hono<App>();
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  const { ok: _ok, status, ...body } = r;
-  return c.json(body, status as never);
-}
 
 async function context(c: Context<App>, need: 'read' | 'write') {
   const d = await authorizeRoute(c, need, need === 'write' ? { branchRules: true } : {});
@@ -38,14 +33,11 @@ async function context(c: Context<App>, need: 'read' | 'write') {
   return { cx } as const;
 }
 
-async function jsonBody(c: Context<App>): Promise<unknown> {
-  return c.req.json().catch(() => undefined);
-}
-
 workspacesApi.post('/repos/:owner/:repo/workspaces', async (c) => {
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.createWorkspace(w.cx, body);
   if (!r.ok) return failJson(c, r);
@@ -76,6 +68,7 @@ workspacesApi.post('/repos/:owner/:repo/workspaces/:id/change-set', async (c) =>
   const w = await context(c, 'write');
   if ('denied' in w) return w.denied;
   const body = await jsonBody(c);
+  if (body instanceof Response) return body;
   if (body === undefined) return c.json({ error: 'body must be JSON', code: 'INVALID_BODY' }, 400);
   const r = await svc.openChangeSet(w.cx, c.req.param('id'), body);
   if (!r.ok) return failJson(c, r);

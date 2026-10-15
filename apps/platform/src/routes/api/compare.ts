@@ -13,17 +13,12 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { actorJson, authorizeRoute, denyJson, type App } from '../api';
-import type { ServiceResult } from '../../repos/service';
+import { actorJson, authorizeRoute, denyJson, type App, failJson} from '../api';
 import * as svc from '../../services/compare';
 
 export const compareApi = new Hono<App>();
 
 const COMPARE_PREFIX = /^\/api\/v1\/repos\/[^/]+\/[^/]+\/compare\/(.+)$/;
-
-function failJson(c: Context<App>, r: Extract<ServiceResult<unknown>, { ok: false }>): Response {
-  return c.json({ error: r.error, code: r.code }, r.status as never);
-}
 
 function parseRange(raw: string): { base: string; head: string; file: boolean } | null {
   let rest: string;

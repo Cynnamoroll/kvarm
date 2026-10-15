@@ -1,10 +1,21 @@
-import { env as cfEnv, exports } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import type { RepoRow } from '../src/db/repos';
 import type { UserRow } from '../src/db/users';
 import { authorizeRepo, scopeCeiling, type Actor } from '../src/services/authz';
 import { authorizeGitRequest } from '../src/routes/git';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = (path: string, init: RequestInit = {}) => request(env, path, init);
+const seedUser = async (login: string, isAdmin: boolean): Promise<UserRow> => {
+  const id = await seedUserBase(env, login, { admin: isAdmin });
+  const row = (await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first())! as Omit<UserRow, 'is_admin'> & { is_admin: unknown };
+  return { ...row, is_admin: isAdmin };
+};
+const seedRepo = async (owner: string, name: string, visibility: 'public' | 'private' = 'private') =>
+  seedRepoBase(env, name, { owner, visibility, register: false });
 
 // Worker secrets (WorkOS) are declared on the global Env but absent in tests.
 const env = cfEnv as unknown as Env;
@@ -25,42 +36,6 @@ interface Principal {
 
 const principals: Record<'owner' | 'stranger' | 'root' | 'ghost', Principal> = {} as never;
 
-async function seedUser(login: string, isAdmin: boolean): Promise<UserRow> {
-  const user: UserRow = {
-    id: crypto.randomUUID(),
-    workos_user_id: `test:${login}`,
-    login,
-    email: `${login}@kvarm.invalid`,
-    name: login,
-    avatar_url: null,
-    is_admin: isAdmin,
-    created_at: Date.now(),
-  };
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  )
-    .bind(user.id, user.workos_user_id, login, user.email, login, isAdmin ? 1 : 0, user.created_at)
-    .run();
-  return user;
-}
-
-async function seedRepo(owner: string, name: string, visibility: 'public' | 'private'): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, created_at) VALUES (?, ?, ?, ?, ?, ?, 'main', ?)`,
-  )
-    .bind(
-      crypto.randomUUID(),
-      owner,
-      name,
-      `${owner}--${name}`,
-      `https://artifacts.invalid/git/default/${owner}--${name}.git`,
-      visibility,
-      Date.now(),
-    )
-    .run();
-}
-
 async function tokens(user: UserRow, sets: Record<string, Scope[]>): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const [key, scopes] of Object.entries(sets)) {
@@ -75,10 +50,6 @@ function basic(token: string): Record<string, string> {
 
 function bearer(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
-}
-
-function call(path: string, init: RequestInit = {}): Promise<Response> {
-  return exports.default.fetch(new Request(`${ORIGIN}${path}`, init));
 }
 
 const FULL: Scope[] = ['read', 'write', 'api'];

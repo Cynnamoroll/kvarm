@@ -1,8 +1,15 @@
-import { env as cfEnv, exports } from 'cloudflare:workers';
+import { env as cfEnv } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { authorizeGitRequest } from '../src/routes/git';
+import { request } from './helpers/http';
+import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
+
+const call = (path: string, init: RequestInit = {}) => request(env, path, init);
+const seedUser = (login: string) => seedUserBase(env, login);
+const seedRepo = async (owner: string, name: string, visibility: 'public' | 'private' = 'private') =>
+  seedRepoBase(env, name, { owner, visibility, register: false });
 
 const env = cfEnv as unknown as Env;
 const ORIGIN = 'https://kvarm.test';
@@ -21,10 +28,6 @@ const logins: Record<Who, string> = {
   twinM: 'tn-twin-m',
 };
 const tok = {} as Record<Who, string>;
-
-function call(path: string, init: RequestInit = {}): Promise<Response> {
-  return exports.default.fetch(new Request(`${ORIGIN}${path}`, init));
-}
 
 function as(who: Who, init: RequestInit & { json?: unknown } = {}): RequestInit {
   const headers: Record<string, string> = { Authorization: `Bearer ${tok[who]}` };
@@ -62,34 +65,7 @@ async function git(who: Who | null, repo: string, op: 'read' | 'write'): Promise
   return res.ok ? 200 : res.response.status;
 }
 
-async function seedUser(login: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO users (id, workos_user_id, login, email, name, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-  )
-    .bind(id, `test:${login}`, login, `${login}@kvarm.invalid`, login, Date.now())
-    .run();
-  return id;
-}
-
 /** Repo rows are seeded directly: Artifacts is not available hermetically. */
-async function seedRepo(owner: string, name: string, visibility: 'public' | 'private'): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO repos (id, owner_login, name, artifacts_name, artifacts_remote, visibility,
-       default_branch, created_at, owner_org_id)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'main', ?7, (SELECT id FROM orgs WHERE login = ?2))`,
-  )
-    .bind(
-      crypto.randomUUID(),
-      owner,
-      name,
-      `${owner}--${name}`,
-      `https://artifacts.invalid/git/default/${owner}--${name}.git`,
-      visibility,
-      Date.now(),
-    )
-    .run();
-}
 
 async function setRole(who: Who, role: string, by: Who = 'owner'): Promise<Response> {
   return call(`/api/v1/orgs/${ORG}/members/${logins[who]}`, as(by, { method: 'PUT', json: { role } }));
@@ -127,8 +103,9 @@ describe('account namespace', () => {
   });
 
   it('refuses a new user whose login matches an org, even differing in case', async () => {
-    await expect(seedUser(ORG)).rejects.toThrow(/UNIQUE|constraint/i);
-    await expect(seedUser(ORG.toUpperCase())).rejects.toThrow(/UNIQUE|constraint/i);
+    // The users_claim_account_name trigger claims every login in account_names.
+    await expect(seedUser(ORG)).rejects.toThrow(/UNIQUE constraint failed: account_names\.login/);
+    await expect(seedUser(ORG.toUpperCase())).rejects.toThrow(/UNIQUE constraint failed: account_names\.login/);
     const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM users WHERE login = ? COLLATE NOCASE')
       .bind(ORG)
       .first<{ n: number }>();

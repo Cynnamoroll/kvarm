@@ -96,18 +96,49 @@ describe('operation registry', () => {
 
   it('registers review, approval and escalation operations', () => {
     expect(findOperation('review_change')).toMatchObject({ command: ['review', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/reviews', family: 'reviews' });
-    expect(findOperation('review_change')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'verdict', 'headSha', 'body']);
+    expect(findOperation('review_change')?.params.map((p) => p.name)).toEqual(['repo', 'number', 'verdict', 'headSha', 'body', 'ship']);
     expect(findOperation('approve_change')).toMatchObject({ command: ['review', 'approve'], method: 'POST', path: '/repos/{repo}/changes/{number}/approve' });
     expect(findOperation('request_changes')).toMatchObject({ command: ['review', 'request-changes'], method: 'POST', path: '/repos/{repo}/changes/{number}/request-changes' });
     expect(findOperation('get_reviews')).toMatchObject({ command: ['review', 'get'], method: 'GET', path: '/repos/{repo}/changes/{number}/reviews', readOnly: true });
+    expect(findOperation('get_change')?.description).toMatch(/ordered remaining actions/i);
+    expect(findOperation('get_mergeability')?.description).toMatch(/ordered remaining actions/i);
     expect(findOperation('list_pending_reviews')).toMatchObject({ command: ['review', 'pending'], path: '/repos/{repo}/reviews/pending', readOnly: true });
+    expect(findOperation('list_pending_reviews')?.params.map((p) => p.name)).toContain('ready');
     expect(findOperation('assign_reviewer')).toMatchObject({ command: ['review', 'assign'], path: '/repos/{repo}/changes/{number}/reviewers/assign' });
-    expect(findOperation('resolve_escalation')).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });
+    const resolveEscalation = findOperation('resolve_escalation');
+    expect(resolveEscalation).toMatchObject({ command: ['review', 'resolve'], path: '/repos/{repo}/changes/{number}/escalations/{id}/resolve' });
+    expect(resolveEscalation?.params.map((param) => param.name)).toEqual(['repo', 'number', 'id', 'note']);
+    expect(resolveEscalation?.description).toMatch(/required note recorded as the reason/i);
+    const retiredAction = ['acknow', 'ledge'].join('');
+    expect(JSON.stringify(resolveEscalation ?? {})).not.toMatch(new RegExp(retiredAction, 'i'));
     expect(findOperation('get_review_policy')).toMatchObject({ command: ['review-policy', 'get'], method: 'GET', path: '/repos/{repo}/review-policy' });
     expect(findOperation('set_review_policy')).toMatchObject({ command: ['review-policy', 'set'], method: 'PUT', path: '/repos/{repo}/review-policy' });
+    expect(findOperation('get_review_guide')).toMatchObject({ command: ['review', 'guide'], method: 'GET', path: '/repos/{repo}/changes/{number}/review-guide' });
+    expect(findOperation('ack_review_units')).toMatchObject({ command: ['review', 'ack'], method: 'POST', path: '/repos/{repo}/changes/{number}/review-acks' });
+    expect(findOperation('submit_findings')).toMatchObject({ command: ['finding', 'submit'], method: 'POST', path: '/repos/{repo}/changes/{number}/findings' });
+    expect(findOperation('get_review_analytics')).toMatchObject({ command: ['review', 'analytics'], method: 'GET', path: '/repos/{repo}/review/analytics' });
     expect(findOperation('create_agent')?.params.map((p) => p.name)).toContain('modelFamily');
-    const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40) });
-    expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40) }]);
+    const req = buildRequest(findOperation('approve_change')!, { repo: 'o/r', number: 3, headSha: 'a'.repeat(40), ship: true });
+    expect([req.method, req.path, req.body]).toEqual(['POST', '/api/v1/repos/o/r/changes/3/approve', { headSha: 'a'.repeat(40), ship: true }]);
+    expect(buildRequest(findOperation('set_review_policy')!, { repo: 'o/r', guideRequired: true, nudgeAfterMinutes: null }).body)
+      .toEqual({ guideRequired: true, nudgeAfterMinutes: null });
+    expect(buildRequest(findOperation('ack_review_units')!, { repo: 'o/r', number: 3, headSha: 'b'.repeat(40), keys: ['unit-key'] }).body)
+      .toEqual({ headSha: 'b'.repeat(40), keys: ['unit-key'] });
+  });
+
+  it('round-trips the branch-rule agent approval option through the operation registry', () => {
+    expect(findOperation('create_branch_rule')?.params.map((p) => p.name)).toContain('agentApprovals');
+    expect(findOperation('update_branch_rule')?.params.map((p) => p.name)).toContain('agentApprovals');
+    expect(buildRequest(findOperation('create_branch_rule')!, { repo: 'o/r', pattern: 'main', agentApprovals: 'low-risk' })).toMatchObject({
+      method: 'POST',
+      path: '/api/v1/repos/o/r/branch-rules',
+      body: { pattern: 'main', agentApprovals: 'low-risk' },
+    });
+    expect(buildRequest(findOperation('update_branch_rule')!, { repo: 'o/r', id: 'rule-id', agentApprovals: 'never' })).toMatchObject({
+      method: 'PATCH',
+      path: '/api/v1/repos/o/r/branch-rules/rule-id',
+      body: { agentApprovals: 'never' },
+    });
   });
 
   it('registers the audit export and provenance key operations', () => {

@@ -21,6 +21,9 @@ import { withLazyRepo, type LazyRepo } from '../artifacts/repo';
 import { internalKey, readCachedJson, writeCachedJson } from '../cache/internal';
 import type { RepoRow } from '../db/repos';
 import type { ServiceResult } from '../repos/service';
+import { agentMetaOf } from './agentMeta';
+import { fail, guarded as baseGuarded, objectBody } from './result';
+export { fail };
 import { attributeMerge, mergeAttributionDefaults, parseAttributionInput, type AttributionInput } from './attribution';
 import { recordMergeAudit } from './audit';
 import { credentialMayUpdateRef, type Actor } from './authz';
@@ -39,6 +42,7 @@ import {
 } from './checks';
 import { defaultChecksGate, type ChecksGate, type ChecksSubject, type RequiredChecks } from './checksGate';
 import { treePairBody, treePairRating, type CompareBody } from './compare';
+import { carryApprovals } from './approvalCarry';
 import {
   blockFromRows,
   changeDependenciesStatement,
@@ -61,6 +65,7 @@ import {
   reconcileConflicts,
   retireConflictTaskStatement,
   transitionStatements,
+  RESOLVE_CONFLICT,
   type ConflictView,
 } from './conflicts';
 import { artifactsPusher, type GitPusher } from './gitwrite';
@@ -74,9 +79,11 @@ import {
   publishMerge,
   type Mergeability,
   type MergeErrorCode,
+  type MergeSources,
   type MergePlanView,
   type MergeStatus,
   type MergeWork,
+  type PreparedMerge,
 } from './merge';
 import { RefStoreUnavailable, isValidRefName, lsRefs, resolveCommitish, type ResolveContext } from './refs';
 import {
@@ -90,9 +97,13 @@ import {
   type ReviewFactsRow,
 } from './reviewGate';
 import type { ChangeRating } from './risk';
+import { remainingFor, type RemainingItem } from './remaining';
 import { kickTrain } from './trainKick';
 import { ciCleanupStatement, hasCiJobs, queueChangeCi, queueExactTreeCi } from './ci';
 import { actorName, changeLinkStatements, mergeCloseStatement, refreshPathLinks, retireIssueTasksStatement } from './issues';
+import { headCoverage, recordHeadTier } from './reviewCoverage';
+import { publishRepoEvent } from './live';
+import { enqueueReviewNudge } from './reviewNudges';
 
 export const MERGE_POLICIES = ['auto', 'draft', 'review'] as const;
 export type MergePolicy = (typeof MERGE_POLICIES)[number];
@@ -135,6 +146,7 @@ export interface ChangeRow {
   created_at: number;
   updated_at: number | null;
   merge_policy: MergePolicy;
+  nudge_after_minutes: number | null;
   risk_score: number | null;
   risk_level: string | null;
   risk_reasons: string | null;
@@ -150,7 +162,9 @@ export interface ChangeRow {
 
 const CHANGE_SELECT = `SELECT c.id, c.repo_id, c.number, c.title, c.body, c.base_ref, c.head_ref, c.head_sha, c.base_sha,
        c.state, c.author_id, u.login AS author_login, c.agent_meta, c.merge_commit, c.merged_at, c.created_at,
-       c.updated_at, c.merge_policy, c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.conflicts,
+       c.updated_at, c.merge_policy,
+       (SELECT p.nudge_after_minutes FROM review_policies p WHERE p.repo_id = c.repo_id) AS nudge_after_minutes,
+       c.risk_score, c.risk_level, c.risk_reasons, c.kind, c.source_change_id, c.conflicts,
        (SELECT q.state FROM merge_queue q WHERE q.change_set_id = c.id AND q.active = 1) AS queue_state,
        (SELECT w.id FROM workspaces w WHERE w.change_set_id = c.id LIMIT 1) AS workspace_id
   FROM change_sets c LEFT JOIN users u ON u.id = c.author_id`;
@@ -205,19 +219,13 @@ export interface ChangeDetail extends ChangeView {
   rating: ChangeRating | null;
   mergeability: MergeabilityView | null;
   checks: CheckRunView[];
+  remaining: RemainingItem[];
 }
+
+export type CreatedChangeDetail = Omit<ChangeDetail, 'remaining'>;
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
 
-function parseAgent(meta: string | null): { id: string; name: string } | null {
-  if (!meta) return null;
-  try {
-    const v = JSON.parse(meta) as { agentId?: unknown; agentName?: unknown };
-    return typeof v.agentId === 'string' && typeof v.agentName === 'string' ? { id: v.agentId, name: v.agentName } : null;
-  } catch {
-    return null;
-  }
-}
 
 export function changeView(row: ChangeRow): ChangeView {
   return {
@@ -232,7 +240,7 @@ export function changeView(row: ChangeRow): ChangeView {
     baseSha: row.base_sha,
     headSha: row.head_sha,
     author: row.author_login,
-    agent: parseAgent(row.agent_meta),
+    agent: agentMetaOf(row.agent_meta),
     mergeCommit: row.merge_commit,
     mergedAt: iso(row.merged_at),
     createdAt: iso(row.created_at)!,
@@ -290,6 +298,8 @@ export interface ChangeContext {
   env: Env;
   repo: RepoRow;
   actor: Actor | null;
+  /** Whether the authority check granting this read also allows repository writes. */
+  writeAccess?: boolean;
   /** The repo's branch rules, when the caller read them in its authority batch. */
   branchRules?: BranchRule[];
   waitUntil(p: Promise<unknown>): void;
@@ -307,9 +317,6 @@ export type Fail = Extract<ServiceResult<never>, { ok: false }> & {
   reason?: string;
 };
 
-export function fail(status: number, error: string, code: string, extra: Partial<Fail> = {}): Fail {
-  return { ok: false, status, error, code, ...extra };
-}
 
 /** The pin refusal (services/dependencyGate.ts) for the rows of a change's workspace pins, or null. */
 export function dependencyRefusal(rows: readonly DependencyRow[] | undefined, mode: 'enqueue' | 'publish' = 'publish'): Fail | null {
@@ -321,17 +328,7 @@ export function resolveCtx(cx: Pick<ChangeContext, 'env' | 'repo' | 'waitUntil'>
   return { env: cx.env, repo: cx.repo, artifacts, bypass: false, waitUntil: cx.waitUntil };
 }
 
-export async function guarded<T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RefStoreUnavailable) {
-      console.warn(JSON.stringify({ changesRefStore: err.message.slice(0, 200) }));
-      return fail(503, 'repository storage is unavailable, retry shortly', 'STORAGE_UNAVAILABLE');
-    }
-    throw err;
-  }
-}
+export const guarded = <T>(fn: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> => baseGuarded('changesRefStore', fn);
 
 /** A branch name as given (`main`) or as a full branch ref (`refs/heads/main`); null otherwise. */
 export function normalizeBranch(input: unknown): string | null {
@@ -377,20 +374,31 @@ export async function readChange(env: Env, repoId: string, number: number): Prom
 }
 
 /** One batch: the change and its newest check runs (bounded), so the cost is the same for any number of runs. */
+function latestChecksByName(rows: readonly CheckRunRow[]): CheckRunView[] {
+  const seen = new Set<string>();
+  const checks: CheckRunView[] = [];
+  for (const row of rows) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    checks.push(checkRunView(row));
+  }
+  return checks;
+}
+
 async function readChangeWithChecks(env: Env, repoId: string, number: number): Promise<{ row: ChangeRow; checks: CheckRunView[] } | null> {
   const [change, checks] = await env.DB.batch([
     changeSelect(env.DB, repoId, number),
     env.DB.prepare(
       `SELECT ${CHECK_RUN_COLUMNS}
-         FROM check_runs k
-        WHERE k.change_set_id = (SELECT id FROM change_sets WHERE repo_id = ?1 AND number = ?2)
+         FROM check_runs k JOIN change_sets c ON c.id = k.change_set_id
+        WHERE c.repo_id = ?1 AND c.number = ?2 AND k.head_sha = c.head_sha
         ORDER BY k.created_at DESC, k.id DESC
         LIMIT ${CHANGE_LIMITS.checksMax}`,
     ).bind(repoId, number),
   ]);
   const row = (change?.results as ChangeRow[] | undefined)?.[0];
   if (!row) return null;
-  return { row, checks: ((checks?.results as CheckRunRow[] | undefined) ?? []).map(checkRunView) };
+  return { row, checks: latestChecksByName((checks?.results as CheckRunRow[] | undefined) ?? []) };
 }
 
 export interface ChangePage {
@@ -469,7 +477,7 @@ export async function mergeabilityFor(ctx: ResolveContext, gate: ChecksGate, tar
 /** The cached merge plan of a commit pair, without asking the checks-gate (conflict evaluation, guard base). */
 export async function mergePlanFor(ctx: ResolveContext, targetSha: string, headSha: string): Promise<CachedPlan> {
   // v3: v2 entries cached criss-cross pairs as refused; they now merge through a virtual base.
-  const key = internalKey('mergeplan/v3', ctx.repo.id, targetSha, headSha);
+  const key = internalKey('mergeplan/v4', ctx.repo.id, targetSha, headSha);
   const hit = await readCachedJson<CachedPlan>(key);
   if (hit) return hit;
   const plan = await computeMergePlan(artifactsMergeSources(ctx), { targetSha, headSha });
@@ -625,27 +633,115 @@ async function reconciled(cx: ChangeContext, row: ChangeRow, m: Mergeability): P
   return { ...row, ...after };
 }
 
+export interface RemainingAux {
+  dependency: ReturnType<typeof blockFromRows>;
+  resolveConflictTaskOpen: boolean;
+}
+
+function remainingAuxStatements(
+  db: D1Database,
+  repoId: string,
+  change: { id?: string; number: number },
+): [D1PreparedStatement, D1PreparedStatement] {
+  const byId = change.id !== undefined;
+  const taskChange = byId ? 't.change_set_id = ?2' : 't.change_set_id = (SELECT c.id FROM change_sets c WHERE c.repo_id = ?1 AND c.number = ?2)';
+  const bindings = byId ? [repoId, change.id] : [repoId, change.number];
+  return [
+    byId
+      ? changeDependenciesStatement(db, repoId, change.id!)
+      : changeNumberDependenciesStatement(db, repoId, change.number),
+    db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM agent_tasks t
+          WHERE t.repo_id = ?1 AND ${taskChange} AND t.kind = '${RESOLVE_CONFLICT}' AND t.status IN ('open', 'claimed')) AS task_open`,
+      )
+      .bind(...bindings),
+  ];
+}
+
+function remainingAuxFromRows(dependencies: DependencyRow[] | undefined, tasks: Array<{ task_open: number }> | undefined): RemainingAux {
+  return {
+    dependency: blockFromRows(dependencies ?? [], 'publish'),
+    resolveConflictTaskOpen: Boolean(tasks?.[0]?.task_open),
+  };
+}
+
+export async function readRemainingAux(env: Env, repoId: string, number: number): Promise<RemainingAux> {
+  const rows = await env.DB.batch(remainingAuxStatements(env.DB, repoId, { number }));
+  return remainingAuxFromRows(
+    rows[0]?.results as DependencyRow[] | undefined,
+    rows[1]?.results as Array<{ task_open: number }> | undefined,
+  );
+}
+
+async function remainingForRow(cx: ChangeContext, row: ChangeRow, mergeability: MergeabilityView | null): Promise<RemainingItem[]> {
+  const [facts, rules, dependencies, tasks] = await cx.env.DB.batch([
+    reviewFactsSelectById(cx.env.DB, row.id),
+    repoBranchRulesSelect(cx.env.DB, cx.repo.id),
+    ...remainingAuxStatements(cx.env.DB, cx.repo.id, { id: row.id, number: row.number }),
+  ]);
+  const branchRules = ((rules?.results as BranchRuleRow[] | undefined) ?? []).map(ruleFromRow);
+  const policy = effectivePolicy(branchRules, branchRef(row.base_ref));
+  const gate = reviewGate(parseReviewFacts((facts?.results as ReviewFactsRow[] | undefined)?.[0]), policy);
+  const aux = remainingAuxFromRows(
+    dependencies?.results as DependencyRow[] | undefined,
+    tasks?.results as Array<{ task_open: number }> | undefined,
+  );
+  const actor = cx.actor;
+  const principal = actor ? (actor.agent ? `agent:${actor.agent.agentId}` : `user:${actor.user.id}`) : null;
+  const agent = agentMetaOf(row.agent_meta);
+  const authorPrincipal = agent ? `agent:${agent.id}` : row.author_id ? `user:${row.author_id}` : null;
+  return remainingFor({
+    change: {
+      state: row.state,
+      mergePolicy: row.merge_policy,
+      author: { principal: authorPrincipal, login: row.author_login, agentId: agent?.id ?? null },
+      queueState: row.queue_state,
+      conflicts: storedConflicts(row).conflicts,
+    },
+    blockers: gate.blockers,
+    approvals: gate.block?.review.approvals ?? null,
+    agentApprovals: policy.agentApprovals,
+    mergeability,
+    dependency: aux.dependency,
+    resolveConflictTaskOpen: aux.resolveConflictTaskOpen,
+    viewer: {
+      principal,
+      login: actor?.user.login ?? null,
+      kind: actor ? (actor.agent ? 'agent' : 'human') : null,
+      writeAccess: cx.writeAccess === true,
+    },
+  });
+}
+
 /** GET changes/:number — the change, its rating and mergeability (open changes) and check runs. */
-export function getChange(cx: ChangeContext, rawNumber: string): Promise<ServiceResult<ChangeDetail>> {
+export function getChange(
+  cx: ChangeContext,
+  rawNumber: string,
+  options: { includeRemaining?: boolean } = {},
+): Promise<ServiceResult<ChangeDetail>> {
   return guarded(async () => {
     const number = parseNumber(rawNumber);
     if (number === null) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const found = await readChangeWithChecks(cx.env, cx.repo.id, number);
     if (!found) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
     const { row, checks } = found;
-    if (!isLive(row)) return { ok: true, value: { ...changeView(row), rating: storedRating(row), mergeability: null, checks } };
+    if (!isLive(row)) return { ok: true, value: { ...changeView(row), rating: storedRating(row), mergeability: null, checks, remaining: [] } };
     return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const live = await liveState(resolveCtx(cx, artifacts), defaultChecksGate(cx.env), row);
       const current = live.mergeability ? await reconciled(cx, row, live.mergeability) : row;
       const view = changeView(current);
+      const mergeability = live.mergeability ? mergeabilityView(live.mergeability) : null;
+      const remaining = options.includeRemaining === false ? [] : await remainingForRow(cx, current, mergeability);
       return {
         ok: true,
         value: {
           ...view,
           baseSha: live.baseSha ?? view.baseSha,
           rating: live.rating,
-          mergeability: live.mergeability ? mergeabilityView(live.mergeability) : null,
+          mergeability,
           checks,
+          remaining,
         },
       };
     });
@@ -657,6 +753,7 @@ export interface MergeabilityResponse {
   number: number;
   state: ChangeState;
   mergeability: MergeabilityView | null;
+  remaining: RemainingItem[];
 }
 
 export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<ServiceResult<MergeabilityResponse>> {
@@ -664,7 +761,13 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
     const number = parseNumber(rawNumber);
     const row = number === null ? null : await readChange(cx.env, cx.repo.id, number);
     if (!row) return fail(404, 'change not found', 'CHANGE_NOT_FOUND');
-    if (!isLive(row) || !row.head_sha) return { ok: true, value: { number: row.number, state: row.state, mergeability: null } };
+    if (!isLive(row)) return { ok: true, value: { number: row.number, state: row.state, mergeability: null, remaining: [] } };
+    if (!row.head_sha) {
+      return {
+        ok: true,
+        value: { number: row.number, state: row.state, mergeability: null, remaining: await remainingForRow(cx, row, null) },
+      };
+    }
     return withLazyRepo(cx.env, cx.repo.artifacts_name, async (artifacts) => {
       const ctx = resolveCtx(cx, artifacts);
       const baseName = branchRef(row.base_ref);
@@ -673,12 +776,14 @@ export function getMergeability(cx: ChangeContext, rawNumber: string): Promise<S
       if (!base) return fail(409, `base branch ${row.base_ref} no longer exists`, 'BASE_NOT_FOUND');
       const m = await mergeabilityFor(ctx, defaultChecksGate(cx.env), base.sha, row.head_sha!, row.id);
       const current = await reconciled(cx, row, m);
-      return { ok: true, value: { number: row.number, state: current.state, mergeability: mergeabilityView(m) } };
+      const mergeability = mergeabilityView(m);
+      const remaining = await remainingForRow(cx, current, mergeability);
+      return { ok: true, value: { number: row.number, state: current.state, mergeability, remaining } };
     });
   });
 }
 
-/** GET changes/:number/checks — the change's check runs, newest first (bounded). */
+/** GET changes/:number/checks — the newest run per name for the current head (bounded). */
 export async function listChangeChecks(env: Env, repo: RepoRow, rawNumber: string): Promise<ServiceResult<{ number: number; headSha: string | null; checks: CheckRunView[] }>> {
   const number = parseNumber(rawNumber);
   const found = number === null ? null : await readChangeWithChecks(env, repo.id, number);
@@ -699,8 +804,9 @@ interface CreateInput {
 }
 
 function parseCreate(input: unknown): ServiceResult<CreateInput> {
-  const b = (input ?? {}) as Record<string, unknown>;
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const title = validTitle(b.title);
   if (title === null) return fail(422, `title is required (1-${CHANGE_LIMITS.titleMax} characters)`, 'INVALID_TITLE');
   const body = b.body === undefined ? null : validBody(b.body);
@@ -732,7 +838,7 @@ export interface CreateChangeOptions {
   kind?: 'change' | 'revert';
 }
 
-export function createChange(cx: ChangeContext, input: unknown, opts: CreateChangeOptions = {}): Promise<ServiceResult<ChangeDetail>> {
+export function createChange(cx: ChangeContext, input: unknown, opts: CreateChangeOptions = {}): Promise<ServiceResult<CreatedChangeDetail>> {
   return guarded(async () => {
     const parsed = parseCreate(input);
     if (!parsed.ok) return parsed;
@@ -768,6 +874,7 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
     const now = Date.now();
     const id = crypto.randomUUID();
     const agentMeta = cx.actor?.agent ? JSON.stringify({ agentId: cx.actor.agent.agentId, agentName: cx.actor.agent.agentName }) : null;
+    const initialCoverage = await headCoverage(cx.env, cx.repo, { id, base: p.base }, headSha, cx.waitUntil);
     // The head watermark is tied to the ref position: a push ingested since the
     // observation (newer event) is adopted outright; the push that produced the
     // observed head lends its event time; otherwise the observation time, so a
@@ -806,16 +913,33 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       ...changeLinkStatements(cx.env.DB, cx.repo, id, { title: p.title, body: p.body, head: p.head }, actorName(cx.actor), now, changed),
       // Guarded by the head: a newer push adopted by the INSERT was not evaluated here.
       ...(conflicted?.kind === 'mark' ? markConflictedStatements(cx.env.DB, id, conflicted.record, now) : []),
-      // A change into a ref covered by a branch rule asks a human from the start.
-      ...(cx.branchRules && effectivePolicy(cx.branchRules, branchRef(p.base)).protected
-        ? [recordMissingEscalation(cx.env.DB, id, 'protected-path', now)]
-        : []),
       guardRunInsert(cx.env.DB, { repoId: cx.repo.id, changeId: id, headSha, treeSha: headTree, summary: guard, startedAt: guardStarted, now }),
       cx.env.DB.prepare(`SELECT ${CHECK_RUN_COLUMNS} FROM check_runs k WHERE k.change_set_id = ? ORDER BY k.created_at DESC, k.id DESC LIMIT ${CHANGE_LIMITS.checksMax}`).bind(id),
       cx.env.DB.prepare(`${CHANGE_SELECT} WHERE c.id = ?`).bind(id),
     ]);
     let row = (results[results.length - 1]?.results as ChangeRow[] | undefined)?.[0];
     if (!row) return fail(500, 'change could not be created', 'CREATE_FAILED');
+    const tier = row.head_sha
+      ? await recordHeadTier(
+          cx.env,
+          cx.repo,
+          { id: row.id, base: row.base_ref },
+          row.head_sha,
+          row.head_sha === headSha ? initialCoverage : undefined,
+          cx.waitUntil,
+        )
+      : { maxTier: 'scrutinize' as const, truncated: false, recorded: false };
+    const targetPolicy = effectivePolicy(cx.branchRules ?? [], branchRef(p.base));
+    if (
+      targetPolicy.protected &&
+      !(targetPolicy.agentApprovals === 'low-risk' && (tier.maxTier === 'read' || tier.maxTier === 'receipt'))
+    ) {
+      try {
+        await cx.env.DB.batch([recordMissingEscalation(cx.env.DB, row.id, 'protected-path', now)]);
+      } catch {
+        // Review publication records any missing escalation before applying the gate.
+      }
+    }
     let checks = ((results[results.length - 2]?.results as CheckRunRow[] | undefined) ?? []).map(checkRunView);
     if (row.head_sha && row.head_sha !== headSha) {
       // The insert adopted a push newer than the evaluated head; that push's hooks ran before the change existed.
@@ -834,15 +958,16 @@ export function createChange(cx: ChangeContext, input: unknown, opts: CreateChan
       // on that persisted head, so return the created, blocked change rather
       // than an error that suggests no change exists.
       if (!queued.ok && row.head_sha === headSha) return queued;
-      if (queued.ok && queued.value.jobs > 0) {
-        const read = await listChangeChecks(cx.env, cx.repo, String(row.number));
-        if (read.ok) checks = read.value.checks;
-      } else if (!queued.ok) {
+      if (!queued.ok || queued.value.jobs > 0) {
         const read = await listChangeChecks(cx.env, cx.repo, String(row.number));
         if (read.ok) checks = read.value.checks;
       }
     }
     if (row.merge_policy === 'auto') row = (await autoMerge(cx, row)) ?? row;
+    if (row.state === 'open' && row.head_sha && row.nudge_after_minutes !== null) {
+      await enqueueReviewNudge(cx.env, cx.repo.id, row.id, row.head_sha);
+    }
+    await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: { ...changeView(row), rating: isLive(row) ? rating : storedRating(row), mergeability: null, checks } };
   });
 }
@@ -855,8 +980,9 @@ interface Patch {
 }
 
 function parsePatch(input: unknown): ServiceResult<Patch> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return fail(400, 'body must be a JSON object', 'INVALID_BODY');
-  const b = input as Record<string, unknown>;
+  const parsed = objectBody(input);
+  if (!parsed.ok) return parsed;
+  const b = parsed.value;
   const out: Patch = {};
   if (b.title !== undefined) {
     const t = validTitle(b.title);
@@ -976,6 +1102,10 @@ export function updateChange(cx: ChangeContext, rawNumber: string, input: unknow
       );
     }
     if (row.merge_policy === 'auto' && row.state === 'open') row = (await autoMerge(cx, row)) ?? row;
+    if ((p.state === 'open' || p.mergePolicy !== undefined) && row.state === 'open' && row.head_sha && row.nudge_after_minutes !== null) {
+      await enqueueReviewNudge(cx.env, cx.repo.id, row.id, row.head_sha);
+    }
+    await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: row.state }, cx.waitUntil);
     return { ok: true, value: changeView(row) };
   });
 }
@@ -1207,6 +1337,66 @@ export function mergedRecordStatements(
  * between that last read and the send is not caught here; the guarded
  * merged write then refuses to record it.
  */
+
+/**
+ * The prepared-commit CI staging step of a publication: points the change's
+ * platform-reserved staging ref at the prepared merge commit (reusing a
+ * leftover from a crashed attempt, or re-pointing one staged for a moved
+ * base), then queues the result tree's jobs. Returns the staging ref so the
+ * caller can clean it up when a later step refuses the publication.
+ */
+async function stagePreparedCi(
+  cx: ChangeContext,
+  ctx: ResolveContext,
+  sources: MergeSources,
+  pusher: GitPusher,
+  row: ChangeRow,
+  prepared: PreparedMerge,
+): Promise<ServiceResult<string | null>> {
+  const configured = await hasCiJobs(cx.env, cx.repo.artifacts_name, prepared.headSha);
+  if (!configured.ok) return configured;
+  if (!configured.value) return { ok: true, value: null };
+  const checkRef = `refs/heads/kvarm-ci/${row.id}/${prepared.treeSha}`;
+  const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
+  if (live) {
+    const expected = await cx.env.DB.prepare(
+      'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
+    )
+      .bind(cx.repo.id, row.id, prepared.treeSha)
+      .first<string>('head_sha');
+    const staged = await sources.readCommit(live);
+    const usable =
+      staged !== null &&
+      live === expected &&
+      staged.treeHash === prepared.treeSha &&
+      staged.parents.length === 2 &&
+      staged.parents[0] === prepared.targetSha &&
+      staged.parents[1] === prepared.headSha;
+    if (usable) {
+      prepared.mergeCommit = live;
+    } else if (prepared.mergeCommit === live) {
+      // Only the queueing was lost (a crash between the staging push
+      // and the job rows): the ref already holds this preparation.
+    } else {
+      // The staging ref holds a commit prepared for another attempt at
+      // this tree: the base moved under an unchanged result tree. The
+      // namespace is platform-reserved, so this preparation re-points
+      // it (expected old value = the stale commit) instead of
+      // refusing forever.
+      const restaged = await pusher.updateRef({ ref: checkRef, oldOid: live, newOid: prepared.mergeCommit }, prepared.objects);
+      if (restaged.status !== 'ok') {
+        return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
+      }
+    }
+  } else {
+    const staged = await pusher.updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: prepared.mergeCommit }, prepared.objects);
+    if (staged.status !== 'ok') return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
+  }
+  const queued = await queueExactTreeCi(cx.env, cx.repo, row.id, prepared.headSha, prepared.mergeCommit, prepared.treeSha);
+  if (!queued.ok) return queued;
+  return { ok: true, value: checkRef };
+}
+
 async function performMerge(
   cx: ChangeContext,
   row: ChangeRow,
@@ -1255,56 +1445,9 @@ async function performMerge(
       }
       let ciCheckRef: string | null = null;
       if (prepared.value.kind === 'merge') {
-        const configured = await hasCiJobs(cx.env, cx.repo.artifacts_name, prepared.value.headSha);
-        if (!configured.ok) return configured;
-        if (configured.value) {
-          const checkRef = `refs/heads/kvarm-ci/${row.id}/${prepared.value.treeSha}`;
-          ciCheckRef = checkRef;
-          const live = (await lsRefs(ctx, [checkRef])).get(checkRef) ?? null;
-          if (live) {
-            const expected = await cx.env.DB.prepare(
-              'SELECT head_sha FROM ci_jobs WHERE repo_id = ?1 AND change_set_id = ?2 AND tree_sha = ?3 ORDER BY created_at LIMIT 1',
-            )
-              .bind(cx.repo.id, row.id, prepared.value.treeSha)
-              .first<string>('head_sha');
-            const staged = await sources.readCommit(live);
-            const usable =
-              staged !== null &&
-              live === expected &&
-              staged.treeHash === prepared.value.treeSha &&
-              staged.parents.length === 2 &&
-              staged.parents[0] === prepared.value.targetSha &&
-              staged.parents[1] === prepared.value.headSha;
-            if (usable) {
-              prepared.value.mergeCommit = live;
-            } else if (prepared.value.mergeCommit === live) {
-              // Only the queueing was lost (a crash between the staging push
-              // and the job rows): the ref already holds this preparation.
-            } else {
-              // The staging ref holds a commit prepared for another attempt at
-              // this tree: the base moved under an unchanged result tree. The
-              // namespace is platform-reserved, so this preparation re-points
-              // it (expected old value = the stale commit) instead of
-              // refusing forever.
-              const restaged = await pusher.updateRef({ ref: checkRef, oldOid: live, newOid: prepared.value.mergeCommit }, prepared.value.objects);
-              if (restaged.status !== 'ok') {
-                return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
-              }
-            }
-          } else {
-            const staged = await pusher.updateRef({ ref: checkRef, oldOid: ZERO_OID, newOid: prepared.value.mergeCommit }, prepared.value.objects);
-            if (staged.status !== 'ok') return fail(503, 'the prepared CI commit could not be staged', 'CI_PREPARED_COMMIT_UNAVAILABLE');
-          }
-          const queued = await queueExactTreeCi(
-            cx.env,
-            cx.repo,
-            row.id,
-            prepared.value.headSha,
-            prepared.value.mergeCommit,
-            prepared.value.treeSha,
-          );
-          if (!queued.ok) return queued;
-        }
+        const staged = await stagePreparedCi(cx, ctx, sources, pusher, row, prepared.value);
+        if (!staged.ok) return staged;
+        ciCheckRef = staged.value;
       }
       const guardBase = await sources.readCommit(prepared.value.mergeBase);
       if (!guardBase) return fail(503, 'the merge base could not be read', 'MERGE_READ_FAILED');
@@ -1457,8 +1600,9 @@ export function mergeChange(
     const number = parseNumber(rawNumber);
     let attribution: AttributionInput | null = null;
     if (body !== undefined && body !== null) {
-      if (typeof body !== 'object' || Array.isArray(body)) return fail(400, 'body must be a JSON object {attribution?}', 'INVALID_BODY');
-      const raw = (body as { attribution?: unknown }).attribution;
+      const parsed = objectBody(body, '{attribution?}');
+      if (!parsed.ok) return parsed;
+      const raw = parsed.value.attribution;
       if (raw !== undefined && raw !== null) {
         if (typeof raw !== 'object' || Array.isArray(raw)) {
           return fail(422, 'attribution must be an object {agent?, session?, promptHash?, model?}', 'INVALID_ATTRIBUTION');
@@ -1488,7 +1632,9 @@ export function mergeChange(
     // A pinned dependency lands first: the explicit merge of a dependent waits for its source like the train does.
     const pinned = dependencyRefusal(pins);
     if (pinned) return pinned;
-    return performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
+    const result = await performMerge(cx, row, mergeAuthor(cx.actor), deps, 'explicit', attribution, facts);
+    if (result.ok) await publishRepoEvent(cx.env, cx.repo.id, { type: 'change.updated', changeNumber: row.number, state: 'merged' }, cx.waitUntil);
+    return result;
   });
 }
 
@@ -1547,6 +1693,7 @@ export interface ChangeOnRef {
   state?: ChangeState;
   policy: MergePolicy;
   headSha: string | null;
+  nudgeAfterMinutes?: number | null;
   /** The head its active merge-queue entry approved, when the change is queued. */
   queuedHead?: string | null;
 }
@@ -1569,12 +1716,34 @@ export const HEAD_MOVED_HOOKS: HeadMovedHook[] = [
     await recordGuard(e.env, e.repoId, e.change.id, e.headSha);
   },
   async (e) => {
+    try {
+      const [repoRead, changeRead] = await e.env.DB.batch([
+        e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId),
+        e.env.DB.prepare('SELECT id, base_ref FROM change_sets WHERE id = ? AND repo_id = ?').bind(e.change.id, e.repoId),
+      ]);
+      const repo = (repoRead?.results as RepoRow[] | undefined)?.[0];
+      const change = (changeRead?.results as { id: string; base_ref: string }[] | undefined)?.[0];
+      if (repo && change) await recordHeadTier(e.env, repo, { id: change.id, base: change.base_ref }, e.headSha);
+    } catch {
+      // A head-tier cache failure must not fail the push hook.
+    }
+  },
+  async (e) => {
     const repo = await e.env.DB.prepare('SELECT * FROM repos WHERE id = ?').bind(e.repoId).first<RepoRow>();
     if (repo) await queueChangeCi(e.env, repo, e.change.id, e.headSha);
   },
   // Issue proposals from paths follow the new head (advice only; never fails the push).
   async (e) => {
     await refreshPathLinks(e.env, e.repoId, e.change.id, e.headSha);
+  },
+  (e) => carryApprovals(e),
+  async (e) => {
+    if (e.change.nudgeAfterMinutes !== null && e.change.nudgeAfterMinutes !== undefined) {
+      await enqueueReviewNudge(e.env, e.repoId, e.change.id, e.headSha);
+    }
+  },
+  async (e) => {
+    await publishRepoEvent(e.env, e.repoId, { type: 'change.head', changeNumber: e.change.number, headSha: e.headSha });
   },
 ];
 
@@ -1774,6 +1943,7 @@ export function changeCleanupStatements(db: D1Database, repoId: string): D1Prepa
     db.prepare('DELETE FROM merge_admission WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM agent_tasks WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_reviews WHERE repo_id = ?').bind(repoId),
+    db.prepare('DELETE FROM change_head_tiers WHERE change_set_id IN (SELECT id FROM change_sets WHERE repo_id = ?)').bind(repoId),
     db.prepare('DELETE FROM change_escalations WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM review_policies WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM change_sets WHERE repo_id = ?').bind(repoId),
