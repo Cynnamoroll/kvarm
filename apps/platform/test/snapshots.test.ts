@@ -1324,7 +1324,7 @@ describe('snapshot API', () => {
     expect((await call(snap('dlcache-flip', `${p.sha}/download`), { token: tok.owner })).cost.cache).toBe('hit');
   });
 
-  it('deleting a repo removes its snapshot rows and tarballs within the DELETE budget (d1 <= 2)', async () => {
+  it('deleting a repo removes its snapshot rows and tarballs within the DELETE budget (d1 <= 3)', async () => {
     const { id, repo } = await seedRepo('doomed');
     const main = await commit(repo, SMALL);
     const other = await commit(repo, { 'other.txt': 'other\n' }, [main.sha]);
@@ -1336,8 +1336,8 @@ describe('snapshot API', () => {
     expect(await objectKeys(id)).toHaveLength(2);
     const del = await call(`/api/v1/repos/${OWNER}/doomed`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
-    expect(del.cost.d1).toBeLessThanOrEqual(2);
-    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 1 });
+    expect(del.cost.d1).toBeLessThanOrEqual(3);
+    expect(del.cost).toMatchObject({ art: 1, r2a: 3, r2b: 0, do: 1 });
     expect(await objectKeys(id)).toHaveLength(0);
     expect(await commitRow(id, main.sha)).toBeNull();
     const trees = await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_trees WHERE repo_id = ?').bind(id).first();
@@ -1345,12 +1345,12 @@ describe('snapshot API', () => {
     expect(await env.DB.prepare('SELECT id FROM repos WHERE id = ?').bind(id).first()).toBeNull();
   });
 
-  it('deleting a repo without snapshots stays within the DELETE budget and touches no R2', async () => {
+  it('deleting a repo without snapshots still sweeps its R2 prefixes', async () => {
     const { id } = await seedRepo('bare');
     const del = await call(`/api/v1/repos/${OWNER}/bare`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
-    expect(del.cost.d1).toBeLessThanOrEqual(2);
-    expect(del.cost).toMatchObject({ art: 1, r2a: 0, r2b: 0, do: 1 });
+    expect(del.cost.d1).toBeLessThanOrEqual(3);
+    expect(del.cost).toMatchObject({ art: 1, r2a: 3, r2b: 0, do: 1 });
     expect(await env.DB.prepare('SELECT id FROM repos WHERE id = ?').bind(id).first()).toBeNull();
   });
 });

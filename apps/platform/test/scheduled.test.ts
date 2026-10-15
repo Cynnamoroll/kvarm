@@ -10,7 +10,8 @@ const env = cfEnv as unknown as Env;
 function spies() {
   const webhooks = vi.fn(async () => {});
   const fleetSweeps = vi.fn(async () => {});
-  return { webhooks, fleetSweeps, jobs: { webhooks, fleetSweeps } satisfies ScheduledJobs };
+  const repoPurges = vi.fn(async () => {});
+  return { webhooks, fleetSweeps, repoPurges, jobs: { webhooks, fleetSweeps, repoPurges } satisfies ScheduledJobs };
 }
 
 async function run(cron: string, jobs: ScheduledJobs) {
@@ -25,6 +26,7 @@ describe('scheduled dispatch on the cron expression', () => {
     const s = spies();
     expect(await run(WEBHOOK_CRON, s.jobs)).toBe('webhooks');
     expect(s.webhooks).toHaveBeenCalledTimes(1);
+    expect(s.repoPurges).toHaveBeenCalledTimes(1);
     expect(s.fleetSweeps).not.toHaveBeenCalled();
   });
 
@@ -33,6 +35,20 @@ describe('scheduled dispatch on the cron expression', () => {
     expect(await run(FLEET_SWEEP_CRON, s.jobs)).toBe('fleetSweeps');
     expect(s.fleetSweeps).toHaveBeenCalledTimes(1);
     expect(s.webhooks).not.toHaveBeenCalled();
+    expect(s.repoPurges).not.toHaveBeenCalled();
+  });
+
+  it('runs the purge sweep even if the webhook stage fails', async () => {
+    const s = spies();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    s.webhooks.mockImplementationOnce(() => { throw new Error('webhook failure'); });
+    try {
+      expect(await run(WEBHOOK_CRON, s.jobs)).toBe('webhooks');
+      expect(s.repoPurges).toHaveBeenCalledOnce();
+      expect(error).toHaveBeenCalledWith('{"cron":"webhooks","error":"Error"}');
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it('an unknown expression is logged and runs nothing', async () => {

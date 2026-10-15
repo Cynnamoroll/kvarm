@@ -12,8 +12,8 @@ import {
   isValidRepoName,
   type RepoRow,
 } from '../db/repos';
-import { purgeGitTokens } from '../artifacts/tokens';
-import { deleteSnapshotObjects, snapshotCleanupStatements } from '../services/snapshots';
+import { snapshotCleanupStatements } from '../services/snapshots';
+import { purgeRepo } from '../services/repoPurge';
 import { changeCleanupStatements } from '../services/changes';
 import { workspaceCleanupStatements } from '../services/workspaces';
 import { issueCleanupStatements } from '../services/issues';
@@ -156,48 +156,63 @@ export async function deleteRepo(
   env: Env,
   repo: RepoRow,
 ): Promise<ServiceResult<{ deleted: true }>> {
-  // One batch: the repo row with its workspace, change and snapshot rows,
-  // returning the tarball keys. Those rows reference the repo (and workspaces
-  // their change sets), so they go first. Forks hold the parent row and
-  // nothing cascades it, so they detach here too.
+  // The tombstone and registry deletion commit with all relational cleanup.
   const before = [
     ...compositionCleanupStatements(env.DB, repo.id),
     ...arenaCleanupStatements(env.DB, repo.id),
+    env.DB.prepare('DELETE FROM sandboxes WHERE repo_id = ?').bind(repo.id),
     ...workspaceCleanupStatements(env.DB, repo.id),
+    env.DB.prepare('DELETE FROM merge_publication_intents WHERE repo_id = ?').bind(repo.id),
     ...changeCleanupStatements(env.DB, repo.id),
     ...issueCleanupStatements(env.DB, repo.id),
+    env.DB.prepare(
+      'DELETE FROM push_event_effects WHERE event_id IN (SELECT id FROM push_events WHERE repo_id = ?)',
+    ).bind(repo.id),
+    env.DB.prepare('DELETE FROM push_events WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM repo_refs WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM ref_updates WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM attribution_evidence WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM audit_commits WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM path_history WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM path_history_commits WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM path_history_state WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM snapshots WHERE repo_id = ?').bind(repo.id),
+    env.DB.prepare('DELETE FROM stars WHERE repo_id = ?').bind(repo.id),
     env.DB.prepare('UPDATE repos SET fork_parent_id = NULL WHERE fork_parent_id = ?').bind(repo.id),
   ];
+  const now = Date.now();
   const results = await env.DB.batch<{ r2_key: string }>([
+    env.DB.prepare(
+      `INSERT INTO repo_purges (repo_id, artifacts_name, snapshot_keys, created_at, next_attempt_at)
+       SELECT r.id, r.artifacts_name,
+         (SELECT COALESCE(json_group_array(r2_key), '[]') FROM (
+           SELECT r2_key FROM snapshot_trees WHERE repo_id = r.id AND r2_key IS NOT NULL
+           UNION SELECT r2_key FROM snapshots WHERE repo_id = r.id AND r2_key IS NOT NULL
+         )), ?2, ?2
+       FROM repos r WHERE r.id = ?1
+       ON CONFLICT(repo_id) DO UPDATE SET
+         artifacts_name = excluded.artifacts_name, snapshot_keys = excluded.snapshot_keys
+       RETURNING *`,
+    ).bind(repo.id, now),
     ...before,
     deleteRepoRowStatement(env.DB, repo.id),
     ...snapshotCleanupStatements(env.DB, repo.id),
   ]);
-  const keys = results[before.length + 1];
-  // D1 before Artifacts: the batch is one transaction, so a failure leaves the
-  // registry intact and the delete retryable. The opposite order removed the
-  // storage first and left listed rows whose every page 500ed when the batch
-  // failed. Storage that reports itself already gone is the normal case when
-  // re-deleting such a leftover; any other delete failure only leaks
-  // unreachable storage.
-  try {
-    await env.ARTIFACTS.delete(repo.artifacts_name);
-  } catch (err) {
-    if (!/not ?found|does not exist|no such/i.test(String(err))) {
-      console.log(JSON.stringify({ artifactsDeleteFailed: repo.id, error: String(err).slice(0, 200) }));
+  const tombstone = results[0]?.results?.[0] as unknown as import('../services/repoPurge').RepoPurgeTombstone | undefined;
+  let purgeComplete = false;
+  if (tombstone) {
+    try {
+      purgeComplete = (await purgeRepo(env, tombstone, { maxPrefixPages: 1, maxSnapshotBatches: 1 })).ok;
+    } catch (err) {
+      console.warn(JSON.stringify({ repoPurgeInlineFailed: repo.id, error: err instanceof Error ? err.name : 'Error' }));
     }
   }
-  try {
-    await env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id)).destroy();
-  } catch (err) {
-    console.log(JSON.stringify({ pathHistoryCleanupFailed: repo.id, error: String(err).slice(0, 200) }));
-  }
-  await purgeGitTokens(repo.artifacts_name);
-  try {
-    await deleteSnapshotObjects(env, (keys?.results ?? []).map((r) => r.r2_key));
-  } catch (err) {
-    // The repo is gone either way; leftover tarballs are unreachable.
-    console.log(JSON.stringify({ snapshotCleanupFailed: repo.id, error: String(err).slice(0, 200) }));
+  if (tombstone && !purgeComplete) {
+    try {
+      await env.EVENTS.send({ type: 'repo.purge', repoId: repo.id });
+    } catch (err) {
+      console.warn(JSON.stringify({ repoPurgeEnqueueFailed: repo.id, error: err instanceof Error ? err.name : 'Error' }));
+    }
   }
   return { ok: true, value: { deleted: true } };
 }

@@ -105,6 +105,19 @@ export class PathHistory extends DurableObject<Env> {
     return this.rows<StateRow>('SELECT * FROM state LIMIT 1')[0] ?? null;
   }
 
+  private async repoExists(repoName = this.repoName): Promise<boolean> {
+    return Boolean(
+      await this.env.DB.prepare('SELECT 1 AS ok FROM repos WHERE artifacts_name = ?').bind(repoName).first(),
+    );
+  }
+
+  private async repoActive(repoName = this.repoName): Promise<boolean> {
+    if (this.destroyed) return false;
+    if (await this.repoExists(repoName)) return !this.destroyed;
+    await this.destroy();
+    return false;
+  }
+
   private pageEntries(path: string, before: number, limit: number): Array<{ seq: number; status: string }> {
     const pathId = this.rows<{ id: number }>('SELECT id FROM paths WHERE path=?', path)[0]?.id;
     if (pathId === undefined) return [];
@@ -177,6 +190,7 @@ export class PathHistory extends DurableObject<Env> {
     if (this.destroyed) return 'not indexed';
     const state = this.state();
     if (!state) return 'not indexed';
+    if (!(await this.repoActive(state.repo_name))) return 'not indexed';
     if (input.ref === state.ref && input.eventAt >= state.known_at) {
       this.repoName = state.repo_name;
       const after = input.after === ZERO_OID ? null : input.after;
@@ -190,6 +204,7 @@ export class PathHistory extends DurableObject<Env> {
 
   async destroy(): Promise<void> {
     await this.ready;
+    if (this.destroyed) return;
     this.destroyed = true;
     this.notifyPageWaiters();
     await this.ctx.storage.deleteAlarm();
@@ -228,11 +243,12 @@ export class PathHistory extends DurableObject<Env> {
         const previous = state ? `${state.epoch}:${state.head_sha}:${state.head_seq}:${state.tail_next}:${state.tail_seq}` : '';
         const waiting = this.waitForFirstPage(input, head);
         await this.arm();
+        const startedIndexer = this.running === null;
         void this.start().catch(() => {});
         await waiting;
         if (this.destroyed) return { ok: false, status: 503, error: 'repository storage is unavailable, retry shortly', code: 'STORAGE_UNAVAILABLE' };
         state = this.state();
-        progressed = state !== null && previous !== `${state.epoch}:${state.head_sha}:${state.head_seq}:${state.tail_next}:${state.tail_seq}`;
+        progressed = startedIndexer && state !== null && previous !== `${state.epoch}:${state.head_sha}:${state.head_seq}:${state.tail_next}:${state.tail_seq}`;
       }
     }
     if (this.destroyed) return { ok: false, status: 503, error: 'repository storage is unavailable, retry shortly', code: 'STORAGE_UNAVAILABLE' };
@@ -288,7 +304,7 @@ export class PathHistory extends DurableObject<Env> {
         try {
           const log = await repo.log({ ref: name, limit: 1 });
           const head = log[0]?.hash ?? null;
-          if (this.destroyed) return null;
+          if (!(await this.repoActive(input.repoName))) return null;
           this.ctx.storage.sql.exec(
             `UPDATE state SET repo_name = ?, known_sha = ?, known_at = ?, memo_cached = ?, memo_known = ?, memo_fresh = ?, memo_at = ?`,
             input.repoName,
@@ -328,7 +344,7 @@ export class PathHistory extends DurableObject<Env> {
       try {
         await this.indexBatch();
       } catch (err) {
-        if (this.destroyed) return;
+        if (!(await this.repoActive())) return;
         this.ctx.storage.sql.exec('UPDATE state SET last_error = ?, updated_at = ?', String(err).slice(0, 200), Date.now());
         console.warn(JSON.stringify({ pathHistory: String(err).slice(0, 200) }));
         throw err;
@@ -338,7 +354,7 @@ export class PathHistory extends DurableObject<Env> {
       const state = this.state();
       if (state && state.head_sha === this.targetHead && state.tail_next === null) break;
     }
-    if (this.destroyed) return;
+    if (!(await this.repoActive())) return;
     const state = this.state();
     if (this.targetHead && (!state || state.head_sha !== this.targetHead || state.tail_next !== null)) {
       await this.ctx.storage.setAlarm(Date.now());
@@ -349,20 +365,19 @@ export class PathHistory extends DurableObject<Env> {
   }
 
   private async indexBatch(): Promise<void> {
-    if (this.destroyed) return;
     const head = this.targetHead!;
     let state = this.state();
     if (!state || state.ref !== this.ref || (!state.head_sha && state.known_sha !== head)) {
+      if (!(await this.repoActive())) return;
       this.resetEpoch(state, head);
       if (this.destroyed) return;
       state = this.state();
     }
     const repo = this.repoHandle ?? (this.repoHandle = await this.artifacts.get(this.repoName));
-    if (this.destroyed) return;
     if (state!.head_sha && state!.head_sha !== head) {
       const indexed = await this.indexForward(repo, state!, head);
-      if (this.destroyed) return;
       if (indexed) return;
+      if (!(await this.repoActive())) return;
       this.resetEpoch(state, head);
       if (this.destroyed) return;
       state = this.state();
@@ -372,15 +387,15 @@ export class PathHistory extends DurableObject<Env> {
       try {
         window = firstParentRun(await repo.log({ ref: state!.tail_next ?? head, limit: LOG_WINDOW }));
       } catch (err) {
-        if (this.destroyed) return;
+        if (!(await this.repoActive())) return;
         if ((err as { code?: string }).code !== 'NOT_FOUND' || state!.tail_next === head) throw err;
         this.ctx.storage.sql.exec('UPDATE state SET tail_next=NULL,gaps=gaps+1');
         return;
       }
-      if (this.destroyed) return;
       this.window = window;
     }
     if (window.length === 0) {
+      if (!(await this.repoActive())) return;
       this.ctx.storage.sql.exec('UPDATE state SET tail_next=NULL,gaps=gaps+1');
       return;
     }
@@ -397,14 +412,15 @@ export class PathHistory extends DurableObject<Env> {
     if (batchLength === 0) {
       const missingParent = commits[0]!;
       const seq = state!.tail_seq - 1;
-      this.persist(
+      if (!(await this.repoActive())) return;
+      if (!this.persist(
         [{ sha: missingParent.hash, tree: missingParent.treeHash, parentTree: null, meta: missingParent, seq }],
         [{ sha: missingParent.hash, changes: [], gap: true }],
         () => this.ctx.storage.sql.exec(
           'UPDATE state SET head_sha=COALESCE(head_sha,?),head_seq=COALESCE(head_seq,?),tail_next=NULL,tail_seq=?,gaps=gaps+1,last_error=NULL,updated_at=?',
           missingParent.hash, seq, seq, Date.now(),
         ),
-      );
+      )) return;
       this.window = [];
       return;
     }
@@ -417,12 +433,12 @@ export class PathHistory extends DurableObject<Env> {
     });
     this.treeReader ??= cachedTreeReader({ readTree: (hash) => repo.readTree(hash) }, CACHE_TREES);
     const result = await indexCommits(this.treeReader, inputs, { maxTreeReads: MAX_TREE_READS, maxChangesPerCommit: MAX_CHANGES, maxRows: 100_000, commitConcurrency: 8 });
-    if (this.destroyed) return;
+    if (!(await this.repoActive())) return;
     const indexed = inputs.slice(0, result.indexed.length);
-    this.persist(indexed, result.indexed, () => {
+    if (!this.persist(indexed, result.indexed, () => {
       const last = indexed[indexed.length - 1];
       if (last) this.ctx.storage.sql.exec('UPDATE state SET head_sha=COALESCE(head_sha,?),head_seq=COALESCE(head_seq,0),tail_next=?,tail_seq=?,gaps=gaps+?,last_error=NULL,updated_at=?', commits[0]!.hash, last.meta.parents[0] ?? null, last.seq, result.indexed.filter((x) => x.gap).length, Date.now());
-    });
+    })) return;
     if (indexed.length < batchLength) this.window = window.slice(indexed.length);
     else this.window = batchLength < commits.length ? [] : window.slice(commits.length);
   }
@@ -490,9 +506,9 @@ export class PathHistory extends DurableObject<Env> {
     }));
     this.treeReader ??= cachedTreeReader({ readTree: (hash) => repo.readTree(hash) }, CACHE_TREES);
     const result = await indexCommits(this.treeReader, inputs, { maxTreeReads: MAX_TREE_READS, maxChangesPerCommit: MAX_CHANGES, maxRows: 100_000, commitConcurrency: 8 });
-    if (this.destroyed) return false;
+    if (!(await this.repoActive())) return false;
     const indexed = inputs.slice(0, result.indexed.length);
-    this.persist(indexed, result.indexed, () => {
+    if (!this.persist(indexed, result.indexed, () => {
       const last = indexed[indexed.length - 1];
       if (last) this.ctx.storage.sql.exec(
         'UPDATE state SET head_sha=?,head_seq=?,gaps=gaps+?,last_error=NULL,updated_at=?',
@@ -501,7 +517,7 @@ export class PathHistory extends DurableObject<Env> {
         result.indexed.filter((item) => item.gap).length,
         Date.now(),
       );
-    });
+    })) return false;
     this.forwardQueue.splice(0, indexed.length);
     const last = indexed[indexed.length - 1];
     if (last) {
@@ -515,8 +531,8 @@ export class PathHistory extends DurableObject<Env> {
     inputs: Array<HistoryCommit & { meta: ArtifactsCommitMetadata; seq: number }>,
     indexed: readonly IndexedCommit[],
     updateState: () => void,
-  ): void {
-    if (this.destroyed) return;
+  ): boolean {
+    if (this.destroyed) return false;
     this.ctx.storage.transactionSync(() => {
       const changesByPath = new Map<string, Array<{ seq: number; status: string }>>();
       for (let i = 0; i < inputs.length; i++) {
@@ -551,5 +567,6 @@ export class PathHistory extends DurableObject<Env> {
       updateState();
     });
     this.notifyPageWaiters();
+    return true;
   }
 }

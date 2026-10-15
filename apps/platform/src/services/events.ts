@@ -43,6 +43,7 @@ import { isNudgeMessage, processReviewNudge } from './reviewNudges';
 import type { RepoRow } from '../db/repos';
 import { WORKSPACE_REF_PREFIX } from './agentMeta';
 import { publishRepoEvent } from './live';
+import { purgeRepoById } from './repoPurge';
 
 export interface PushEvent {
   namespace: string;
@@ -60,6 +61,10 @@ export interface PushEvent {
 const SHA_RE = /^[0-9a-f]{40}$/;
 const PUSH_TYPE = 'cf.artifacts.repo.pushed';
 
+interface RepoPurgeMessage {
+  type: 'repo.purge';
+  repoId: string;
+}
 
 function record(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -67,6 +72,13 @@ function record(v: unknown): Record<string, unknown> | null {
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function parseRepoPurgeMessage(body: unknown): RepoPurgeMessage | null {
+  const msg = record(body);
+  return msg?.type === 'repo.purge' && typeof msg.repoId === 'string' && msg.repoId.length > 0
+    ? { type: 'repo.purge', repoId: msg.repoId }
+    : null;
 }
 
 /** The push event in a queue message body, or null for anything else. */
@@ -526,7 +538,7 @@ export const PUSH_EFFECTS: readonly PushEffect[] = [
 /** Webhook attempts one consumer invocation runs at once. */
 export const WEBHOOK_ATTEMPT_LANES = 3;
 
-export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'nudge' | 'webhook';
+export type MessageOutcome = 'processed' | 'replayed' | 'duplicate' | 'unknown-repo' | 'ignored' | 'retry' | 'train' | 'settle' | 'nudge' | 'webhook' | 'repo-purge';
 
 /** Backoff for a failed message: 10 s, 20 s, 40 s, … capped at 5 minutes. */
 export function retryDelaySeconds(attempts: number): number {
@@ -544,6 +556,11 @@ interface MessageResult {
 }
 
 async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
+  const purge = parseRepoPurgeMessage(msg.body);
+  if (purge) {
+    const result = await purgeRepoById(env, purge.repoId);
+    return result.ok ? { outcome: 'repo-purge' } : { outcome: 'retry', error: result.error };
+  }
   if (isTrainMessage(msg.body)) {
     const run = await runTrain(env, msg.body.repoId, msg.body.ref);
     await publishRepoEvent(env, msg.body.repoId, { type: 'train.updated', ref: msg.body.ref, state: run.state });

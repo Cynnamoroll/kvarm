@@ -290,13 +290,10 @@ export async function demandSnapshot(env: Env, repoId: string, sha: string): Pro
 const SNAPSHOT_DELETE_KEYS = 1000;
 
 /**
- * Statements that delete a repo's snapshot rows, for the caller's repo
- * deletion batch. The first returns the repo's tarball keys for
- * deleteSnapshotObjects.
+ * Statements that delete a repo's snapshot rows in the caller's deletion batch.
  */
 export function snapshotCleanupStatements(db: D1Database, repoId: string): D1PreparedStatement[] {
   return [
-    db.prepare('SELECT r2_key FROM snapshot_trees WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM snapshot_commits WHERE repo_id = ?').bind(repoId),
     db.prepare('DELETE FROM snapshot_trees WHERE repo_id = ?').bind(repoId),
   ];
