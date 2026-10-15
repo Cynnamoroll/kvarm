@@ -645,7 +645,7 @@ describe('repo deletion', () => {
     expect(recreated.ok).toBe(true);
     if (!recreated.ok) throw new Error(recreated.error);
     expect(recreated.value.artifacts_name).not.toBe(oldRepo!.artifacts_name);
-    expect(recreated.value.artifacts_name).toMatch(/^del-owner--name-reuse--[0-9a-f]{8}$/);
+    expect(recreated.value.artifacts_name).toMatch(/^del-owner--name-reuse--[0-9a-f]{12}$/);
 
     expect((await purgeRepoById(lifecycleEnv, id)).ok).toBe(true);
     expect(deletedNames).toEqual([oldRepo!.artifacts_name, oldRepo!.artifacts_name]);
@@ -694,7 +694,7 @@ describe('repo deletion', () => {
     expect(new Set(names).size).toBe(3);
     expect(createdNames).toEqual(names);
     for (const name of names) {
-      expect(name).toMatch(/^del-owner--[a-z0-9._-]+--[0-9a-f]{8}$/);
+      expect(name).toMatch(/^del-owner--[a-z0-9._-]+--[0-9a-f]{12}$/);
       expect(name.length).toBeLessThanOrEqual(63);
     }
   });
@@ -721,37 +721,6 @@ describe('repo deletion', () => {
 
     deleteSpy.mockRestore();
     logSpy.mockRestore();
-  });
-
-  it('tries a matching pending tombstone before refusing repo creation', async () => {
-    const name = 'legacy-pending';
-    const artifactsName = `${OWNER}--${name}--deadbeef`;
-    const tombstoneId = crypto.randomUUID();
-    await env.DB.prepare(
-      `INSERT INTO repo_purges (repo_id, artifacts_name, created_at, attempts, next_attempt_at)
-       VALUES (?, ?, ?, 0, ?)`,
-    ).bind(tombstoneId, artifactsName, Date.now(), Date.now()).run();
-    const deleteSpy = vi.fn(async () => { throw new Error('storage unavailable'); });
-    const createSpy = vi.fn(async (target: string) => ({ remote: target, defaultBranch: 'main' }));
-    const serviceEnv = {
-      ...env,
-      ARTIFACTS: { ...fakeArtifacts, delete: deleteSpy, create: createSpy },
-    } as unknown as Env;
-    const randomSpy = vi.spyOn(crypto, 'getRandomValues').mockImplementation(<T extends ArrayBufferView>(array: T): T => {
-      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set([0xde, 0xad, 0xbe, 0xef]);
-      return array;
-    });
-
-    const result = await createRepo(serviceEnv, { ownerLogin: OWNER, name });
-    randomSpy.mockRestore();
-    expect(result).toMatchObject({
-      ok: false,
-      status: 409,
-      code: 'REPO_DELETING',
-      error: 'a deleted repository with this name is still being purged, retry shortly',
-    });
-    expect(deleteSpy).toHaveBeenCalledWith(artifactsName);
-    expect(createSpy).not.toHaveBeenCalled();
   });
 
   it('prunes completed purge tombstones after seven days', async () => {

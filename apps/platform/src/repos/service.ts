@@ -13,7 +13,7 @@ import {
   type RepoRow,
 } from '../db/repos';
 import { snapshotCleanupStatements } from '../services/snapshots';
-import { purgeRepo, purgeRepoById } from '../services/repoPurge';
+import { purgeRepo } from '../services/repoPurge';
 import { changeCleanupStatements } from '../services/changes';
 import { workspaceCleanupStatements } from '../services/workspaces';
 import { issueCleanupStatements } from '../services/issues';
@@ -52,21 +52,6 @@ async function prepareRepoCreation(
     return { ok: false, status: 409, error: 'you already have a repo with that name', code: 'REPO_EXISTS' };
   }
   const artifactsName = artifactsRepoName(ownerLogin, name);
-  const purging = await env.DB.prepare(
-    'SELECT repo_id FROM repo_purges WHERE artifacts_name = ? AND done_at IS NULL',
-  ).bind(artifactsName).all<{ repo_id: string }>();
-  for (const tombstone of purging.results ?? []) await purgeRepoById(env, tombstone.repo_id);
-  const stillPurging = await env.DB.prepare(
-    'SELECT 1 AS pending FROM repo_purges WHERE artifacts_name = ? AND done_at IS NULL LIMIT 1',
-  ).bind(artifactsName).first();
-  if (stillPurging) {
-    return {
-      ok: false,
-      status: 409,
-      error: 'a deleted repository with this name is still being purged, retry shortly',
-      code: 'REPO_DELETING',
-    };
-  }
   return { ok: true, value: { name, artifactsName } };
 }
 

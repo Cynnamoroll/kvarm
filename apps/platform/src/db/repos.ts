@@ -41,7 +41,7 @@ export function artifactsRepoName(owner: string, name: string): string {
       .replace(/[^a-z0-9._-]+/g, '-')
       .replace(/-+/g, '-')
       .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '') || 'repo';
-  const suffix = [...crypto.getRandomValues(new Uint8Array(4))]
+  const suffix = [...crypto.getRandomValues(new Uint8Array(6))]
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
   const ownerPart = part(owner).slice(0, 31);
