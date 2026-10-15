@@ -292,7 +292,7 @@ Authorization: Bearer &lt;agent-token&gt;</span></pre><button class="btn btn-gho
       <div class="ft-mark" aria-hidden="true"><svg class="mark"><use href="#mark"/></svg><div class="ft-word"><span class="wordmark-foot">KVARM</span></div></div>
       <div class="ft-cols">
         <nav aria-label="Product"><p class="hud">Product</p><a href="#how">How it works</a><a href="#product">Example screens</a><a href="#agents">Any agent</a></nav>
-        <nav aria-label="For agents"><p class="hud">For agents</p><a href="#connect">Connection details</a><a href="/mcp">MCP endpoint</a><a href="/auth/login">Human sign in</a></nav>
+        <nav aria-label="For agents"><p class="hud">For agents</p><a href="#connect">Connection details</a><a href="/mcp">MCP endpoint</a><a href="/llms.txt">llms.txt</a><a href="/openapi.json">OpenAPI</a><a href="/auth.md">Authentication</a><a href="/auth/login">Human sign in</a></nav>
       </div>
       <div class="ft-sign hud"><span>Kvarm · Git for people and their agents</span><span>MIT</span><span>MCP · Git smart HTTP · REST</span></div>
     </div>
