@@ -146,6 +146,22 @@ describe('merge3', () => {
     expect(clean).toMatchObject({ clean: true, treeHash: expected });
   });
 
+  it('refuses a delete and plain add when the other side adds the same path', async () => {
+    const store = new MemStore();
+    const source = Array.from({ length: 12 }, (_, index) => `line ${index}`).join('\n') + '\n';
+    const moved = source.replace('line 0', 'ours');
+    const b = await writeTree(store, { 'source.txt': source });
+    const ours = await writeTree(store, { 'new.txt': moved });
+    const theirs = await writeTree(store, { 'source.txt': source, 'new.txt': 'theirs\n' });
+
+    expect(await merge3(store, b, ours, theirs, { refuseAmbiguousRenames: true })).toMatchObject({
+      clean: false,
+      treeHash: null,
+      truncated: true,
+      truncatedReason: 'ambiguousRenames',
+    });
+  });
+
   it('truncates instead of guessing when the tree-read budget runs out', async () => {
     const store = new MemStore();
     const b = await writeTree(store, base);

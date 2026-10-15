@@ -287,13 +287,16 @@ function sideOps(changes: TreeChange[]): SideOps {
  *   and among its destinations, so git's exact pass has one choice too;
  * - removals and additions left over are not both present, so git's
  *   similarity pass has nothing to pair;
+ * - when a side has both a deletion and a plain addition, the other side
+ *   doesn't also add that destination; virtual-base rename/add conflicts can
+ *   differ from add/add;
  * - the other side adds nothing under a directory a rename here left, so no
  *   directory rename can move it.
  */
 function renamesAmbiguous(s: SideOps, other: SideOps): boolean {
   if (s.retyped) return true;
   const removedPaths = [...s.src].flatMap(([path, op]) => (op.op === 'delete' ? [path] : []));
-  const added = [...s.adds.values()].some((a) => a.from === undefined);
+  const plainAdded = [...s.adds].filter(([, add]) => add.from === undefined);
   const vacated = new Set<string>();
   const markVacated = (path: string) => {
     for (let d = dirname(path); d !== ''; d = dirname(d)) vacated.add(d);
@@ -304,9 +307,9 @@ function renamesAmbiguous(s: SideOps, other: SideOps): boolean {
     }
     return false;
   };
-  if (removedPaths.length > 0 && added) {
+  if (removedPaths.length > 0 && plainAdded.length > 0) {
     for (const path of removedPaths) markVacated(path);
-    if (removedPaths.some((path) => other.src.has(path)) || otherAddsUnderVacated()) return true;
+    if (removedPaths.some((path) => other.src.has(path)) || otherAddsUnderVacated() || plainAdded.some(([path]) => other.adds.has(path))) return true;
   }
   if (s.renames.length === 0) return false;
   const sources = new Map<string, number>();
