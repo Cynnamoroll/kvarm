@@ -23,6 +23,7 @@ import * as agents from '../services/agents';
 import { linkWorkOSIdentity } from '../services/identity';
 import type { Actor } from '../services/authz';
 import { listMyPendingApprovals, listMySandboxes } from '../services/sandboxes';
+import { nexusField, type NexusArea, type NexusField } from '../services/nexusField';
 import { landingPage } from '../web/landing';
 import { homeJsonLd, homeMarkdown, prefersMarkdown, SUMMARY } from '../services/agentDiscovery';
 import { requestSession, type App } from './api';
@@ -127,6 +128,78 @@ function iso(ms: number | null): string {
   return ms === null ? 'never' : new Date(ms).toISOString();
 }
 
+/** Tile size and heat by rank: the busiest area is drawn largest. */
+const AREA_SIZES = ['t-xl', 't-l', 't-m', 't-m', 't-s', 't-s', 't-s', 't-s', 't-s'] as const;
+
+function areaClass(area: NexusArea, rank: number): string {
+  const heat = area.overlapping ? 'k3' : area.agents.length > 1 ? 'k2' : area.declared + area.observed > 0 ? 'k1' : 'k0';
+  return `t ${AREA_SIZES[rank] ?? 't-s'} ${heat}`;
+}
+
+function areaLabel(area: NexusArea): string {
+  const who = area.agents.slice(0, 2).join(', ') + (area.agents.length > 2 ? ` +${area.agents.length - 2}` : '');
+  const what = area.overlapping ? 'overlap' : area.declared > 0 && area.observed > 0 ? 'declared + observed' : area.declared > 0 ? 'declared paths' : 'observed changes';
+  return who ? `${who} · ${what}` : what;
+}
+
+function repoHref(repo: string): string {
+  return `/${repo.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/** The Nexus field (services/nexusField.ts) in the landing mock-up's layout, from live data. */
+function nexusPanel(field: NexusField): string {
+  const scope = field.repos === 1 ? '1 repository' : `${field.repos} repositories`;
+  if (field.activeWorkspaces === 0 && field.areas.length === 0) {
+    return html`<section class="panel m-agent k-nexus" aria-labelledby="nexus-title">
+      <div class="panel-head hud"><b id="nexus-title">Nexus · field</b><span>${scope}</span></div>
+      <div class="k-panel-body">
+        <p class="muted">No active agent workspaces in your repositories yet. When an agent declares an intent or pushes to its workspace, the paths it touches and any overlap appear here.</p>
+        <pre class="code">kvarm workspace create &lt;owner&gt;/&lt;repo&gt; --task "…" --intent '{"paths":["src/"]}'
+kvarm nexus forecast &lt;owner&gt;/&lt;repo&gt; --paths src/</pre>
+      </div>
+    </section>`;
+  }
+  const multiRepo = new Set(field.areas.map((a) => a.repo)).size > 1;
+  const tiles = field.areas
+    .map(
+      (area, i) =>
+        html`<a class="${areaClass(area, i)}" href="${raw(`${repoHref(area.repo)}/activity`)}"><b>${multiRepo ? `${area.repo} · ` : ''}${area.path}</b><span>${areaLabel(area)}</span></a>`,
+    )
+    .join('');
+  const intents = field.intents
+    .map((intent) => {
+      const badge = intent.changeSet !== null ? String(intent.changeSet).padStart(2, '0') : '··';
+      const state = intent.overlapping ? 'st4' : intent.changeSet !== null ? 'st3' : 'st2';
+      const where = [intent.paths[0], intent.agent].filter(Boolean).join(' · ');
+      return html`<li><span class="st ${state}">${badge}</span><div><b><a href="${raw(`${repoHref(intent.repo)}/activity#ws-${encodeURIComponent(intent.workspace)}`)}">${intent.task ?? intent.workspace}</a></b><span class="hud">${where}${multiRepo ? ` · ${intent.repo}` : ''}</span></div></li>`;
+    })
+    .join('');
+  const overlapRows = field.overlaps
+    .slice(0, 4)
+    .map(
+      (o) =>
+        html`<p class="needs"><b>${o.agents[0] ?? o.workspaces[0]} ↔ ${o.agents[1] ?? o.workspaces[1]}</b> share ${o.pathCount} path${o.pathCount === 1 ? '' : 's'} (${o.paths.slice(0, 2).join(', ')}${o.pathCount > 2 ? ', …' : ''}) in <a href="${raw(`${repoHref(o.repo)}/activity#overlap`)}">${o.repo}</a>.</p>`,
+    )
+    .join('');
+  return html`<section class="panel m-agent k-nexus" aria-labelledby="nexus-title">
+    <div class="panel-head hud"><b id="nexus-title">Nexus · field</b><span>${scope} · ${field.activeWorkspaces} active workspace${field.activeWorkspaces === 1 ? '' : 's'}</span></div>
+    <div class="field-body">
+      <div class="territory" aria-label="Declared and observed codebase paths and advisory overlap">${raw(tiles || '<p class="muted">No declared or observed paths yet.</p>')}</div>
+      <aside class="field-side">
+        <section class="panel">
+          <div class="panel-head hud"><b>Declared intents</b><span>${field.intents.length}</span></div>
+          ${raw(intents ? `<ul class="intents">${intents}</ul>` : '<p class="needs">No declared intents.</p>')}
+        </section>
+        <section class="panel">
+          <div class="panel-head hud"><b>Overlap</b><span>${field.overlaps.length} pair${field.overlaps.length === 1 ? '' : 's'} · advisory</span></div>
+          ${raw(overlapRows || '<p class="needs">No overlapping workspaces reported.</p>')}
+        </section>
+      </aside>
+    </div>
+    ${field.partial.length > 0 ? raw(html`<p class="muted k-nexus-note">Partial for ${field.partial.join(', ')}: some reads were bounded or unavailable, so an empty area is not proof of no activity.</p>`) : ''}
+  </section>`;
+}
+
 // ---------------------------------------------------------------------------
 // Home
 // ---------------------------------------------------------------------------
@@ -158,6 +231,7 @@ web.get('/', async (c) => {
     listMyPendingApprovals(c.env, actor),
     runningSandboxCount(c.env, actor),
   ]);
+  const field = await nexusField(c.env, repos, origin);
   const approvals = approvalsResult.ok ? approvalsResult.value : null;
   const pendingCount = approvals?.length ?? null;
   const mcpUrl = `${origin}/mcp`;
@@ -202,6 +276,7 @@ web.get('/', async (c) => {
         <div><span class="hud">Running sandboxes</span><b>${runningCount ?? 'Unavailable'}</b></div>
         <div><span class="hud">Pending approvals</span><b class="${pendingCount ? 'warn' : ''}">${pendingCount ?? 'Unavailable'}</b></div>
       </div>
+      ${raw(nexusPanel(field))}
       <div class="k-grid">
         <div class="k-col">
           <section class="panel">
