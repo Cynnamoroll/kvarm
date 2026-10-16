@@ -20,6 +20,7 @@ import { pageCacheKey } from '../src/cache/edge';
 import { internalKey, writeCachedJson } from '../src/cache/internal';
 import { COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import type { RepoRow } from '../src/db/repos';
+import type { MirrorUpdate } from '../src/do/repoMirror';
 import { infoRefsCacheKey } from '../src/routes/git';
 import { relayReceivePackReply, repoViewGeneration } from '../src/services/pushFreshness';
 import worker from '../src/index';
@@ -37,6 +38,7 @@ const heads = new Map<string, number>();
 /** The receive-pack reply the fake upstream sends, per Artifacts repo name. */
 const reports = new Map<string, { body: Uint8Array; moves: boolean }>();
 const originalFetch = globalThis.fetch;
+const mirrorApplies: Array<{ refSeq: number; updates: MirrorUpdate[]; repoId: string }> = [];
 let token = '';
 
 function nameOf(repo: string): string {
@@ -117,7 +119,12 @@ const env = {
   ARTIFACTS: { get: async (name: string) => handle(name) } as unknown as Artifacts,
   REPO_MIRROR: {
     idFromName: (id: string) => id,
-    get: () => ({ apply: async () => undefined, markDirty: async () => undefined }),
+    get: () => ({
+      apply: async (refSeq: number, updates: MirrorUpdate[], repoId: string) => {
+        mirrorApplies.push({ refSeq, updates, repoId });
+      },
+      markDirty: async () => undefined,
+    }),
   } as unknown as Env['REPO_MIRROR'],
 } as Env;
 
@@ -286,6 +293,29 @@ async function warm(repo: string): Promise<string> {
 }
 
 describe('confirmed push freshness', () => {
+  it('applies all refs from one confirmed push in one mirror call', async () => {
+    const updates: MirrorUpdate[] = [
+      { ref: 'refs/heads/main', oldOid: hex(1, 'a'), newOid: hex(2, 'a') },
+      { ref: 'refs/heads/side', oldOid: hex(1, 'b'), newOid: hex(2, 'b') },
+    ];
+    const body = buildReportStatus(updates.map(({ ref }) => ({ ref, ok: true })), 'none');
+    await seedRepo('multi-ref', body, true);
+    const id = (await repoRow('multi-ref')).id;
+    const before = await env.DB.prepare('SELECT ref_seq FROM repos WHERE id = ?').bind(id).first<{ ref_seq: number }>();
+    mirrorApplies.length = 0;
+    const commands = updates.map((update, i) =>
+      pktLine(`${update.oldOid} ${update.newOid} ${update.ref}${i === 0 ? '\0report-status agent=git/2.34.1\n' : '\n'}`),
+    );
+    const pushed = await send(`/${OWNER}/multi-ref.git/git-receive-pack`, {
+      method: 'POST',
+      headers: { ...basic(), 'content-type': 'application/x-git-receive-pack-request' },
+      body: cat(...commands, '0000', 'PACK-not-inspected-by-the-fake'),
+    });
+    expect(pushed.status).toBe(200);
+    await pushed.settled;
+    expect(mirrorApplies).toEqual([{ refSeq: before!.ref_seq + 1, updates, repoId: id }]);
+  });
+
   it('shows the new head on the anonymous tree page and info/refs as soon as the push reply completes', async () => {
     const before = await repoRow('fresh');
     const oldMark = await warm('fresh');

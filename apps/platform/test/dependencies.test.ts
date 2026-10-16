@@ -761,7 +761,8 @@ describe('lifecycle', () => {
       const landed = await merge('settle-many', a.change!);
       expect(landed.status).toBe(200);
       // Within one invocation's budget: no settlement intent, no continuation.
-      expect(landed.cost.do).toBe(1);
+      // +1 RepoMirror.apply per confirmed push
+      expect(landed.cost.do).toBe(2);
       expect(await intentsOf('settle-many')).toEqual([]);
       for (const d of pinned) expect((await listDeps('settle-many', d.id)).json.dependencies, d.id).toEqual([expect.objectContaining({ state: 'satisfied' })]);
       expect(sent.map((m) => m.body)).toContainEqual(expect.objectContaining({ type: 'kvarm.train', ref: MAIN, reason: 'dependency-landed' }));
@@ -821,7 +822,8 @@ describe('lifecycle', () => {
         { type: 'kvarm.dependency-settle', repoId: repoIds[name], changeSetId: expect.any(String), mergedAt: expect.any(Number), mergeCommit, ref: MAIN },
       ]);
       const first = continuations()[0];
-      expect(landed.cost.do).toBe(2);
+      // +1 RepoMirror.apply per confirmed push
+      expect(landed.cost.do).toBe(3);
       const [intent] = await intentsOf(name);
       expect(intent).toMatchObject({ repoId: repoIds[name], changeSetId: first.changeSetId, mergedAt: first.mergedAt, mergeCommit, ref: MAIN });
       expect(await alarmOf(name)).toBe(intent!.deadline);
@@ -907,10 +909,11 @@ describe('lifecycle', () => {
       expect(continuation).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit, ref: MAIN })]);
       // The intent is written after the recorded publication cost: that stays acquire + release.
       const recorded = deps.events.find((e): e is Extract<TrainEvent, { type: 'publish' }> => e.type === 'publish' && e.status === 'recorded');
-      expect(recorded?.cost?.do).toBe(2);
+      // +1 RepoMirror.apply per confirmed push
+      expect(recorded?.cost?.do).toBe(3);
       const entry = await env.DB.prepare('SELECT cost FROM merge_queue WHERE repo_id = ? AND change_number = ?').bind(repoIds[name], a.change).first<{ cost: string }>();
-      expect((JSON.parse(entry!.cost) as CostCounters).do).toBe(2);
-      expect(meter.snapshot().do).toBe(3);
+      expect((JSON.parse(entry!.cost) as CostCounters).do).toBe(3);
+      expect(meter.snapshot().do).toBe(4);
       expect(await intentsOf(name)).toEqual([expect.objectContaining({ repoId: repoIds[name], mergeCommit, ref: MAIN })]);
       for (let i = 0; i < 4 && sent.some((m) => m.body?.type === 'kvarm.dependency-settle'); i++) {
         const next = sent.find((m) => m.body?.type === 'kvarm.dependency-settle')!.body;
@@ -981,7 +984,8 @@ describe('lifecycle', () => {
       const landed = await merge(name, a.change!);
       expect(landed.status, JSON.stringify(landed.json)).toBe(200);
       const mergeCommit = landed.json.merge.mergeCommit as string;
-      expect(landed.cost.do).toBe(2);
+      // +1 RepoMirror.apply per confirmed push
+      expect(landed.cost.do).toBe(3);
       expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
       expect(await states(name, dependents)).toEqual([...Array(4).fill('satisfied'), ...Array(5).fill('stale')]);
 
@@ -1125,7 +1129,8 @@ describe('lifecycle', () => {
     sent.length = 0;
     const landed = await merge(name, a.change!);
     expect(landed.status).toBe(200);
-    expect(landed.cost.do).toBe(1);
+    // +1 RepoMirror.apply per confirmed push
+    expect(landed.cost.do).toBe(2);
     expect(await wakeMarks(name)).toBe(0);
     expect(await intentsOf(name)).toEqual([]);
     expect(sent.filter((m) => m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
@@ -1984,7 +1989,8 @@ describe('integration train', () => {
     expect(await wakeMarks(name)).toBe(0);
     expect(sent.filter((m) => m.body?.reason === 'dependency-landed' || m.body?.type === 'kvarm.dependency-settle')).toEqual([]);
     const recorded = deps.events.find((e): e is Extract<TrainEvent, { type: 'publish' }> => e.type === 'publish' && e.status === 'recorded');
-    expect(recorded?.cost).toMatchObject({ do: 2, sub: 2 });
+    // +1 RepoMirror.apply per confirmed push
+    expect(recorded?.cost).toMatchObject({ do: 3, sub: 2 });
     expect(recorded!.cost!.d1).toBeLessThanOrEqual(3);
     expect(recorded!.cost!.rr).toBeLessThanOrEqual(12);
     expect(recorded!.cost!.rw).toBeLessThanOrEqual(8);

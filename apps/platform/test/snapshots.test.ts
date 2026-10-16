@@ -1336,8 +1336,10 @@ describe('snapshot API', () => {
     expect(await objectKeys(id)).toHaveLength(2);
     const del = await call(`/api/v1/repos/${OWNER}/doomed`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
-    expect(del.cost.d1).toBeLessThanOrEqual(3);
-    expect(del.cost).toMatchObject({ art: 0, r2a: 0, r2b: 0, do: 0 });
+    // +1 UPDATE repo_purges SET done_at records the completed inline purge.
+    expect(del.cost.d1).toBeLessThanOrEqual(4);
+    // +1 PATH_HISTORY.destroy and +1 REPO_MIRROR.destroy for the purge.
+    expect(del.cost).toMatchObject({ art: 0, r2a: 0, r2b: 0, do: 2 });
     expect(await objectKeys(id)).toHaveLength(0);
     expect(await commitRow(id, main.sha)).toBeNull();
     const trees = await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_trees WHERE repo_id = ?').bind(id).first();
@@ -1349,8 +1351,10 @@ describe('snapshot API', () => {
     const { id } = await seedRepo('bare');
     const del = await call(`/api/v1/repos/${OWNER}/bare`, { method: 'DELETE', token: tok.owner });
     expect(del.status).toBe(200);
-    expect(del.cost.d1).toBeLessThanOrEqual(3);
-    expect(del.cost).toMatchObject({ art: 0, r2a: 0, r2b: 0, do: 0 });
+    // +1 UPDATE repo_purges SET done_at records the completed inline purge.
+    expect(del.cost.d1).toBeLessThanOrEqual(4);
+    // +1 PATH_HISTORY.destroy and +1 REPO_MIRROR.destroy for the purge.
+    expect(del.cost).toMatchObject({ art: 0, r2a: 0, r2b: 0, do: 2 });
     expect(await env.DB.prepare('SELECT id FROM repos WHERE id = ?').bind(id).first()).toBeNull();
   });
 });

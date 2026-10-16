@@ -198,7 +198,8 @@ describe('queue dispatcher', () => {
     expect(line.outcome).toBe('processed');
     expect(line.cost.d1).toBeLessThanOrEqual(3);
     expect(line.cost.art).toBe(0);
-    expect(line.cost.do).toBe(1);
+    // +1 RepoMirror.reconcile per confirmed push event
+    expect(line.cost.do).toBe(2);
     expect(line.wf).toBe(1);
   });
 

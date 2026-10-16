@@ -390,7 +390,8 @@ describe('complete', () => {
       expect(done.status, JSON.stringify(done.json)).toBe(200);
       expect(done.json.change).toMatchObject({ state: 'open', mergePolicy: policy, headSha: res.sha });
       expect(repo.refs.get(FEATURE)).toBe(res.sha);
-      expect(done.cost, name).toMatchObject({ do: 0 });
+      // +1 RepoMirror.apply per confirmed push
+      expect(done.cost, name).toMatchObject({ do: 2 });
       expect(done.cost.d1, name).toBeLessThanOrEqual(7);
       expect(done.cost.sub, name).toBeLessThanOrEqual(5);
       // Both the head-branch and the notes updates still advance the view generation.

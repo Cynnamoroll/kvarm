@@ -524,7 +524,8 @@ describe('integration train', () => {
     // Both ready candidates were one chain: one lease cycle for the pass.
     const leaseOps = deps.events.filter((e) => e.type === 'lease');
     expect(leaseOps.map((e) => (e as { op: string }).op)).toEqual(['acquire', 'release']);
-    expect(meter.snapshot().do).toBe(2);
+    // +1 RepoMirror.apply per confirmed push
+    expect(meter.snapshot().do).toBe(4);
 
     for (const row of await entries('timeline')) {
       const cost = JSON.parse(row.cost!) as CostCounters;
