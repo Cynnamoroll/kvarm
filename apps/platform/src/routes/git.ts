@@ -31,7 +31,8 @@ import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type Works
 import { agentReservedRefDenial, directHumanPushDenial, directPushDenial, INVALID_REF_REASON, type BranchRule } from '../services/branchRules';
 import { concat, isSafeRefName, sha256Hex, type RefCommand } from '@kvarm/gitops';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
-import { classifyUploadPackRequest, derivePackCacheKey, type PackProtocol } from '../git/packCache';
+import { classifyUploadPackRequest, derivePackCacheKey, derivePackCacheSlotHash, type PackProtocol } from '../git/packCache';
+import { lockstepTee } from '../git/lockstepTee';
 import { lookupUploadPackCache, storeUploadPackResponse, type UploadPackCacheAddress } from '../services/uploadPackCache';
 import { parseLsRefsRequest } from '../do/repoMirror';
 import { recordPushAudit } from '../services/audit';
@@ -423,9 +424,11 @@ export async function handleGitRequest(
       } else {
         const refSeq = repo.ref_seq ?? 0;
         const hash = await derivePackCacheKey(repo.id, refSeq, protocol, classification.normalized);
+        const slotHash = await derivePackCacheSlotHash(repo.id, protocol, classification.normalized);
         const address: UploadPackCacheAddress = {
           cacheKey: new Request(`https://kvarm-git.internal/pack/${repo.id}/${refSeq}/${hash}`),
-          r2Key: `fetch/${repo.id}/${hash}`,
+          r2Key: `fetch/${repo.id}/${slotHash}`,
+          fullHash: hash,
           refSeq,
           r2Eligible: classification.r2Eligible,
           protocol,
@@ -639,7 +642,7 @@ export async function handleGitRequest(
   if (packCacheAddress && upstreamRes.status === 200 && upstreamRes.body) {
     const contentType = upstreamRes.headers.get('content-type');
     if (contentType) {
-      const [client, stored] = upstreamRes.body.tee();
+      const [client, stored] = lockstepTee(upstreamRes.body, 2);
       c.executionCtx.waitUntil(
         storeUploadPackResponse(env, packCacheAddress, contentType, stored).catch(() => undefined),
       );

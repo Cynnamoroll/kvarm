@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+import { lockstepTee } from '../git/lockstepTee';
 import { UploadPackResponseValidator, type PackProtocol } from '../git/packCache';
 
 const CACHE_TTL_SECONDS = 3600;
@@ -8,6 +9,7 @@ const R2_PART_BYTES = 8 * 1024 * 1024;
 export interface UploadPackCacheAddress {
   cacheKey: Request;
   r2Key: string;
+  fullHash: string;
   refSeq: number;
   r2Eligible: boolean;
   protocol: PackProtocol;
@@ -54,6 +56,7 @@ const lookupEffect = Effect.fnUntraced(function* (
   const object = yield* bestEffort(() => env.SNAPSHOTS.get(address.r2Key));
   if (
     !object ||
+    object.customMetadata?.key !== address.fullHash ||
     object.customMetadata?.refSeq !== String(address.refSeq) ||
     !object.customMetadata.contentType
   ) {
@@ -62,7 +65,7 @@ const lookupEffect = Effect.fnUntraced(function* (
   }
 
   const contentType = object.customMetadata.contentType;
-  const [client, backfill] = object.body.tee();
+  const [client, backfill] = lockstepTee(object.body, 2);
   yield* Effect.sync(() => {
     const response = new Response(backfill, { status: 200, headers: cacheHeaders(contentType) });
     ctx.waitUntil(caches.default.put(address.cacheKey, response).catch(() => undefined));
@@ -163,7 +166,7 @@ async function writeR2(
   try {
     upload = await env.SNAPSHOTS.createMultipartUpload(address.r2Key, {
       httpMetadata: { contentType },
-      customMetadata: { refSeq: String(address.refSeq), contentType },
+      customMetadata: { key: address.fullHash, refSeq: String(address.refSeq), contentType },
     });
     for (;;) {
       const { done, value } = await reader.read();
@@ -192,7 +195,7 @@ const storeEffect = Effect.fnUntraced(function* (
   source: ReadableStream<Uint8Array>,
 ): Effect.fn.Return<void, never> {
   const validated = validateStream(source, address.protocol);
-  const [cacheBody, r2Body] = address.r2Eligible ? validated.tee() : [validated, null];
+  const [cacheBody, r2Body] = address.r2Eligible ? lockstepTee(validated, 2) : [validated, null];
   const tasks: Effect.Effect<void, never>[] = [Effect.promise(() => putCacheApi(address, contentType, cacheBody))];
   if (r2Body) {
     tasks.push(Effect.promise(() => writeR2(env, address, contentType, r2Body).catch(() => undefined)));

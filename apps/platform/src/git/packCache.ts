@@ -242,6 +242,38 @@ export async function derivePackCacheKey(repoId: string, refSeq: number, protoco
   return sha256Hex(`${repoId}\n${refSeq}\n${protocol}\n${normalized}`);
 }
 
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+export async function derivePackCacheSlotHash(repoId: string, protocol: PackProtocol, normalized: string): Promise<string> {
+  const parsed: unknown = JSON.parse(normalized);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new TypeError('invalid normalized upload-pack request');
+  const request = parsed as Record<string, unknown>;
+  if (request.protocol !== protocol) throw new TypeError('normalized upload-pack protocol mismatch');
+  const withoutNegotiatedOids = (lines: string[]) => lines.filter((line) => !/^(?:want|have|shallow) /.test(line));
+
+  let shape: string;
+  if (protocol === 'v2' && stringArray(request.headers) && stringArray(request.args)) {
+    shape = JSON.stringify({
+      protocol,
+      headers: request.headers,
+      args: withoutNegotiatedOids(request.args),
+    });
+  } else if (protocol === 'v0' && stringArray(request.capabilities) && Array.isArray(request.sections) &&
+    request.sections.every(stringArray)) {
+    shape = JSON.stringify({
+      protocol,
+      capabilities: request.capabilities,
+      sections: request.sections.map(withoutNegotiatedOids),
+    });
+  } else {
+    throw new TypeError('invalid normalized upload-pack request');
+  }
+
+  return sha256Hex(`${repoId}\n${protocol}\n${shape}`);
+}
+
 export class UploadPackResponseValidator {
   private pending: Uint8Array = new Uint8Array();
   private valid = true;

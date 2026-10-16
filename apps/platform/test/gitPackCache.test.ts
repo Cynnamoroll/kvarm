@@ -5,7 +5,8 @@ import { concat, DELIM_PKT, FLUSH_PKT, pktLine } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { recordConfirmedPush } from '../src/services/pushFreshness';
 import worker from '../src/index';
-import { classifyUploadPackRequest, derivePackCacheKey } from '../src/git/packCache';
+import { classifyUploadPackRequest, derivePackCacheKey, derivePackCacheSlotHash } from '../src/git/packCache';
+import { lookupUploadPackCache } from '../src/services/uploadPackCache';
 import { ORIGIN, send } from './helpers/http';
 import { fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 import { seedRepoWithCommit, seedUser } from './helpers/seed';
@@ -104,18 +105,32 @@ describe('upload-pack response cache', () => {
     expect(fixture.upstreamCalls).toBe(1);
   });
 
-  it('uses ref_seq in the cache key so a confirmed push causes a miss', async () => {
+  it('uses ref_seq in the cache key and overwrites one R2 slot across pushes', async () => {
     const fixture = await createFixture('ref-seq');
-    expect((await upload(fixture)).cost.cache).toBe('miss');
+    const request = fetchRequest();
+    expect((await upload(fixture, request)).cost.cache).toBe('miss');
+    const classification = classifyUploadPackRequest(request, 'v2');
+    const oldHash = await derivePackCacheKey(fixture.id, 0, 'v2', classification.normalized!);
+    const slotHash = await derivePackCacheSlotHash(fixture.id, 'v2', classification.normalized!);
+    const r2Key = `fetch/${fixture.id}/${slotHash}`;
+
     await recordConfirmedPush(env, fixture.id, [{
       ref: 'refs/heads/main',
       oldOid: '0'.repeat(40),
       newOid: '1'.repeat(40),
     }]);
 
-    const response = await upload(fixture);
+    const response = await upload(fixture, request);
+    const newHash = await derivePackCacheKey(fixture.id, 1, 'v2', classification.normalized!);
     expect(response.cost.cache).toBe('miss');
+    expect(oldHash).not.toBe(newHash);
     expect(fixture.upstreamCalls).toBe(2);
+    expect((await env.SNAPSHOTS.list({ prefix: `fetch/${fixture.id}/` })).objects).toHaveLength(1);
+    expect((await env.SNAPSHOTS.head(r2Key))?.customMetadata).toEqual({
+      key: newHash,
+      refSeq: '1',
+      contentType: 'application/x-git-upload-pack-result',
+    });
   });
 
   it('authorizes a private repository before serving a cached hit', async () => {
@@ -209,9 +224,14 @@ describe('upload-pack response cache', () => {
     const classification = classifyUploadPackRequest(request, 'v2');
     const hash = await derivePackCacheKey(fixture.id, refSeq, 'v2', classification.normalized!);
     const cacheUrl = `https://kvarm-git.internal/pack/${fixture.id}/${refSeq}/${hash}`;
-    const r2key = `fetch/${fixture.id}/${hash}`;
+    const slotHash = await derivePackCacheSlotHash(fixture.id, 'v2', classification.normalized!);
+    const r2key = `fetch/${fixture.id}/${slotHash}`;
     const stored = await env.SNAPSHOTS.head(r2key);
-    expect(stored?.customMetadata).toEqual({ refSeq: '0', contentType: 'application/x-git-upload-pack-result' });
+    expect(stored?.customMetadata).toEqual({
+      key: hash,
+      refSeq: '0',
+      contentType: 'application/x-git-upload-pack-result',
+    });
     expect(first.cost.cache).toBe('miss');
     expect(await caches.default.delete(cacheUrl)).toBe(true);
 
@@ -225,6 +245,99 @@ describe('upload-pack response cache', () => {
     const incremental = await upload(fixture, fetchRequest(OID, 'b'.repeat(40)));
     expect(incremental.cost.cache).toBe('miss');
     expect(fixture.upstreamCalls).toBe(2);
+  });
+
+  it('treats a mismatched full hash as an R2 miss without deleting the slot', async () => {
+    const fixture = await createFixture('r2-stale-hash');
+    const request = fetchRequest();
+    await upload(fixture, request);
+    const classification = classifyUploadPackRequest(request, 'v2');
+    const fullHash = await derivePackCacheKey(fixture.id, 0, 'v2', classification.normalized!);
+    const slotHash = await derivePackCacheSlotHash(fixture.id, 'v2', classification.normalized!);
+    const r2Key = `fetch/${fixture.id}/${slotHash}`;
+    await env.SNAPSHOTS.put(r2Key, 'stale', {
+      customMetadata: {
+        key: 'older-full-hash',
+        refSeq: '0',
+        contentType: 'application/x-git-upload-pack-result',
+      },
+    });
+
+    const cached = await lookupUploadPackCache(env, createExecutionContext(), {
+      cacheKey: new Request(`https://kvarm-git.internal/pack/${fixture.id}/mismatch`),
+      r2Key,
+      fullHash,
+      refSeq: 0,
+      r2Eligible: true,
+      protocol: 'v2',
+    });
+
+    expect(cached).toBeNull();
+    expect((await env.SNAPSHOTS.head(r2Key))?.customMetadata?.key).toBe('older-full-hash');
+  });
+
+  it('finishes the R2 upload after the client cancels its response', async () => {
+    const fixture = await createFixture('cancel-client');
+    const request = fetchRequest();
+    const classification = classifyUploadPackRequest(request, 'v2');
+    const fullHash = await derivePackCacheKey(fixture.id, 0, 'v2', classification.normalized!);
+    const slotHash = await derivePackCacheSlotHash(fixture.id, 'v2', classification.normalized!);
+    const ctx = createExecutionContext();
+    const response = await worker.fetch!(
+      new Request(`${ORIGIN}/${OWNER}/${fixture.name}.git/git-upload-pack`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-git-upload-pack-request',
+          'Git-Protocol': 'version=2',
+        },
+        body: request,
+      }) as Request<unknown, IncomingRequestCfProperties>,
+      env,
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
+    await waitOnExecutionContext(ctx);
+
+    expect((await env.SNAPSHOTS.head(`fetch/${fixture.id}/${slotHash}`))?.customMetadata).toEqual({
+      key: fullHash,
+      refSeq: '0',
+      contentType: 'application/x-git-upload-pack-result',
+    });
+  });
+
+  it('preserves client bytes when the R2 store branch fails', async () => {
+    const fixture = await createFixture('r2-write-failure');
+    const snapshots = new Proxy({}, {
+      get(_target, property) {
+        if (property === 'createMultipartUpload') {
+          return async () => {
+            throw new Error('simulated R2 write failure');
+          };
+        }
+        const value = Reflect.get(env.SNAPSHOTS, property, env.SNAPSHOTS) as unknown;
+        return typeof value === 'function' ? value.bind(env.SNAPSHOTS) : value;
+      },
+    }) as R2Bucket;
+    const failingEnv = { ...env, SNAPSHOTS: snapshots } as Env;
+    const ctx = createExecutionContext();
+    const response = await worker.fetch!(
+      new Request(`${ORIGIN}/${OWNER}/${fixture.name}.git/git-upload-pack`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-git-upload-pack-request',
+          'Git-Protocol': 'version=2',
+        },
+        body: fetchRequest(),
+      }) as Request<unknown, IncomingRequestCfProperties>,
+      failingEnv,
+      ctx,
+    );
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    await waitOnExecutionContext(ctx);
+
+    expect(bytes).toEqual(packResponse());
   });
 
   it('does not share identical request bodies across repositories', async () => {

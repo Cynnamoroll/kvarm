@@ -3,8 +3,10 @@ import { concat, DELIM_PKT, FLUSH_PKT, pktLine } from '@kvarm/gitops';
 import {
   classifyUploadPackRequest,
   derivePackCacheKey,
+  derivePackCacheSlotHash,
   UploadPackResponseValidator,
 } from '../../apps/platform/src/git/packCache';
+import { lockstepTee } from '../../apps/platform/src/git/lockstepTee';
 
 const OID_A = 'a'.repeat(40);
 const OID_B = 'b'.repeat(40);
@@ -16,6 +18,25 @@ function v2Request(lines: string[], headers: string[] = ['command=fetch\n', 'obj
     ...lines.map(pktLine),
     FLUSH_PKT,
   );
+}
+
+async function readBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    length += value.byteLength;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 describe('upload-pack request cache classification', () => {
@@ -82,6 +103,26 @@ describe('upload-pack request cache classification', () => {
       .not.toBe(await derivePackCacheKey('repo-a', 17, 'v0', withoutTag.normalized!));
   });
 
+  it('derives R2 slots from clone shape while excluding negotiated object IDs', async () => {
+    const fullA = classifyUploadPackRequest(v2Request([`want ${OID_A}\n`, `have ${OID_B}\n`, `shallow ${OID_A}\n`, 'done\n']));
+    const fullB = classifyUploadPackRequest(v2Request([`want ${OID_B}\n`, `have ${OID_A}\n`, `shallow ${OID_B}\n`, 'done\n']));
+    const deepen = classifyUploadPackRequest(v2Request([`want ${OID_A}\n`, 'deepen 1\n', 'done\n']));
+    const filtered = classifyUploadPackRequest(v2Request([`want ${OID_A}\n`, 'filter blob:none\n', 'done\n']));
+    const v0 = classifyUploadPackRequest(
+      concat(pktLine(`want ${OID_A}\0side-band-64k\n`), FLUSH_PKT, pktLine('done\n')),
+      'v0',
+    );
+
+    const fullSlot = await derivePackCacheSlotHash('repo-a', 'v2', fullA.normalized!);
+    expect(await derivePackCacheSlotHash('repo-a', 'v2', fullB.normalized!)).toBe(fullSlot);
+    expect(await derivePackCacheSlotHash('repo-a', 'v2', deepen.normalized!)).not.toBe(fullSlot);
+    expect(await derivePackCacheSlotHash('repo-a', 'v2', filtered.normalized!)).not.toBe(fullSlot);
+    expect(await derivePackCacheSlotHash('repo-a', 'v2', filtered.normalized!))
+      .not.toBe(await derivePackCacheSlotHash('repo-a', 'v2', deepen.normalized!));
+    expect(await derivePackCacheSlotHash('repo-b', 'v2', fullA.normalized!)).not.toBe(fullSlot);
+    expect(await derivePackCacheSlotHash('repo-a', 'v0', v0.normalized!)).not.toBe(fullSlot);
+  });
+
   it('excludes requests with haves from the R2 tier', () => {
     const request = classifyUploadPackRequest(v2Request([`want ${OID_A}\n`, `have ${OID_B}\n`, 'done\n']));
 
@@ -121,5 +162,185 @@ describe('upload-pack response completeness', () => {
     const truncated = new UploadPackResponseValidator('v2');
     truncated.push(new TextEncoder().encode('000ap'));
     expect(truncated.finish()).toBe(false);
+  });
+});
+
+describe('lockstep upload-pack stream tee', () => {
+  it('does not read more than one chunk ahead of a branch that is not reading', async () => {
+    let pulls = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulls === 64) {
+          controller.close();
+          return;
+        }
+        const chunk = new Uint8Array(1024 * 1024);
+        chunk[0] = pulls++;
+        controller.enqueue(chunk);
+      },
+    }, { highWaterMark: 0 });
+    const [fast, slow] = lockstepTee(source, 2);
+    const fastReader = fast.getReader();
+    const slowReader = slow.getReader();
+    const firstFast = await fastReader.read();
+    expect(firstFast.done).toBe(false);
+    expect(pulls).toBe(1);
+
+    const nextFast = fastReader.read();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(pulls).toBe(1);
+
+    const firstSlow = await slowReader.read();
+    expect(firstSlow.done).toBe(false);
+    let fastChunks = 1;
+    let slowChunks = 1;
+    const fastDrain = (async () => {
+      let result = await nextFast;
+      while (!result.done) {
+        fastChunks++;
+        result = await fastReader.read();
+      }
+    })();
+    const slowDrain = (async () => {
+      let result = await slowReader.read();
+      while (!result.done) {
+        slowChunks++;
+        result = await slowReader.read();
+      }
+    })();
+    await Promise.all([fastDrain, slowDrain]);
+
+    expect(pulls).toBe(64);
+    expect(fastChunks).toBe(64);
+    expect(slowChunks).toBe(64);
+  });
+
+  it('lets a surviving store branch finish after the client cancels', async () => {
+    let next = 0;
+    let sourceCancelled = false;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (next === 4) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(Uint8Array.of(++next));
+      },
+      cancel() {
+        sourceCancelled = true;
+      },
+    }, { highWaterMark: 0 });
+    const [client, store] = lockstepTee(source, 2);
+    let finalized = false;
+    const storeFinished = (async () => {
+      const reader = store.getReader();
+      while (!(await reader.read()).done) {}
+      finalized = true;
+    })();
+    const clientReader = client.getReader();
+    expect((await clientReader.read()).value).toEqual(Uint8Array.of(1));
+    await clientReader.cancel();
+    await storeFinished;
+
+    expect(finalized).toBe(true);
+    expect(sourceCancelled).toBe(false);
+  });
+
+  it('cancels the source only after every branch cancels', async () => {
+    let sourceCancelled = false;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(Uint8Array.of(1));
+      },
+      cancel() {
+        sourceCancelled = true;
+      },
+    }, { highWaterMark: 0 });
+    const [first, second] = lockstepTee(source, 2);
+    const firstReader = first.getReader();
+    const secondReader = second.getReader();
+    await firstReader.read();
+    await firstReader.cancel();
+
+    expect(sourceCancelled).toBe(false);
+    await secondReader.cancel();
+    expect(sourceCancelled).toBe(true);
+  });
+
+  it('keeps client bytes intact when the store branch cancels', async () => {
+    const sourceBytes = [1, 2, 3, 4].map((value) => Uint8Array.of(value));
+    let index = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index === sourceBytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(sourceBytes[index++]!);
+      },
+    }, { highWaterMark: 0 });
+    const [client, store] = lockstepTee(source, 2);
+    const storeReader = store.getReader();
+    expect((await storeReader.read()).value).toEqual(sourceBytes[0]);
+    await storeReader.cancel();
+
+    expect(await readBytes(client)).toEqual(concat(...sourceBytes));
+  });
+
+  it('keeps client bytes intact when the store branch errors', async () => {
+    const sourceBytes = [1, 2, 3, 4].map((value) => Uint8Array.of(value));
+    let index = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index === sourceBytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(sourceBytes[index++]!);
+      },
+    }, { highWaterMark: 0 });
+    const [client, store] = lockstepTee(source, 2);
+    const failingStore = store.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        if (chunk[0] === 2) throw new Error('simulated R2 write failure');
+        controller.enqueue(chunk);
+      },
+    }));
+    const clientReader = client.getReader();
+    const firstClient = await clientReader.read();
+    expect(firstClient.done).toBe(false);
+    const secondClient = clientReader.read();
+    const storeReader = failingStore.getReader();
+    expect((await storeReader.read()).value).toEqual(sourceBytes[0]);
+    await expect(storeReader.read()).rejects.toThrow('simulated R2 write failure');
+    const second = await secondClient;
+    expect(second.done).toBe(false);
+    const received = [firstClient.value!, second.value!];
+    for (;;) {
+      const next = await clientReader.read();
+      if (next.done) break;
+      received.push(next.value);
+    }
+
+    expect(concat(...received)).toEqual(concat(...sourceBytes));
+  });
+
+  it('delivers identical bytes to every branch', async () => {
+    const sourceBytes = [new Uint8Array([0, 1]), new Uint8Array([2, 3, 4]), new Uint8Array([5])];
+    let index = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index === sourceBytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(sourceBytes[index++]!);
+      },
+    }, { highWaterMark: 0 });
+    const [left, right] = lockstepTee(source, 2);
+    const [leftBytes, rightBytes] = await Promise.all([readBytes(left), readBytes(right)]);
+
+    expect(leftBytes).toEqual(concat(...sourceBytes));
+    expect(rightBytes).toEqual(leftBytes);
   });
 });
