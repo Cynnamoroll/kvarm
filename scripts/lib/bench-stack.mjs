@@ -74,9 +74,11 @@ export async function emptyBenchBucket({ id, bucketName, accountId, apiToken, fe
 }
 
 const MIRROR_MODES = new Set(['off', 'shadow', 'on']);
+const PACK_CACHE_MODES = new Set(['off', 'on']);
 
-export function benchmarkConfig(base, resources, databaseId = '00000000-0000-0000-0000-000000000000', mirrorMode = 'shadow') {
+export function benchmarkConfig(base, resources, databaseId = '00000000-0000-0000-0000-000000000000', mirrorMode = 'shadow', packCache = 'off') {
   if (!MIRROR_MODES.has(mirrorMode)) throw new Error('--mirror-mode must be off, shadow, or on');
+  if (!PACK_CACHE_MODES.has(packCache)) throw new Error('--pack-cache must be off or on');
   const config = structuredClone(base);
   config.name = resources.worker;
   config.workers_dev = true;
@@ -99,7 +101,7 @@ export function benchmarkConfig(base, resources, databaseId = '00000000-0000-000
   config.artifacts = config.artifacts.map((artifacts) => artifacts.binding === 'ARTIFACTS'
     ? { ...artifacts, namespace: resources.namespace }
     : artifacts);
-  config.vars = { ...config.vars, ARTIFACTS_NAMESPACE: resources.namespace, GIT_MIRROR_MODE: mirrorMode };
+  config.vars = { ...config.vars, ARTIFACTS_NAMESPACE: resources.namespace, GIT_MIRROR_MODE: mirrorMode, GIT_PACK_CACHE: packCache };
   config.ratelimits = config.ratelimits.map((ratelimit) => {
     const suffix = createHash('sha256').update(`${resources.prefix}:${ratelimit.name}`).digest('hex').slice(0, 12);
     return { ...ratelimit, namespace_id: String(1_000_000_000_000n + BigInt(`0x${suffix}`)) };
@@ -172,6 +174,7 @@ function assertIsolatedConfig(config, resources) {
       config.workflows.some((x) => !x.name?.startsWith(`${resources.prefix}-`)) ||
       config.vars?.ARTIFACTS_NAMESPACE !== resources.namespace ||
       !MIRROR_MODES.has(config.vars?.GIT_MIRROR_MODE) ||
+      !PACK_CACHE_MODES.has(config.vars?.GIT_PACK_CACHE) ||
       config.containers !== undefined ||
       config.durable_objects?.bindings?.some((binding) => ['CI_SANDBOX', 'ENV_BUILDER', 'AGENT_SANDBOX'].includes(binding.name))) {
     throw new Error('refusing deployment or migration with a non-isolated Wrangler config');
@@ -341,12 +344,15 @@ export async function unsubscribeBenchRepo(resources, repo, wrangler) {
 }
 
 export async function runBenchStack({
-  action, id, repo, mirrorMode = 'shadow', baseConfig, wrangler, accountId, apiToken, fetchImpl = fetch,
+  action, id, repo, mirrorMode = 'shadow', packCache = 'off', baseConfig, wrangler, accountId, apiToken, fetchImpl = fetch,
   writeConfig = async () => {}, removeConfig = async () => {}, patFile, mintPat, removePatFile = async () => {},
   pats = 1, readPatFile = async () => '', writePatFile = async () => {},
 }) {
   if (action === 'up' && !MIRROR_MODES.has(mirrorMode)) {
     throw new Error('--mirror-mode must be off, shadow, or on');
+  }
+  if (action === 'up' && !PACK_CACHE_MODES.has(packCache)) {
+    throw new Error('--pack-cache must be off or on');
   }
   const resources = benchResources(id);
   const configArg = expectedConfig(resources);
@@ -383,7 +389,7 @@ export async function runBenchStack({
     if (!state.repos.some((r) => r.name === resources.seedRepo)) {
       await call(wrangler, ['artifacts', 'repos', 'create', resources.seedRepo, '--namespace', resources.namespace], resources);
     }
-    const config = benchmarkConfig(baseConfig, resources, databaseId, mirrorMode);
+    const config = benchmarkConfig(baseConfig, resources, databaseId, mirrorMode, packCache);
     await writeConfig(config);
     await call(wrangler, ['deploy', '--dry-run', '-c', configArg], resources, config);
     await call(wrangler, ['d1', 'migrations', 'apply', 'DB', '--remote', '-c', configArg], resources, config);

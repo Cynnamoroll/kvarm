@@ -15,17 +15,22 @@ const { positionals, values } = parseArgs({
     id: { type: 'string' },
     repo: { type: 'string' },
     'mirror-mode': { type: 'string', default: 'shadow' },
+    'pack-cache': { type: 'string', default: 'off' },
     pats: { type: 'string', default: '1' },
   },
   allowPositionals: true,
 });
 const action = positionals[0];
 if (!['up', 'down', 'status', 'subscribe', 'unsubscribe'].includes(action ?? '') || !values.id) {
-  console.error('usage: node scripts/bench-stack.mjs up [--mirror-mode off|shadow|on] [--pats <count>]|down|status --id <id>; subscribe|unsubscribe --id <id> --repo <repo>');
+  console.error('usage: node scripts/bench-stack.mjs up [--mirror-mode off|shadow|on] [--pack-cache off|on] [--pats <count>]|down|status --id <id>; subscribe|unsubscribe --id <id> --repo <repo>');
   process.exit(2);
 }
 if (!['off', 'shadow', 'on'].includes(values['mirror-mode'] ?? '')) {
   console.error('--mirror-mode must be off, shadow, or on');
+  process.exit(2);
+}
+if (!['off', 'on'].includes(values['pack-cache'] ?? '')) {
+  console.error('--pack-cache must be off or on');
   process.exit(2);
 }
 const pats = Number(values.pats);
@@ -59,6 +64,7 @@ try {
     id: values.id,
     repo: values.repo,
     mirrorMode: values['mirror-mode'],
+    packCache: values['pack-cache'],
     baseConfig,
     wrangler,
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID,

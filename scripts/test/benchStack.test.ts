@@ -192,7 +192,7 @@ describe('throwaway benchmark stack', () => {
     expect(config.artifacts[0].namespace).toBe(RES.namespace);
     expect(config.workflows.every((workflow: { name: string }) => workflow.name.startsWith(`${RES.prefix}-`))).toBe(true);
     expect(config.triggers.crons).toEqual(BASE.triggers.crons);
-    expect(config.vars).toMatchObject({ ARTIFACTS_NAMESPACE: RES.namespace, GIT_MIRROR_MODE: 'shadow' });
+    expect(config.vars).toMatchObject({ ARTIFACTS_NAMESPACE: RES.namespace, GIT_MIRROR_MODE: 'shadow', GIT_PACK_CACHE: 'off' });
     const rateLimitIds = config.ratelimits.map((ratelimit: { namespace_id: string | number }) => String(ratelimit.namespace_id));
     expect(rateLimitIds).not.toContain('4601');
     expect(rateLimitIds).not.toContain('4602');
@@ -220,6 +220,7 @@ describe('throwaway benchmark stack', () => {
       mintPat: async () => {},
     });
     expect(written[0]?.vars.GIT_MIRROR_MODE).toBe(mirrorMode);
+    expect(written[0]?.vars.GIT_PACK_CACHE).toBe('off');
     expect(fake.calls.some((args) => args[0] === 'd1' && args[1] === 'create')).toBe(false);
     expect(fake.calls.some((args) => args[0] === 'r2' && args[2] === 'create')).toBe(false);
     expect(fake.calls.some((args) => args[0] === 'queues' && args[1] === 'create')).toBe(false);
@@ -240,6 +241,61 @@ describe('throwaway benchmark stack', () => {
       },
     })).rejects.toThrow(/--mirror-mode must be off, shadow, or on/);
     expect(called).toBe(false);
+  });
+
+  it.each(['off', 'on'] as const)('up deploys an existing stack with pack cache %s', async (packCache) => {
+    const fake = fakeWrangler({
+      d1: [{ name: RES.d1, uuid: DATABASE_ID }],
+      buckets: [RES.bucket],
+      queues: [RES.queue, RES.deadLetterQueue],
+      repos: [{ name: RES.seedRepo }],
+    });
+    const written: Record<string, any>[] = [];
+    await runBenchStack({
+      action: 'up',
+      id: ID,
+      packCache,
+      baseConfig: BASE,
+      wrangler: fake.wrangler,
+      writeConfig: async (config) => { written.push(config); },
+      patFile: `/repo/apps/platform/.env.bench-${ID}`,
+      mintPat: async () => {},
+    });
+    expect(written[0]?.vars.GIT_PACK_CACHE).toBe(packCache);
+  });
+
+  it('rejects an invalid pack-cache mode before inspecting resources', async () => {
+    let called = false;
+    await expect(runBenchStack({
+      action: 'up',
+      id: ID,
+      packCache: 'bogus' as never,
+      baseConfig: BASE,
+      wrangler: async () => {
+        called = true;
+        return { code: 0, stdout: '[]', stderr: '' };
+      },
+    })).rejects.toThrow(/--pack-cache must be off or on/);
+    expect(called).toBe(false);
+  });
+
+  it('refuses a deploy config with an invalid pack-cache mode', async () => {
+    const fake = fakeWrangler({
+      d1: [{ name: RES.d1, uuid: DATABASE_ID }],
+      buckets: [RES.bucket],
+      queues: [RES.queue, RES.deadLetterQueue],
+      repos: [{ name: RES.seedRepo }],
+    });
+    await expect(runBenchStack({
+      action: 'up',
+      id: ID,
+      baseConfig: BASE,
+      wrangler: fake.wrangler,
+      writeConfig: async (config) => { config.vars.GIT_PACK_CACHE = 'invalid'; },
+      patFile: `/repo/apps/platform/.env.bench-${ID}`,
+      mintPat: async () => {},
+    })).rejects.toThrow(/non-isolated Wrangler config/);
+    expect(fake.calls.some((args) => args[0] === 'deploy')).toBe(false);
   });
 
   it.each(['missing', 'bogus'] as const)('refuses a deploy config with mirror mode %s', async (invalidMode) => {

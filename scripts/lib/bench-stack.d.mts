@@ -17,7 +17,7 @@ export function emptyBenchBucket(options: {
   fetchImpl?: typeof fetch;
 }): Promise<{ deleted: number }>;
 export function benchResources(id: string): BenchResources;
-export function benchmarkConfig(base: any, resources: BenchResources, databaseId?: string, mirrorMode?: 'off' | 'shadow' | 'on'): any;
+export function benchmarkConfig(base: any, resources: BenchResources, databaseId?: string, mirrorMode?: 'off' | 'shadow' | 'on', packCache?: 'off' | 'on'): any;
 export function assertArtifactsNamespace(namespace: string | undefined, resources: BenchResources): void;
 export function patKeys(count: number): string[];
 export function withPatList(text: string, keys: readonly string[]): string;
@@ -36,6 +36,7 @@ export function runBenchStack(options: {
   id: string;
   repo?: string;
   mirrorMode?: 'off' | 'shadow' | 'on';
+  packCache?: 'off' | 'on';
   baseConfig: any;
   wrangler: (args: string[], options?: { input?: string }) => Promise<{ code: number; stdout: string; stderr: string }>;
   accountId?: string;
