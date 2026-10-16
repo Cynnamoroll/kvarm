@@ -27,6 +27,13 @@ interface Fixture {
   upstreamCalls: number;
 }
 
+interface PackFlightHooks {
+  waitTimeoutMs?: number;
+  onAwait?: () => void;
+  failAcquire?: boolean;
+  failAwait?: boolean;
+}
+
 function fetchRequest(oid = OID, have?: string, sidebandAll = false): Uint8Array {
   return concat(
     pktLine('command=fetch\n'),
@@ -87,6 +94,38 @@ async function upload(fixture: Fixture, body = fetchRequest(), auth?: string, re
   );
 }
 
+function withPackFlightHooks(requestEnv: Env, hooks: PackFlightHooks): Env {
+  const namespace = requestEnv.REPO_MIRROR;
+  const wrapped = {
+    idFromName: namespace.idFromName.bind(namespace),
+    get: (id: DurableObjectId) => {
+      const stub = namespace.get(id);
+      return new Proxy(stub, {
+        get(target, property, receiver) {
+          if (property === 'acquirePackFlight' && hooks.failAcquire) {
+            return () => { throw new Error('simulated pack-flight acquire failure'); };
+          }
+          if (property === 'awaitPackFlight') {
+            return (key: string, timeoutMs: number) => {
+              hooks.onAwait?.();
+              if (hooks.failAwait) throw new Error('simulated pack-flight wait failure');
+              return stub.awaitPackFlight(key, hooks.waitTimeoutMs ?? timeoutMs);
+            };
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    },
+  };
+  return { ...requestEnv, REPO_MIRROR: wrapped } as unknown as Env;
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 beforeAll(async () => {
   userId = await seedUser(env, OWNER);
   token = (await mintPAT(env, userId, 'git-pack-cache', FULL)).token;
@@ -105,10 +144,182 @@ describe('upload-pack response cache', () => {
     expect(first.cost.cache).toBe('miss');
     expect(second.status).toBe(200);
     expect(second.cost.cache).toBe('hit');
+    expect(first.cost.do).toBe(2);
+    expect(second.cost.do).toBe(0);
     expect(second.cost.art).toBe(0);
     expect(second.headers.get('content-type')).toBe('application/x-git-upload-pack-result');
     expect(second.bytes).toEqual(first.bytes);
     expect(fixture.upstreamCalls).toBe(1);
+  });
+
+  it('coalesces eight concurrent identical misses into one Artifacts fetch', async () => {
+    const fixture = await createFixture('single-flight');
+    const upstreamGate = deferred();
+    const followersReady = deferred();
+    let followers = 0;
+    const requestEnv = withPackFlightHooks(env, {
+      onAwait: () => {
+        followers++;
+        if (followers === 7) followersReady.resolve();
+      },
+    });
+    fixture.repo.gitRemoteHandler = async () => {
+      fixture.upstreamCalls++;
+      await upstreamGate.promise;
+      return new Response(packResponse(), {
+        headers: { 'content-type': 'application/x-git-upload-pack-result' },
+      });
+    };
+
+    const replies = Promise.all(Array.from({ length: 8 }, () => upload(fixture, fetchRequest(), undefined, requestEnv)));
+    await followersReady.promise;
+    upstreamGate.resolve();
+    const completed = await replies;
+
+    expect(fixture.upstreamCalls).toBe(1);
+    expect(completed.every((reply) => reply.status === 200)).toBe(true);
+    for (const reply of completed.slice(1)) expect(reply.bytes).toEqual(completed[0]!.bytes);
+    expect(completed.filter((reply) => reply.cost.cache === 'coalesced')).toHaveLength(7);
+    expect(completed.filter((reply) => reply.cost.cache === 'miss')).toHaveLength(1);
+    expect(completed.every((reply) => reply.cost.do === 2)).toBe(true);
+  });
+
+  it('lets followers fall back without storing when the leader response is invalid', async () => {
+    const fixture = await createFixture('single-flight-invalid');
+    const upstreamGate = deferred();
+    const followersReady = deferred();
+    let followers = 0;
+    const requestEnv = withPackFlightHooks(env, {
+      onAwait: () => {
+        followers++;
+        if (followers === 7) followersReady.resolve();
+      },
+    });
+    const invalid = concat(pktLine('ERR repository unavailable\n'), FLUSH_PKT);
+    fixture.repo.gitRemoteHandler = async () => {
+      fixture.upstreamCalls++;
+      if (fixture.upstreamCalls === 1) {
+        await upstreamGate.promise;
+        return new Response(invalid, { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+      }
+      return new Response(packResponse(), { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+    };
+
+    const request = fetchRequest();
+    const replies = Promise.all(Array.from({ length: 8 }, () => upload(fixture, request, undefined, requestEnv)));
+    await followersReady.promise;
+    upstreamGate.resolve();
+    const completed = await replies;
+    const classification = classifyUploadPackRequest(request, 'v2');
+    const fullHash = await derivePackCacheKey(fixture.id, 0, 'v2', classification.normalized!);
+    const slotHash = await derivePackCacheSlotHash(fixture.id, 'v2', classification.normalized!);
+
+    expect(fixture.upstreamCalls).toBe(8);
+    expect(completed.filter((reply) => reply.text.includes('ERR repository unavailable'))).toHaveLength(1);
+    expect(completed.every((reply) => reply.cost.cache === 'miss')).toBe(true);
+    expect(await caches.default.match(`https://kvarm-git.internal/pack/${fixture.id}/0/${fullHash}`)).toBeUndefined();
+    expect(await env.SNAPSHOTS.head(`fetch/${fixture.id}/${slotHash}`)).toBeNull();
+  });
+
+  it('lets followers time out and fetch without storing or becoming leader', async () => {
+    const fixture = await createFixture('single-flight-timeout');
+    const upstreamEntered = deferred();
+    let closeLeader!: () => void;
+    fixture.repo.gitRemoteHandler = () => {
+      fixture.upstreamCalls++;
+      if (fixture.upstreamCalls > 1) {
+        return new Response(packResponse(), { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+      }
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(packResponse());
+          closeLeader = () => controller.close();
+          upstreamEntered.resolve();
+        },
+      }), { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+    };
+
+    const leaderContext = createExecutionContext();
+    const leaderResponse = await worker.fetch!(
+      new Request(`${ORIGIN}/${OWNER}/${fixture.name}.git/git-upload-pack`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-git-upload-pack-request', 'Git-Protocol': 'version=2' },
+        body: fetchRequest(),
+      }) as Request<unknown, IncomingRequestCfProperties>,
+      env,
+      leaderContext,
+    );
+    await upstreamEntered.promise;
+    const followerEnv = withPackFlightHooks(env, { waitTimeoutMs: 10 });
+    const follower = await upload(fixture, fetchRequest(), undefined, followerEnv);
+
+    expect(follower.status).toBe(200);
+    expect(follower.cost.cache).toBe('miss');
+    expect(fixture.upstreamCalls).toBe(2);
+
+    await leaderResponse.body?.cancel();
+    closeLeader();
+    await waitOnExecutionContext(leaderContext);
+  });
+
+  it('degrades to an uncoalesced store when the flight Durable Object throws', async () => {
+    const fixture = await createFixture('single-flight-do-error');
+    const throwingEnv = withPackFlightHooks(env, { failAcquire: true });
+    const response = await upload(fixture, fetchRequest(), undefined, throwingEnv);
+
+    expect(response.status).toBe(200);
+    expect(response.bytes).toEqual(packResponse());
+    expect(response.cost.do).toBe(1);
+    expect(fixture.upstreamCalls).toBe(1);
+    expect((await upload(fixture)).cost.cache).toBe('hit');
+
+    const waitFixture = await createFixture('single-flight-wait-error');
+    const request = fetchRequest();
+    const classification = classifyUploadPackRequest(request, 'v2');
+    const fullHash = await derivePackCacheKey(waitFixture.id, 0, 'v2', classification.normalized!);
+    const mirror = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(waitFixture.id));
+    expect(await mirror.acquirePackFlight(fullHash, 60_000)).toBe('leader');
+    const waitError = await upload(
+      waitFixture,
+      request,
+      undefined,
+      withPackFlightHooks(env, { failAwait: true }),
+    );
+    expect(waitError.status).toBe(200);
+    expect(waitError.bytes).toEqual(packResponse());
+    expect(waitError.cost.do).toBe(2);
+    expect(waitFixture.upstreamCalls).toBe(1);
+    await mirror.settlePackFlight(fullHash, false);
+  });
+
+  it('does not coalesce requests with different full cache hashes', async () => {
+    const fixture = await createFixture('single-flight-different-keys');
+    const upstreamGate = deferred();
+    const bothEntered = deferred();
+    fixture.repo.gitRemoteHandler = async () => {
+      fixture.upstreamCalls++;
+      if (fixture.upstreamCalls === 2) bothEntered.resolve();
+      await upstreamGate.promise;
+      return new Response(packResponse(), { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+    };
+    const firstRequest = fetchRequest(OID);
+    const secondRequest = fetchRequest('b'.repeat(40));
+    const firstClassification = classifyUploadPackRequest(firstRequest, 'v2');
+    const secondClassification = classifyUploadPackRequest(secondRequest, 'v2');
+    expect(
+      await derivePackCacheKey(fixture.id, 0, 'v2', firstClassification.normalized!),
+    ).not.toBe(await derivePackCacheKey(fixture.id, 0, 'v2', secondClassification.normalized!));
+
+    const replies = Promise.all([
+      upload(fixture, firstRequest),
+      upload(fixture, secondRequest),
+    ]);
+    await bothEntered.promise;
+    upstreamGate.resolve();
+    const completed = await replies;
+
+    expect(fixture.upstreamCalls).toBe(2);
+    expect(completed.map((reply) => reply.cost.cache)).toEqual(['miss', 'miss']);
   });
 
   it('validates and caches a captured sideband-all Artifacts response', async () => {
@@ -263,6 +474,7 @@ describe('upload-pack response cache', () => {
 
     const second = await upload(fixture, request);
     expect(second.cost.cache).toBe('r2');
+    expect(second.cost.do).toBe(0);
     expect(second.cost.art).toBe(0);
     expect(second.cost.r2b).toBe(1);
     expect(fixture.upstreamCalls).toBe(1);

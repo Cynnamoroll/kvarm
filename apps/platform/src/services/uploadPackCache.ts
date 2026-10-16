@@ -122,12 +122,13 @@ function limitCacheApiSize(source: ReadableStream<Uint8Array>): ReadableStream<U
   }));
 }
 
-function putCacheApi(address: UploadPackCacheAddress, contentType: string, body: ReadableStream<Uint8Array>): Promise<void> {
+function putCacheApi(address: UploadPackCacheAddress, contentType: string, body: ReadableStream<Uint8Array>): Promise<boolean> {
   return caches.default
     .put(address.cacheKey, new Response(limitCacheApiSize(body), { status: 200, headers: cacheHeaders(contentType) }))
-    .then(() => undefined)
+    .then(() => true)
     .catch(async () => {
       await caches.default.delete(address.cacheKey).catch(() => false);
+      return false;
     });
 }
 
@@ -201,7 +202,7 @@ const storeEffect = Effect.fnUntraced(function* (
   address: UploadPackCacheAddress,
   contentType: string,
   source: ReadableStream<Uint8Array>,
-): Effect.fn.Return<void, never> {
+): Effect.fn.Return<boolean, never> {
   const validated = validateStream(source, address.protocol, address.sidebandAll);
   const [cacheBody, r2Body] = address.r2Eligible
     ? lockstepTee(validated, 2, [
@@ -209,11 +210,12 @@ const storeEffect = Effect.fnUntraced(function* (
         { maxLagBytes: UPLOAD_PACK_CACHE_MAX_LAG_BYTES },
       ])
     : [validated, null];
-  const tasks: Effect.Effect<void, never>[] = [Effect.promise(() => putCacheApi(address, contentType, cacheBody))];
+  const tasks: Effect.Effect<boolean, never>[] = [Effect.promise(() => putCacheApi(address, contentType, cacheBody))];
   if (r2Body) {
-    tasks.push(Effect.promise(() => writeR2(env, address, contentType, r2Body).catch(() => undefined)));
+    tasks.push(Effect.promise(() => writeR2(env, address, contentType, r2Body).then(() => true, () => false)));
   }
-  yield* Effect.all(tasks, { concurrency: 'unbounded', discard: true });
+  const stored = yield* Effect.all(tasks, { concurrency: 'unbounded' });
+  return stored.some(Boolean);
 });
 
 export function storeUploadPackResponse(
@@ -221,6 +223,6 @@ export function storeUploadPackResponse(
   address: UploadPackCacheAddress,
   contentType: string,
   body: ReadableStream<Uint8Array>,
-): Promise<void> {
+): Promise<boolean> {
   return Effect.runPromise(storeEffect(env, address, contentType, body));
 }

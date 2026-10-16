@@ -22,7 +22,7 @@ import type { RepoRow } from '../db/repos';
 import { parseBasicAuth } from '../auth/pat';
 import { getGitToken } from '../artifacts/tokens';
 import { gitRateLimit, type RateLimitReason } from '../ratelimit';
-import { markCache } from '../cost/meter';
+import { markCache, reserveDoCall } from '../cost/meter';
 import { withPrivateCacheControl } from '../cache/scope';
 import { resolveRepoAccess, type AccessDenied } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
@@ -405,6 +405,7 @@ export async function handleGitRequest(
   }
 
   let packCacheAddress: UploadPackCacheAddress | null = null;
+  let packFlightSettlement: ((ok: boolean) => unknown) | null = null;
   if (
     env.GIT_PACK_CACHE === 'on' &&
     op === 'read' &&
@@ -529,7 +530,49 @@ export async function handleGitRequest(
   if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
     init.body = pushBody ?? uploadBody ?? c.req.raw.body;
   }
-  const upstreamRes = await fetch(upstream.toString(), init);
+  if (packCacheAddress) {
+    const address = packCacheAddress;
+    try {
+      const mirror = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repo.id));
+      const acquired = await mirror.acquirePackFlight(address.fullHash, 60_000);
+      if (acquired === 'leader') {
+        packFlightSettlement = (ok) => mirror.settlePackFlight(address.fullHash, ok);
+      } else if (acquired === 'follower') {
+        const outcome = await mirror.awaitPackFlight(address.fullHash, 20_000);
+        if (outcome === 'done') {
+          const cached = await lookupUploadPackCache(env, c.executionCtx, address);
+          if (cached) {
+            markCache('coalesced');
+            const cachedHeaders = new Headers(cached.response.headers);
+            cachedHeaders.set('cache-control', 'no-cache');
+            return scoped(new Response(cached.response.body, { status: 200, headers: cachedHeaders }));
+          }
+        }
+        packCacheAddress = null;
+      }
+    } catch {
+      packFlightSettlement = null;
+    }
+  }
+
+  const schedulePackFlightSettlement = (result: boolean | Promise<boolean>) => {
+    const settle = packFlightSettlement;
+    if (!settle) return;
+    packFlightSettlement = null;
+    reserveDoCall('settlePackFlight');
+    const settled = Promise.resolve(result)
+      .catch(() => false)
+      .then((ok) => Promise.resolve().then(() => settle(ok)));
+    c.executionCtx.waitUntil(settled.catch(() => undefined));
+  };
+
+  let upstreamRes: Response;
+  try {
+    upstreamRes = await fetch(upstream.toString(), init);
+  } catch (error) {
+    schedulePackFlightSettlement(false);
+    throw error;
+  }
 
   if (mirrorRequest && mirrorMode === 'shadow' && upstreamRes.ok) {
     const request = mirrorRequest;
@@ -647,12 +690,13 @@ export async function handleGitRequest(
         {},
         { maxLagBytes: UPLOAD_PACK_CACHE_MAX_LAG_BYTES },
       ]);
-      c.executionCtx.waitUntil(
-        storeUploadPackResponse(env, packCacheAddress, contentType, stored).catch(() => undefined),
-      );
+      const store = storeUploadPackResponse(env, packCacheAddress, contentType, stored);
+      c.executionCtx.waitUntil(store.catch(() => false));
+      schedulePackFlightSettlement(store);
       return scoped(relay(new Response(client, upstreamRes)));
     }
   }
 
+  schedulePackFlightSettlement(false);
   return scoped(relay(upstreamRes));
 }

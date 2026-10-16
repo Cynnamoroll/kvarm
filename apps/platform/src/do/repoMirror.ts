@@ -18,6 +18,16 @@ export interface MirrorReadRequest {
 }
 export interface MirrorReadResult { seq: number; bytes: Uint8Array }
 
+type PackFlightResult = 'done' | 'failed' | 'timeout';
+interface PackFlightWaiter {
+  resolve(result: PackFlightResult): void;
+  timer: ReturnType<typeof setTimeout>;
+}
+interface PackFlight {
+  expiresAt: number;
+  waiters: Set<PackFlightWaiter>;
+}
+
 interface Meta {
   repo_id: string; seq: number; seeded_at: number | null; verified_at: number | null;
   dirty: number; destroyed: number; caps_v0: string; v0_service: number;
@@ -238,6 +248,7 @@ export function parseLsRefsRequest(body: Uint8Array): LsRefsOptions | null {
 export class RepoMirror extends DurableObject<Env> {
   private ready: Promise<void>;
   private seedFlight: Promise<void> | null = null;
+  private packFlights = new Map<string, PackFlight>();
   private destroyed = false;
   private seedVersion = 0;
   private renderCache: { seq: number; meta: Meta; refs: MirrorRenderRef[]; v0: Uint8Array } | null = null;
@@ -264,6 +275,21 @@ export class RepoMirror extends DurableObject<Env> {
   }
   private rows<T>(sql: string, ...values: unknown[]): T[] { return this.ctx.storage.sql.exec(sql, ...values).toArray() as unknown as T[]; }
   private meta(): Meta | null { return this.rows<Meta>('SELECT * FROM meta LIMIT 1')[0] ?? null; }
+  private resolvePackFlight(flight: PackFlight, result: PackFlightResult): void {
+    for (const waiter of flight.waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(result);
+    }
+    flight.waiters.clear();
+  }
+  private expirePackFlights(now: number): void {
+    for (const [key, flight] of this.packFlights) {
+      if (flight.expiresAt <= now) {
+        this.packFlights.delete(key);
+        this.resolvePackFlight(flight, 'timeout');
+      }
+    }
+  }
   private prepared(meta: Meta): { seq: number; meta: Meta; refs: MirrorRenderRef[]; v0: Uint8Array } {
     if (this.renderCache?.seq === meta.seq) return this.renderCache;
     const refs = this.rowsForRender();
@@ -295,6 +321,42 @@ export class RepoMirror extends DurableObject<Env> {
       this.seedVersion++;
       this.dirty(this.meta()?.repo_id || repoId || '');
     }
+  }
+
+  async acquirePackFlight(key: string, ttlMs: number): Promise<'leader' | 'follower'> {
+    const now = Date.now();
+    this.expirePackFlights(now);
+    if (this.packFlights.has(key)) return 'follower';
+    const ttl = Number.isFinite(ttlMs) ? Math.max(0, Math.floor(ttlMs)) : 0;
+    this.packFlights.set(key, { expiresAt: now + ttl, waiters: new Set() });
+    return 'leader';
+  }
+
+  async awaitPackFlight(key: string, timeoutMs: number): Promise<PackFlightResult> {
+    this.expirePackFlights(Date.now());
+    const flight = this.packFlights.get(key);
+    const timeout = Number.isFinite(timeoutMs) ? Math.max(0, Math.floor(timeoutMs)) : 0;
+    if (!flight || timeout === 0) return 'timeout';
+    return new Promise((resolve) => {
+      let waiter: PackFlightWaiter | undefined;
+      const timer = setTimeout(() => {
+        if (waiter) flight.waiters.delete(waiter);
+        resolve('timeout');
+      }, timeout);
+      waiter = {
+        timer,
+        resolve: (result) => resolve(result),
+      };
+      flight.waiters.add(waiter);
+    });
+  }
+
+  settlePackFlight(key: string, ok: boolean): void {
+    this.expirePackFlights(Date.now());
+    const flight = this.packFlights.get(key);
+    if (!flight) return;
+    this.packFlights.delete(key);
+    this.resolvePackFlight(flight, ok ? 'done' : 'failed');
   }
 
   async apply(seq: number, updates: MirrorUpdate[], repoId?: string): Promise<void> {
@@ -423,6 +485,8 @@ export class RepoMirror extends DurableObject<Env> {
   async destroy(repoId?: string): Promise<void> {
     await this.ready;
     this.seedVersion++;
+    for (const flight of this.packFlights.values()) this.resolvePackFlight(flight, 'failed');
+    this.packFlights.clear();
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec('DELETE FROM refs');
       this.ctx.storage.sql.exec('DELETE FROM ring');

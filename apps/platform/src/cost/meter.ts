@@ -5,10 +5,10 @@
  * counting proxies, outbound `fetch` is counted through AsyncLocalStorage, and
  * response-level Cache API layers report hit/miss. The totals are emitted as
  *
- *   x-kvarm-cost: d1=..;rr=..;rw=..;art=..;do=..;r2a=..;r2b=..;q=..;sub=..;cache=hit|r2|miss|none|bypass
+ *   x-kvarm-cost: d1=..;rr=..;rw=..;art=..;do=..;r2a=..;r2b=..;q=..;sub=..;cache=hit|r2|miss|coalesced|none|bypass
  *
  * These are work counters, not a bill: CPU, duration, storage, payload sizes
- * and background (waitUntil) work after the response are not included.
+ * and background work are not included except for RPCs reserved by a request.
  *
  * Counting rules:
  *  - d1: D1 round trips. One statement call (first/all/run/raw) or one
@@ -29,7 +29,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 export const COST_HEADER = 'x-kvarm-cost';
 
-export type CacheState = 'hit' | 'r2' | 'miss' | 'none' | 'bypass';
+export type CacheState = 'hit' | 'r2' | 'miss' | 'coalesced' | 'none' | 'bypass';
 
 export interface CostCounters {
   d1: number;
@@ -109,10 +109,11 @@ export class CostMeter {
   q = 0;
   sub = 0;
   cache: CacheState = 'none';
+  private reservedDoCalls = new Map<string, number>();
 
-  /** Records the outermost response-cache outcome; later lookups don't override it. */
-  markCache(state: 'hit' | 'r2' | 'miss' | 'bypass'): void {
-    if (this.cache === 'none') this.cache = state;
+  /** Records the outermost response-cache outcome; coalesced replaces its initiating miss. */
+  markCache(state: 'hit' | 'r2' | 'miss' | 'coalesced' | 'bypass'): void {
+    if (this.cache === 'none' || (state === 'coalesced' && this.cache === 'miss')) this.cache = state;
   }
 
   /** Adds `n` to one counter here and on every span of the current async context. */
@@ -120,6 +121,22 @@ export class CostMeter {
     if (n <= 0) return;
     this[counter] += n;
     for (const s of spans.getStore() ?? []) s[counter] += n;
+  }
+
+  reserveDoCall(method: string): void {
+    this.count('do');
+    this.reservedDoCalls.set(method, (this.reservedDoCalls.get(method) ?? 0) + 1);
+  }
+
+  /** Counts an RPC already reserved by the request without counting it twice. */
+  countDoCall(method: string): void {
+    const reserved = this.reservedDoCalls.get(method) ?? 0;
+    if (reserved > 0) {
+      if (reserved === 1) this.reservedDoCalls.delete(method);
+      else this.reservedDoCalls.set(method, reserved - 1);
+      return;
+    }
+    this.count('do');
   }
 
   addRows(meta: D1Meta | undefined | null): void {
@@ -177,7 +194,7 @@ function toCount(n: unknown): number {
 export function parseCostHeader(value: string | null | undefined): CostCounters | null {
   if (!value) return null;
   const m = value.match(
-    /^d1=(\d+);rr=(\d+);rw=(\d+);art=(\d+);do=(\d+);r2a=(\d+);r2b=(\d+);q=(\d+);sub=(\d+);cache=(hit|r2|miss|none|bypass)$/,
+    /^d1=(\d+);rr=(\d+);rw=(\d+);art=(\d+);do=(\d+);r2a=(\d+);r2b=(\d+);q=(\d+);sub=(\d+);cache=(hit|r2|miss|coalesced|none|bypass)$/,
   );
   if (!m) return null;
   const n = (i: number) => Number(m[i]);
@@ -269,10 +286,7 @@ function wrapArtifacts(ns: object, m: CostMeter): object {
 }
 
 function wrapDurableObjectNamespace(ns: object, m: CostMeter): object {
-  const stub = (s: object) =>
-    countCalls(s, () => {
-      m.count('do');
-    });
+  const stub = (s: object) => countCalls(s, (name) => m.countDoCall(name));
   return new Proxy(ns, {
     get(t, prop) {
       const value: unknown = Reflect.get(t, prop);
@@ -410,8 +424,13 @@ export function runWithMeter<R>(meter: CostMeter, fn: () => R): R {
 }
 
 /** Marks the response-level cache outcome on the current request's meter. */
-export function markCache(state: 'hit' | 'r2' | 'miss' | 'bypass'): void {
+export function markCache(state: 'hit' | 'r2' | 'miss' | 'coalesced' | 'bypass'): void {
   scope.getStore()?.markCache(state);
+}
+
+/** Counts an RPC in this response before its waitUntil operation runs. */
+export function reserveDoCall(method: string): void {
+  scope.getStore()?.reserveDoCall(method);
 }
 
 /** Wraps a fetch implementation so calls count as subrequests on the active meter. */

@@ -68,6 +68,28 @@ describe('RepoMirror', () => {
   afterAll(() => restoreFetch());
   beforeEach(() => { infoRefsCalls.length = 0; });
 
+  it('coordinates, settles, and expires pack-cache flights', async () => {
+    await withFakeArtifacts(`pack-flight-${crypto.randomUUID()}`, async (mirror) => {
+      expect(await mirror.acquirePackFlight('success', 10_000)).toBe('leader');
+      const done = mirror.awaitPackFlight('success', 100);
+      expect(await mirror.acquirePackFlight('success', 10_000)).toBe('follower');
+      mirror.settlePackFlight('success', true);
+      expect(await done).toBe('done');
+      expect(await mirror.awaitPackFlight('success', 1)).toBe('timeout');
+
+      expect(await mirror.acquirePackFlight('failure', 10_000)).toBe('leader');
+      const failed = mirror.awaitPackFlight('failure', 100);
+      mirror.settlePackFlight('failure', false);
+      expect(await failed).toBe('failed');
+
+      expect(await mirror.acquirePackFlight('timeout', 10_000)).toBe('leader');
+      expect(await mirror.awaitPackFlight('timeout', 5)).toBe('timeout');
+
+      expect(await mirror.acquirePackFlight('expired', 0)).toBe('leader');
+      expect(await mirror.acquirePackFlight('expired', 10_000)).toBe('leader');
+    });
+  });
+
   it('renders captured v0/v2 and ls-refs bytes, then applies a push without reseeding', async () => {
     const name = `mirror-${crypto.randomUUID().slice(0, 8)}`;
     const { id, main } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });

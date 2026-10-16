@@ -278,6 +278,16 @@ describe('request scope', () => {
     });
     expect(m.cache).toBe('miss');
   });
+
+  it('reports a coalesced cache hit instead of its initiating miss', () => {
+    const m = new CostMeter();
+    runWithMeter(m, () => {
+      markCache('miss');
+      markCache('coalesced');
+    });
+    expect(m.cache).toBe('coalesced');
+    expect(parseCostHeader(m.header())?.cache).toBe('coalesced');
+  });
 });
 
 describe('x-kvarm-cost header', () => {
