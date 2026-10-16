@@ -555,7 +555,7 @@ interface MessageResult {
   webhook?: AttemptResult;
 }
 
-async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }): Promise<MessageResult> {
+async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: number }, schedule?: (promise: Promise<unknown>) => void): Promise<MessageResult> {
   const purge = parseRepoPurgeMessage(msg.body);
   if (purge) {
     const result = await purgeRepoById(env, purge.repoId);
@@ -585,6 +585,11 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
   const now = Date.now();
   const state = await ingest(env.DB, event, eventId, msg.id, now);
   if (!state) return { outcome: 'unknown-repo', eventId };
+  const reconcile = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(state.repoId))
+    .reconcile(event.ref, event.after, state.repoId)
+    .catch((error: unknown) => console.warn(JSON.stringify({ repoMirrorReconcileFailed: String(error).slice(0, 200) })));
+  if (schedule) schedule(reconcile);
+  else await reconcile;
 
   const pending = PUSH_EFFECTS.filter((e) => !state.done.has(e.name));
   if (pending.length === 0) return { outcome: 'duplicate', eventId };
@@ -648,7 +653,7 @@ async function processMessage(env: Env, msg: Message<unknown>, counters: { wf: n
  * effects did not all complete is retried with backoff; everything else
  * (including malformed messages and unknown repos) is acked.
  */
-export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): Promise<void> {
+export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env, schedule?: (promise: Promise<unknown>) => void): Promise<void> {
   // Webhook attempts wait on outside endpoints (up to their timeout each), so
   // they run concurrently with each other and alongside the in-order work,
   // never in front of it.
@@ -657,11 +662,11 @@ export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): 
   // attempt's timeout starts when it calls fetch: a few lanes keep every
   // attempt on an open connection and leave room for the in-order work.
   const lanes = Array.from({ length: Math.min(WEBHOOK_ATTEMPT_LANES, hooks.length) }, async (_, lane) => {
-    for (let i = lane; i < hooks.length; i += WEBHOOK_ATTEMPT_LANES) await handleMessage(batch.queue, env, hooks[i]!);
+    for (let i = lane; i < hooks.length; i += WEBHOOK_ATTEMPT_LANES) await handleMessage(batch.queue, env, hooks[i]!, schedule);
   });
   const hookRuns = Promise.all(lanes);
   for (const msg of batch.messages) {
-    if (!isWebhookDeliveryMessage(msg.body)) await handleMessage(batch.queue, env, msg);
+    if (!isWebhookDeliveryMessage(msg.body)) await handleMessage(batch.queue, env, msg, schedule);
   }
   await hookRuns;
   // Only platform work records new deliveries (an attempt's disablement
@@ -669,12 +674,12 @@ export async function handleEventBatch(batch: MessageBatch<unknown>, env: Env): 
   if (hooks.length < batch.messages.length) await pumpWebhooks(env, batch.queue);
 }
 
-async function handleMessage(queue: string, env: Env, msg: Message<unknown>): Promise<void> {
+async function handleMessage(queue: string, env: Env, msg: Message<unknown>, schedule?: (promise: Promise<unknown>) => void): Promise<void> {
   const meter = new CostMeter();
   const counters = { wf: 0 };
   let result: MessageResult;
   try {
-    result = await runWithMeter(meter, () => processMessage(meter.wrapEnv(env), msg, counters));
+    result = await runWithMeter(meter, () => processMessage(meter.wrapEnv(env), msg, counters, schedule));
   } catch (err) {
     result = { outcome: 'retry', error: String(err).slice(0, 200) };
   }

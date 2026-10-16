@@ -5,6 +5,7 @@
  * rate-limit bindings (declared identically, so a regenerated file merges).
  */
 import type { PathHistory } from './do/pathHistory';
+import type { RepoMirror } from './do/repoMirror';
 
 declare global {
   interface Env {
@@ -37,5 +38,7 @@ declare global {
     WRITE_LIMITER: RateLimit;
     REPO_EVENTS: DurableObjectNamespace;
     PATH_HISTORY: DurableObjectNamespace<PathHistory>;
+    REPO_MIRROR: DurableObjectNamespace<RepoMirror>;
+    GIT_MIRROR_MODE?: 'off' | 'shadow' | 'on';
   }
 }

@@ -25,7 +25,7 @@ import { relayReceivePackReply, repoViewGeneration } from '../src/services/pushF
 import worker from '../src/index';
 import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
-const baseEnv = cfEnv as unknown as Env;
+const baseEnv = { ...(cfEnv as unknown as Env), GIT_MIRROR_MODE: 'off' } as Env;
 const ORIGIN = 'https://kvarm.test';
 const OWNER = 'pf-owner';
 const FULL: Scope[] = ['read', 'write', 'api'];
@@ -92,6 +92,14 @@ function slowPushedAt(db: D1Database): D1Database {
                   await new Promise((r) => setTimeout(r, SLOW_PUSHED_AT_MS));
                   return bound.run();
                 },
+                first: async <T>() => {
+                  await new Promise((r) => setTimeout(r, SLOW_PUSHED_AT_MS));
+                  return bound.first<T>();
+                },
+                all: async <T>() => {
+                  await new Promise((r) => setTimeout(r, SLOW_PUSHED_AT_MS));
+                  return bound.all<T>();
+                },
               };
             },
           } as unknown as D1PreparedStatement;
@@ -107,6 +115,10 @@ const env = {
   ...baseEnv,
   DB: slowPushedAt(baseEnv.DB),
   ARTIFACTS: { get: async (name: string) => handle(name) } as unknown as Artifacts,
+  REPO_MIRROR: {
+    idFromName: (id: string) => id,
+    get: () => ({ apply: async () => undefined, markDirty: async () => undefined }),
+  } as unknown as Env['REPO_MIRROR'],
 } as Env;
 
 interface Sent {
@@ -140,10 +152,13 @@ function basic(): Record<string, string> {
 }
 
 function push(repo: string): Promise<Sent> {
+  const oldOid = hex(heads.get(nameOf(repo)) ?? 1, 'a');
+  const newOid = hex((heads.get(nameOf(repo)) ?? 1) + 1, 'a');
+  const commands = pktLine(`${oldOid} ${newOid} refs/heads/main\0report-status agent=git/2.34.1\n`);
   return send(`/${OWNER}/${repo}.git/git-receive-pack`, {
     method: 'POST',
     headers: { ...basic(), 'content-type': 'application/x-git-receive-pack-request' },
-    body: enc.encode('0000PACK-not-inspected-by-the-fake'),
+    body: cat(commands, '0000', 'PACK-not-inspected-by-the-fake'),
   });
 }
 

@@ -103,6 +103,12 @@ export async function purgeRepo(
       },
     },
     {
+      name: 'mirror',
+      async run() {
+        await env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(tombstone.repo_id)).destroy(tombstone.repo_id);
+      },
+    },
+    {
       name: 'tokens',
       async run() {
         if (await artifactsNameIsCurrent(env, tombstone, 'tokens')) return;

@@ -79,7 +79,8 @@
       { "name": "ENV_BUILDER", "class_name": "EnvironmentBuilder" },
       { "name": "AGENT_SANDBOX", "class_name": "AgentSandbox" },
       { "name": "REPO_EVENTS", "class_name": "RepoEvents" },
-      { "name": "PATH_HISTORY", "class_name": "PathHistory" }
+      { "name": "PATH_HISTORY", "class_name": "PathHistory" },
+      { "name": "REPO_MIRROR", "class_name": "RepoMirror" }
     ]
   },
   "migrations": [
@@ -106,6 +107,10 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["PathHistory"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": ["RepoMirror"]
     }
   ],
   // Container CI runner showcase (public beta). No image or dockerfile key:
@@ -136,6 +141,7 @@
     "SITE_NAME": "Kvarm",
     "APP_ORIGIN": "http://localhost:8787",
     "ARTIFACTS_NAMESPACE": "default",
+    "GIT_MIRROR_MODE": "shadow",
     // Empty means the callback is the origin that served /auth/login, so local
     // dev and any deployment work without editing this file. The deploy
     // overlay sets it explicitly from KVARM_APP_ORIGIN.

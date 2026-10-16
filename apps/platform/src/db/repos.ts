@@ -15,6 +15,7 @@ export interface RepoRow {
   stars: number;
   created_at: number;
   pushed_at: number | null;
+  ref_seq?: number;
   /** Opt-in hosted CI execution (services/hostedCi.ts); 0 unless a repo admin enabled it. */
   hosted_ci: number;
   /** Owning organization for org repos; null (or absent in older cached rows) for personal repos. */

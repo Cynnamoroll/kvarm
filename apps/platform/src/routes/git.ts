@@ -29,8 +29,9 @@ import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
 import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type WorkspaceOwner } from '../services/workspaces';
 import { agentReservedRefDenial, directHumanPushDenial, directPushDenial, INVALID_REF_REASON, type BranchRule } from '../services/branchRules';
-import { isSafeRefName, type RefCommand } from '@kvarm/gitops';
+import { isSafeRefName, sha256Hex, type RefCommand } from '@kvarm/gitops';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
+import { parseLsRefsRequest } from '../do/repoMirror';
 import { recordPushAudit } from '../services/audit';
 import { branchPushUpdates, dispatchConfirmedPush } from '../services/pushFastPath';
 
@@ -72,6 +73,60 @@ function relay(upstream: Response): Response {
     if (v) headers.set(h, v);
   }
   return new Response(upstream.body, { status: upstream.status, headers });
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+async function parseLsRefsBody(request: Request): Promise<{ body: Uint8Array; options: import('../do/repoMirror').LsRefsOptions } | null> {
+  const cloned = request.clone();
+  const decoded = decodedRequestBody(cloned);
+  if (!decoded.ok || !decoded.body) return null;
+  const reader = decoded.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  const maxBytes = 64 * 1024;
+  const prefix = (size: number): Uint8Array => {
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      const count = Math.min(chunk.byteLength, size - offset);
+      bytes.set(chunk.subarray(0, count), offset);
+      offset += count;
+      if (offset === size) break;
+    }
+    return bytes;
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        const body = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+          body.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        const options = parseLsRefsRequest(body);
+        return options ? { body, options } : null;
+      }
+      if (!value) continue;
+      chunks.push(value);
+      length += value.byteLength;
+      if (length >= 8) {
+        const firstLength = Number.parseInt(new TextDecoder().decode(prefix(4)), 16);
+        if (Number.isFinite(firstLength) && firstLength >= 4 && length >= firstLength) {
+          const firstPacket = prefix(firstLength);
+          const first = new TextDecoder().decode(firstPacket.subarray(4));
+          if (first !== 'command=ls-refs\n') return null;
+        }
+      }
+      if (length > maxBytes) return null;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
 }
 
 /** Agent tokens get only the request shapes git itself sends. */
@@ -174,11 +229,47 @@ export async function handleGitRequest(
     return new Response('method not allowed\n', { status: 405 });
   }
 
+  const mirrorMode = env.GIT_MIRROR_MODE ?? 'shadow';
+  let mirrorRequest: { kind: 'v0' | 'v2' | 'ls-refs'; options?: import('../do/repoMirror').LsRefsOptions; body?: Uint8Array } | null = null;
+  if (mirrorMode !== 'off' && op === 'read' && subpath === 'info/refs' && c.req.method === 'GET' &&
+      url.searchParams.get('service') === 'git-upload-pack') {
+    mirrorRequest = { kind: c.req.header('git-protocol')?.includes('version=2') ? 'v2' : 'v0' };
+  } else if (mirrorMode !== 'off' && op === 'read' && subpath === 'git-upload-pack' && c.req.method === 'POST' &&
+             c.req.header('git-protocol')?.includes('version=2')) {
+    const parsed = await parseLsRefsBody(c.req.raw);
+    if (parsed) mirrorRequest = { kind: 'ls-refs', ...parsed };
+  }
+
   let uploadBody: ReadableStream<Uint8Array> | null = null;
   if (subpath === 'git-upload-pack' && c.req.method === 'POST') {
     const decoded = decodedRequestBody(c.req.raw);
     if (!decoded.ok) return decoded.response;
     uploadBody = decoded.body;
+  }
+
+  if (mirrorRequest && mirrorMode === 'on') {
+    const version = mirrorRequest.kind === 'v0' ? 'v0' : mirrorRequest.kind === 'v2' ? 'v2' : 'v2';
+    const digest = mirrorRequest.kind === 'ls-refs' ? `/${await sha256Hex(mirrorRequest.body!)}` : '';
+    const refSeq = repo.ref_seq ?? 0;
+    const key = new Request(`https://kvarm-git.internal/refs/${repo.id}/${refSeq}/${version}/${mirrorRequest.kind}${digest}`);
+    const cached = await caches.default.match(key);
+    if (cached) {
+      markCache('hit');
+      const headers = new Headers(cached.headers);
+      headers.set('cache-control', 'no-cache');
+      return scoped(new Response(cached.body, { status: cached.status, headers }));
+    }
+    markCache('miss');
+    const mirror = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repo.id));
+    const result = await mirror.read(refSeq, repo.artifacts_name, repo.artifacts_remote, mirrorRequest, repo.id);
+    if (result) {
+      const headers = new Headers({ 'content-type': mirrorRequest.kind === 'ls-refs' ? 'application/x-git-upload-pack-result' : 'application/x-git-upload-pack-advertisement', 'cache-control': 'no-cache' });
+      const response = new Response(result.bytes, { status: 200, headers });
+      const edgeHeaders = new Headers(headers);
+      edgeHeaders.set('cache-control', 'public, max-age=300');
+      c.executionCtx.waitUntil(caches.default.put(key, new Response(result.bytes, { status: 200, headers: edgeHeaders })).catch(() => undefined));
+      return scoped(response);
+    }
   }
 
   // Agent tokens are confined to their granted refs (workspace refs also to
@@ -217,7 +308,8 @@ export async function handleGitRequest(
   // Warm public advertisements are served before any token mint or upstream
   // fetch; authorization above already ran on the current repo state.
   const cacheKey =
-    op === 'read' && isPublic && subpath === 'info/refs' && c.req.method === 'GET'
+    op === 'read' && isPublic && subpath === 'info/refs' && c.req.method === 'GET' &&
+      (mirrorMode === 'off' || url.searchParams.get('service') === 'git-receive-pack')
       ? infoRefsCacheKey(
           repo.artifacts_remote,
           url.search,
@@ -264,6 +356,18 @@ export async function handleGitRequest(
   }
   const upstreamRes = await fetch(upstream.toString(), init);
 
+  if (mirrorRequest && mirrorMode === 'shadow' && upstreamRes.ok) {
+    const mirror = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repo.id));
+    c.executionCtx.waitUntil(
+      (async () => {
+        const result = await mirror.read(repo.ref_seq ?? 0, repo.artifacts_name, repo.artifacts_remote, mirrorRequest!, repo.id);
+        if (!result || !sameBytes(new Uint8Array(await upstreamRes.clone().arrayBuffer()), result.bytes)) {
+          console.warn(JSON.stringify({ gitMirrorMismatch: { repoId: repo.id, kind: mirrorRequest!.kind, seq: result?.seq ?? repo.ref_seq ?? 0 } }));
+        }
+      })().catch(() => console.warn(JSON.stringify({ gitMirrorMismatch: { repoId: repo.id, kind: mirrorRequest!.kind, seq: repo.ref_seq ?? 0 } }))),
+    );
+  }
+
   // Briefly edge-cache public clone bootstrapping.
   if (cacheKey && upstreamRes.status === 200) {
     const res = relay(upstreamRes);
@@ -285,7 +389,10 @@ export async function handleGitRequest(
       // in the background: the reply waits only for the freshness writes.
       onConfirmed: async (refs) => {
         c.executionCtx.waitUntil(recordPushAudit(env, repo.id, actor, pushCommands, refs));
-        await recordConfirmedPush(env, repo.id);
+        const confirmed = pushCommands
+          .filter((command) => refs.includes(command.ref))
+          .map((command) => ({ ref: command.ref, oldOid: command.oldOid, newOid: command.newOid }));
+        await recordConfirmedPush(env, repo.id, confirmed);
         // The guard and CI dispatch start here instead of waiting seconds for
         // the Artifacts event. Background work only: the reply is already
         // complete, and the event remains the reliable, idempotent path for

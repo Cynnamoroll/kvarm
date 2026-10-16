@@ -17,7 +17,8 @@
 
 import { confirmedRefs, ReportStatusReader, sha256Hex } from '@kvarm/gitops';
 import { bumpRefGeneration, refGeneration } from '../cache/compare';
-import { touchRepoPushed, type RepoRow } from '../db/repos';
+import { type RepoRow } from '../db/repos';
+import type { MirrorUpdate } from '../do/repoMirror';
 
 /** Upper bound on how long a confirmed push reply waits for the freshness writes. */
 export const PUSH_FRESHNESS_TIMEOUT_MS = 3000;
@@ -41,8 +42,25 @@ export async function repoViewGeneration(
  * `pushed_at` write to the caller, which records it in its own next D1 batch
  * (`touchRepoPushedStatement`).
  */
-export async function recordConfirmedPush(env: Env, repoId: string, opts: { deferPushedAt?: boolean } = {}): Promise<void> {
-  await Promise.all([bumpRefGeneration(repoId), opts.deferPushedAt ? null : touchRepoPushed(env.DB, repoId)]);
+export async function recordConfirmedPush(env: Env, repoId: string, updates: MirrorUpdate[], opts: { deferPushedAt?: boolean } = {}): Promise<void> {
+  if (updates.length === 0) return;
+  let row: { ref_seq: number } | null;
+  try {
+    const result = await env.DB.prepare(
+      opts.deferPushedAt
+        ? 'UPDATE repos SET ref_seq = ref_seq + 1 WHERE id = ? RETURNING ref_seq'
+        : 'UPDATE repos SET pushed_at = MAX(COALESCE(pushed_at, 0) + 1, ?), ref_seq = ref_seq + 1 WHERE id = ? RETURNING ref_seq',
+    ).bind(...(opts.deferPushedAt ? [repoId] : [Date.now(), repoId])).all<{ ref_seq: number }>();
+    row = result.results[0] ?? null;
+  } catch (error) {
+    await env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repoId)).markDirty(repoId).catch(() => undefined);
+    throw error;
+  }
+  if (!row) return;
+  await Promise.all([
+    bumpRefGeneration(repoId),
+    env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repoId)).apply(row.ref_seq, updates, repoId),
+  ]);
 }
 
 export interface RelayOptions {

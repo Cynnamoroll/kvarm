@@ -32,7 +32,10 @@ interface Obj {
 export class FakeRepo {
   objects = new Map<string, Obj>();
   refs = new Map<string, string>();
+  headRef: string | null = 'refs/heads/main';
+  peeled = new Map<string, string>();
   calls: string[] = [];
+  gitCalls: string[] = [];
   /** Blob hashes whose next read throws once (simulated transient failure). */
   failBlobOnce = new Set<string>();
   /** Commits whose `log` throws NOT_FOUND, as the binding does for a missing commit. */
@@ -219,20 +222,35 @@ export const fakeArtifacts = {
 
 /** ls-refs over the fake refs, honoring ref-prefix like git upload-pack v2. */
 function lsRefsResponse(repo: FakeRepo, body: Uint8Array): Response {
-  const prefixes = readPktLines(body)
+  const packets = readPktLines(body);
+  const args = packets
     .filter((p) => !p.flush && !p.delim && !p.responseEnd)
-    .map((p) => decode(p.data).trim())
-    .filter((l) => l.startsWith('ref-prefix '))
-    .map((l) => l.slice('ref-prefix '.length));
+    .map((p) => decode(p.data).trim());
+  const prefixes = args.filter((l) => l.startsWith('ref-prefix ')).map((l) => l.slice('ref-prefix '.length));
+  const peel = args.includes('peel');
+  const symrefs = args.includes('symrefs');
+  const unborn = args.includes('unborn');
   lsRefsPrefixes.push(prefixes);
-  const lines = [...repo.refs]
-    .filter(([n]) => prefixes.some((p) => n.startsWith(p)))
+  const refs = [...repo.refs];
+  const head = repo.headRef ? repo.refs.get(repo.headRef) : undefined;
+  if (head && (prefixes.length === 0 || prefixes.some((p) => 'HEAD'.startsWith(p)))) refs.push(['HEAD', head]);
+  const lines = refs
+    .filter(([n]) => prefixes.length === 0 || prefixes.some((p) => n.startsWith(p)))
     .sort(([a], [b]) => (a < b ? -1 : 1))
-    .map(([n, oid]) => pktLine(`${oid} ${n}\n`));
+    .flatMap(([n, oid]) => {
+      let line = `${oid} ${n}`;
+      if (symrefs && n === 'HEAD' && repo.headRef) line += ` symref-target:${repo.headRef}`;
+      if (peel && repo.peeled.has(n)) line += ` peeled:${repo.peeled.get(n)}`;
+      return [pktLine(`${line}\n`)];
+    });
+  if (unborn && !head && repo.headRef && (prefixes.length === 0 || prefixes.some((p) => 'HEAD'.startsWith(p)))) {
+    lines.unshift(pktLine(`unborn HEAD symref-target:${repo.headRef}\n`));
+  }
   return new Response(concat(...lines, FLUSH_PKT), { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
 }
 
 export const lsRefsCalls: string[] = [];
+export const infoRefsCalls: string[] = [];
 /** The ref-prefix lines of every ls-refs request, in request order. */
 export const lsRefsPrefixes: string[][] = [];
 const originalFetch = globalThis.fetch;
@@ -294,14 +312,34 @@ async function receivePack(repo: FakeRepo, body: Uint8Array): Promise<Response> 
 
 const ZERO = '0'.repeat(40);
 
-function infoRefsResponse(repo: FakeRepo, service: string): Response {
-  const branch = repo.refs.get('refs/heads/main');
-  const refs = [...(branch ? [['HEAD', branch] as [string, string]] : []), ...repo.refs].sort(([a], [b]) => (a < b ? -1 : 1));
+function infoRefsResponse(repo: FakeRepo, service: string, v2 = false): Response {
+  if (v2) {
+    return new Response(concat(
+      pktLine('# service=git-upload-pack\n'),
+      FLUSH_PKT,
+      pktLine('version 2\n'),
+      pktLine('agent=git/2.34.1\n'),
+      pktLine('ls-refs=unborn\n'),
+      pktLine('fetch=shallow wait-for-done\n'),
+      pktLine('server-option\n'),
+      pktLine('object-format=sha1\n'),
+      FLUSH_PKT,
+    ), { headers: { 'content-type': 'application/x-git-upload-pack-advertisement', 'cache-control': 'no-cache' } });
+  }
+  const branch = repo.headRef ? repo.refs.get(repo.headRef) : undefined;
+  const refs = [...(branch ? [['HEAD', branch] as [string, string]] as Array<[string, string]> : []), ...repo.refs].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const capabilities =
     service === 'git-receive-pack'
       ? 'report-status delete-refs side-band-64k ofs-delta agent=git/2.34.1'
-      : 'multi_ack thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed symref=HEAD:refs/heads/main agent=git/2.34.1';
-  const lines = refs.map(([name, oid], i) => pktLine(`${oid} ${name}${i === 0 ? `\0${capabilities}` : ''}\n`));
+      : `multi_ack thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed${repo.headRef ? ` symref=HEAD:${repo.headRef}` : ''} agent=git/2.34.1`;
+  const lines: Uint8Array[] = refs.length === 0
+    ? [pktLine(`${ZERO} capabilities^{}\0${capabilities}\n`)]
+    : refs.flatMap(([name, oid], i) => {
+      const result = [pktLine(`${oid} ${name}${i === 0 ? `\0${capabilities}` : ''}\n`)];
+      const peeled = repo.peeled.get(name);
+      if (peeled) result.push(pktLine(`${peeled} ${name}^{}\n`));
+      return result;
+    });
   return new Response(concat(pktLine(`# service=${service}\n`), FLUSH_PKT, ...lines, FLUSH_PKT), {
     headers: {
       'content-type': service === 'git-receive-pack' ? 'application/x-git-receive-pack-advertisement' : 'application/x-git-upload-pack-advertisement',
@@ -323,7 +361,13 @@ export function installFakeGitRemote(): void {
       if (!target || req.method !== 'GET' || (service !== 'git-upload-pack' && service !== 'git-receive-pack')) {
         return new Response('bad', { status: 404 });
       }
-      return infoRefsResponse(target, service);
+      if (service === 'git-upload-pack') {
+        const kind = req.headers.get('git-protocol') === 'version=2' ? 'v2' : 'v0';
+        infoRefsCalls.push(`${ir[1]}:${kind}`);
+        target.gitCalls.push(`info-refs:${kind}`);
+      }
+      await target.hook?.(`infoRefs:${req.headers.get('git-protocol') === 'version=2' ? 'v2' : 'v0'}`);
+      return infoRefsResponse(target, service, req.headers.get('git-protocol') === 'version=2');
     }
     const rp = /^\/git\/default\/(.+)\.git\/git-receive-pack$/.exec(url.pathname);
     if (rp) {
@@ -335,6 +379,7 @@ export function installFakeGitRemote(): void {
     const repo = m ? fakeRepos.get(m[1]!) : undefined;
     if (!repo || req.headers.get('git-protocol') !== 'version=2') return new Response('bad', { status: 400 });
     lsRefsCalls.push(m![1]!);
+    repo.gitCalls.push('ls-refs');
     const res = lsRefsResponse(repo, new Uint8Array(await req.arrayBuffer()));
     await repo.hook?.('lsRefs');
     return res;

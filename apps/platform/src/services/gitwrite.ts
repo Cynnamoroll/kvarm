@@ -90,7 +90,7 @@ export function artifactsPusher(env: Env, repo: PushTarget, opts: GitPusherOptio
         const result = await pushOneRef(target, command, pack);
         if (result.status === 'ok') {
           // The ref already moved; a failed freshness write must not turn it into a failure.
-          await recordConfirmedPush(env, repo.id, { deferPushedAt: opts.deferPushedAt === true }).catch((err: unknown) => {
+          await recordConfirmedPush(env, repo.id, [{ ref: command.ref, oldOid: command.oldOid, newOid: command.newOid }], { deferPushedAt: opts.deferPushedAt === true }).catch((err: unknown) => {
             console.warn(JSON.stringify({ gitWriteFreshnessFailed: String(err).slice(0, 200) }));
           });
         }

@@ -11,10 +11,11 @@ import { runInDurableObject } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mintPAT, type Scope } from '../src/auth/pat';
 import { listReposForOwner, type RepoRow } from '../src/db/repos';
+import { RepoMirror } from '../src/do/repoMirror';
 import { createRepo, deleteRepo, forkRepo, importRepo } from '../src/repos/service';
 import { handleEventBatch } from '../src/services/events';
 import { purgeRepo, purgeRepoById, sweepRepoPurges } from '../src/services/repoPurge';
-import { FakeRepo, fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
+import { FakeRepo, fakeArtifacts, fakeRepos, infoRefsCalls, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 import { call } from './helpers/http';
 import { seedRepo, seedRepoWithCommit, seedUser } from './helpers/seed';
 
@@ -385,7 +386,14 @@ describe('repo deletion', () => {
       await env.SNAPSHOTS.put(`${prefix}/${id}/object`, prefix);
     }
     const repoTables = await populateRepoTables(id, sha, userId);
-    const repo = await env.DB.prepare('SELECT artifacts_name FROM repos WHERE id = ?').bind(id).first<{ artifacts_name: string }>();
+    const repo = await env.DB.prepare('SELECT artifacts_name, artifacts_remote FROM repos WHERE id = ?')
+      .bind(id).first<{ artifacts_name: string; artifacts_remote: string }>();
+    const mirrorStub = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(id));
+    await runInDurableObject(mirrorStub, async (object) => {
+      const mirror = object as RepoMirror;
+      (mirror as unknown as { env: Env }).env = { ...(mirror as unknown as { env: Env }).env, ARTIFACTS: fakeArtifacts };
+      expect(await mirror.read(0, repo!.artifacts_name, repo!.artifacts_remote, { kind: 'v0' }, id)).not.toBeNull();
+    });
     const historyStub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(id));
     await runInDurableObject(historyStub, async (_obj, state) => {
       state.storage.sql.exec(
@@ -422,6 +430,14 @@ describe('repo deletion', () => {
     expect(tombstone?.done_at).not.toBeNull();
     expect(tombstone?.attempts).toBe(0);
     expect((await listReposForOwner(env.DB, OWNER)).some((repo) => repo.id === id)).toBe(false);
+    const upstreamCalls = infoRefsCalls.length;
+    const destroyedMirrorRead = await runInDurableObject(mirrorStub, async (object) => {
+      const mirror = object as RepoMirror;
+      (mirror as unknown as { env: Env }).env = { ...(mirror as unknown as { env: Env }).env, ARTIFACTS: fakeArtifacts };
+      return mirror.read(0, repo!.artifacts_name, repo!.artifacts_remote, { kind: 'v0' }, id);
+    });
+    expect(destroyedMirrorRead).toBeNull();
+    expect(infoRefsCalls).toHaveLength(upstreamCalls);
   });
 
   it('retries failed cleanup from both the minute sweep and the event queue', async () => {
@@ -486,6 +502,10 @@ describe('repo deletion', () => {
 
   it('continues snapshot-prefix deletion across page-limited purge sweeps', async () => {
     const { id } = await seedRepo(env, 'large-snapshot-prefix', { owner: OWNER, visibility: 'private' });
+    const sweepEnv = {
+      ...env,
+      EVENTS: { send: async () => {}, sendBatch: async () => {} },
+    } as unknown as Env;
     const prefix = `trees/v1/${id}/`;
     for (let start = 0; start < 2001; start += 100) {
       await Promise.all(
@@ -495,7 +515,10 @@ describe('repo deletion', () => {
       );
     }
 
-    expect((await call(env, 'DELETE', `/api/v1/repos/${OWNER}/large-snapshot-prefix`, { token: tok.owner })).status).toBe(200);
+    expect((await call(env, 'DELETE', `/api/v1/repos/${OWNER}/large-snapshot-prefix`, {
+      token: tok.owner,
+      env: sweepEnv,
+    })).status).toBe(200);
     const first = await env.DB.prepare('SELECT attempts, done_at FROM repo_purges WHERE repo_id = ?')
       .bind(id).first<{ attempts: number; done_at: number | null }>();
     expect(first).toMatchObject({ attempts: 1, done_at: null });

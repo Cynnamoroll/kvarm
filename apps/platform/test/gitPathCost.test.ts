@@ -1,4 +1,5 @@
 import { env as cfEnv } from 'cloudflare:workers';
+import { runInDurableObject } from 'cloudflare:test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { concat, DELIM_PKT, FLUSH_PKT, pktLine, ZERO_OID } from '@kvarm/gitops';
 import { mintPAT, type Scope } from '../src/auth/pat';
@@ -12,7 +13,8 @@ const OWNER = 'git-path-cost';
 const FULL: Scope[] = ['read', 'write', 'api'];
 let token = '';
 
-const call = (path: string, init: RequestInit = {}) => send(env, new Request(`${ORIGIN}${path}`, init));
+const call = (path: string, init: RequestInit = {}) =>
+  send({ ...env, GIT_MIRROR_MODE: 'off' } as Env, new Request(`${ORIGIN}${path}`, init));
 
 function basic(): Record<string, string> {
   return { Authorization: `Basic ${btoa(`x:${token}`)}` };
@@ -54,6 +56,16 @@ beforeAll(async () => {
 });
 
 afterAll(() => restoreFetch());
+
+async function useFakeMirrorArtifacts(id: string): Promise<void> {
+  const stub = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(id));
+  await runInDurableObject(stub, (object) => {
+    (object as unknown as { env: Env }).env = {
+      ...(object as unknown as { env: Env }).env,
+      ARTIFACTS: fakeArtifacts,
+    };
+  });
+}
 
 describe('git-path cost baseline', () => {
   it('snapshots cold and warm costs for read, ls-refs, advertisement, and receive-pack paths', async () => {
@@ -281,6 +293,239 @@ describe('git-path cost baseline', () => {
           "rw": 0,
           "status": 200,
           "sub": 1,
+        },
+      ]
+    `);
+  });
+
+  it('snapshots RepoMirror cold, warm, and cold-after-seed costs for public and private reads', async () => {
+    const mirrorEnv = { ...env, GIT_MIRROR_MODE: 'on' } as Env;
+    const rows: Array<Record<string, unknown>> = [];
+    for (const visibility of ['public', 'private'] as const) {
+      const name = `mirror-${visibility}-${crypto.randomUUID().slice(0, 8)}`;
+      const seeded = await seedRepoWithCommit(mirrorEnv, name, { owner: OWNER, visibility });
+      await useFakeMirrorArtifacts(seeded.id);
+      const repoRow = await env.DB.prepare('SELECT artifacts_name FROM repos WHERE owner_login = ? AND name = ?')
+        .bind(OWNER, name).first<{ artifacts_name: string }>();
+      const fake = fakeRepos.get(repoRow!.artifacts_name)!;
+      const auth = visibility === 'private' ? basic() : {};
+      const paths = [
+        ['v0', `/${OWNER}/${name}.git/info/refs?service=git-upload-pack`, { headers: auth }],
+        ['v2', `/${OWNER}/${name}.git/info/refs?service=git-upload-pack`, { headers: { ...auth, 'Git-Protocol': 'version=2' } }],
+        ['ls-refs', `/${OWNER}/${name}.git/git-upload-pack`, {
+          method: 'POST',
+          headers: { ...auth, 'Git-Protocol': 'version=2', 'content-type': 'application/x-git-upload-pack-request' },
+          body: uploadPackRequest(),
+        }],
+      ] as const;
+      for (const [kind, path, init] of paths) {
+        const beforeUpstream = fake.gitCalls.length;
+        const coldResponse = await send(mirrorEnv, new Request(`${ORIGIN}${path}`, init));
+        const coldCounters = parseCostHeader(coldResponse.headers.get('x-kvarm-cost'))!;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const afterCold = fake.gitCalls.length;
+        rows.push({
+          label: `${visibility} ${kind} cold`,
+          status: coldResponse.status,
+          ...coldCounters,
+          upstream: afterCold - beforeUpstream,
+        });
+        const beforeWarm = fake.gitCalls.length;
+        const warmResponse = await send(mirrorEnv, new Request(`${ORIGIN}${path}`, init));
+        const warmCounters = parseCostHeader(warmResponse.headers.get('x-kvarm-cost'))!;
+        rows.push({
+          label: `${visibility} ${kind} warm`,
+          status: warmResponse.status,
+          ...warmCounters,
+          upstream: fake.gitCalls.length - beforeWarm,
+        });
+      }
+    }
+    expect(rows.every((row) => row.status === 200)).toBe(true);
+    expect(rows
+      .filter((row) => !String(row.label).endsWith('v0 cold'))
+      .every((row) => row.art === 0 && row.upstream === 0)).toBe(true);
+    expect(rows).toMatchInlineSnapshot(`
+      [
+        {
+          "art": 0,
+          "cache": "miss",
+          "d1": 1,
+          "do": 0,
+          "label": "public v0 cold",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 1,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 2,
+        },
+        {
+          "art": 0,
+          "cache": "hit",
+          "d1": 1,
+          "do": 0,
+          "label": "public v0 warm",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 1,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "miss",
+          "d1": 1,
+          "do": 0,
+          "label": "public v2 cold",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 1,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "hit",
+          "d1": 1,
+          "do": 0,
+          "label": "public v2 warm",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 1,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "miss",
+          "d1": 1,
+          "do": 0,
+          "label": "public ls-refs cold",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 1,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "hit",
+          "d1": 1,
+          "do": 0,
+          "label": "public ls-refs warm",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 1,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "miss",
+          "d1": 1,
+          "do": 0,
+          "label": "private v0 cold",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 4,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 2,
+        },
+        {
+          "art": 0,
+          "cache": "hit",
+          "d1": 1,
+          "do": 0,
+          "label": "private v0 warm",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 4,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "miss",
+          "d1": 1,
+          "do": 0,
+          "label": "private v2 cold",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 4,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "hit",
+          "d1": 1,
+          "do": 0,
+          "label": "private v2 warm",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 4,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "miss",
+          "d1": 1,
+          "do": 0,
+          "label": "private ls-refs cold",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 4,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
+        },
+        {
+          "art": 0,
+          "cache": "hit",
+          "d1": 1,
+          "do": 0,
+          "label": "private ls-refs warm",
+          "q": 0,
+          "r2a": 0,
+          "r2b": 0,
+          "rr": 4,
+          "rw": 0,
+          "status": 200,
+          "sub": 0,
+          "upstream": 0,
         },
       ]
     `);

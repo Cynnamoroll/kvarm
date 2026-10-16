@@ -44,7 +44,7 @@ import { inboxPages, reviewPages } from './routes/reviewPages';
 import { installFetchMeter, serveMetered } from './cost/meter';
 import { presentsCredential, withPrivateCacheControl } from './cache/scope';
 
-export { TokenCache, RateLimiter, MergeLock, RepoEvents, PathHistory } from './do';
+export { TokenCache, RateLimiter, MergeLock, RepoEvents, PathHistory, RepoMirror } from './do';
 export { SnapshotBuilder, CiPipeline, MergeWorkflow, RepoImport } from './workflows';
 export { EnvironmentBuild } from './workflows/environmentBuild';
 export { CiRunnerSandbox } from './containers/ciRunnerSandbox';
@@ -189,7 +189,7 @@ export default {
     dispatchPlatformRequest(request, env, ctx),
   // Artifacts push events, through the account-level event subscription
   // (services/events.ts).
-  queue: (batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) => handleEventBatch(batch, env),
+  queue: (batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext) => handleEventBatch(batch, env, (promise) => ctx.waitUntil(promise)),
   // One job per cron expression (cron.ts, scheduled.ts).
   scheduled: (controller: ScheduledController, env: Env, ctx: ExecutionContext) => {
     dispatchScheduled(controller.cron, env, ctx);
