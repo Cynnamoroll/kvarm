@@ -1,0 +1,283 @@
+import { parseQueueList, parseR2BucketList } from './bootstrap.mjs';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ACCOUNT_ID = /^[0-9a-f]{32}$/i;
+
+export function benchResources(id) {
+  if (!/^[a-z0-9]{4,12}$/.test(id)) throw new Error('--id must be 4–12 lowercase letters or digits');
+  const prefix = `kvarm-bench-${id}`;
+  return {
+    prefix,
+    worker: `${prefix}-platform`,
+    d1: `${prefix}-db`,
+    bucket: `${prefix}-snapshots`,
+    queue: `${prefix}-events`,
+    deadLetterQueue: `${prefix}-events-dlq`,
+    namespace: `${prefix}-artifacts`,
+    seedRepo: `${prefix}-seed`,
+  };
+}
+
+export async function emptyBenchBucket({ id, bucketName, accountId, apiToken, fetchImpl = fetch }) {
+  const resources = benchResources(id);
+  if (bucketName !== resources.bucket) throw new Error(`refusing to list or empty non-benchmark bucket: ${bucketName}`);
+  if (!ACCOUNT_ID.test(accountId ?? '')) throw new Error('CLOUDFLARE_ACCOUNT_ID must be a 32-character hex account ID');
+  if (!apiToken) throw new Error('CLOUDFLARE_API_TOKEN is required to empty the benchmark R2 bucket');
+
+  let cursor;
+  let deleted = 0;
+  const cursors = new Set();
+  while (true) {
+    const url = new URL(`https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucketName)}/objects`);
+    url.searchParams.set('per_page', '1000');
+    if (cursor) url.searchParams.set('cursor', cursor);
+    const response = await fetchImpl(url, { headers: { Authorization: `Bearer ${apiToken}` } });
+    if (!response.ok) throw new Error(`R2 object listing failed: HTTP ${response.status}`);
+    const page = await response.json();
+    if (page.success !== true || !Array.isArray(page.result)) throw new Error('R2 object listing returned an invalid response');
+
+    let next = 0;
+    const failures = [];
+    await Promise.all(Array.from({ length: Math.min(8, page.result.length) }, async () => {
+      while (next < page.result.length) {
+        const item = page.result[next++];
+        if (typeof item?.key !== 'string') {
+          failures.push(new Error('R2 object listing returned an object without a key'));
+          continue;
+        }
+        try {
+          const deletedResponse = await fetchImpl(
+            `https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucketName)}/objects/${encodeURIComponent(item.key)}`,
+            { method: 'DELETE', headers: { Authorization: `Bearer ${apiToken}` } },
+          );
+          if (!deletedResponse.ok && deletedResponse.status !== 404) {
+            throw new Error(`HTTP ${deletedResponse.status}`);
+          }
+          deleted++;
+        } catch (error) {
+          failures.push(new Error(`R2 object deletion failed: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      }
+    }));
+    if (failures.length) throw new AggregateError(failures, `failed to delete ${failures.length} R2 object(s)`);
+
+    const info = page.result_info ?? {};
+    if (info.is_truncated !== true) break;
+    if (typeof info.cursor !== 'string' || !info.cursor || cursors.has(info.cursor)) {
+      throw new Error('R2 object listing returned a missing or repeated pagination cursor');
+    }
+    cursors.add(info.cursor);
+    cursor = info.cursor;
+  }
+  return { deleted };
+}
+
+export function benchmarkConfig(base, resources, databaseId = '00000000-0000-0000-0000-000000000000') {
+  const config = structuredClone(base);
+  config.name = resources.worker;
+  config.workers_dev = true;
+  config.d1_databases = config.d1_databases.map((db) => db.binding === 'DB'
+    ? { ...db, database_name: resources.d1, database_id: databaseId }
+    : db);
+  config.r2_buckets = config.r2_buckets.map((bucket) => bucket.binding === 'SNAPSHOTS'
+    ? { ...bucket, bucket_name: resources.bucket }
+    : bucket);
+  config.queues.producers = config.queues.producers.map((producer) => producer.binding === 'EVENTS'
+    ? { ...producer, queue: resources.queue }
+    : producer);
+  config.queues.consumers = config.queues.consumers.map((consumer) => ({
+    ...consumer,
+    queue: consumer.queue === base.queues.producers.find((p) => p.binding === 'EVENTS')?.queue ? resources.queue : consumer.queue,
+    dead_letter_queue: consumer.dead_letter_queue === base.queues.consumers.find((c) => c.queue === base.queues.producers.find((p) => p.binding === 'EVENTS')?.queue)?.dead_letter_queue
+      ? resources.deadLetterQueue
+      : consumer.dead_letter_queue,
+  }));
+  config.artifacts = config.artifacts.map((artifacts) => artifacts.binding === 'ARTIFACTS'
+    ? { ...artifacts, namespace: resources.namespace }
+    : artifacts);
+  config.vars = { ...config.vars, ARTIFACTS_NAMESPACE: resources.namespace };
+  config.workflows = config.workflows.map((workflow) => ({ ...workflow, name: `${resources.prefix}-${workflow.name}` }));
+
+  const containerBindings = new Set(['CI_SANDBOX', 'ENV_BUILDER', 'AGENT_SANDBOX']);
+  config.durable_objects.bindings = config.durable_objects.bindings.filter((binding) => !containerBindings.has(binding.name));
+  delete config.containers;
+  return config;
+}
+
+const namedArg = (args, name) => args[args.indexOf(name) + 1];
+const ensureName = (name, resources) => {
+  if (typeof name !== 'string' || !name.startsWith(`${resources.prefix}-`)) {
+    throw new Error(`refusing Wrangler mutation for non-benchmark name: ${String(name)}`);
+  }
+};
+
+function assertMutation(args, resources, config) {
+  if (args[0] === 'd1' && ['create', 'delete'].includes(args[1])) ensureName(args[2], resources);
+  if (args[0] === 'r2' && args[1] === 'bucket' && ['create', 'delete'].includes(args[2])) ensureName(args[3], resources);
+  if (args[0] === 'queues' && ['create', 'delete'].includes(args[1])) ensureName(args[2], resources);
+  if (args[0] === 'artifacts' && args[1] === 'repos' && ['create', 'delete'].includes(args[2])) {
+    ensureName(args[3], resources);
+    if (namedArg(args, '--namespace') !== resources.namespace) throw new Error('refusing Artifacts mutation outside the benchmark namespace');
+  }
+  if (args[0] === 'queues' && args[1] === 'subscription' && args[2] === 'create') {
+    ensureName(args[3], resources);
+    ensureName(namedArg(args, '--name'), resources);
+    if (namedArg(args, '--source-namespace') !== resources.namespace) throw new Error('refusing subscription outside the benchmark namespace');
+    ensureName(namedArg(args, '--source-repo-name'), resources);
+  }
+  if (args[0] === 'deploy' || args[0] === 'delete') {
+    if (config?.name !== resources.worker || config.d1_databases.find((x) => x.binding === 'DB')?.database_name !== resources.d1 ||
+        config.r2_buckets.find((x) => x.binding === 'SNAPSHOTS')?.bucket_name !== resources.bucket ||
+        config.queues.producers.find((x) => x.binding === 'EVENTS')?.queue !== resources.queue ||
+        config.artifacts.find((x) => x.binding === 'ARTIFACTS')?.namespace !== resources.namespace) {
+      throw new Error('refusing deployment/delete with a non-isolated Wrangler config');
+    }
+  }
+}
+
+async function call(wrangler, args, resources, config, { optional = false } = {}) {
+  assertMutation(args, resources, config);
+  const result = await wrangler(args);
+  if (result.code !== 0 && !optional) throw new Error(`wrangler ${args.join(' ')} failed (exit ${result.code}): ${(result.stderr || result.stdout).trim().slice(0, 400)}`);
+  return result;
+}
+
+function parseJson(text, fallback = []) {
+  try { return JSON.parse(text); } catch { return fallback; }
+}
+
+function d1Rows(text) {
+  const rows = parseJson(text, []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+function repoRows(text) {
+  const result = parseJson(text, []);
+  return Array.isArray(result) ? result : result.repos ?? [];
+}
+
+async function inspect(resources, wrangler) {
+  const [d1Output, bucketOutput, queueOutput] = await Promise.all([
+    call(wrangler, ['d1', 'list', '--json'], resources),
+    call(wrangler, ['r2', 'bucket', 'list'], resources),
+    call(wrangler, ['queues', 'list'], resources),
+  ]);
+  const d1 = d1Rows(d1Output.stdout).find((row) => row.name === resources.d1) ?? null;
+  const buckets = parseR2BucketList(bucketOutput.stdout);
+  const queues = parseQueueList(queueOutput.stdout);
+  let subscriptions = [];
+  if (queues.includes(resources.queue)) {
+    const result = await call(wrangler, ['queues', 'subscription', 'list', resources.queue, '--json'], resources);
+    subscriptions = parseJson(result.stdout, []);
+  }
+  let repos = [];
+  const reposOutput = await call(wrangler, ['artifacts', 'repos', 'list', '--namespace', resources.namespace, '--json'], resources, null, { optional: true });
+  if (reposOutput.code === 0) repos = repoRows(reposOutput.stdout);
+  return { d1, buckets, queues, subscriptions, repos, namespaced: reposOutput.code === 0 };
+}
+
+function subscriptionName(resources, repo) {
+  if (!repo.startsWith(`${resources.prefix}-`) || repo.length > 63) throw new Error(`scratch repo name must be a <=63 character name under ${resources.prefix}-`);
+  const suffix = repo.slice(resources.prefix.length + 1).replace(/[^a-z0-9-]/g, '-').slice(0, 24);
+  if (!suffix) throw new Error('scratch repo name needs a non-empty suffix');
+  return `${resources.prefix}-${suffix}`;
+}
+
+export async function subscribeBenchRepo(resources, repo, wrangler) {
+  const name = subscriptionName(resources, repo);
+  const state = await inspect(resources, wrangler);
+  if (!state.queues.includes(resources.queue)) throw new Error(`benchmark queue ${resources.queue} does not exist; run bench-stack up first`);
+  const existing = state.subscriptions.find((item) => item.name === name);
+  if (existing) return { created: false, name };
+  await call(wrangler, [
+    'queues', 'subscription', 'create', resources.queue,
+    '--source', 'artifacts.repo',
+    '--source-namespace', resources.namespace,
+    '--source-repo-name', repo,
+    '--events', 'pushed',
+    '--name', name,
+  ], resources);
+  return { created: true, name };
+}
+
+export async function unsubscribeBenchRepo(resources, repo, wrangler) {
+  const name = subscriptionName(resources, repo);
+  const state = await inspect(resources, wrangler);
+  const existing = state.subscriptions.find((item) => item.name === name);
+  if (!existing) return { deleted: false, name };
+  if (existing.source?.type !== 'artifacts.repo' || existing.source.namespace !== resources.namespace || existing.source.repo_name !== repo) {
+    throw new Error(`refusing to delete mismatched subscription ${name}`);
+  }
+  await call(wrangler, ['queues', 'subscription', 'delete', resources.queue, '--id', existing.id, '--force'], resources);
+  return { deleted: true, name };
+}
+
+export async function runBenchStack({
+  action, id, repo, baseConfig, wrangler, accountId, apiToken, fetchImpl = fetch,
+  writeConfig = async () => {}, removeConfig = async () => {},
+}) {
+  const resources = benchResources(id);
+  const configArg = `wrangler.bench-${id}.json`;
+  if (action === 'subscribe') return subscribeBenchRepo(resources, repo, wrangler);
+  if (action === 'unsubscribe') return unsubscribeBenchRepo(resources, repo, wrangler);
+  const state = await inspect(resources, wrangler);
+  if (action === 'status') {
+    return {
+      resources,
+      d1: state.d1,
+      bucket: state.buckets.includes(resources.bucket),
+      queues: Object.fromEntries([resources.queue, resources.deadLetterQueue].map((name) => [name, state.queues.includes(name)])),
+      subscriptions: state.subscriptions.filter((s) => s.name?.startsWith(`${resources.prefix}-`)),
+      artifactsRepos: state.repos.filter((r) => r.name?.startsWith(`${resources.prefix}-`)),
+    };
+  }
+  if (action === 'up') {
+    if (state.d1?.uuid && !UUID.test(state.d1.uuid)) throw new Error('Wrangler returned an invalid benchmark D1 id');
+    let databaseId = state.d1?.uuid;
+    if (!databaseId) {
+      const result = await call(wrangler, ['d1', 'create', resources.d1], resources);
+      const output = parseJson(result.stdout, {});
+      databaseId = output.database_id ?? /database_id\s*=\s*["']?([0-9a-f-]{36})/i.exec(result.stdout)?.[1];
+      if (!databaseId || !UUID.test(databaseId)) throw new Error('could not parse the D1 database id from Wrangler output');
+    }
+    if (!state.buckets.includes(resources.bucket)) await call(wrangler, ['r2', 'bucket', 'create', resources.bucket], resources);
+    if (!state.queues.includes(resources.queue)) await call(wrangler, ['queues', 'create', resources.queue], resources);
+    if (!state.queues.includes(resources.deadLetterQueue)) await call(wrangler, ['queues', 'create', resources.deadLetterQueue], resources);
+    if (!state.repos.some((r) => r.name === resources.seedRepo)) {
+      await call(wrangler, ['artifacts', 'repos', 'create', resources.seedRepo, '--namespace', resources.namespace], resources);
+    }
+    const config = benchmarkConfig(baseConfig, resources, databaseId);
+    await writeConfig(config);
+    await call(wrangler, ['d1', 'migrations', 'apply', 'DB', '--remote', '-c', configArg], resources, config);
+    await call(wrangler, ['deploy', '-c', configArg], resources, config);
+    return { resources, config, databaseId };
+  }
+  if (action === 'down') {
+    const config = benchmarkConfig(baseConfig, resources, state.d1?.uuid ?? '00000000-0000-0000-0000-000000000000');
+    if (state.buckets.includes(resources.bucket)) {
+      await emptyBenchBucket({ id, bucketName: resources.bucket, accountId, apiToken, fetchImpl });
+    }
+    if (state.queues.includes(resources.queue)) {
+      for (const subscription of state.subscriptions.filter((s) => s.name?.startsWith(`${resources.prefix}-`))) {
+        ensureName(subscription.name, resources);
+        if (subscription.source?.type !== 'artifacts.repo' || subscription.source.namespace !== resources.namespace) {
+          throw new Error(`refusing to remove non-benchmark subscription ${subscription.name}`);
+        }
+        await call(wrangler, ['queues', 'subscription', 'delete', resources.queue, '--id', subscription.id, '--force'], resources);
+      }
+    }
+    if (state.d1) await call(wrangler, ['delete', '-c', configArg], resources, config);
+    for (const artifact of state.repos.filter((r) => r.name?.startsWith(`${resources.prefix}-`))) {
+      ensureName(artifact.name, resources);
+      await call(wrangler, ['artifacts', 'repos', 'delete', artifact.name, '--namespace', resources.namespace, '--force'], resources);
+    }
+    for (const name of [resources.queue, resources.deadLetterQueue]) {
+      if (state.queues.includes(name)) await call(wrangler, ['queues', 'delete', name], resources);
+    }
+    if (state.buckets.includes(resources.bucket)) await call(wrangler, ['r2', 'bucket', 'delete', resources.bucket], resources);
+    if (state.d1) await call(wrangler, ['d1', 'delete', resources.d1, '--skip-confirmation'], resources);
+    await removeConfig();
+    return { resources, deleted: true };
+  }
+  throw new Error(`unknown bench-stack action: ${action}`);
+}

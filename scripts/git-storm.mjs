@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, platform, release, tmpdir } from 'node:os';
@@ -25,12 +25,15 @@ const { values: args } = parseArgs({
     keep: { type: 'boolean', default: false },
     write: { type: 'boolean', default: false },
     'write-local': { type: 'boolean', default: false },
+    'bench-id': { type: 'string', default: process.env.KVARM_BENCH_STACK_ID },
   },
   allowPositionals: true,
 });
 const flags = new Set(process.argv.slice(2).filter((x) => x.startsWith('--')).map((x) => x.split('=')[0]));
 const target = args.target;
 const local = target === 'local';
+if (args['bench-id'] && !/^[a-z0-9]{4,12}$/.test(args['bench-id'])) throw new Error('--bench-id must be 4–12 lowercase letters or digits');
+if (local && args['bench-id']) throw new Error('--bench-id requires a deployment target');
 const base = local ? '' : new URL(target);
 const n = Number(args.n);
 const writers = Number(args.writers);
@@ -39,7 +42,7 @@ const concurrency = Number(args.concurrency);
 const seed = Number(args.seed);
 const ts = Math.floor(Date.now() / 1000);
 const owner = process.env.KVARM_USER ?? 'admin';
-const repo = `bench-storm-${ts}`;
+const repo = args['bench-id'] ? `kvarm-bench-${args['bench-id']}-storm-${ts}` : `bench-storm-${ts}`;
 const outFile = args.out ? resolve(args.out) : resolve(`git-storm-${ts}.json`);
 const allWorkloads = ['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental', 'push-distinct', 'push-contended', ...(!local ? ['push-to-visible'] : [])];
 const requested = args.workloads === 'all' ? allWorkloads : args.workloads.split(',').map((v) => v.trim()).filter(Boolean);
@@ -73,6 +76,13 @@ let localBackend;
 let proxy;
 let createdRemote = false;
 let remoteDeleted = false;
+let subscribed = false;
+const benchStack = (action) => {
+  const result = spawnSync(process.execPath, [
+    resolve('scripts/bench-stack.mjs'), action, '--id', args['bench-id'], '--repo', repo,
+  ], { encoding: 'utf8', env: process.env });
+  if (result.status !== 0) throw new Error(`bench-stack ${action} failed: ${(result.stderr || result.stdout).trim().slice(0, 300)}`);
+};
 let activeWorkload = 'setup';
 const limit = (max) => {
   let live = 0;
@@ -362,6 +372,10 @@ try {
     const created = await api('/api/v1/repos', 'POST', { name: repo, visibility: 'public' });
     if (created.status !== 201) throw new Error(`repo create failed: HTTP ${created.status}`);
     createdRemote = true;
+    if (args['bench-id']) {
+      benchStack('subscribe');
+      subscribed = true;
+    }
   }
   mkdirSync(seedRepo, { recursive: true });
   await git(work, ['init', '-b', 'main', seedRepo]);
@@ -561,6 +575,10 @@ try {
   if (createdRemote && !args.keep) {
     const cleanupErrors = [];
     try {
+      if (subscribed) {
+        benchStack('unsubscribe');
+        subscribed = false;
+      }
       const deleted = await api(`/api/v1/repos/${owner}/${repo}`, 'DELETE');
       if (![200, 202, 204, 404].includes(deleted.status)) throw new Error(`scratch repo cleanup failed: HTTP ${deleted.status}`);
       const readback = await api(`/api/v1/repos/${owner}/${repo}`);
@@ -602,6 +620,10 @@ try {
     activeWorkload = 'cleanup';
     let cleanupError;
     try {
+      if (subscribed) {
+        benchStack('unsubscribe');
+        subscribed = false;
+      }
       const deleted = await api(`/api/v1/repos/${owner}/${repo}`, 'DELETE');
       if (![200, 202, 204, 404].includes(deleted.status)) {
         cleanupError = new Error(`scratch repo cleanup failed: HTTP ${deleted.status}`);

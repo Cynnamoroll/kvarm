@@ -6,9 +6,11 @@ dist/
 !.dev.vars.example
 .env
 .env.*
+.env.bench-*
 !.env.example
 !.env.*.example
 apps/platform/wrangler.target.json
+**/wrangler.bench-*.json
 coverage/
 *.log
 .DS_Store
