@@ -31,11 +31,12 @@ export function checkGitStormCaps({ target, concurrency, dedicated = false, dedi
   return concurrency <= GIT_STORM_LIMITS.dedicatedGit ? null : `dedicated concurrency may not exceed ${GIT_STORM_LIMITS.dedicatedGit}`;
 }
 
-export function gitAuthorization(mode, token) {
+export function gitAuthorization(mode, token, username) {
   if (mode === 'anonymous') return null;
   if (mode !== 'pat') throw new Error('--git-auth must be pat or anonymous');
   if (!token) throw new Error('KVARM_PAT is required for PAT-authenticated Git traffic');
-  return `Bearer ${token}`;
+  if (!username) throw new Error('Git username is required for PAT-authenticated Git traffic');
+  return `Basic ${Buffer.from(`${username}:${token}`).toString('base64')}`;
 }
 
 export function validateExistingRepoTarget({ benchId, repo, workloads }) {

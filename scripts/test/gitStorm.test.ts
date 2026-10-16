@@ -17,10 +17,13 @@ import {
 import { forwardGitRequest } from '../lib/git-storm-proxy.mjs';
 
 describe('git-storm streaming proxy', () => {
-  it('preserves chunked request bytes and Git-Protocol while injecting PAT auth', async () => {
+  it('preserves chunked request bytes and Git-Protocol while injecting Basic PAT auth', async () => {
     let received = '';
     let authorization = '';
     let gitProtocol = '';
+    const token = 'fixture-pat';
+    const authHeader = gitAuthorization('pat', token, 'fixture-user');
+    if (!authHeader) throw new Error('expected PAT authorization');
     const upstream = createServer((req, res) => {
       req.setEncoding('utf8');
       req.on('data', (chunk) => { received += chunk; });
@@ -36,7 +39,7 @@ describe('git-storm streaming proxy', () => {
     const upstreamPort = (upstream.address() as { port: number }).port;
     const proxy = createServer((req, res) => {
       forwardGitRequest(req, res, `http://127.0.0.1:${upstreamPort}`, {
-        authorization: 'Bearer fixture-pat',
+        authorization: authHeader,
       });
     });
     await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
@@ -61,7 +64,9 @@ describe('git-storm streaming proxy', () => {
       });
       expect(response).toEqual({ status: 200, body: 'ok' });
       expect(received).toBe('0008one0008two');
-      expect(authorization).toBe('Bearer fixture-pat');
+      expect(authorization).toBe(authHeader);
+      expect(Buffer.from(authorization.slice('Basic '.length), 'base64').toString()).toBe(`fixture-user:${token}`);
+      expect(authorization).not.toContain(token);
       expect(gitProtocol).toBe('version=2');
     } finally {
       await Promise.all([
@@ -91,8 +96,13 @@ describe('git-storm helpers', () => {
       workloads: [...workloads, 'push-distinct'],
     })).toMatch(/does not allow workload/);
     expect(gitAuthorization('anonymous', undefined)).toBeNull();
-    expect(gitAuthorization('pat', 'fixture-pat')).toBe('Bearer fixture-pat');
+    const token = 'fixture-pat';
+    const authHeader = gitAuthorization('pat', token, 'fixed-user');
+    expect(authHeader).toBe(`Basic ${Buffer.from(`fixed-user:${token}`).toString('base64')}`);
+    expect(Buffer.from(authHeader!.slice('Basic '.length), 'base64').toString()).toBe(`fixed-user:${token}`);
+    expect(authHeader).not.toContain(token);
     expect(() => gitAuthorization('pat')).toThrow(/KVARM_PAT/);
+    expect(() => gitAuthorization('pat', token)).toThrow(/username/);
   });
 
   it('uses nearest-rank percentiles, including singleton and two-item vectors', () => {
@@ -103,10 +113,20 @@ describe('git-storm helpers', () => {
   });
 
   it('summarizes request costs, status errors, and byte totals per workload', () => {
+    const token = 'fixture-pat-secret';
+    const authHeader = gitAuthorization('pat', token, 'fixed-user')!;
+    const request = {
+      op: 'upload-pack',
+      status: 200,
+      reqBytes: 4,
+      resBytes: 8,
+      cost: { d1: 4 },
+      authorization: authHeader,
+    };
     const summary = operationSummary(
       [{ start: 0, end: 10, ms: 10, ok: true }, { start: 20, end: 30, ms: 10, ok: false, status: 0 }],
       [
-        { op: 'upload-pack', status: 200, reqBytes: 4, resBytes: 8, cost: { d1: 4 } },
+        request,
         { op: 'upload-pack', status: 429, reqBytes: 2, resBytes: 0, cost: {} },
       ],
     );
@@ -116,6 +136,8 @@ describe('git-storm helpers', () => {
     expect(summary.totalResBytes).toBe(8);
     expect(summary.errors).toEqual({ 0: 1, 429: 1 });
     expect(summary.metrics.giveUps).toBe(1);
+    expect(JSON.stringify(summary)).not.toContain(authHeader);
+    expect(JSON.stringify(summary)).not.toContain(token);
   });
 
   it('makes fixture bytes reproducible for a seed', () => {
@@ -143,8 +165,10 @@ describe('git-storm local smoke', () => {
     const out = join(work, 'smoke.json');
     try {
       const script = fileURLToPath(new URL('../git-storm.mjs', import.meta.url));
+      const token = 'git-storm-test-pat';
       const child = spawn(process.execPath, [script, '--target', 'local', '--fixture', 'small', '--n', '2', '--writers', '2', '--commits', '2', '--out', out], {
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, KVARM_PAT: token },
       });
       let text = '';
       child.stdout.on('data', (d) => (text += d));
@@ -152,6 +176,8 @@ describe('git-storm local smoke', () => {
       const code = await new Promise((resolve) => child.on('close', resolve));
       expect(code, text).toBe(0);
       const report = JSON.parse(await readFile(out, 'utf8'));
+      expect(text).not.toContain(token);
+      expect(JSON.stringify(report)).not.toContain(token);
       for (const workload of Object.values(report.workloads) as Array<{ metrics: { latencyMs: { n: number } }; errors: Record<string, number> }>) {
         expect(workload.metrics.latencyMs.n).toBeGreaterThan(0);
         expect(Object.values(workload.errors).reduce((a, b) => a + b, 0)).toBe(0);

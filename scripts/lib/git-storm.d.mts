@@ -2,7 +2,7 @@ export const GIT_STORM_LIMITS: Readonly<{ http: 5; git: 3; requests: 10000; dedi
 export function percentile(values: number[], p: number): number | null;
 export function summarize(values: number[]): { n: number; min: number | null; mean: number | null; p50: number | null; p90: number | null; p99: number | null; max: number | null };
 export function checkGitStormCaps(options: { target: string; concurrency: number; dedicated?: boolean; dedicatedHost?: string; targetHost?: string }): string | null;
-export function gitAuthorization(mode: string, token?: string): string | null;
+export function gitAuthorization(mode: string, token?: string, username?: string): string | null;
 export function validateExistingRepoTarget(options: { benchId?: string; repo?: string; workloads: string[] }): string | null;
 export function createRandom(seed?: number): () => number;
 export function fixtureFiles(fixture: 'small' | 'mixed' | 'large', seed?: number): Array<[string, string]>;

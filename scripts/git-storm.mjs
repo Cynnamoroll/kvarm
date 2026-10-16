@@ -82,7 +82,8 @@ if (existingRepo) {
   if (!process.env.KVARM_USER) throw new Error('KVARM_USER is required for an existing benchmark repository');
 }
 if (!local && !existingRepo && !process.env.KVARM_PAT) throw new Error('KVARM_PAT is required for a deployment target');
-const gitAuth = local ? null : gitAuthorization(args['git-auth'], process.env.KVARM_PAT);
+// The Git gate authenticates Basic's password; it ignores the username.
+const gitAuth = local ? null : gitAuthorization(args['git-auth'], process.env.KVARM_PAT, 'kvarm');
 
 const work = mkdtempSync(join(tmpdir(), 'git-storm-'));
 const bareRoot = join(work, `${repo}.git`);
