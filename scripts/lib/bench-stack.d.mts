@@ -17,7 +17,7 @@ export function emptyBenchBucket(options: {
   fetchImpl?: typeof fetch;
 }): Promise<{ deleted: number }>;
 export function benchResources(id: string): BenchResources;
-export function benchmarkConfig(base: any, resources: BenchResources, databaseId?: string): any;
+export function benchmarkConfig(base: any, resources: BenchResources, databaseId?: string, mirrorMode?: 'off' | 'shadow' | 'on'): any;
 export function assertArtifactsNamespace(namespace: string | undefined, resources: BenchResources): void;
 export function subscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[], options?: { input?: string }) => Promise<any>): Promise<{ created: boolean; name: string }>;
 export function unsubscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[], options?: { input?: string }) => Promise<any>): Promise<{ deleted: boolean; name: string }>;
@@ -32,6 +32,7 @@ export function runBenchStack(options: {
   action: string;
   id: string;
   repo?: string;
+  mirrorMode?: 'off' | 'shadow' | 'on';
   baseConfig: any;
   wrangler: (args: string[], options?: { input?: string }) => Promise<{ code: number; stdout: string; stderr: string }>;
   accountId?: string;

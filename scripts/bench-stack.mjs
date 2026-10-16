@@ -11,12 +11,20 @@ import { runBenchStack } from './lib/bench-stack.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const platform = join(root, 'apps/platform');
 const { positionals, values } = parseArgs({
-  options: { id: { type: 'string' }, repo: { type: 'string' } },
+  options: {
+    id: { type: 'string' },
+    repo: { type: 'string' },
+    'mirror-mode': { type: 'string', default: 'shadow' },
+  },
   allowPositionals: true,
 });
 const action = positionals[0];
 if (!['up', 'down', 'status', 'subscribe', 'unsubscribe'].includes(action ?? '') || !values.id) {
-  console.error('usage: node scripts/bench-stack.mjs up|down|status --id <id>; subscribe|unsubscribe --id <id> --repo <repo>');
+  console.error('usage: node scripts/bench-stack.mjs up [--mirror-mode off|shadow|on]|down|status --id <id>; subscribe|unsubscribe --id <id> --repo <repo>');
+  process.exit(2);
+}
+if (!['off', 'shadow', 'on'].includes(values['mirror-mode'] ?? '')) {
+  console.error('--mirror-mode must be off, shadow, or on');
   process.exit(2);
 }
 if ((action === 'subscribe' || action === 'unsubscribe') && !values.repo) {
@@ -44,6 +52,7 @@ try {
     action,
     id: values.id,
     repo: values.repo,
+    mirrorMode: values['mirror-mode'],
     baseConfig,
     wrangler,
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID,

@@ -157,6 +157,70 @@ describe('throwaway benchmark stack', () => {
     expect(config.durable_objects.bindings.some((binding: { name: string }) => ['CI_SANDBOX', 'ENV_BUILDER', 'AGENT_SANDBOX'].includes(binding.name))).toBe(false);
   });
 
+  it.each(['off', 'shadow', 'on'] as const)('up deploys an existing stack with mirror mode %s', async (mirrorMode) => {
+    const fake = fakeWrangler({
+      d1: [{ name: RES.d1, uuid: DATABASE_ID }],
+      buckets: [RES.bucket],
+      queues: [RES.queue, RES.deadLetterQueue],
+      repos: [{ name: RES.seedRepo }],
+    });
+    const written: Record<string, any>[] = [];
+    await runBenchStack({
+      action: 'up',
+      id: ID,
+      mirrorMode,
+      baseConfig: BASE,
+      wrangler: fake.wrangler,
+      writeConfig: async (config) => { written.push(config); },
+      patFile: `/repo/apps/platform/.env.bench-${ID}`,
+      mintPat: async () => {},
+    });
+    expect(written[0]?.vars.GIT_MIRROR_MODE).toBe(mirrorMode);
+    expect(fake.calls.some((args) => args[0] === 'd1' && args[1] === 'create')).toBe(false);
+    expect(fake.calls.some((args) => args[0] === 'r2' && args[2] === 'create')).toBe(false);
+    expect(fake.calls.some((args) => args[0] === 'queues' && args[1] === 'create')).toBe(false);
+    expect(fake.calls.some((args) => args[0] === 'artifacts' && args[2] === 'create')).toBe(false);
+    expect(fake.calls.some((args) => args[0] === 'deploy' && !args.includes('--dry-run'))).toBe(true);
+  });
+
+  it('rejects an invalid mirror mode before inspecting resources', async () => {
+    let called = false;
+    await expect(runBenchStack({
+      action: 'up',
+      id: ID,
+      mirrorMode: 'bogus' as never,
+      baseConfig: BASE,
+      wrangler: async () => {
+        called = true;
+        return { code: 0, stdout: '[]', stderr: '' };
+      },
+    })).rejects.toThrow(/--mirror-mode must be off, shadow, or on/);
+    expect(called).toBe(false);
+  });
+
+  it.each(['missing', 'bogus'] as const)('refuses a deploy config with mirror mode %s', async (invalidMode) => {
+    const fake = fakeWrangler({
+      d1: [{ name: RES.d1, uuid: DATABASE_ID }],
+      buckets: [RES.bucket],
+      queues: [RES.queue, RES.deadLetterQueue],
+      repos: [{ name: RES.seedRepo }],
+    });
+    const tamperConfig = async (config: Record<string, any>) => {
+      if (invalidMode === 'missing') delete config.vars.GIT_MIRROR_MODE;
+      else config.vars.GIT_MIRROR_MODE = invalidMode;
+    };
+    await expect(runBenchStack({
+      action: 'up',
+      id: ID,
+      baseConfig: BASE,
+      wrangler: fake.wrangler,
+      writeConfig: tamperConfig,
+      patFile: `/repo/apps/platform/.env.bench-${ID}`,
+      mintPat: async () => {},
+    })).rejects.toThrow(/non-isolated Wrangler config/);
+    expect(fake.calls.some((args) => args[0] === 'deploy')).toBe(false);
+  });
+
   it('up creates isolated resources, internal secrets, and a bench PAT without an account-level subscription', async () => {
     const fake = fakeWrangler();
     const written: Record<string, any>[] = [];
@@ -172,6 +236,7 @@ describe('throwaway benchmark stack', () => {
     });
     expect(result.databaseId).toBe(DATABASE_ID);
     expect(written[0]?.name).toBe(RES.worker);
+    expect(written[0]?.vars.GIT_MIRROR_MODE).toBe('shadow');
     expect(fake.state.d1.map((row) => row.name)).toEqual([RES.d1]);
     expect(fake.state.buckets).toEqual([RES.bucket]);
     expect(fake.state.queues).toEqual([RES.queue, RES.deadLetterQueue]);
