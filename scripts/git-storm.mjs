@@ -13,6 +13,7 @@ import {
   createRandom,
   fixtureFiles,
   gitAuthorization,
+  gitPushArgs,
   operationSummary,
   opForPath,
   redactCredentials,
@@ -62,7 +63,7 @@ const existingRepo = args['existing-repo'];
 const repo = existingRepo ?? (args['bench-id'] ? `kvarm-bench-${args['bench-id']}-storm-${ts}` : `bench-storm-${ts}`);
 const outFile = args.out ? resolve(args.out) : resolve(`git-storm-${ts}.json`);
 const configuredWriterTokens = writerCredentials(process.env);
-const allWorkloads = ['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental', 'push-distinct', 'push-contended', ...(!local ? ['push-to-visible'] : [])];
+const allWorkloads = ['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental', 'push-distinct', 'push-contended', 'push-to-visible'];
 const requested = args.workloads === 'all' ? allWorkloads : args.workloads.split(',').map((v) => v.trim()).filter(Boolean);
 const workloadRequestLimit = 10_000 - (local ? 0 : 2);
 const invalid = requested.find((w) => !allWorkloads.includes(w));
@@ -447,11 +448,12 @@ const addCommit = async (cwd, files, message) => {
 const push = (cwd, workload, ref = 'refs/heads/main', writer = null) => {
   const lane = writer === null ? '' : `/w/${writer}`;
   const remote = new URL(`${proxyUrl}/__w/${encodeURIComponent(workload)}${lane}/${owner}/${repo}.git`);
+  if (writer !== null && !local) remote.username = 'kvarm';
+  const pushArgs = gitPushArgs(remote.href, ref);
   if (writer !== null && !local) {
-    remote.username = 'kvarm';
-    return gitDirect(cwd, [`-c`, `remote.origin.url=${remote.href}`, 'push', 'origin', `HEAD:${ref}`], credentialForWriter(writerTokens, writer) ?? process.env.KVARM_PAT);
+    return gitDirect(cwd, pushArgs, credentialForWriter(writerTokens, writer) ?? process.env.KVARM_PAT);
   }
-  return git(cwd, ['-c', `remote.origin.url=${remote.href}`, 'push', 'origin', `HEAD:${ref}`]);
+  return git(cwd, pushArgs);
 };
 try {
   proxyUrl = await startProxy();
@@ -492,7 +494,7 @@ try {
       })();
     await git(seedRepo, ['remote', 'add', 'origin', setupRemote]);
     if (local) await push(seedRepo, 'setup');
-    else await gitDirect(seedRepo, ['push', 'origin', 'HEAD:refs/heads/main'], process.env.KVARM_PAT);
+    else await gitDirect(seedRepo, gitPushArgs(setupRemote, 'refs/heads/main'), process.env.KVARM_PAT);
   }
   if (local) await git(bareRoot, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
   const results = {};
@@ -525,7 +527,7 @@ try {
       const each = record(name);
       await addCommit(seedRepo, [['incremental.txt', `${seed}-${ts}\n`]], 'git-storm incremental');
       try {
-        if (existingRepo) await gitDirect(seedRepo, ['push', existingRepoUrl(true), 'HEAD:refs/heads/main'], process.env.KVARM_PAT);
+        if (existingRepo) await gitDirect(seedRepo, gitPushArgs(existingRepoUrl(true), 'refs/heads/main'), process.env.KVARM_PAT);
         else await push(seedRepo, name);
       } catch (error) { recordFailure(name, error); }
       await Promise.all(clones.map((clone, lane) => (async () => {
@@ -558,9 +560,17 @@ try {
               const sha = name === 'push-to-visible' ? await gitOutput(clone.path, ['rev-parse', 'HEAD']) : null;
               const pushed = await push(clone.path, name, branch, i);
               started = pushed.processStart;
-              if (name === 'push-to-visible') await waitVisible(clone.path, branch, sha);
+              const visibilityMs = name === 'push-to-visible'
+                ? await waitVisible(clone.path, branch, sha, pushed.processEnd)
+                : undefined;
               const end = name === 'push-to-visible' ? performance.now() : pushed.processEnd;
-              perWorkload.set(name, [...(perWorkload.get(name) ?? []), { start: started, end, ms: end - started, ok: true }]);
+              perWorkload.set(name, [...(perWorkload.get(name) ?? []), {
+                start: started,
+                end,
+                ms: end - started,
+                ok: true,
+                ...(visibilityMs !== undefined ? { visibilityMs } : {}),
+              }]);
             } catch (err) {
               const end = performance.now();
               const start = started ?? err.processStart ?? end;
@@ -673,11 +683,11 @@ try {
       failures: samples.filter((sample) => !sample.ok).map(({ status, message }) => ({ status, message })),
     };
   }
-  async function waitVisible(cwd, ref, expectedSha) {
+  async function waitVisible(cwd, ref, expectedSha, pushEnd) {
     const end = Date.now() + 30_000;
     while (Date.now() < end) {
       const refs = await gitOutput(cwd, ['ls-remote', 'origin', ref]);
-      if (refs.split('\t')[0] === expectedSha) return;
+      if (refs.split('\t')[0] === expectedSha) return performance.now() - pushEnd;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error(`push-to-visible timed out for ${ref}`);

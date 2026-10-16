@@ -64,6 +64,10 @@ export function benchBranch(ts, workload, suffix) {
   return `refs/heads/bench/${ts}-${workload}-${suffix}`;
 }
 
+export function gitPushArgs(remoteUrl, ref) {
+  return ['push', remoteUrl, `HEAD:${ref}`];
+}
+
 export function validateExistingRepoTarget({ benchId, repo, workloads }) {
   if (!benchId || !/^[a-z0-9]{4,12}$/.test(benchId)) return '--existing-repo requires a valid --bench-id';
   const repoPrefix = `kvarm-bench-${benchId}-`;
@@ -158,9 +162,14 @@ export function operationSummary(samples, requests) {
     rateLimited.byLimiter[limiter] = (rateLimited.byLimiter[limiter] ?? 0) + 1;
     rateLimited.byWriter[writer] = (rateLimited.byWriter[writer] ?? 0) + 1;
   }
+  const visibilityMs = samples.flatMap((sample) =>
+    sample.ok && typeof sample.visibilityMs === 'number' && Number.isFinite(sample.visibilityMs)
+      ? [sample.visibilityMs]
+      : []);
   return {
     metrics: {
       latencyMs: summarize(samples.filter((s) => s.ok).map((s) => s.ms)),
+      ...(visibilityMs.length ? { visibilityMs: summarize(visibilityMs) } : {}),
       throughput: span > 0 ? samples.filter((s) => s.ok).length / span : 0,
       attemptsPerSuccess: summarize(samples.filter((s) => s.ok && Number.isFinite(s.attempts)).map((s) => s.attempts)),
       giveUps: samples.filter((s) => !s.ok).length,

@@ -12,6 +12,7 @@ import {
   credentialForWriter,
   fixtureFiles,
   gitAuthorization,
+  gitPushArgs,
   operationSummary,
   percentile,
   redactCredentials,
@@ -287,6 +288,40 @@ describe('git-storm helpers', () => {
 });
 
 describe('git-storm local smoke', () => {
+  it('pushes to only the explicit bare-repository URL', async () => {
+    const work = await mkdtemp(join(tmpdir(), 'git-storm-push-url-test-'));
+    const source = join(work, 'source');
+    const origin = join(work, 'origin.git');
+    const target = join(work, 'target.git');
+    try {
+      const runGit = (cwd: string, args: string[]) => {
+        const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+        if (result.error) throw result.error;
+        if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+        return result.stdout.trim();
+      };
+      await mkdir(source);
+      runGit(work, ['init', '--bare', origin]);
+      runGit(work, ['init', '--bare', target]);
+      runGit(source, ['init', '-b', 'main']);
+      await writeFile(join(source, 'fixture.txt'), 'push target fixture\n');
+      runGit(source, ['add', 'fixture.txt']);
+      runGit(source, ['commit', '-m', 'push target fixture']);
+      runGit(source, ['remote', 'add', 'origin', origin]);
+
+      const pushArgs = gitPushArgs(target, 'refs/heads/explicit-target');
+      expect(pushArgs).toEqual(['push', target, 'HEAD:refs/heads/explicit-target']);
+      expect(pushArgs.some((arg) => arg.includes('remote.origin.url='))).toBe(false);
+      runGit(source, pushArgs);
+
+      expect(runGit(origin, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).toBe('');
+      expect(runGit(target, ['rev-parse', 'refs/heads/explicit-target']))
+        .toBe(runGit(source, ['rev-parse', 'HEAD']));
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
   it('runs each workload against stock git http-backend without errors', async () => {
     const work = await mkdtemp(join(tmpdir(), 'git-storm-test-'));
     const out = join(work, 'smoke.json');
@@ -320,6 +355,7 @@ describe('git-storm local smoke', () => {
         expect(workload.metrics.latencyMs.n).toBeGreaterThan(0);
         expect(Object.values(workload.errors).reduce((a, b) => a + b, 0)).toBe(0);
       }
+      expect(report.workloads['push-to-visible'].metrics.visibilityMs.n).toBeGreaterThan(0);
     } finally {
       await rm(work, { recursive: true, force: true });
     }

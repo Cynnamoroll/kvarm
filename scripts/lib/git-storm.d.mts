@@ -7,6 +7,7 @@ export function writerCredentials(env?: { KVARM_PATS?: string; KVARM_PAT?: strin
 export function credentialForWriter<T>(credentials: readonly T[], writer: number): T | null;
 export function redactCredentials(text: string, tokens: readonly string[]): string;
 export function benchBranch(ts: number | string, workload: string, suffix: number | string): string;
+export function gitPushArgs(remoteUrl: string, ref: string): string[];
 export function validateExistingRepoTarget(options: { benchId?: string; repo?: string; workloads: string[] }): string | null;
 export function resolveRemoteOwner(options: {
   target: string;
@@ -18,7 +19,7 @@ export function scratchDeleteError(status: number, owner: string, repo: string):
 export function createRandom(seed?: number): () => number;
 export function fixtureFiles(fixture: 'small' | 'mixed' | 'large', seed?: number): Array<[string, string]>;
 export function operationSummary(
-  samples: Array<{ start?: number; end?: number; ms: number; ok: boolean; status?: number; attempts?: number; message?: string }>,
+  samples: Array<{ start?: number; end?: number; ms: number; ok: boolean; status?: number; attempts?: number; message?: string; visibilityMs?: number }>,
   requests: Array<{
     op: string;
     status: number;
@@ -29,7 +30,7 @@ export function operationSummary(
     rateLimit: string | null;
   }>,
 ): {
-  metrics: { latencyMs: { n: number }; giveUps: number };
+  metrics: { latencyMs: { n: number }; visibilityMs?: ReturnType<typeof summarize>; giveUps: number };
   errors: Record<string, number>;
   requests: Record<string, number>;
   totalRequests: number;
