@@ -174,5 +174,6 @@ export function reconcileWorkspaces(input: {
 };
 
 export function percentile(values: number[], p: number): number | null;
+export function aggregateTrainPhases(entries: Array<Record<string, number | undefined>>): Record<string, { n: number; p50: number | null; p90: number | null; max: number }>;
 export function findMonetary(text: string): string[];
 export function renderBenchmarkMarkdown(report: Record<string, any>): string;

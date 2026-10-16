@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   BUDGET_ROWS,
+  aggregateTrainPhases,
   CAMPAIGN_LIMITS,
   CHECK_IDS,
   CampaignAbort,
@@ -40,6 +41,29 @@ import {
 } from '../lib/fleet.mjs';
 
 const TS = 1791700000;
+
+describe('aggregateTrainPhases', () => {
+  it('aggregates consecutive observed deltas and lock-held/total spans', () => {
+    const report = aggregateTrainPhases([
+      { enqueued: 0, prepareStart: 10, prepareEnd: 30, checksReady: 35, leaseAcquired: 40, packBuilt: 45, pushSent: 50, pushConfirmed: 70, recorded: 80 },
+      { enqueued: 0, prepareStart: 20, prepareEnd: 40, checksReady: 50, leaseAcquired: 70, packBuilt: 90, pushSent: 100, pushConfirmed: 140, recorded: 160 },
+    ]);
+    expect(report['enqueued→prepareStart']).toEqual({ n: 2, p50: 10, p90: 20, max: 20 });
+    expect(report['leaseAcquired→packBuilt']).toEqual({ n: 2, p50: 5, p90: 20, max: 20 });
+    expect(report.lockHeld).toEqual({ n: 2, p50: 30, p90: 70, max: 70 });
+    expect(report.total).toEqual({ n: 2, p50: 80, p90: 160, max: 160 });
+  });
+
+  it('omits skipped phases and connects consecutive phases that are present', () => {
+    const report = aggregateTrainPhases([{ enqueued: 0, prepareStart: 5, leaseAcquired: 12, recorded: 20 }]);
+    expect(report['enqueued→prepareStart']).toEqual({ n: 1, p50: 5, p90: 5, max: 5 });
+    expect(report['prepareStart→leaseAcquired']).toEqual({ n: 1, p50: 7, p90: 7, max: 7 });
+    expect(report['leaseAcquired→recorded']).toEqual({ n: 1, p50: 8, p90: 8, max: 8 });
+    expect(report.total).toEqual({ n: 1, p50: 20, p90: 20, max: 20 });
+    expect(report['prepareStart→prepareEnd']).toBeUndefined();
+    expect(report.lockHeld).toBeUndefined();
+  });
+});
 
 describe('planFleet', () => {
   const plan = planFleet({ workspaces: 100, ts: TS });

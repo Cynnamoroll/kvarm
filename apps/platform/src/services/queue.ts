@@ -152,6 +152,10 @@ export function backoffSeconds(attempts: number): number {
 // ---------------------------------------------------------------------------
 
 export type QueueState = 'queued' | 'preparing' | 'checking' | 'ready' | 'publishing' | 'published' | 'ejected' | 'stale' | 'dequeued';
+export type TrainPhase = 'enqueued' | 'prepareStart' | 'prepareEnd' | 'checksReady' | 'leaseAcquired' | 'packBuilt' | 'pushSent' | 'pushConfirmed' | 'recorded';
+export interface PublicationCost extends Partial<CostCounters> {
+  phases?: Partial<Record<TrainPhase, number>>;
+}
 
 interface EntryRow {
   id: string;
@@ -240,6 +244,7 @@ export interface QueueEntryView {
   reason: { code: string; message: string | null } | null;
   mergeCommit: string | null;
   cost?: unknown;
+  phases?: Partial<Record<TrainPhase, number>>;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -274,7 +279,11 @@ function entryView(r: EntryRow, position: number | null = null): QueueEntryView 
     reason: r.reason_code ? { code: r.reason_code, message: r.reason } : null,
     mergeCommit: r.merge_commit,
   };
-  if (r.cost) view.cost = parseJson(r.cost);
+  if (r.cost) {
+    view.cost = parseJson(r.cost);
+    const cost = view.cost as { phases?: Partial<Record<TrainPhase, number>> } | null;
+    if (cost?.phases) view.phases = cost.phases;
+  }
   return view;
 }
 
@@ -343,7 +352,8 @@ export type TrainEvent =
   | { type: 'window'; pass: number; prepared: number; checking: number; states: Array<{ number: number; state: QueueState }> }
   | { type: 'checks'; number: number; treeSha: string; baseSha: string; state: string; leaseHeld: boolean; phase: 'prepare' | 'publish' }
   | { type: 'lease'; op: 'acquire' | 'release'; number: number; ok: boolean; generation: number | null }
-  | { type: 'publish'; number: number; status: string; mergeCommit: string; previous: string; cost?: Partial<CostCounters> }
+  | { type: 'publish'; number: number; status: string; mergeCommit: string; previous: string; cost?: PublicationCost }
+  | { type: 'phase'; number: number; phase: TrainPhase; at: number }
   | { type: 'transition'; number: number; to: QueueState; code?: string };
 
 export interface TrainDeps {
@@ -978,6 +988,21 @@ interface Plan {
   current: boolean;
   /** The entry's generation and state as stored right now (writes this pass already applied, not the batched ones). */
   stored: { generation: number; state: QueueState };
+  phases: Partial<Record<TrainPhase, number>>;
+}
+
+function recordTrainPhase(plan: Plan, deps: TrainDeps, phase: TrainPhase, at = Date.now()): void {
+  if (phase === 'enqueued' && plan.phases.enqueued !== undefined) return;
+  plan.phases[phase] = at;
+  deps.observe?.({ type: 'phase', number: plan.e.change_number, phase, at });
+}
+
+function phaseOffsets(e: EntryRow, phases: Partial<Record<TrainPhase, number>>, recordedAt?: number): Partial<Record<TrainPhase, number>> {
+  const at = { ...phases, ...(recordedAt === undefined ? {} : { recorded: recordedAt }) };
+  const origin = e.enqueued_at;
+  return Object.fromEntries(
+    Object.entries(at).map(([phase, value]) => [phase, Math.max(0, Math.trunc(value - origin))]),
+  ) as Partial<Record<TrainPhase, number>>;
 }
 
 interface PassOutcome {
@@ -1065,8 +1090,9 @@ async function trainPass(
   let reconciled = 0;
 
   for (const e of rows) {
-    const plan: Plan = { e, generation: e.generation, headSha: e.head_sha, next: e.state, current: true, stored: { generation: e.generation, state: e.state } };
+    const plan: Plan = { e, generation: e.generation, headSha: e.head_sha, next: e.state, current: true, stored: { generation: e.generation, state: e.state }, phases: {} };
     plans.push(plan);
+    recordTrainPhase(plan, deps, 'enqueued', e.enqueued_at);
     const exit = (code: string, message: string) => {
       const to = EXIT_STATES[code] ?? 'ejected';
       plan.next = to;
@@ -1243,12 +1269,14 @@ async function trainPass(
     }
 
     if (out.prepared >= TRAIN_LIMITS.window) break;
+    recordTrainPhase(plan, deps, 'prepareStart');
     const p = await prepareMerge(sources, {
       targetSha: base!,
       headSha: plan.headSha,
       message: `Merge change #${e.change_number} from ${e.c_head_ref}\n\n${e.c_title}\n`,
       ...(enqueuerAuthor(e) ? { author: enqueuerAuthor(e)! } : {}),
     });
+    recordTrainPhase(plan, deps, 'prepareEnd');
     if (!p.ok) {
       if (p.code === 'MERGE_READ_FAILED') throw new RefStoreUnavailable(p.error);
       // Only with no batched write pending for the entry, so the record's fence names what is stored.
@@ -1377,6 +1405,7 @@ async function trainPass(
       continue;
     }
     const pending = checks.state === 'pending' || ruleBlock?.code === 'REQUIRED_CHECKS_PENDING';
+    if (!pending) recordTrainPhase(plan, deps, 'checksReady');
     if (pending) {
       if (out.checking < TRAIN_LIMITS.runnerCapacity) {
         out.checking += 1;
@@ -1627,7 +1656,7 @@ async function recordPublication(
   e: EntryRow,
   i: IntentRow,
   fence: { generation: number; state: QueueState },
-  via: { kind: 'push'; cost: Partial<CostCounters> | null } | { kind: 'reconcile'; observed: string | null },
+  via: { kind: 'push'; cost: PublicationCost | null } | { kind: 'reconcile'; observed: string | null; cost?: PublicationCost },
   now: number,
   /** False only when the publisher read that no workspace is linked to the change (then no pin can need settling). */
   dependents = true,
@@ -1656,7 +1685,7 @@ async function recordPublication(
         i.new_sha,
         i.old_sha,
         i.lease_generation,
-        via.kind === 'push' && via.cost ? JSON.stringify(via.cost) : null,
+        via.cost ? JSON.stringify(via.cost) : null,
         now,
         e.repo_id,
         fence.state,
@@ -1851,7 +1880,19 @@ async function reconcileIntent(env: Env, reader: CommitReader, e: EntryRow, i: I
   }
   await deps.checkpoint?.('reconcile-decided', e.change_number);
   if (landed) {
-    const recorded = await recordPublication(db, e, i, { generation: i.generation, state: 'publishing' }, { kind: 'reconcile', observed }, deps.now());
+    const recordedAt = deps.now();
+    const recorded = await recordPublication(
+      db,
+      e,
+      i,
+      { generation: i.generation, state: 'publishing' },
+      { kind: 'reconcile', observed, cost: { phases: phaseOffsets(e, {}, recordedAt) } },
+      recordedAt,
+    );
+    if (recorded.entryWritten) {
+      deps.observe?.({ type: 'phase', number: e.change_number, phase: 'enqueued', at: e.enqueued_at });
+      deps.observe?.({ type: 'phase', number: e.change_number, phase: 'recorded', at: recordedAt });
+    }
     return { outcome: 'completed', recorded };
   }
   const outcome = observed === i.old_sha ? 'not_applied' : 'moved';
@@ -1922,8 +1963,17 @@ async function lateLanding(env: Env, ctx: ResolveContext, repo: RepoRow, sources
   }
   if (!found) return false;
   await deps.checkpoint?.('reconcile-decided', e.change_number);
-  const recorded = await recordPublication(env.DB, e, found, plan.stored, { kind: 'reconcile', observed: tip }, deps.now());
+  const recordedAt = deps.now();
+  const recorded = await recordPublication(
+    env.DB,
+    e,
+    found,
+    plan.stored,
+    { kind: 'reconcile', observed: tip, cost: { phases: phaseOffsets(e, plan.phases, recordedAt) } },
+    recordedAt,
+  );
   if (!recorded.entryWritten) return false;
+  deps.observe?.({ type: 'phase', number: e.change_number, phase: 'recorded', at: recordedAt });
   await afterReconciled(env, ctx, repo, e, found, recorded, deps, true);
   return true;
 }
@@ -2197,6 +2247,7 @@ async function publishChain(
     for (const c of claiming) c.result = { kind: 'busy', retryAfterSeconds: Math.max(1, Math.ceil(acq.retryAfterMs / 1000)) };
     return results();
   }
+  for (const c of claiming) recordTrainPhase(c.plan, deps, 'leaseAcquired');
   let released = false;
   const release = async () => {
     if (released) return;
@@ -2232,6 +2283,7 @@ async function publishChain(
       for (const c of claiming) c.result = { kind: 'retry' };
       return results();
     }
+    for (const c of claiming) recordTrainPhase(c.plan, deps, 'packBuilt');
 
     // 4. One claim-and-revalidate batch: every candidate's claim, intent,
     // change, head workspace and enqueuer facts, then the current rules. The
@@ -2392,6 +2444,7 @@ async function publishChain(
         for (const c of claimedEntries) c.result = { kind: 'retry' };
         return results();
       }
+      for (const c of claimedEntries) recordTrainPhase(c.plan, deps, 'packBuilt');
     }
     const first = claimedEntries[0]!;
 
@@ -2448,6 +2501,7 @@ async function publishChain(
         for (const c of publishing) c.result = { kind: 'retry' };
         return results();
       }
+      for (const c of publishing) recordTrainPhase(c.plan, deps, 'packBuilt');
     }
 
     // 6. The one send, guarded by the lease's remaining time.
@@ -2462,8 +2516,10 @@ async function publishChain(
     } else {
       for (const c of publishing) await deps.checkpoint?.('intent-recorded', c.e.change_number);
       sent = true;
+      for (const c of publishing) recordTrainPhase(c.plan, deps, 'pushSent');
       try {
         status = (await update.send()).status;
+        if (status === 'ok') for (const c of publishing) recordTrainPhase(c.plan, deps, 'pushConfirmed');
       } catch (err) {
         // Whatever failed, the request may have reached the store: the ref decides.
         status = 'unknown';
@@ -2492,9 +2548,12 @@ async function publishChain(
         ? splitCounters({ ...cost, d1: (cost.d1 ?? 0) + publishing.length, do: (cost.do ?? 0) + 1 }, publishing.length)
         : null;
       for (const [i, c] of publishing.entries()) {
-        const recordCost = shares ? shares[i]! : null;
+        const recordedAt = Date.now();
+        const recordCost = { ...shares?.[i], phases: phaseOffsets(c.e, c.plan.phases, recordedAt) };
         c.recorded = await recordPublication(db, c.e, c.intent!, c.fence, { kind: 'push', cost: recordCost }, deps.now(), c.linked);
         if (c.recorded.entryWritten) {
+          c.plan.phases.recorded = recordedAt;
+          deps.observe?.({ type: 'phase', number: c.e.change_number, phase: 'recorded', at: recordedAt });
           await deps.checkpoint?.('recorded', c.e.change_number);
           deps.observe?.({
             type: 'publish',

@@ -294,12 +294,37 @@ async function receivePack(repo: FakeRepo, body: Uint8Array): Promise<Response> 
 
 const ZERO = '0'.repeat(40);
 
+function infoRefsResponse(repo: FakeRepo, service: string): Response {
+  const branch = repo.refs.get('refs/heads/main');
+  const refs = [...(branch ? [['HEAD', branch] as [string, string]] : []), ...repo.refs].sort(([a], [b]) => (a < b ? -1 : 1));
+  const capabilities =
+    service === 'git-receive-pack'
+      ? 'report-status delete-refs side-band-64k ofs-delta agent=git/2.34.1'
+      : 'multi_ack thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed symref=HEAD:refs/heads/main agent=git/2.34.1';
+  const lines = refs.map(([name, oid], i) => pktLine(`${oid} ${name}${i === 0 ? `\0${capabilities}` : ''}\n`));
+  return new Response(concat(pktLine(`# service=${service}\n`), FLUSH_PKT, ...lines, FLUSH_PKT), {
+    headers: {
+      'content-type': service === 'git-receive-pack' ? 'application/x-git-receive-pack-advertisement' : 'application/x-git-upload-pack-advertisement',
+      'cache-control': 'no-cache',
+    },
+  });
+}
+
 /** Routes artifacts.invalid upload-pack (ls-refs) and receive-pack requests to the fake repos. */
 export function installFakeGitRemote(): void {
   globalThis.fetch = countingFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = new Request(input, init);
     const url = new URL(req.url);
     if (url.hostname !== 'artifacts.invalid') return originalFetch(input, init);
+    const ir = /^\/git\/default\/(.+)\.git\/info\/refs$/.exec(url.pathname);
+    if (ir) {
+      const target = fakeRepos.get(ir[1]!);
+      const service = url.searchParams.get('service');
+      if (!target || req.method !== 'GET' || (service !== 'git-upload-pack' && service !== 'git-receive-pack')) {
+        return new Response('bad', { status: 404 });
+      }
+      return infoRefsResponse(target, service);
+    }
     const rp = /^\/git\/default\/(.+)\.git\/git-receive-pack$/.exec(url.pathname);
     if (rp) {
       const target = fakeRepos.get(rp[1]!);

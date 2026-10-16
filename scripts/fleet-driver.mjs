@@ -51,6 +51,7 @@ import { checkIsolatedName } from './lib/fixture-repo.mjs';
 import { remoteD1Args } from './lib/wrangler-target.mjs';
 import {
   BUDGET_ROWS,
+  aggregateTrainPhases,
   CAMPAIGN_LIMITS,
   CHECK_IDS,
   CONFIG_PATH,
@@ -1103,6 +1104,9 @@ report.background = {
   'snapshot commits (by state)': d1.snapshots ? d1.snapshots.commits.map((s) => `${s.state} ${s.n}`).join(', ') || '0' : 'n/a',
   'snapshot tree builds, summed build counters': d1.snapshots ? `${d1.snapshots.trees}: ${fmt(d1.snapshots.treeBuildCost)}` : 'n/a',
 };
+report.trainPhases = aggregateTrainPhases((d1.queue ?? [])
+  .filter((q) => q.state === 'published')
+  .map((q) => safeJson(q.cost)?.phases ?? {}));
 report.d1 = d1;
 report.checks = results;
 report.passed = results.filter((r) => r.ok).length;

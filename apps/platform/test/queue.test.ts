@@ -335,7 +335,18 @@ describe('integration train', () => {
       expect(c.json).toMatchObject({ state: 'merged', mergeCommit: chain[chain.length - 1 - i], queueState: null });
     }
     expect((await queueOf('two')).json.entries).toEqual([]);
-    expect((await entries('two')).map((e) => e.state)).toEqual(['published', 'published']);
+    const published = await entries('two');
+    expect(published.map((e) => e.state)).toEqual(['published', 'published']);
+    for (const entry of published) {
+      const phases = JSON.parse(entry.cost ?? '{}').phases as Record<string, number>;
+      const ordered = ['enqueued', 'prepareStart', 'prepareEnd', 'checksReady', 'leaseAcquired', 'packBuilt', 'pushSent', 'pushConfirmed', 'recorded'];
+      const values = ordered.filter((phase) => phases[phase] !== undefined).map((phase) => phases[phase]!);
+      expect(values).toEqual([...values].sort((a, b) => a - b));
+      expect(phases).toEqual(expect.objectContaining(Object.fromEntries(ordered.map((phase) => [phase, expect.any(Number)]))));
+      expect(deps.events
+        .filter((event): event is Extract<TrainEvent, { type: 'phase' }> => event.type === 'phase' && event.number === entry.change_number)
+        .map((event) => event.phase)).toEqual(ordered);
+    }
     expect((await leaseStatus('two')).lease).toBeNull();
     // The second candidate was composed on the first one's published result.
     const checks = deps.events.filter((e): e is Extract<TrainEvent, { type: 'checks' }> => e.type === 'checks' && e.number === numbers[1]);
@@ -1227,6 +1238,12 @@ describe('train CI staging of composed merges', () => {
     expect(third.ciJobInserts).toBe(0);
     expect(repo.refs.get(MAIN)).toBe(stagedSha);
     expect(stagedRefs(repo)).toEqual([]);
+    const published = (await entries('ci-stage'))[0]!;
+    const phases = JSON.parse(published.cost ?? '{}').phases as Record<string, number>;
+    const phaseOrder = ['enqueued', 'prepareStart', 'prepareEnd', 'checksReady', 'leaseAcquired', 'packBuilt', 'pushSent', 'pushConfirmed', 'recorded'];
+    const values = phaseOrder.filter((phase) => phases[phase] !== undefined).map((phase) => phases[phase]!);
+    expect(values).toEqual([...values].sort((a, b) => a - b));
+    expect(phases).toEqual(expect.objectContaining(Object.fromEntries(phaseOrder.map((phase) => [phase, expect.any(Number)]))));
     // Every CI job of the published tree ran on that one staged commit.
     const jobs = await env.DB.prepare('SELECT DISTINCT head_sha FROM ci_jobs WHERE repo_id = ? AND tree_sha = ?')
       .bind(repoIds['ci-stage'], commitOf(repo, stagedSha).tree)

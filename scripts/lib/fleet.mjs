@@ -516,6 +516,36 @@ export function percentile(values, p) {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))];
 }
 
+const TRAIN_PHASES = ['enqueued', 'prepareStart', 'prepareEnd', 'checksReady', 'leaseAcquired', 'packBuilt', 'pushSent', 'pushConfirmed', 'recorded'];
+
+/** Aggregate per-entry train phase deltas; omitted events do not become zero samples. */
+export function aggregateTrainPhases(entries) {
+  const samples = new Map();
+  const add = (name, value) => {
+    if (!Number.isFinite(value) || value < 0) return;
+    const values = samples.get(name) ?? [];
+    values.push(value);
+    samples.set(name, values);
+  };
+  for (const entry of entries) {
+    const present = TRAIN_PHASES.filter((phase) => Number.isFinite(entry?.[phase]));
+    for (let i = 1; i < present.length; i++) {
+      const from = present[i - 1];
+      const to = present[i];
+      add(`${from}→${to}`, entry[to] - entry[from]);
+    }
+    if (Number.isFinite(entry?.leaseAcquired) && Number.isFinite(entry?.pushConfirmed)) {
+      add('lockHeld', entry.pushConfirmed - entry.leaseAcquired);
+    }
+    if (Number.isFinite(entry?.enqueued) && Number.isFinite(entry?.recorded)) {
+      add('total', entry.recorded - entry.enqueued);
+    }
+  }
+  return Object.fromEntries(
+    [...samples].map(([name, values]) => [name, { n: values.length, p50: percentile(values, 50), p90: percentile(values, 90), max: Math.max(...values) }]),
+  );
+}
+
 const MONETARY = [/[$€£]\s?\d/g, /\b\d+(?:\.\d+)?\s?(?:USD|EUR|GBP|cents?)\b/gi, /\b(?:price[ds]?|pricing|invoice[ds]?|dollars?)\b/gi];
 
 /** Currency amounts or pricing derivations in `text` (the report must have none). */
@@ -610,6 +640,16 @@ export function renderBenchmarkMarkdown(r) {
     '|---|---|',
     ...Object.entries(r.background).map(([k, v]) => `| ${k} | ${typeof v === 'object' ? fmtCounters(v) : v} |`),
     '',
+    ...(r.trainPhases
+      ? [
+          '## Train phase timing',
+          '',
+          '| Span | n | p50 ms | p90 ms | max ms |',
+          '|---|---:|---:|---:|---:|',
+          ...Object.entries(r.trainPhases).map(([name, v]) => `| ${name} | ${v.n} | ${v.p50} | ${v.p90} | ${v.max} |`),
+          '',
+        ]
+      : []),
     ...checksSection(r.checks),
     ...(r.notes?.length ? ['## Notes', '', ...r.notes.map((n) => `- ${n}`), ''] : []),
     'Work counters (`x-kvarm-cost` classes and the stored per-publication counters) are application telemetry, not a Cloudflare bill. They come from one measured run of this workload and are not a service-level objective.',
