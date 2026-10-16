@@ -75,16 +75,12 @@ function readLines(bytes: Uint8Array): Array<string | null> | null {
     if (!sameBytes(packetsToBytes(packets), bytes)) return null;
     return packets.map((packet) => {
       if (packet.flush || packet.delim || packet.responseEnd) return null;
-      const line = new TextDecoder('utf-8', { fatal: true }).decode(packet.data);
-      return line.endsWith('\n') ? line.slice(0, -1) : null;
+      const line = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(packet.data);
+      return line.endsWith('\n') ? line.slice(0, -1) : line;
     });
   } catch {
     return null;
   }
-}
-
-function volatile(line: string): boolean {
-  return line.startsWith('agent=') || line.startsWith('session-id=');
 }
 
 function sortUnique(lines: string[]): string[] {
@@ -171,7 +167,7 @@ function normalizeV0(bytes: Uint8Array): UploadPackClassification {
     }
     let line: string;
     try {
-      line = new TextDecoder('utf-8', { fatal: true }).decode(packet.data);
+      line = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(packet.data);
     } catch {
       return uncacheable();
     }
@@ -247,7 +243,7 @@ export async function derivePackCacheKey(repoId: string, refSeq: number, protoco
 }
 
 export class UploadPackResponseValidator {
-  private pending = new Uint8Array();
+  private pending: Uint8Array = new Uint8Array();
   private valid = true;
   private lastFlush = false;
   private sawPackfile = false;
@@ -287,7 +283,7 @@ export class UploadPackResponseValidator {
       if (packet.data.length > 0) {
         let line = '';
         try {
-          line = new TextDecoder('utf-8', { fatal: true }).decode(packet.data).replace(/\n$/, '');
+          line = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(packet.data).replace(/\n$/, '');
         } catch {
           line = '';
         }

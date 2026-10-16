@@ -16,6 +16,7 @@
     "lint": "oxlint .",
     "cli": "cd apps/cli && go build ./... && go vet ./... && go test ./...",
     "test:repo-mirror-git": "node scripts/test/repoMirrorGitDifferential.mjs",
+    "test:git-pack-cache-differential": "node scripts/test/gitPackCacheDifferential.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

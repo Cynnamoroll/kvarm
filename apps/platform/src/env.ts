@@ -40,5 +40,6 @@ declare global {
     PATH_HISTORY: DurableObjectNamespace<PathHistory>;
     REPO_MIRROR: DurableObjectNamespace<RepoMirror>;
     GIT_MIRROR_MODE?: 'off' | 'shadow' | 'on';
+    GIT_PACK_CACHE?: 'off' | 'on';
   }
 }

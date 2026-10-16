@@ -48,6 +48,20 @@ describe('upload-pack request cache classification', () => {
     expect(request.normalized).toBeNull();
   });
 
+  it('accepts system Git v2 packets without trailing line feeds', () => {
+    const request = classifyUploadPackRequest(concat(
+      pktLine('command=fetch'),
+      pktLine('agent=git/2.34.1'),
+      pktLine('object-format=sha1'),
+      DELIM_PKT,
+      pktLine(`want ${OID_A}`),
+      pktLine('done'),
+      FLUSH_PKT,
+    ));
+
+    expect(request.cacheable).toBe(true);
+  });
+
   it('keeps include-tag in the normalized key and scopes keys by ref_seq', async () => {
     const body = concat(
       pktLine(`want ${OID_A}\0include-tag side-band-64k agent=git/2.45.0\n`),

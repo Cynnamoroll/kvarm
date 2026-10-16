@@ -29,8 +29,10 @@ import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
 import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type WorkspaceOwner } from '../services/workspaces';
 import { agentReservedRefDenial, directHumanPushDenial, directPushDenial, INVALID_REF_REASON, type BranchRule } from '../services/branchRules';
-import { isSafeRefName, sha256Hex, type RefCommand } from '@kvarm/gitops';
+import { concat, isSafeRefName, sha256Hex, type RefCommand } from '@kvarm/gitops';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
+import { classifyUploadPackRequest, derivePackCacheKey, type PackProtocol } from '../git/packCache';
+import { lookupUploadPackCache, storeUploadPackResponse, type UploadPackCacheAddress } from '../services/uploadPackCache';
 import { parseLsRefsRequest } from '../do/repoMirror';
 import { recordPushAudit } from '../services/audit';
 import { branchPushUpdates, dispatchConfirmedPush } from '../services/pushFastPath';
@@ -80,6 +82,84 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 const MAX_MIRROR_COMPARE_BYTES = 1024 * 1024;
+const MAX_PACK_CACHE_REQUEST_BYTES = 1024 * 1024;
+
+interface BufferedUploadBody {
+  bytes: Uint8Array | null;
+  body: ReadableStream<Uint8Array>;
+  oversized: boolean;
+}
+
+function replayBuffered(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index < chunks.length) controller.enqueue(chunks[index++]!);
+      else controller.close();
+    },
+  });
+}
+
+function replayOversized(
+  chunks: Uint8Array[],
+  overflow: Uint8Array,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  const initial = [...chunks, overflow];
+  let index = 0;
+  let released = false;
+  const release = () => {
+    if (!released) {
+      released = true;
+      reader.releaseLock();
+    }
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (index < initial.length) {
+        controller.enqueue(initial[index++]!);
+        return;
+      }
+      try {
+        const result = await reader.read();
+        if (result.done) {
+          controller.close();
+          release();
+        } else {
+          controller.enqueue(result.value);
+        }
+      } catch (error) {
+        controller.error(error);
+        release();
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+      release();
+    },
+  });
+}
+
+async function bufferUploadBody(
+  body: ReadableStream<Uint8Array>,
+  limit: number,
+): Promise<BufferedUploadBody> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      reader.releaseLock();
+      return { bytes: chunks.length ? concat(...chunks) : new Uint8Array(), body: replayBuffered(chunks), oversized: false };
+    }
+    if (size + value.byteLength > limit) {
+      return { bytes: null, body: replayOversized(chunks, value, reader), oversized: true };
+    }
+    chunks.push(value);
+    size += value.byteLength;
+  }
+}
 
 type CompareBody =
   | { bytes: Uint8Array; oversized: false }
@@ -323,6 +403,46 @@ export async function handleGitRequest(
     }
   }
 
+  let packCacheAddress: UploadPackCacheAddress | null = null;
+  if (
+    env.GIT_PACK_CACHE === 'on' &&
+    op === 'read' &&
+    subpath === 'git-upload-pack' &&
+    c.req.method === 'POST' &&
+    uploadBody
+  ) {
+    const buffered = await bufferUploadBody(uploadBody, MAX_PACK_CACHE_REQUEST_BYTES);
+    uploadBody = buffered.body;
+    const protocol: PackProtocol = c.req.header('git-protocol')?.includes('version=2') ? 'v2' : 'v0';
+    if (buffered.oversized) {
+      markCache('bypass');
+    } else {
+      const classification = classifyUploadPackRequest(buffered.bytes!, protocol);
+      if (!classification.cacheable || !classification.normalized) {
+        markCache('bypass');
+      } else {
+        const refSeq = repo.ref_seq ?? 0;
+        const hash = await derivePackCacheKey(repo.id, refSeq, protocol, classification.normalized);
+        const address: UploadPackCacheAddress = {
+          cacheKey: new Request(`https://kvarm-git.internal/pack/${repo.id}/${refSeq}/${hash}`),
+          r2Key: `fetch/${repo.id}/${hash}`,
+          refSeq,
+          r2Eligible: classification.r2Eligible,
+          protocol,
+        };
+        const cached = await lookupUploadPackCache(env, c.executionCtx, address);
+        if (cached) {
+          markCache(cached.tier);
+          const headers = new Headers(cached.response.headers);
+          headers.set('cache-control', 'no-cache');
+          return scoped(new Response(cached.response.body, { status: 200, headers }));
+        }
+        markCache('miss');
+        packCacheAddress = address;
+      }
+    }
+  }
+
   // Agent tokens are confined to their granted refs (workspace refs also to
   // an active workspace the agent may use), protected refs refuse direct
   // pushes from everyone (instance admin included), and human credentials
@@ -514,6 +634,17 @@ export async function handleGitRequest(
       waitUntil: (p) => c.executionCtx.waitUntil(p),
     });
     return scoped(relay(new Response(body, upstreamRes)));
+  }
+
+  if (packCacheAddress && upstreamRes.status === 200 && upstreamRes.body) {
+    const contentType = upstreamRes.headers.get('content-type');
+    if (contentType) {
+      const [client, stored] = upstreamRes.body.tee();
+      c.executionCtx.waitUntil(
+        storeUploadPackResponse(env, packCacheAddress, contentType, stored).catch(() => undefined),
+      );
+      return scoped(relay(new Response(client, upstreamRes)));
+    }
   }
 
   return scoped(relay(upstreamRes));

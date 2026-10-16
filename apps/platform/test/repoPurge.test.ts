@@ -129,6 +129,33 @@ afterEach(() => {
 });
 
 describe('repo purge orchestration', () => {
+  it('deletes upload-pack response objects under the fetch prefix', async () => {
+    const tombstone = await insertTombstone();
+    const key = `fetch/${tombstone.repo_id}/response-hash`;
+    const objects = new Set([key]);
+    const snapshots = {
+      async list(options: R2ListOptions) {
+        const matching = [...objects].filter((objectKey) => objectKey.startsWith(options.prefix ?? ''));
+        return {
+          objects: matching.map((objectKey) => ({ key: objectKey })),
+          truncated: false,
+        } as unknown as R2Objects;
+      },
+      async delete(keys: string | string[]) {
+        for (const objectKey of Array.isArray(keys) ? keys : [keys]) objects.delete(objectKey);
+      },
+    };
+    const testEnv = { ...purgeEnv(async () => undefined), SNAPSHOTS: snapshots } as unknown as Env;
+    stubTokenStep(async () => undefined);
+    try {
+      const result = await purgeRepo(testEnv, tombstone);
+      expect(result.ok).toBe(true);
+      expect(objects.size).toBe(0);
+    } finally {
+      await deleteTombstones([tombstone.repo_id]);
+    }
+  });
+
   it('runs purge steps concurrently while keeping token deletion behind Artifacts deletion', async () => {
     const tombstone = await insertTombstone();
     let active = 0;
