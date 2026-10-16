@@ -20,11 +20,12 @@ export interface MirrorReadResult { seq: number; bytes: Uint8Array }
 
 interface Meta {
   repo_id: string; seq: number; seeded_at: number | null; verified_at: number | null;
-  dirty: number; destroyed: number; caps_v0: string; adv_v2: Uint8Array | ArrayBuffer | null; head_symref: string | null;
+  dirty: number; destroyed: number; caps_v0: string; v0_service: number;
+  adv_v2: Uint8Array | ArrayBuffer | null; head_symref: string | null;
 }
 interface RefRow { name: string; oid: Uint8Array | ArrayBuffer; peeled: Uint8Array | ArrayBuffer | null }
 export interface MirrorRenderRef { name: string; oid: string; peeled: string | null }
-export interface MirrorRenderMeta { caps_v0: string; head_symref: string | null }
+export interface MirrorRenderMeta { caps_v0: string; v0_service?: number; head_symref: string | null }
 
 function oidBytes(oid: string): Uint8Array { return Uint8Array.from(oid.match(/../g)!.map((x) => parseInt(x, 16))); }
 function oidHex(value: Uint8Array | ArrayBuffer): string {
@@ -74,17 +75,22 @@ function encodePacketBodies(bodies: readonly string[]): Uint8Array {
   return TEXT_ENCODER.encode(packets.join(''));
 }
 
-function parseV0(body: Uint8Array): { caps: string; headSymref: string | null; refs: RefRow[] } | null {
+function parseV0(body: Uint8Array): { caps: string; headSymref: string | null; refs: RefRow[]; serviceBanner: boolean } | null {
   try {
     const packets = readPktLines(body);
-    if (packets.length < 3 || decode(packets[0]!.data) !== '# service=git-upload-pack\n' || !packets[1]!.flush ||
-        packets.findIndex((p, i) => i >= 2 && p.flush) !== packets.length - 1) return null;
+    if (packets.length === 1 && packets[0]!.flush) {
+      return { caps: '', headSymref: null, refs: [], serviceBanner: false };
+    }
+    const serviceBanner = decode(packets[0]!.data) === '# service=git-upload-pack\n';
+    const start = serviceBanner ? 2 : 0;
+    if ((serviceBanner && !packets[1]!.flush) || packets.length <= start ||
+        packets.findIndex((p, i) => i >= start && p.flush) !== packets.length - 1) return null;
     const refs = new Map<string, RefRow>();
     let caps = '';
     let sawCapabilities = false;
     let sawEnd = false;
     let capabilitiesOnly = false;
-    for (const packet of packets.slice(2)) {
+    for (const packet of packets.slice(start)) {
       if (packet.flush) { sawEnd = true; break; }
       if (packet.delim || packet.responseEnd) return null;
       if (capabilitiesOnly) return null;
@@ -119,20 +125,24 @@ function parseV0(body: Uint8Array): { caps: string; headSymref: string | null; r
     if (!sawEnd || !caps) return null;
     const symPrefix = 'symref=HEAD:';
     const sym = caps.split(' ').find((x) => x.startsWith(symPrefix))?.slice(symPrefix.length) ?? null;
-    return { caps, headSymref: sym, refs: [...refs.values()] };
+    return { caps, headSymref: sym, refs: [...refs.values()], serviceBanner };
   } catch { return null; }
 }
 
 function validV2(body: Uint8Array): boolean {
   try {
     const p = readPktLines(body);
-    return p.length >= 3 && decode(p[0]!.data) === '# service=git-upload-pack\n' && p[1]!.flush &&
-      p.slice(2).some((x) => !x.flush && decode(x.data).trim() === 'version 2') && p[p.length - 1]!.flush;
+    if (p.length < 2 || !p[p.length - 1]!.flush) return false;
+    const hasVersion = p.some((x) => !x.flush && decode(x.data).trim() === 'version 2');
+    const hasServiceBanner = decode(p[0]!.data) === '# service=git-upload-pack\n' && p[1]!.flush;
+    return hasVersion && (hasServiceBanner || decode(p[0]!.data).trim() === 'version 2');
   } catch { return false; }
 }
 
 export function renderV0(meta: MirrorRenderMeta, refs: MirrorRenderRef[]): Uint8Array {
-  const lines = ['# service=git-upload-pack\n', ''];
+  const serviceBanner = meta.v0_service !== 0;
+  if (refs.length === 0 && !meta.caps_v0 && !serviceBanner) return encodePacketBodies(['']);
+  const lines = serviceBanner ? ['# service=git-upload-pack\n', ''] : [];
   const head = refs.find((r) => r.name === 'HEAD');
   if (head) lines.push(`${head.oid} HEAD${meta.caps_v0 ? `\0${meta.caps_v0}` : ''}\n`);
   else if (refs.length === 0) lines.push(`${ZERO} capabilities^{}${meta.caps_v0 ? `\0${meta.caps_v0}` : ''}\n`);
@@ -240,7 +250,12 @@ export class RepoMirror extends DurableObject<Env> {
       ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS meta (
         repo_id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, seeded_at INTEGER,
         verified_at INTEGER, dirty INTEGER NOT NULL DEFAULT 1, destroyed INTEGER NOT NULL DEFAULT 0,
-        caps_v0 TEXT NOT NULL DEFAULT '', adv_v2 BLOB, head_symref TEXT)`);
+        caps_v0 TEXT NOT NULL DEFAULT '', v0_service INTEGER NOT NULL DEFAULT 1,
+        adv_v2 BLOB, head_symref TEXT)`);
+      const metaColumns = ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(meta)').toArray();
+      if (!metaColumns.some((column) => column.name === 'v0_service')) {
+        ctx.storage.sql.exec('ALTER TABLE meta ADD COLUMN v0_service INTEGER NOT NULL DEFAULT 1');
+      }
       ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS refs (name TEXT PRIMARY KEY, oid BLOB NOT NULL, peeled BLOB) WITHOUT ROWID');
       ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS ring (name TEXT NOT NULL, oid BLOB NOT NULL, seq INTEGER NOT NULL)');
       ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS ring_name_seq ON ring(name, seq DESC)');
@@ -289,7 +304,17 @@ export class RepoMirror extends DurableObject<Env> {
     const m = this.meta();
     if (!m) { this.seedVersion++; this.dirty(repoId ?? ''); return; }
     if (!m.repo_id && repoId) this.ctx.storage.sql.exec('UPDATE meta SET repo_id=? WHERE repo_id=?', repoId, '');
-    if (seq <= m.seq) return;
+    if (seq <= m.seq) {
+      const inconsistent = updates.some((u) => {
+        const current = this.rows<RefRow>('SELECT name,oid,peeled FROM refs WHERE name=?', u.ref)[0];
+        return u.newOid === ZERO ? current !== undefined : !current || !same(current.oid, u.newOid);
+      });
+      if (inconsistent) {
+        this.seedVersion++;
+        this.dirty(m.repo_id || repoId || '');
+      }
+      return;
+    }
     this.seedVersion++;
     if (!m.seeded_at || seq !== m.seq + 1 || updates.some((u) => u.ref.startsWith('refs/tags/'))) { this.dirty(m.repo_id); return; }
     try {
@@ -354,10 +379,10 @@ export class RepoMirror extends DurableObject<Env> {
       this.ctx.storage.sql.exec('DELETE FROM ring');
       for (const r of parsed.refs) this.ctx.storage.sql.exec('INSERT INTO refs(name,oid,peeled) VALUES(?,?,?)', r.name, r.oid, r.peeled);
       this.ctx.storage.sql.exec(
-        `INSERT INTO meta(repo_id,seq,seeded_at,verified_at,dirty,destroyed,caps_v0,adv_v2,head_symref)
-         VALUES(?,?,?,?,0,0,?,?,?) ON CONFLICT(repo_id) DO UPDATE SET seq=?,seeded_at=?,verified_at=?,dirty=0,destroyed=0,caps_v0=?,adv_v2=?,head_symref=?`,
-        current?.repo_id || repoId || '', Math.max(rowSeq, current?.seq ?? 0), Date.now(), Date.now(), parsed.caps, v2body, parsed.headSymref,
-        Math.max(rowSeq, current?.seq ?? 0), Date.now(), Date.now(), parsed.caps, v2body, parsed.headSymref,
+        `INSERT INTO meta(repo_id,seq,seeded_at,verified_at,dirty,destroyed,caps_v0,v0_service,adv_v2,head_symref)
+         VALUES(?,?,?,?,0,0,?,?,?,?) ON CONFLICT(repo_id) DO UPDATE SET seq=?,seeded_at=?,verified_at=?,dirty=0,destroyed=0,caps_v0=?,v0_service=?,adv_v2=?,head_symref=?`,
+        current?.repo_id || repoId || '', Math.max(rowSeq, current?.seq ?? 0), Date.now(), Date.now(), parsed.caps, parsed.serviceBanner ? 1 : 0, v2body, parsed.headSymref,
+        Math.max(rowSeq, current?.seq ?? 0), Date.now(), Date.now(), parsed.caps, parsed.serviceBanner ? 1 : 0, v2body, parsed.headSymref,
       );
     });
     this.renderCache = null;

@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/platform/tsconfig.json --noEmit && tsc -p packages/container-runner/tsconfig.json --noEmit && tsc -p packages/ops/tsconfig.json --noEmit",
     "lint": "oxlint .",
     "cli": "cd apps/cli && go build ./... && go vet ./... && go test ./...",
+    "test:repo-mirror-git": "node scripts/test/repoMirrorGitDifferential.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

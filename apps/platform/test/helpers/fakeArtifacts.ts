@@ -52,6 +52,8 @@ export class FakeRepo {
   materialized = 0;
   /** When set, receive-pack answers with this HTTP status and applies nothing. */
   receivePackStatus: number | null = null;
+  /** Replaces fake Git wire responses with responses from an external Git fixture. */
+  gitRemoteHandler: ((url: URL, request: Request) => Response | Promise<Response>) | null = null;
   /**
    * Awaited at a call, to interleave other work deterministically: before
    * readTree/readBlob/readCommit, inside a token mint (`createToken:<scope>`)
@@ -367,6 +369,7 @@ export function installFakeGitRemote(): void {
         target.gitCalls.push(`info-refs:${kind}`);
       }
       await target.hook?.(`infoRefs:${req.headers.get('git-protocol') === 'version=2' ? 'v2' : 'v0'}`);
+      if (target.gitRemoteHandler) return target.gitRemoteHandler(url, req);
       return infoRefsResponse(target, service, req.headers.get('git-protocol') === 'version=2');
     }
     const rp = /^\/git\/default\/(.+)\.git\/git-receive-pack$/.exec(url.pathname);
@@ -380,6 +383,7 @@ export function installFakeGitRemote(): void {
     if (!repo || req.headers.get('git-protocol') !== 'version=2') return new Response('bad', { status: 400 });
     lsRefsCalls.push(m![1]!);
     repo.gitCalls.push('ls-refs');
+    if (repo.gitRemoteHandler) return repo.gitRemoteHandler(url, req);
     const res = lsRefsResponse(repo, new Uint8Array(await req.arrayBuffer()));
     await repo.hook?.('lsRefs');
     return res;

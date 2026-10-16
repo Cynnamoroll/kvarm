@@ -342,6 +342,7 @@ describe('git-path cost baseline', () => {
       }
     }
     expect(rows.every((row) => row.status === 200)).toBe(true);
+    expect(rows.every((row) => row.do === (String(row.label).endsWith('cold') ? 1 : 0))).toBe(true);
     expect(rows
       .filter((row) => !String(row.label).endsWith('v0 cold'))
       .every((row) => row.art === 0 && row.upstream === 0)).toBe(true);
@@ -351,7 +352,7 @@ describe('git-path cost baseline', () => {
           "art": 0,
           "cache": "miss",
           "d1": 1,
-          "do": 0,
+          "do": 1,
           "label": "public v0 cold",
           "q": 0,
           "r2a": 0,
@@ -381,7 +382,7 @@ describe('git-path cost baseline', () => {
           "art": 0,
           "cache": "miss",
           "d1": 1,
-          "do": 0,
+          "do": 1,
           "label": "public v2 cold",
           "q": 0,
           "r2a": 0,
@@ -411,7 +412,7 @@ describe('git-path cost baseline', () => {
           "art": 0,
           "cache": "miss",
           "d1": 1,
-          "do": 0,
+          "do": 1,
           "label": "public ls-refs cold",
           "q": 0,
           "r2a": 0,
@@ -441,7 +442,7 @@ describe('git-path cost baseline', () => {
           "art": 0,
           "cache": "miss",
           "d1": 1,
-          "do": 0,
+          "do": 1,
           "label": "private v0 cold",
           "q": 0,
           "r2a": 0,
@@ -471,7 +472,7 @@ describe('git-path cost baseline', () => {
           "art": 0,
           "cache": "miss",
           "d1": 1,
-          "do": 0,
+          "do": 1,
           "label": "private v2 cold",
           "q": 0,
           "r2a": 0,
@@ -501,7 +502,7 @@ describe('git-path cost baseline', () => {
           "art": 0,
           "cache": "miss",
           "d1": 1,
-          "do": 0,
+          "do": 1,
           "label": "private ls-refs cold",
           "q": 0,
           "r2a": 0,

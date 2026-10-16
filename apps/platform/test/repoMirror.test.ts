@@ -97,6 +97,54 @@ describe('RepoMirror', () => {
     expect(destroyed).toBeNull();
   });
 
+  it('reseeds when a same-sequence apply proves the seeded advertisement was stale', async () => {
+    const name = `lagging-${crypto.randomUUID().slice(0, 8)}`;
+    const { id, repo, main } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });
+    const artifactsName = `${OWNER}--${name}`;
+    const remote = `https://artifacts.invalid/git/default/${artifactsName}.git`;
+    const next = '1'.repeat(40);
+    const stale = await withFakeArtifacts(id, async (mirror) => {
+      const beforeSeed = infoRefsCalls.length;
+      const result = await mirror.read(7, artifactsName, remote, { kind: 'v0' }, id);
+      expect(infoRefsCalls.length - beforeSeed).toBe(2);
+      return result;
+    });
+    expect(new TextDecoder().decode(stale!.bytes)).toContain(main);
+
+    repo.refs.set('refs/heads/main', next);
+    const beforeReseed = infoRefsCalls.length;
+    const current = await withFakeArtifacts(id, async (mirror) => {
+      await mirror.apply(7, [{ ref: 'refs/heads/main', oldOid: main, newOid: next }], id);
+      return mirror.read(7, artifactsName, remote, { kind: 'v0' }, id);
+    });
+    expect(infoRefsCalls.length - beforeReseed).toBe(2);
+    expect(new TextDecoder().decode(current!.bytes)).toContain(next);
+    expect(new TextDecoder().decode(current!.bytes)).not.toContain(main);
+  });
+
+  it('keeps a consistent same-sequence apply clean without reseeding', async () => {
+    const name = `late-apply-${crypto.randomUUID().slice(0, 8)}`;
+    const { id, repo, main } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });
+    const artifactsName = `${OWNER}--${name}`;
+    const remote = `https://artifacts.invalid/git/default/${artifactsName}.git`;
+    const next = '2'.repeat(40);
+    repo.refs.set('refs/heads/main', next);
+
+    const beforeSeed = infoRefsCalls.length;
+    const seeded = await withFakeArtifacts(id, async (mirror) =>
+      mirror.read(7, artifactsName, remote, { kind: 'v0' }, id));
+    expect(infoRefsCalls.length - beforeSeed).toBe(2);
+    expect(new TextDecoder().decode(seeded!.bytes)).toContain(next);
+
+    const beforeApply = infoRefsCalls.length;
+    const afterApply = await withFakeArtifacts(id, async (mirror) => {
+      await mirror.apply(7, [{ ref: 'refs/heads/main', oldOid: main, newOid: next }], id);
+      return mirror.read(7, artifactsName, remote, { kind: 'v0' }, id);
+    });
+    expect(infoRefsCalls).toHaveLength(beforeApply);
+    expect(new TextDecoder().decode(afterApply!.bytes)).toContain(next);
+  });
+
   it('discards a seed overlapped by an apply and never resurrects after destroy', async () => {
     const name = `race-${crypto.randomUUID().slice(0, 8)}`;
     const { id, repo, main } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });
