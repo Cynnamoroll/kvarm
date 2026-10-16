@@ -7,6 +7,10 @@ import {
   UploadPackResponseValidator,
 } from '../../apps/platform/src/git/packCache';
 import { lockstepTee } from '../../apps/platform/src/git/lockstepTee';
+import {
+  artifactsSidebandAllResponseBase64,
+  artifactsWithoutSidebandAllResponseBase64,
+} from '../../apps/platform/test/gitPackCacheResponse.fixture';
 
 const OID_A = 'a'.repeat(40);
 const OID_B = 'b'.repeat(40);
@@ -37,6 +41,10 @@ async function readBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+function fromBase64(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 }
 
 describe('upload-pack request cache classification', () => {
@@ -81,6 +89,14 @@ describe('upload-pack request cache classification', () => {
     ));
 
     expect(request.cacheable).toBe(true);
+  });
+
+  it('records sideband-all in the request classification', () => {
+    const withSideband = classifyUploadPackRequest(v2Request([`want ${OID_A}\n`, 'sideband-all\n', 'done\n']));
+    const withoutSideband = classifyUploadPackRequest(v2Request([`want ${OID_A}\n`, 'done\n']));
+
+    expect(withSideband.sidebandAll).toBe(true);
+    expect(withoutSideband.sidebandAll).toBe(false);
   });
 
   it('keeps include-tag in the normalized key and scopes keys by ref_seq', async () => {
@@ -149,6 +165,57 @@ describe('upload-pack response completeness', () => {
     expect(validator.finish()).toBe(true);
   });
 
+  it('validates captured Artifacts responses with and without sideband-all', () => {
+    const sidebandAll = new UploadPackResponseValidator('v2', true);
+    const sidebandBytes = fromBase64(artifactsSidebandAllResponseBase64);
+    for (let offset = 0; offset < sidebandBytes.length; offset += 7) {
+      sidebandAll.push(sidebandBytes.subarray(offset, Math.min(offset + 7, sidebandBytes.length)));
+    }
+
+    const withoutSidebandAll = new UploadPackResponseValidator('v2', false);
+    withoutSidebandAll.push(fromBase64(artifactsWithoutSidebandAllResponseBase64));
+
+    expect(sidebandAll.finish()).toBe(true);
+    expect(withoutSidebandAll.finish()).toBe(true);
+  });
+
+  it('requires sideband framing and rejects error bands and band-1 ERR payloads', () => {
+    const encoder = new TextEncoder();
+    const sidebandPacket = (band: number, payload: string) => pktLine(concat(Uint8Array.of(band), encoder.encode(payload)));
+    const invalidResponses = [
+      concat(sidebandPacket(3, 'fatal error\n'), FLUSH_PKT),
+      concat(sidebandPacket(1, 'ERR not found\n'), FLUSH_PKT),
+      concat(pktLine('packfile\n'), sidebandPacket(1, 'PACK'), FLUSH_PKT),
+      concat(sidebandPacket(1, 'packfile\n'), pktLine('PACK'), FLUSH_PKT),
+    ];
+    const valid = new UploadPackResponseValidator('v2', true);
+    valid.push(concat(
+      sidebandPacket(1, 'keepalive\n'),
+      pktLine(Uint8Array.of(1)),
+      sidebandPacket(2, 'progress\n'),
+      sidebandPacket(1, 'packfile\n'),
+      sidebandPacket(1, 'PACK'),
+      FLUSH_PKT,
+    ));
+
+    expect(valid.finish()).toBe(true);
+    for (const response of invalidResponses) {
+      const validator = new UploadPackResponseValidator('v2', true);
+      validator.push(response);
+      expect(validator.finish()).toBe(false);
+    }
+    const withDelimiter = new UploadPackResponseValidator('v2', true);
+    withDelimiter.push(concat(
+      sidebandPacket(1, 'shallow-info\n'),
+      sidebandPacket(1, `shallow ${OID_A}\n`),
+      DELIM_PKT,
+      sidebandPacket(1, 'packfile\n'),
+      sidebandPacket(1, 'PACK'),
+      FLUSH_PKT,
+    ));
+    expect(withDelimiter.finish()).toBe(true);
+  });
+
   it('rejects ERR responses, missing final flushes, and truncated packets', () => {
     const errorResponse = new UploadPackResponseValidator('v2');
     errorResponse.push(pktLine('ERR not found\n'));
@@ -182,16 +249,18 @@ describe('lockstep upload-pack stream tee', () => {
     const [fast, slow] = lockstepTee(source, 2);
     const fastReader = fast.getReader();
     const slowReader = slow.getReader();
-    const firstFast = await fastReader.read();
+    const firstFastPromise = fastReader.read();
+    const firstSlowPromise = slowReader.read();
+    const [firstFast, firstSlow] = await Promise.all([firstFastPromise, firstSlowPromise]);
     expect(firstFast.done).toBe(false);
+    expect(firstSlow.done).toBe(false);
     expect(pulls).toBe(1);
 
     const nextFast = fastReader.read();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(pulls).toBe(1);
 
-    const firstSlow = await slowReader.read();
-    expect(firstSlow.done).toBe(false);
+    const nextSlow = slowReader.read();
     let fastChunks = 1;
     let slowChunks = 1;
     const fastDrain = (async () => {
@@ -202,7 +271,7 @@ describe('lockstep upload-pack stream tee', () => {
       }
     })();
     const slowDrain = (async () => {
-      let result = await slowReader.read();
+      let result = await nextSlow;
       while (!result.done) {
         slowChunks++;
         result = await slowReader.read();
@@ -259,7 +328,7 @@ describe('lockstep upload-pack stream tee', () => {
     const [first, second] = lockstepTee(source, 2);
     const firstReader = first.getReader();
     const secondReader = second.getReader();
-    await firstReader.read();
+    await Promise.all([firstReader.read(), secondReader.read()]);
     await firstReader.cancel();
 
     expect(sourceCancelled).toBe(false);
@@ -281,10 +350,19 @@ describe('lockstep upload-pack stream tee', () => {
     }, { highWaterMark: 0 });
     const [client, store] = lockstepTee(source, 2);
     const storeReader = store.getReader();
-    expect((await storeReader.read()).value).toEqual(sourceBytes[0]);
+    const clientReader = client.getReader();
+    const [storeFirst, clientFirst] = await Promise.all([storeReader.read(), clientReader.read()]);
+    expect(storeFirst.value).toEqual(sourceBytes[0]);
+    expect(clientFirst.value).toEqual(sourceBytes[0]);
     await storeReader.cancel();
 
-    expect(await readBytes(client)).toEqual(concat(...sourceBytes));
+    const received = [clientFirst.value!];
+    for (;;) {
+      const next = await clientReader.read();
+      if (next.done) break;
+      received.push(next.value);
+    }
+    expect(concat(...received)).toEqual(concat(...sourceBytes));
   });
 
   it('keeps client bytes intact when the store branch errors', async () => {
@@ -307,11 +385,13 @@ describe('lockstep upload-pack stream tee', () => {
       },
     }));
     const clientReader = client.getReader();
-    const firstClient = await clientReader.read();
-    expect(firstClient.done).toBe(false);
-    const secondClient = clientReader.read();
     const storeReader = failingStore.getReader();
-    expect((await storeReader.read()).value).toEqual(sourceBytes[0]);
+    const firstClientPromise = clientReader.read();
+    const firstStorePromise = storeReader.read();
+    const [firstClient, firstStore] = await Promise.all([firstClientPromise, firstStorePromise]);
+    expect(firstClient.done).toBe(false);
+    expect(firstStore.value).toEqual(sourceBytes[0]);
+    const secondClient = clientReader.read();
     await expect(storeReader.read()).rejects.toThrow('simulated R2 write failure');
     const second = await secondClient;
     expect(second.done).toBe(false);
@@ -342,5 +422,93 @@ describe('lockstep upload-pack stream tee', () => {
 
     expect(leftBytes).toEqual(concat(...sourceBytes));
     expect(rightBytes).toEqual(leftBytes);
+  });
+
+  it('lets the client finish while a store branch is paused below its lag limit', async () => {
+    const sourceBytes = [1, 2, 3, 4].map((value) => Uint8Array.of(value));
+    let index = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index === sourceBytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(sourceBytes[index++]!);
+      },
+    }, { highWaterMark: 0 });
+    const [client, store] = lockstepTee(source, 2, [{}, { maxLagBytes: 8 }]);
+
+    expect(await readBytes(client)).toEqual(concat(...sourceBytes));
+    expect(await readBytes(store)).toEqual(concat(...sourceBytes));
+  });
+
+  it('drops a store branch over its lag limit without changing client bytes', async () => {
+    const sourceBytes = [Uint8Array.of(1, 2), Uint8Array.of(3, 4), Uint8Array.of(5, 6)];
+    let index = 0;
+    let pulls = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        if (index === sourceBytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(sourceBytes[index++]!);
+      },
+    }, { highWaterMark: 0 });
+    const [client, store] = lockstepTee(source, 2, [{}, { maxLagBytes: 3 }]);
+    const storeReader = store.getReader();
+    let pullsAtDrop = 0;
+    const storeDropped = storeReader.closed.then(
+      () => false,
+      () => {
+        pullsAtDrop = pulls;
+        return true;
+      },
+    );
+
+    expect(await readBytes(client)).toEqual(concat(...sourceBytes));
+    expect(await storeDropped).toBe(true);
+    expect(pullsAtDrop).toBe(2);
+  });
+
+  it('bounds a stalled store queue to its lag limit plus one source chunk', async () => {
+    const chunkSize = 1024 * 1024;
+    const maxLagBytes = 2 * chunkSize;
+    let pulls = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulls === 64) {
+          controller.close();
+          return;
+        }
+        const chunk = new Uint8Array(chunkSize);
+        chunk[0] = pulls++;
+        controller.enqueue(chunk);
+      },
+    }, { highWaterMark: 0 });
+    const [client, store] = lockstepTee(source, 2, [{}, { maxLagBytes }]);
+    const storeReader = store.getReader();
+    let pullsAtDrop = 0;
+    const storeDropped = storeReader.closed.then(
+      () => false,
+      () => {
+        pullsAtDrop = pulls;
+        return true;
+      },
+    );
+    const reader = client.getReader();
+    let clientBytes = 0;
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      clientBytes += next.value.byteLength;
+    }
+
+    expect(await storeDropped).toBe(true);
+    expect(pullsAtDrop * chunkSize).toBe(maxLagBytes + chunkSize);
+    expect(pullsAtDrop * chunkSize).toBeLessThanOrEqual(maxLagBytes + chunkSize);
+    expect(clientBytes).toBe(64 * chunkSize);
+    expect(pulls).toBe(64);
   });
 });

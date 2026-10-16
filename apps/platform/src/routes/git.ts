@@ -32,7 +32,7 @@ import { agentReservedRefDenial, directHumanPushDenial, directPushDenial, INVALI
 import { concat, isSafeRefName, sha256Hex, type RefCommand } from '@kvarm/gitops';
 import { recordConfirmedPush, relayReceivePackReply, repoViewGeneration } from '../services/pushFreshness';
 import { classifyUploadPackRequest, derivePackCacheKey, derivePackCacheSlotHash, type PackProtocol } from '../git/packCache';
-import { lockstepTee } from '../git/lockstepTee';
+import { lockstepTee, UPLOAD_PACK_CACHE_MAX_LAG_BYTES } from '../git/lockstepTee';
 import { lookupUploadPackCache, storeUploadPackResponse, type UploadPackCacheAddress } from '../services/uploadPackCache';
 import { parseLsRefsRequest } from '../do/repoMirror';
 import { recordPushAudit } from '../services/audit';
@@ -432,6 +432,7 @@ export async function handleGitRequest(
           refSeq,
           r2Eligible: classification.r2Eligible,
           protocol,
+          sidebandAll: classification.sidebandAll,
         };
         const cached = await lookupUploadPackCache(env, c.executionCtx, address);
         if (cached) {
@@ -642,7 +643,10 @@ export async function handleGitRequest(
   if (packCacheAddress && upstreamRes.status === 200 && upstreamRes.body) {
     const contentType = upstreamRes.headers.get('content-type');
     if (contentType) {
-      const [client, stored] = lockstepTee(upstreamRes.body, 2);
+      const [client, stored] = lockstepTee(upstreamRes.body, 2, [
+        {},
+        { maxLagBytes: UPLOAD_PACK_CACHE_MAX_LAG_BYTES },
+      ]);
       c.executionCtx.waitUntil(
         storeUploadPackResponse(env, packCacheAddress, contentType, stored).catch(() => undefined),
       );

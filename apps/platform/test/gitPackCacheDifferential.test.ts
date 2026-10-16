@@ -36,6 +36,7 @@ describe('upload-pack cache against system Git fixtures', () => {
       const request = bytes(item.request);
       const classification = classifyUploadPackRequest(request, 'v2');
       expect(classification.cacheable, item.name).toBe(true);
+      expect(classification.sidebandAll, item.name).toBe(true);
       const path = `/${OWNER}/${repoName}.git/git-upload-pack`;
       const req = () => new Request(`${ORIGIN}${path}`, {
         method: 'POST',

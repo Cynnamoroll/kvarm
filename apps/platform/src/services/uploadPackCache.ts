@@ -1,5 +1,5 @@
 import { Effect } from 'effect';
-import { lockstepTee } from '../git/lockstepTee';
+import { lockstepTee, UPLOAD_PACK_CACHE_MAX_LAG_BYTES } from '../git/lockstepTee';
 import { UploadPackResponseValidator, type PackProtocol } from '../git/packCache';
 
 const CACHE_TTL_SECONDS = 3600;
@@ -13,6 +13,7 @@ export interface UploadPackCacheAddress {
   refSeq: number;
   r2Eligible: boolean;
   protocol: PackProtocol;
+  sidebandAll: boolean;
 }
 
 export interface UploadPackCacheHit {
@@ -65,7 +66,10 @@ const lookupEffect = Effect.fnUntraced(function* (
   }
 
   const contentType = object.customMetadata.contentType;
-  const [client, backfill] = lockstepTee(object.body, 2);
+  const [client, backfill] = lockstepTee(object.body, 2, [
+    {},
+    { maxLagBytes: UPLOAD_PACK_CACHE_MAX_LAG_BYTES },
+  ]);
   yield* Effect.sync(() => {
     const response = new Response(backfill, { status: 200, headers: cacheHeaders(contentType) });
     ctx.waitUntil(caches.default.put(address.cacheKey, response).catch(() => undefined));
@@ -87,8 +91,12 @@ export function lookupUploadPackCache(
   return Effect.runPromise(lookupEffect(env, ctx, address));
 }
 
-function validateStream(source: ReadableStream<Uint8Array>, protocol: PackProtocol): ReadableStream<Uint8Array> {
-  const validator = new UploadPackResponseValidator(protocol);
+function validateStream(
+  source: ReadableStream<Uint8Array>,
+  protocol: PackProtocol,
+  sidebandAll: boolean,
+): ReadableStream<Uint8Array> {
+  const validator = new UploadPackResponseValidator(protocol, sidebandAll);
   return source.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       validator.push(chunk);
@@ -194,8 +202,13 @@ const storeEffect = Effect.fnUntraced(function* (
   contentType: string,
   source: ReadableStream<Uint8Array>,
 ): Effect.fn.Return<void, never> {
-  const validated = validateStream(source, address.protocol);
-  const [cacheBody, r2Body] = address.r2Eligible ? lockstepTee(validated, 2) : [validated, null];
+  const validated = validateStream(source, address.protocol, address.sidebandAll);
+  const [cacheBody, r2Body] = address.r2Eligible
+    ? lockstepTee(validated, 2, [
+        { maxLagBytes: UPLOAD_PACK_CACHE_MAX_LAG_BYTES },
+        { maxLagBytes: UPLOAD_PACK_CACHE_MAX_LAG_BYTES },
+      ])
+    : [validated, null];
   const tasks: Effect.Effect<void, never>[] = [Effect.promise(() => putCacheApi(address, contentType, cacheBody))];
   if (r2Body) {
     tasks.push(Effect.promise(() => writeR2(env, address, contentType, r2Body).catch(() => undefined)));

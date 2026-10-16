@@ -7,9 +7,12 @@ export interface UploadPackClassification {
   normalized: string | null;
   hasHaves: boolean;
   r2Eligible: boolean;
+  sidebandAll: boolean;
 }
 
 const OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const PACKFILE_SECTION_LINE = new TextEncoder().encode('packfile\n');
+const ERR_PREFIX = new TextEncoder().encode('ERR ');
 const V0_CAPABILITIES = new Set([
   'allow-reachable-sha1-in-want',
   'allow-tip-sha1-in-want',
@@ -144,12 +147,13 @@ function normalizeV2(bytes: Uint8Array): UploadPackClassification {
     }
   }
   if (done !== 1 || wants.length === 0) return uncacheable();
+  const sidebandAll = otherArgs.includes('sideband-all');
   const normalized = JSON.stringify({
     protocol: 'v2',
     headers: normalizedHeaders,
     args: [...sortUnique(wants).map((oid) => `want ${oid}`), ...sortUnique(haves).map((oid) => `have ${oid}`), ...sortUnique(shallows).map((oid) => `shallow ${oid}`), ...otherArgs],
   });
-  return { cacheable: true, normalized, hasHaves: haves.length > 0, r2Eligible: haves.length === 0 };
+  return { cacheable: true, normalized, hasHaves: haves.length > 0, r2Eligible: haves.length === 0, sidebandAll };
 }
 
 function normalizeV0(bytes: Uint8Array): UploadPackClassification {
@@ -223,11 +227,11 @@ function normalizeV0(bytes: Uint8Array): UploadPackClassification {
   });
   const normalized = JSON.stringify({ protocol: 'v0', capabilities, sections: normalizedSections });
   const hasHaves = sections.some((section) => section.some((line) => line.startsWith('have ')));
-  return { cacheable: true, normalized, hasHaves, r2Eligible: !hasHaves };
+  return { cacheable: true, normalized, hasHaves, r2Eligible: !hasHaves, sidebandAll: false };
 }
 
 function uncacheable(): UploadPackClassification {
-  return { cacheable: false, normalized: null, hasHaves: false, r2Eligible: false };
+  return { cacheable: false, normalized: null, hasHaves: false, r2Eligible: false, sidebandAll: false };
 }
 
 export function classifyUploadPackRequest(bytes: Uint8Array, protocol: PackProtocol = 'v2'): UploadPackClassification {
@@ -281,7 +285,7 @@ export class UploadPackResponseValidator {
   private sawPackfile = false;
   private sawV0Pack = false;
 
-  constructor(private readonly protocol: PackProtocol) {}
+  constructor(private readonly protocol: PackProtocol, private readonly sidebandAll = false) {}
 
   push(chunk: Uint8Array): void {
     if (!this.valid || chunk.length === 0) return;
@@ -312,18 +316,45 @@ export class UploadPackResponseValidator {
       }
       const packet = packets[0]!;
       this.lastFlush = packet.flush;
+      if (
+        this.protocol === 'v2' &&
+        this.sidebandAll &&
+        packet.data.length === 0 &&
+        !packet.flush &&
+        !packet.delim &&
+        !packet.responseEnd
+      ) {
+        this.valid = false;
+        return;
+      }
       if (packet.data.length > 0) {
-        let line = '';
-        try {
-          line = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(packet.data).replace(/\n$/, '');
-        } catch {
-          line = '';
+        if (this.protocol === 'v2' && this.sidebandAll) {
+          const band = packet.data[0]!;
+          if (band < 1 || band >= 3) {
+            this.valid = false;
+            return;
+          }
+          const payload = packet.data.subarray(1);
+          if (band === 1) {
+            if (payload.length >= ERR_PREFIX.length && ERR_PREFIX.every((value, index) => payload[index] === value)) {
+              this.valid = false;
+              return;
+            }
+            if (sameBytes(payload, PACKFILE_SECTION_LINE)) this.sawPackfile = true;
+          }
+        } else {
+          let line = '';
+          try {
+            line = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(packet.data).replace(/\n$/, '');
+          } catch {
+            line = '';
+          }
+          if (line.startsWith('ERR ') || packet.data[0] === 3) {
+            this.valid = false;
+            return;
+          }
+          if (this.protocol === 'v2' && line === 'packfile') this.sawPackfile = true;
         }
-        if (line.startsWith('ERR ') || packet.data[0] === 3) {
-          this.valid = false;
-          return;
-        }
-        if (this.protocol === 'v2' && line === 'packfile') this.sawPackfile = true;
         if (
           this.protocol === 'v0' &&
           packet.data[0] === 1 &&

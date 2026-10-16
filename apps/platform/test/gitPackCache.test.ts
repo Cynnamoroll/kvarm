@@ -10,6 +10,7 @@ import { lookupUploadPackCache } from '../src/services/uploadPackCache';
 import { ORIGIN, send } from './helpers/http';
 import { fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 import { seedRepoWithCommit, seedUser } from './helpers/seed';
+import { artifactsSidebandAllResponseBase64 } from './gitPackCacheResponse.fixture';
 
 const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts, GIT_MIRROR_MODE: 'off', GIT_PACK_CACHE: 'on' } as Env;
 const OWNER = 'git-pack-cache';
@@ -26,7 +27,7 @@ interface Fixture {
   upstreamCalls: number;
 }
 
-function fetchRequest(oid = OID, have?: string): Uint8Array {
+function fetchRequest(oid = OID, have?: string, sidebandAll = false): Uint8Array {
   return concat(
     pktLine('command=fetch\n'),
     pktLine('agent=git/2.34.1\n'),
@@ -34,9 +35,14 @@ function fetchRequest(oid = OID, have?: string): Uint8Array {
     DELIM_PKT,
     pktLine(`want ${oid}\n`),
     ...(have ? [pktLine(`have ${have}\n`)] : []),
+    ...(sidebandAll ? [pktLine('sideband-all\n')] : []),
     pktLine('done\n'),
     FLUSH_PKT,
   );
+}
+
+function bytesFromBase64(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 }
 
 function packResponse(): Uint8Array {
@@ -102,6 +108,26 @@ describe('upload-pack response cache', () => {
     expect(second.cost.art).toBe(0);
     expect(second.headers.get('content-type')).toBe('application/x-git-upload-pack-result');
     expect(second.bytes).toEqual(first.bytes);
+    expect(fixture.upstreamCalls).toBe(1);
+  });
+
+  it('validates and caches a captured sideband-all Artifacts response', async () => {
+    const fixture = await createFixture('sideband-all');
+    const responseBytes = bytesFromBase64(artifactsSidebandAllResponseBase64);
+    fixture.repo.gitRemoteHandler = () => {
+      fixture.upstreamCalls++;
+      return new Response(responseBytes, {
+        headers: { 'content-type': 'application/x-git-upload-pack-result' },
+      });
+    };
+    const request = fetchRequest(OID, undefined, true);
+
+    const first = await upload(fixture, request);
+    const second = await upload(fixture, request);
+
+    expect(first.cost.cache).toBe('miss');
+    expect(second.cost.cache).toBe('hit');
+    expect(second.bytes).toEqual(responseBytes);
     expect(fixture.upstreamCalls).toBe(1);
   });
 
@@ -270,6 +296,7 @@ describe('upload-pack response cache', () => {
       refSeq: 0,
       r2Eligible: true,
       protocol: 'v2',
+      sidebandAll: classification.sidebandAll,
     });
 
     expect(cached).toBeNull();

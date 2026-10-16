@@ -1,0 +1,5 @@
+export const artifactsSidebandAllResponseBase64 =
+  'MDAwZQFwYWNrZmlsZQowMDI1AVBBQ0sAAAACAAAAAAKdCII72KjqtRCtasdcgjz9PtMeMDAwMA==';
+
+export const artifactsWithoutSidebandAllResponseBase64 =
+  'MDAwZHBhY2tmaWxlCjAwMjUBUEFDSwAAAAIAAAAAAp0IgjvYqOq1EK1qx1yCPP0+0x4wMDAw';

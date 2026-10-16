@@ -40,6 +40,23 @@ function packBody(body) {
   return body.toString('base64');
 }
 
+function hasPktLine(body, expected) {
+  for (let offset = 0; offset + 4 <= body.length;) {
+    const header = body.subarray(offset, offset + 4).toString('ascii');
+    if (!/^[0-9a-f]{4}$/i.test(header)) return false;
+    const length = Number.parseInt(header, 16);
+    if (length < 4) {
+      offset += 4;
+      continue;
+    }
+    if (offset + length > body.length) return false;
+    const line = body.subarray(offset + 4, offset + length).toString('utf8').replace(/\n$/, '');
+    if (line === expected) return true;
+    offset += length;
+  }
+  return false;
+}
+
 const state = { captures: [], replay: false, replayResponse: null };
 const server = createServer((request, response) => {
   const chunks = [];
@@ -88,6 +105,7 @@ const server = createServer((request, response) => {
 try {
   git(['clone', '--bare', '--no-hardlinks', source, bare], { stdio: 'ignore' });
   git(['--git-dir', bare, 'config', 'uploadpack.allowfilter', 'true']);
+  git(['--git-dir', bare, 'config', 'uploadpack.allowSidebandAll', 'true']);
   await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Git fixture server failed to bind');
@@ -102,6 +120,9 @@ try {
     await gitAsync(['-c', 'protocol.version=2', 'clone', '--quiet', '--no-checkout', ...mode.args, remote, direct]);
     const capture = state.captures.at(-1);
     if (!capture) throw new Error(`System Git did not produce a pack response for ${mode.name}`);
+    if (!hasPktLine(capture.request, 'sideband-all')) {
+      throw new Error(`System Git did not negotiate sideband-all for ${mode.name}`);
+    }
     fixture.cases.push({
       name: mode.name,
       request: packBody(capture.request),
