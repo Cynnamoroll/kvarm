@@ -25,11 +25,13 @@ if ((action === 'subscribe' || action === 'unsubscribe') && !values.repo) {
 }
 
 const configFile = join(platform, `wrangler.bench-${values.id}.json`);
+const patFile = join(platform, `.env.bench-${values.id}`);
 let deployOutput = '';
-const wrangler = async (args) => {
+const wrangler = async (args, { input } = {}) => {
   const result = spawnSync(process.execPath, [WRANGLER_BIN, ...args], {
     cwd: platform,
     env: process.env,
+    ...(input === undefined ? {} : { input }),
     encoding: 'utf8',
   });
   if (args[0] === 'deploy' && result.status === 0) deployOutput = result.stdout;
@@ -52,6 +54,23 @@ try {
       await writeFile(configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
     },
     removeConfig: async () => rm(configFile, { force: true }),
+    patFile,
+    mintPat: async (databaseId, tokenFile) => {
+      const result = spawnSync(process.execPath, [
+        join(root, 'scripts/mint-pat.mjs'),
+        '--login', `bench-${values.id}`,
+        '--scopes', 'read,write,api,ci',
+        '--name', `bench-${values.id}`,
+        '--token-file', tokenFile,
+        '--key', 'KVARM_PAT',
+      ], {
+        cwd: root,
+        env: { ...process.env, KVARM_D1_DATABASE_ID: databaseId },
+        encoding: 'utf8',
+      });
+      if (result.status !== 0) throw new Error(`mint-pat failed (exit ${result.status ?? 1})`);
+    },
+    removePatFile: async () => rm(patFile, { force: true }),
   });
   if (deployOutput) console.log(deployOutput.trim());
   console.log(JSON.stringify(result, null, 2));

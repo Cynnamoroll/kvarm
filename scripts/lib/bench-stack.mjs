@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { parseQueueList, parseR2BucketList } from './bootstrap.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -104,6 +105,10 @@ export function benchmarkConfig(base, resources, databaseId = '00000000-0000-000
   return config;
 }
 
+export function assertArtifactsNamespace(namespace, resources) {
+  if (namespace !== resources.namespace) throw new Error('refusing Artifacts mutation outside the benchmark namespace');
+}
+
 const namedArg = (args, name) => args[args.indexOf(name) + 1];
 const ensureName = (name, resources) => {
   if (typeof name !== 'string' || !name.startsWith(`${resources.prefix}-`)) {
@@ -116,8 +121,8 @@ function assertMutation(args, resources, config) {
   if (args[0] === 'r2' && args[1] === 'bucket' && ['create', 'delete'].includes(args[2])) ensureName(args[3], resources);
   if (args[0] === 'queues' && ['create', 'delete'].includes(args[1])) ensureName(args[2], resources);
   if (args[0] === 'artifacts' && args[1] === 'repos' && ['create', 'delete'].includes(args[2])) {
-    ensureName(args[3], resources);
-    if (namedArg(args, '--namespace') !== resources.namespace) throw new Error('refusing Artifacts mutation outside the benchmark namespace');
+    if (args[2] === 'create') ensureName(args[3], resources);
+    assertArtifactsNamespace(namedArg(args, '--namespace'), resources);
   }
   if (args[0] === 'queues' && args[1] === 'subscription' && args[2] === 'create') {
     ensureName(args[3], resources);
@@ -125,7 +130,13 @@ function assertMutation(args, resources, config) {
     if (namedArg(args, '--source-namespace') !== resources.namespace) throw new Error('refusing subscription outside the benchmark namespace');
     ensureName(namedArg(args, '--source-repo-name'), resources);
   }
-  if (args[0] === 'deploy' || args[0] === 'delete') {
+  if (args[0] === 'secret' && args[1] === 'put') {
+    const expectedConfig = `wrangler.bench-${resources.prefix.slice('kvarm-bench-'.length)}.json`;
+    if (!['WORKOS_COOKIE_PASSWORD', 'WEBHOOK_SECRET_KEY'].includes(args[2]) || namedArg(args, '-c') !== expectedConfig) {
+      throw new Error('refusing to set a secret outside the isolated benchmark config');
+    }
+  }
+  if (args[0] === 'deploy' || args[0] === 'delete' || (args[0] === 'secret' && args[1] === 'put')) {
     if (config?.name !== resources.worker || config.d1_databases.find((x) => x.binding === 'DB')?.database_name !== resources.d1 ||
         config.r2_buckets.find((x) => x.binding === 'SNAPSHOTS')?.bucket_name !== resources.bucket ||
         config.queues.producers.find((x) => x.binding === 'EVENTS')?.queue !== resources.queue ||
@@ -135,10 +146,13 @@ function assertMutation(args, resources, config) {
   }
 }
 
-async function call(wrangler, args, resources, config, { optional = false } = {}) {
+async function call(wrangler, args, resources, config, { optional = false, input } = {}) {
   assertMutation(args, resources, config);
-  const result = await wrangler(args);
-  if (result.code !== 0 && !optional) throw new Error(`wrangler ${args.join(' ')} failed (exit ${result.code}): ${(result.stderr || result.stdout).trim().slice(0, 400)}`);
+  const result = await wrangler(args, input === undefined ? {} : { input });
+  if (result.code !== 0 && !optional) {
+    const detail = args[0] === 'secret' && args[1] === 'put' ? '' : `: ${(result.stderr || result.stdout).trim().slice(0, 400)}`;
+    throw new Error(`wrangler ${args.join(' ')} failed (exit ${result.code})${detail}`);
+  }
   return result;
 }
 
@@ -162,6 +176,15 @@ async function inspect(resources, wrangler) {
     call(wrangler, ['r2', 'bucket', 'list'], resources),
     call(wrangler, ['queues', 'list'], resources),
   ]);
+  const workerOutput = await call(wrangler, ['deployments', 'list', '--name', resources.worker, '--json'], resources, null, { optional: true });
+  let worker = false;
+  if (workerOutput.code === 0) {
+    const deployments = parseJson(workerOutput.stdout, null);
+    if (!Array.isArray(deployments)) throw new Error('Wrangler returned an invalid benchmark deployment list');
+    worker = deployments.length > 0;
+  } else if (!/not found|does not exist|404/i.test(`${workerOutput.stderr} ${workerOutput.stdout}`)) {
+    throw new Error(`could not inspect benchmark Worker: ${(workerOutput.stderr || workerOutput.stdout).trim().slice(0, 400)}`);
+  }
   const d1 = d1Rows(d1Output.stdout).find((row) => row.name === resources.d1) ?? null;
   const buckets = parseR2BucketList(bucketOutput.stdout);
   const queues = parseQueueList(queueOutput.stdout);
@@ -173,7 +196,10 @@ async function inspect(resources, wrangler) {
   let repos = [];
   const reposOutput = await call(wrangler, ['artifacts', 'repos', 'list', '--namespace', resources.namespace, '--json'], resources, null, { optional: true });
   if (reposOutput.code === 0) repos = repoRows(reposOutput.stdout);
-  return { d1, buckets, queues, subscriptions, repos, namespaced: reposOutput.code === 0 };
+  else if (!/not found|does not exist|404/i.test(`${reposOutput.stderr} ${reposOutput.stdout}`)) {
+    throw new Error(`could not inspect benchmark Artifacts namespace: ${(reposOutput.stderr || reposOutput.stdout).trim().slice(0, 400)}`);
+  }
+  return { d1, buckets, queues, subscriptions, repos, worker };
 }
 
 function subscriptionName(resources, repo) {
@@ -214,7 +240,7 @@ export async function unsubscribeBenchRepo(resources, repo, wrangler) {
 
 export async function runBenchStack({
   action, id, repo, baseConfig, wrangler, accountId, apiToken, fetchImpl = fetch,
-  writeConfig = async () => {}, removeConfig = async () => {},
+  writeConfig = async () => {}, removeConfig = async () => {}, patFile, mintPat, removePatFile = async () => {},
 }) {
   const resources = benchResources(id);
   const configArg = `wrangler.bench-${id}.json`;
@@ -225,10 +251,11 @@ export async function runBenchStack({
     return {
       resources,
       d1: state.d1,
+      worker: state.worker,
       bucket: state.buckets.includes(resources.bucket),
       queues: Object.fromEntries([resources.queue, resources.deadLetterQueue].map((name) => [name, state.queues.includes(name)])),
       subscriptions: state.subscriptions.filter((s) => s.name?.startsWith(`${resources.prefix}-`)),
-      artifactsRepos: state.repos.filter((r) => r.name?.startsWith(`${resources.prefix}-`)),
+      artifactsRepos: state.repos,
     };
   }
   if (action === 'up') {
@@ -250,7 +277,16 @@ export async function runBenchStack({
     await writeConfig(config);
     await call(wrangler, ['d1', 'migrations', 'apply', 'DB', '--remote', '-c', configArg], resources, config);
     await call(wrangler, ['deploy', '-c', configArg], resources, config);
-    return { resources, config, databaseId };
+    const secrets = [
+      ['WORKOS_COOKIE_PASSWORD', randomBytes(32).toString('base64url')],
+      ['WEBHOOK_SECRET_KEY', randomBytes(32).toString('base64url')],
+    ];
+    for (const [key, value] of secrets) {
+      await call(wrangler, ['secret', 'put', key, '-c', configArg], resources, config, { input: value });
+    }
+    if (!patFile || !mintPat) throw new Error('bench PAT minting is required for up');
+    await mintPat(databaseId, patFile);
+    return { resources, config, databaseId, patFile };
   }
   if (action === 'down') {
     const config = benchmarkConfig(baseConfig, resources, state.d1?.uuid ?? '00000000-0000-0000-0000-000000000000');
@@ -267,8 +303,7 @@ export async function runBenchStack({
       }
     }
     if (state.d1) await call(wrangler, ['delete', '-c', configArg], resources, config);
-    for (const artifact of state.repos.filter((r) => r.name?.startsWith(`${resources.prefix}-`))) {
-      ensureName(artifact.name, resources);
+    for (const artifact of state.repos) {
       await call(wrangler, ['artifacts', 'repos', 'delete', artifact.name, '--namespace', resources.namespace, '--force'], resources);
     }
     for (const name of [resources.queue, resources.deadLetterQueue]) {
@@ -276,8 +311,18 @@ export async function runBenchStack({
     }
     if (state.buckets.includes(resources.bucket)) await call(wrangler, ['r2', 'bucket', 'delete', resources.bucket], resources);
     if (state.d1) await call(wrangler, ['d1', 'delete', resources.d1, '--skip-confirmation'], resources);
+    const status = await runBenchStack({ action: 'status', id, baseConfig, wrangler });
+    const remaining =
+      status.worker ||
+      status.d1 ||
+      status.bucket ||
+      Object.values(status.queues).some(Boolean) ||
+      status.subscriptions.length > 0 ||
+      status.artifactsRepos.length > 0;
+    if (remaining) throw new Error(`benchmark resources remain after down: ${JSON.stringify(status)}`);
     await removeConfig();
-    return { resources, deleted: true };
+    await removePatFile();
+    return { resources, deleted: true, status };
   }
   throw new Error(`unknown bench-stack action: ${action}`);
 }

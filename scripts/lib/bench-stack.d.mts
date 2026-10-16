@@ -18,8 +18,9 @@ export function emptyBenchBucket(options: {
 }): Promise<{ deleted: number }>;
 export function benchResources(id: string): BenchResources;
 export function benchmarkConfig(base: any, resources: BenchResources, databaseId?: string): any;
-export function subscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[]) => Promise<any>): Promise<{ created: boolean; name: string }>;
-export function unsubscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[]) => Promise<any>): Promise<{ deleted: boolean; name: string }>;
+export function assertArtifactsNamespace(namespace: string | undefined, resources: BenchResources): void;
+export function subscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[], options?: { input?: string }) => Promise<any>): Promise<{ created: boolean; name: string }>;
+export function unsubscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[], options?: { input?: string }) => Promise<any>): Promise<{ deleted: boolean; name: string }>;
 export function emptyBenchBucket(options: {
   id: string;
   bucketName: string;
@@ -32,10 +33,13 @@ export function runBenchStack(options: {
   id: string;
   repo?: string;
   baseConfig: any;
-  wrangler: (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
+  wrangler: (args: string[], options?: { input?: string }) => Promise<{ code: number; stdout: string; stderr: string }>;
   accountId?: string;
   apiToken?: string;
   fetchImpl?: typeof fetch;
   writeConfig?: (config: any) => Promise<void>;
   removeConfig?: () => Promise<void>;
+  patFile?: string;
+  mintPat?: (databaseId: string, tokenFile: string) => Promise<void>;
+  removePatFile?: () => Promise<void>;
 }): Promise<any>;

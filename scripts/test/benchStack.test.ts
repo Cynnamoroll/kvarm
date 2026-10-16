@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  assertArtifactsNamespace,
   benchmarkConfig,
   benchResources,
   emptyBenchBucket,
@@ -21,8 +22,9 @@ function fakeWrangler(initial: {
   d1?: Array<{ name: string; uuid: string }>;
   buckets?: string[];
   queues?: string[];
-  repos?: Array<{ name: string }>;
+  repos?: Array<{ name: string; namespace?: string }>;
   subscriptions?: Array<{ id: string; name: string; source: Record<string, string>; events: string[] }>;
+  preserveDeletedRepos?: boolean;
 } = {}) {
   const state = {
     d1: initial.d1 ?? [],
@@ -30,9 +32,12 @@ function fakeWrangler(initial: {
     queues: initial.queues ?? [],
     repos: initial.repos ?? [],
     subscriptions: initial.subscriptions ?? [],
+    secrets: new Map<string, string>(),
+    worker: false,
+    preserveDeletedRepos: initial.preserveDeletedRepos ?? false,
   };
   const calls: string[][] = [];
-  const wrangler = async (args: string[]) => {
+  const wrangler = async (args: string[], options: { input?: string } = {}) => {
     calls.push(args);
     const command = args.join(' ');
     if (command === 'd1 list --json') return { code: 0, stdout: JSON.stringify(state.d1), stderr: '' };
@@ -42,7 +47,19 @@ function fakeWrangler(initial: {
       return { code: 0, stdout: JSON.stringify(state.subscriptions), stderr: '' };
     }
     if (args[0] === 'artifacts' && args[1] === 'repos' && args[2] === 'list') {
-      return { code: 0, stdout: JSON.stringify(state.repos), stderr: '' };
+      const namespace = args[args.indexOf('--namespace') + 1];
+      return {
+        code: 0,
+        stdout: JSON.stringify(state.repos.filter((repo) => (repo.namespace ?? RES.namespace) === namespace)),
+        stderr: '',
+      };
+    }
+    if (args[0] === 'deployments' && args[1] === 'list') {
+      return { code: 0, stdout: JSON.stringify(state.worker ? [{ id: 'deployment' }] : []), stderr: '' };
+    }
+    if (args[0] === 'secret' && args[1] === 'put') {
+      state.secrets.set(args[2]!, options.input ?? '');
+      return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'd1' && args[1] === 'create') {
       state.d1.push({ name: args[2]!, uuid: DATABASE_ID });
@@ -69,11 +86,14 @@ function fakeWrangler(initial: {
       return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'artifacts' && args[1] === 'repos' && args[2] === 'create') {
-      state.repos.push({ name: args[3]! });
+      state.repos.push({ name: args[3]!, namespace: args[args.indexOf('--namespace') + 1] });
       return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'artifacts' && args[1] === 'repos' && args[2] === 'delete') {
-      state.repos = state.repos.filter((repo) => repo.name !== args[3]);
+      const namespace = args[args.indexOf('--namespace') + 1];
+      if (!state.preserveDeletedRepos) {
+        state.repos = state.repos.filter((repo) => repo.name !== args[3] || (repo.namespace ?? RES.namespace) !== namespace);
+      }
       return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'queues' && args[1] === 'subscription' && args[2] === 'create') {
@@ -93,6 +113,8 @@ function fakeWrangler(initial: {
       state.subscriptions = state.subscriptions.filter((s) => s.id !== args[args.indexOf('--id') + 1]);
       return { code: 0, stdout: '', stderr: '' };
     }
+    if (args[0] === 'deploy') state.worker = true;
+    if (args[0] === 'delete') state.worker = false;
     if (args[0] === 'd1' && args[1] === 'migrations' && args[2] === 'apply' || args[0] === 'deploy' || args[0] === 'delete') {
       return { code: 0, stdout: '', stderr: '' };
     }
@@ -102,6 +124,11 @@ function fakeWrangler(initial: {
 }
 
 describe('throwaway benchmark stack', () => {
+  it('rejects an Artifacts namespace other than the exact benchmark namespace', () => {
+    expect(() => assertArtifactsNamespace(RES.namespace, RES)).not.toThrow();
+    expect(() => assertArtifactsNamespace(`${RES.namespace}-other`, RES)).toThrow(/outside the benchmark namespace/);
+  });
+
   it('isolates worker resources and keeps cron triggers while omitting optional container paths', () => {
     const config = benchmarkConfig(BASE, RES, DATABASE_ID);
     expect(config.name).toBe(RES.worker);
@@ -116,23 +143,32 @@ describe('throwaway benchmark stack', () => {
     expect(config.durable_objects.bindings.some((binding: { name: string }) => ['CI_SANDBOX', 'ENV_BUILDER', 'AGENT_SANDBOX'].includes(binding.name))).toBe(false);
   });
 
-  it('up creates isolated resources and deploys a generated config without an account-level subscription', async () => {
+  it('up creates isolated resources, internal secrets, and a bench PAT without an account-level subscription', async () => {
     const fake = fakeWrangler();
     const written: Record<string, any>[] = [];
+    const patCalls: Array<{ databaseId: string; tokenFile: string }> = [];
     const result = await runBenchStack({
       action: 'up',
       id: ID,
       baseConfig: BASE,
       wrangler: fake.wrangler,
       writeConfig: async (config) => { written.push(config); },
+      patFile: `/repo/apps/platform/.env.bench-${ID}`,
+      mintPat: async (databaseId, tokenFile) => { patCalls.push({ databaseId, tokenFile }); },
     });
     expect(result.databaseId).toBe(DATABASE_ID);
     expect(written[0]?.name).toBe(RES.worker);
     expect(fake.state.d1.map((row) => row.name)).toEqual([RES.d1]);
     expect(fake.state.buckets).toEqual([RES.bucket]);
     expect(fake.state.queues).toEqual([RES.queue, RES.deadLetterQueue]);
-    expect(fake.state.repos).toEqual([{ name: RES.seedRepo }]);
+    expect(fake.state.repos).toEqual([{ name: RES.seedRepo, namespace: RES.namespace }]);
     expect(fake.calls.some((args) => args[0] === 'queues' && args[1] === 'subscription' && args[2] === 'create')).toBe(false);
+    expect(fake.state.secrets.get('WORKOS_COOKIE_PASSWORD')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(fake.state.secrets.get('WEBHOOK_SECRET_KEY')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(fake.calls.filter((args) => args[0] === 'secret' && args[1] === 'put')).toHaveLength(2);
+    expect(fake.calls.filter((args) => args[0] === 'secret' && args[1] === 'put').every((args) => args.includes('-c') && args.includes(`wrangler.bench-${ID}.json`))).toBe(true);
+    expect(patCalls).toEqual([{ databaseId: DATABASE_ID, tokenFile: `/repo/apps/platform/.env.bench-${ID}` }]);
+    expect(JSON.stringify(result)).not.toContain(fake.state.secrets.get('WORKOS_COOKIE_PASSWORD'));
     const mutations = fake.calls.filter((args) => ['create', 'delete', 'deploy'].includes(String(args[1] ?? args[0])));
     for (const args of mutations) {
       if (args[0] === 'd1' && args[1] === 'create') expect(String(args[2])).toMatch(new RegExp(`^${RES.prefix}-`));
@@ -142,13 +178,18 @@ describe('throwaway benchmark stack', () => {
     }
   });
 
-  it('creates and removes a per-repo artifacts.repo subscription, then down removes leftovers', async () => {
+  it('creates and removes a per-repo artifacts.repo subscription, then down removes every namespaced repo', async () => {
     const scratchRepo = `${RES.prefix}-storm-123`;
     const fake = fakeWrangler({
       d1: [{ name: RES.d1, uuid: DATABASE_ID }],
       buckets: [RES.bucket],
       queues: [RES.queue, RES.deadLetterQueue],
-      repos: [{ name: RES.seedRepo }, { name: scratchRepo }, { name: 'unrelated-repo' }],
+      repos: [
+        { name: RES.seedRepo },
+        { name: scratchRepo },
+        { name: 'owner--api-created--a1b2c3d4' },
+        { name: 'unrelated-repo', namespace: 'another-namespace' },
+      ],
     });
     const created = await subscribeBenchRepo(RES, scratchRepo, fake.wrangler);
     expect(created.created).toBe(true);
@@ -165,7 +206,9 @@ describe('throwaway benchmark stack', () => {
     });
     const status = await runBenchStack({ action: 'status', id: ID, baseConfig: BASE, wrangler: fake.wrangler });
     expect(status.subscriptions).toHaveLength(1);
+    expect(status.artifactsRepos.map((repo: { name: string }) => repo.name)).toContain('owner--api-created--a1b2c3d4');
     let removedConfig = false;
+    let removedPat = false;
     await runBenchStack({
       action: 'down',
       id: ID,
@@ -175,13 +218,34 @@ describe('throwaway benchmark stack', () => {
       apiToken: 'test-token',
       fetchImpl: async () => new Response(JSON.stringify({ success: true, result: [], result_info: { is_truncated: false } })),
       removeConfig: async () => { removedConfig = true; },
+      removePatFile: async () => { removedPat = true; },
     });
     expect(removedConfig).toBe(true);
+    expect(removedPat).toBe(true);
     expect(fake.state.subscriptions).toEqual([]);
-    expect(fake.state.repos).toEqual([{ name: 'unrelated-repo' }]);
+    expect(fake.state.repos).toEqual([{ name: 'unrelated-repo', namespace: 'another-namespace' }]);
     expect(fake.state.queues).toEqual([]);
     expect(fake.state.buckets).toEqual([]);
     expect(fake.state.d1).toEqual([]);
+    expect(fake.calls.filter((args) => args[0] === 'artifacts' && args[1] === 'repos' && args[2] === 'delete').every((args) => {
+      return args[args.indexOf('--namespace') + 1] === RES.namespace;
+    })).toBe(true);
+    expect(fake.calls.slice(-4).some((args) => args[0] === 'deployments' && args[1] === 'list')).toBe(true);
+  });
+
+  it('fails down when final status still sees a benchmark-prefixed resource or a namespaced repo', async () => {
+    const fake = fakeWrangler({
+      repos: [{ name: 'owner--api-created--a1b2c3d4' }],
+      preserveDeletedRepos: true,
+    });
+    await expect(runBenchStack({
+      action: 'down',
+      id: ID,
+      baseConfig: BASE,
+      wrangler: fake.wrangler,
+      removeConfig: async () => {},
+      removePatFile: async () => {},
+    })).rejects.toThrow(/benchmark resources remain/);
   });
 
   it('paginates R2 listings, encodes keys, and treats delete 404s as gone', async () => {
