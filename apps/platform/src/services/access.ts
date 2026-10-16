@@ -37,7 +37,7 @@ import { agentFromRow, agentTokenSelect, agentTokenStamp, isAgentToken, type Age
 import { PAT_STAMP_INTERVAL_MS } from '../auth/pat';
 import type { RepoRow } from '../db/repos';
 import { branchRulesSelect, ruleFromRow, type BranchRule, type BranchRuleRow } from './branchRules';
-import { preauthAllowed } from '../ratelimit';
+import { preauthAllowed, type RateLimitReason } from '../ratelimit';
 import {
   authorizeRepo,
   isOrgRole,
@@ -75,14 +75,16 @@ export const AGENT_FORBIDDEN: AccessDenied = {
   code: 'AGENT_FORBIDDEN',
 };
 
-export interface AccessDenied {
-  ok: false;
-  status: 401 | 403 | 404 | 429;
-  error: string;
-  code: AccessDenyCode;
-  /** The presented credential itself was rejected (unknown, revoked or expired). */
-  badCredential?: true;
-}
+export type AccessDenied =
+  | { ok: false; status: 429; error: string; code: 'RATE_LIMITED'; rateLimit: RateLimitReason }
+  | {
+      ok: false;
+      status: 401 | 403 | 404;
+      error: string;
+      code: Exclude<AccessDenyCode, 'RATE_LIMITED'>;
+      /** The presented credential itself was rejected (unknown, revoked or expired). */
+      badCredential?: true;
+    };
 
 export type PrincipalResult = { ok: true; pat: PATInfo } | AccessDenied;
 
@@ -132,7 +134,13 @@ const BAD_CREDENTIAL: AccessDenied = {
 
 const NO_ACTOR: AccessDenied = { ok: false, status: 401, error: 'unauthorized', code: 'UNAUTHENTICATED' };
 
-const RATE_LIMITED: AccessDenied = { ok: false, status: 429, error: 'rate limited', code: 'RATE_LIMITED' };
+const rateLimited = (rateLimit: RateLimitReason): AccessDenied => ({
+  ok: false,
+  status: 429,
+  error: 'rate limited',
+  code: 'RATE_LIMITED',
+  rateLimit,
+});
 
 /** Non-api PATs act as anonymous callers on REST and pages; agent tokens on pages. */
 function actorFor(transport: Transport, pat: PATInfo | null | undefined): Actor | null {
@@ -307,7 +315,8 @@ export async function resolvePAT(env: Env, token: string, clientIp: string | nul
   const cachedEntry = await readPatCache(hash, now);
   if (cachedEntry === 'invalid') return BAD_CREDENTIAL;
   const cached = cachedEntry === 'seen' ? undefined : cachedEntry;
-  if (!cachedEntry && !(await preauthAllowed(env, clientIp))) return RATE_LIMITED;
+  const rateLimit = !cachedEntry ? await preauthAllowed(env, clientIp) : null;
+  if (rateLimit) return rateLimited(rateLimit);
   const { pat } = await authoritativeLookup(env, {
     hash,
     kind,
@@ -380,7 +389,8 @@ export async function resolveRepoAccess(env: Env, req: RepoAccessRequest): Promi
   // Agent tokens never resolve from cache ('seen' only skips the preauth throttle).
   const cachedPat = cachedEntry === 'seen' ? undefined : cachedEntry;
 
-  if (hash && !cachedEntry && !(await preauthAllowed(env, req.clientIp))) return RATE_LIMITED;
+  const rateLimit = hash && !cachedEntry ? await preauthAllowed(env, req.clientIp) : null;
+  if (rateLimit) return rateLimited(rateLimit);
 
   // A PAT's owning user never changes, so a cached PAT safely names whose
   // facts to read; the PAT itself is still re-verified in the same batch.

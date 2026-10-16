@@ -7,6 +7,8 @@
  * strict enforcement, and the goal is bounding abuse, not exact quotas.
  */
 
+export type RateLimitReason = 'git-read' | 'git-write' | 'preauth';
+
 async function allowed(limiter: RateLimit | undefined, key: string): Promise<boolean> {
   if (!limiter) return true;
   try {
@@ -18,17 +20,17 @@ async function allowed(limiter: RateLimit | undefined, key: string): Promise<boo
 }
 
 /** Git request budget per identity (PAT id, or client IP for anonymous reads). */
-export function gitRateLimit(env: Env, op: 'read' | 'write', identity: string): Promise<boolean> {
+export async function gitRateLimit(env: Env, op: 'read' | 'write', identity: string): Promise<RateLimitReason | null> {
   const limiter = op === 'write' ? env.WRITE_LIMITER : env.READ_LIMITER;
-  return allowed(limiter, `git:${op}:${identity}`);
+  return (await allowed(limiter, `git:${op}:${identity}`)) ? null : op === 'read' ? 'git-read' : 'git-write';
 }
 
 /**
  * Bounds uncached PAT lookups per client IP so a stream of unknown tokens
  * cannot turn into unbounded D1 reads. Cached tokens never consume it.
  */
-export function preauthAllowed(env: Env, clientIp: string | null): Promise<boolean> {
-  return allowed(env.WRITE_LIMITER, `preauth:${clientIp ?? 'unknown'}`);
+export async function preauthAllowed(env: Env, clientIp: string | null): Promise<RateLimitReason | null> {
+  return (await allowed(env.WRITE_LIMITER, `preauth:${clientIp ?? 'unknown'}`)) ? null : 'preauth';
 }
 
 /** Incident webhook deliveries (services/incidents.ts) per repository and client IP, checked before the webhook lookup. */

@@ -21,10 +21,10 @@ import type { Context } from 'hono';
 import type { RepoRow } from '../db/repos';
 import { parseBasicAuth } from '../auth/pat';
 import { getGitToken } from '../artifacts/tokens';
-import { gitRateLimit } from '../ratelimit';
+import { gitRateLimit, type RateLimitReason } from '../ratelimit';
 import { markCache } from '../cost/meter';
 import { withPrivateCacheControl } from '../cache/scope';
-import { resolveRepoAccess, type AccessDenyCode } from '../services/access';
+import { resolveRepoAccess, type AccessDenied } from '../services/access';
 import { credentialMayUpdateRef, type Actor } from '../services/authz';
 import { gateReceivePack } from '../services/receivePackGate';
 import { WORKSPACE_REF_PREFIX, agentWorkspaceDenial, workspaceOwners, type WorkspaceOwner } from '../services/workspaces';
@@ -46,19 +46,19 @@ function unauthorized(): Response {
   });
 }
 
-function rateLimited(): Response {
+function rateLimited(reason: RateLimitReason): Response {
   return new Response('rate limit exceeded, slow down\n', {
     status: 429,
-    headers: { 'Retry-After': '60' },
+    headers: { 'Retry-After': '60', 'x-kvarm-ratelimit': reason },
   });
 }
 
-function denied(status: 401 | 403 | 404 | 429, code: AccessDenyCode): Response {
-  if (status === 401) return unauthorized();
-  if (status === 429) return rateLimited();
-  if (status === 404) return new Response('repository not found\n', { status: 404 });
+function denied(access: AccessDenied): Response {
+  if (access.status === 401) return unauthorized();
+  if (access.status === 429) return rateLimited(access.rateLimit);
+  if (access.status === 404) return new Response('repository not found\n', { status: 404 });
   return new Response(
-    code === 'INSUFFICIENT_SCOPE' ? 'insufficient token scope\n' : 'permission denied\n',
+    access.code === 'INSUFFICIENT_SCOPE' ? 'insufficient token scope\n' : 'permission denied\n',
     { status: 403 },
   );
 }
@@ -253,7 +253,7 @@ export async function authorizeGitRequest(
     clientIp: request.headers.get('CF-Connecting-IP'),
     branchRules: subpath === 'git-receive-pack',
   });
-  if (!access.ok) return { ok: false, response: denied(access.status, access.code) };
+  if (!access.ok) return { ok: false, response: denied(access) };
   return { ok: true, repo: access.repo, actor: access.actor, op, branchRules: access.branchRules ?? [] };
 }
 
@@ -273,7 +273,8 @@ export async function handleGitRequest(
 
   // Rate limit by PAT id (or client IP for anonymous public reads).
   const identity = actor?.patId ?? `ip:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`;
-  if (!(await gitRateLimit(env, op, identity))) return rateLimited();
+  const rateLimit = await gitRateLimit(env, op, identity);
+  if (rateLimit) return rateLimited(rateLimit);
 
   if (actor?.agent && !agentMethodAllowed(subpath, c.req.method)) {
     return new Response('method not allowed\n', { status: 405 });
