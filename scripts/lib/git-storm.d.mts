@@ -19,7 +19,15 @@ export function createRandom(seed?: number): () => number;
 export function fixtureFiles(fixture: 'small' | 'mixed' | 'large', seed?: number): Array<[string, string]>;
 export function operationSummary(
   samples: Array<{ start?: number; end?: number; ms: number; ok: boolean; status?: number; attempts?: number; message?: string }>,
-  requests: Array<{ op: string; status: number; reqBytes: number; resBytes: number; cost?: Record<string, number> }>,
+  requests: Array<{
+    op: string;
+    status: number;
+    reqBytes: number;
+    resBytes: number;
+    cost?: Record<string, number>;
+    writer: number | null;
+    rateLimit: string | null;
+  }>,
 ): {
   metrics: { latencyMs: { n: number }; giveUps: number };
   errors: Record<string, number>;
@@ -28,5 +36,6 @@ export function operationSummary(
   totalReqBytes: number;
   totalResBytes: number;
   cost: Record<string, { median: Record<string, number | null>; total: Record<string, number> }>;
+  rateLimited: { byLimiter: Record<string, number>; byWriter: Record<string, number> };
 };
 export function opForPath(path: string): string;

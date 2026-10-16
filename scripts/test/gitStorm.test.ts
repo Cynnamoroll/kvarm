@@ -241,19 +241,27 @@ describe('git-storm helpers', () => {
       resBytes: 8,
       cost: { d1: 4 },
       authorization: authHeader,
+      writer: null,
+      rateLimit: null,
     };
     const summary = operationSummary(
       [{ start: 0, end: 10, ms: 10, ok: true }, { start: 20, end: 30, ms: 10, ok: false, status: 0 }],
       [
         request,
-        { op: 'upload-pack', status: 429, reqBytes: 2, resBytes: 0, cost: {} },
+        { op: 'upload-pack', status: 429, reqBytes: 2, resBytes: 0, cost: {}, writer: 0, rateLimit: 'git-write' },
+        { op: 'upload-pack', status: 429, reqBytes: 3, resBytes: 0, cost: {}, writer: 1, rateLimit: 'preauth' },
+        { op: 'upload-pack', status: 429, reqBytes: 1, resBytes: 0, cost: {}, writer: null, rateLimit: null },
       ],
     );
     expect(summary.cost['upload-pack']).toEqual({ median: { d1: 0 }, total: { d1: 4 } });
-    expect(summary.requests).toEqual({ 'upload-pack': 2 });
-    expect(summary.totalReqBytes).toBe(6);
+    expect(summary.requests).toEqual({ 'upload-pack': 4 });
+    expect(summary.totalReqBytes).toBe(10);
     expect(summary.totalResBytes).toBe(8);
-    expect(summary.errors).toEqual({ 0: 1, 429: 1 });
+    expect(summary.errors).toEqual({ 0: 1, 429: 3 });
+    expect(summary.rateLimited).toEqual({
+      byLimiter: { 'git-write': 1, preauth: 1, 'null': 1 },
+      byWriter: { 0: 1, 1: 1, 'null': 1 },
+    });
     expect(summary.metrics.giveUps).toBe(1);
     expect(JSON.stringify(summary)).not.toContain(authHeader);
     expect(JSON.stringify(summary)).not.toContain(token);
@@ -303,6 +311,11 @@ describe('git-storm local smoke', () => {
         expect(JSON.stringify(report)).not.toContain(secret);
         expect(JSON.stringify(report)).not.toContain(Buffer.from(`kvarm:${secret}`).toString('base64'));
       }
+      const requestRows = report.requests as Array<{ writer?: unknown; rateLimit?: unknown }>;
+      expect(requestRows.every((request) =>
+        Object.hasOwn(request, 'writer') && Object.hasOwn(request, 'rateLimit'),
+      )).toBe(true);
+      expect(requestRows.some((request) => Number.isInteger(request.writer))).toBe(true);
       for (const workload of Object.values(report.workloads) as Array<{ metrics: { latencyMs: { n: number } }; errors: Record<string, number> }>) {
         expect(workload.metrics.latencyMs.n).toBeGreaterThan(0);
         expect(Object.values(workload.errors).reduce((a, b) => a + b, 0)).toBe(0);

@@ -150,6 +150,14 @@ export function operationSummary(samples, requests) {
   for (const request of requests) if (request.status < 200 || request.status >= 400) {
     errorBuckets[request.status] = (errorBuckets[request.status] ?? 0) + 1;
   }
+  const rateLimited = { byLimiter: {}, byWriter: {} };
+  for (const request of requests) {
+    if (request.status !== 429) continue;
+    const limiter = request.rateLimit ?? 'null';
+    const writer = request.writer ?? 'null';
+    rateLimited.byLimiter[limiter] = (rateLimited.byLimiter[limiter] ?? 0) + 1;
+    rateLimited.byWriter[writer] = (rateLimited.byWriter[writer] ?? 0) + 1;
+  }
   return {
     metrics: {
       latencyMs: summarize(samples.filter((s) => s.ok).map((s) => s.ms)),
@@ -163,6 +171,7 @@ export function operationSummary(samples, requests) {
     totalReqBytes: requests.reduce((n, r) => n + r.reqBytes, 0),
     totalResBytes: requests.reduce((n, r) => n + r.resBytes, 0),
     cost,
+    rateLimited,
   };
 }
 

@@ -219,6 +219,8 @@ const api = async (path, method = 'GET', body) => {
       resBytes: responseBytes.byteLength,
       cost: costHeader ? parseCost(costHeader) : {},
       retryAfter: response.headers.get('retry-after'),
+      writer: null,
+      rateLimit: response.headers.get('x-kvarm-ratelimit'),
     });
     if (response.status !== 429) return response;
     const retryAfter = response.headers.get('retry-after');
@@ -233,7 +235,7 @@ const api = async (path, method = 'GET', body) => {
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
 };
-const recordRequest = (req, pathname, workload, started) => {
+const recordRequest = (req, pathname, workload, started, writer = null) => {
   if (!requestCeilingExceeded) {
     requestsSeen++;
     if (requestsSeen >= workloadRequestLimit) requestCeilingExceeded = true;
@@ -251,6 +253,8 @@ const recordRequest = (req, pathname, workload, started) => {
       resBytes: row.resBytes,
       cost: typeof headers['x-kvarm-cost'] === 'string' ? parseCost(headers['x-kvarm-cost']) : {},
       retryAfter: headers['retry-after'] ?? null,
+      writer,
+      rateLimit: typeof headers['x-kvarm-ratelimit'] === 'string' ? headers['x-kvarm-ratelimit'] : null,
     });
   };
   const meter = (reply) => {
@@ -338,8 +342,8 @@ const createLocalProxy = async () => {
   const backendPort = localBackend.address().port;
   proxy = createServer((req, res) => {
     const started = performance.now();
-    const { workload, forwardedPath } = routeProxyRequest(req.url);
-    const meter = recordRequest(req, forwardedPath, workload, started);
+    const { workload, writer, forwardedPath } = routeProxyRequest(req.url);
+    const meter = recordRequest(req, forwardedPath, workload, started, writer);
     if (requestCeilingExceeded) { meter.blocked(429); res.writeHead(429, { 'retry-after': '0' }).end(); return; }
     forwardGitRequest(req, res, `http://127.0.0.1:${backendPort}`, {
       path: forwardedPath,
@@ -363,7 +367,7 @@ const startProxy = async () => {
       res.writeHead(401, { 'www-authenticate': 'Basic realm="git-storm"' }).end();
       return;
     }
-    const meter = recordRequest(req, forwardedPath, workload, started);
+    const meter = recordRequest(req, forwardedPath, workload, started, writer);
     if (requestCeilingExceeded) { meter.blocked(429); res.writeHead(429, { 'retry-after': '0' }).end(); return; }
     forwardGitRequest(req, res, base.origin, {
       path: forwardedPath,
