@@ -7,13 +7,17 @@ import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  benchBranch,
   checkGitStormCaps,
+  credentialForWriter,
   fixtureFiles,
   gitAuthorization,
   operationSummary,
   percentile,
+  redactCredentials,
   summarize,
   validateExistingRepoTarget,
+  writerCredentials,
 } from '../lib/git-storm.mjs';
 import { forwardGitRequest } from '../lib/git-storm-proxy.mjs';
 
@@ -126,6 +130,31 @@ describe('git-storm streaming proxy', () => {
 });
 
 describe('git-storm helpers', () => {
+  it('uses workload-specific refs and round-robins writer credentials', () => {
+    const tokens = ['writer-one-secret', 'writer-two-secret'];
+    const credentials = writerCredentials({ KVARM_PATS: `${tokens[0]}\n${tokens[1]}` });
+    expect([0, 1, 2, 3].map((writer) => credentialForWriter(credentials, writer))).toEqual([
+      tokens[0], tokens[1], tokens[0], tokens[1],
+    ]);
+    expect(writerCredentials({ KVARM_PATS: `${tokens[0]}, ${tokens[1]}` })).toEqual(tokens);
+    expect(writerCredentials({ KVARM_PAT: 'fallback-secret' })).toEqual(['fallback-secret']);
+    expect(benchBranch(123, 'push-distinct', 0)).not.toBe(benchBranch(123, 'push-to-visible', 0));
+    expect(benchBranch(123, 'push-contended', 'hot')).toContain('123-push-contended-hot');
+  });
+
+  it('redacts every PAT and its Basic encoding', () => {
+    const tokens = ['writer-one-secret', 'writer-two-secret'];
+    const message = tokens.flatMap((token) => [
+      token,
+      `Basic ${Buffer.from(`kvarm:${token}`).toString('base64')}`,
+    ]).join(' ');
+    const redacted = redactCredentials(message, tokens);
+    for (const token of tokens) {
+      expect(redacted).not.toContain(token);
+      expect(redacted).not.toContain(Buffer.from(`kvarm:${token}`).toString('base64'));
+    }
+  });
+
   it('targets only benchmark repos and the requested clone/fetch workloads', () => {
     const workloads = ['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental'];
     expect(validateExistingRepoTarget({
@@ -214,9 +243,10 @@ describe('git-storm local smoke', () => {
     try {
       const script = fileURLToPath(new URL('../git-storm.mjs', import.meta.url));
       const token = 'git-storm-test-pat';
+      const writerTokens = ['git-storm-writer-one-pat', 'git-storm-writer-two-pat'];
       const child = spawn(process.execPath, [script, '--target', 'local', '--fixture', 'small', '--n', '2', '--writers', '2', '--commits', '2', '--out', out], {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, KVARM_PAT: token },
+        env: { ...process.env, KVARM_PAT: token, KVARM_PATS: writerTokens.join(',') },
       });
       let text = '';
       child.stdout.on('data', (d) => (text += d));
@@ -224,8 +254,13 @@ describe('git-storm local smoke', () => {
       const code = await new Promise((resolve) => child.on('close', resolve));
       expect(code, text).toBe(0);
       const report = JSON.parse(await readFile(out, 'utf8'));
-      expect(text).not.toContain(token);
-      expect(JSON.stringify(report)).not.toContain(token);
+      expect(report.meta.credentials).toBe(2);
+      for (const secret of [token, ...writerTokens]) {
+        expect(text).not.toContain(secret);
+        expect(text).not.toContain(Buffer.from(`kvarm:${secret}`).toString('base64'));
+        expect(JSON.stringify(report)).not.toContain(secret);
+        expect(JSON.stringify(report)).not.toContain(Buffer.from(`kvarm:${secret}`).toString('base64'));
+      }
       for (const workload of Object.values(report.workloads) as Array<{ metrics: { latencyMs: { n: number } }; errors: Record<string, number> }>) {
         expect(workload.metrics.latencyMs.n).toBeGreaterThan(0);
         expect(Object.values(workload.errors).reduce((a, b) => a + b, 0)).toBe(0);

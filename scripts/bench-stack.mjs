@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -15,16 +15,22 @@ const { positionals, values } = parseArgs({
     id: { type: 'string' },
     repo: { type: 'string' },
     'mirror-mode': { type: 'string', default: 'shadow' },
+    pats: { type: 'string', default: '1' },
   },
   allowPositionals: true,
 });
 const action = positionals[0];
 if (!['up', 'down', 'status', 'subscribe', 'unsubscribe'].includes(action ?? '') || !values.id) {
-  console.error('usage: node scripts/bench-stack.mjs up [--mirror-mode off|shadow|on]|down|status --id <id>; subscribe|unsubscribe --id <id> --repo <repo>');
+  console.error('usage: node scripts/bench-stack.mjs up [--mirror-mode off|shadow|on] [--pats <count>]|down|status --id <id>; subscribe|unsubscribe --id <id> --repo <repo>');
   process.exit(2);
 }
 if (!['off', 'shadow', 'on'].includes(values['mirror-mode'] ?? '')) {
   console.error('--mirror-mode must be off, shadow, or on');
+  process.exit(2);
+}
+const pats = Number(values.pats);
+if (!Number.isSafeInteger(pats) || pats < 1 || pats > 50) {
+  console.error('--pats must be an integer between 1 and 50');
   process.exit(2);
 }
 if ((action === 'subscribe' || action === 'unsubscribe') && !values.repo) {
@@ -64,14 +70,23 @@ try {
     },
     removeConfig: async () => rm(configFile, { force: true }),
     patFile,
-    mintPat: async (databaseId, tokenFile) => {
+    pats,
+    readPatFile: async () => readFile(patFile, 'utf8').catch((error) => {
+      if (error.code === 'ENOENT') return '';
+      throw error;
+    }),
+    writePatFile: async (text) => {
+      await writeFile(patFile, text, { mode: 0o600 });
+      await chmod(patFile, 0o600);
+    },
+    mintPat: async (databaseId, tokenFile, key) => {
       const result = spawnSync(process.execPath, [
         join(root, 'scripts/mint-pat.mjs'),
         '--login', `bench-${values.id}`,
         '--scopes', 'read,write,api,ci',
-        '--name', `bench-${values.id}`,
+        '--name', key === 'KVARM_PAT' ? `bench-${values.id}` : `bench-${values.id}-${key.slice('KVARM_PAT_'.length)}`,
         '--token-file', tokenFile,
-        '--key', 'KVARM_PAT',
+        '--key', key,
       ], {
         cwd: root,
         env: { ...process.env, KVARM_D1_DATABASE_ID: databaseId },

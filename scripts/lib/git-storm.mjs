@@ -39,6 +39,31 @@ export function gitAuthorization(mode, token, username) {
   return `Basic ${Buffer.from(`${username}:${token}`).toString('base64')}`;
 }
 
+// Write rate limits are keyed per credential, so measuring server write capacity needs one
+// credential per writer; KVARM_PATS carries them, KVARM_PAT remains the single-credential form.
+export function writerCredentials({ KVARM_PATS, KVARM_PAT } = {}) {
+  const list = String(KVARM_PATS ?? '').split(/[\n,]/).map((value) => value.trim()).filter(Boolean);
+  if (list.length) return list;
+  return KVARM_PAT ? [KVARM_PAT] : [];
+}
+
+export function credentialForWriter(credentials, writer) {
+  if (!credentials.length) return null;
+  return credentials[writer % credentials.length] ?? null;
+}
+
+export function redactCredentials(text, tokens) {
+  const secrets = [...new Set(tokens.filter(Boolean))].flatMap((token) => [
+    token,
+    Buffer.from(`kvarm:${token}`).toString('base64'),
+  ]);
+  return secrets.reduce((safe, secret) => safe.replaceAll(secret, '[REDACTED]'), String(text));
+}
+
+export function benchBranch(ts, workload, suffix) {
+  return `refs/heads/bench/${ts}-${workload}-${suffix}`;
+}
+
 export function validateExistingRepoTarget({ benchId, repo, workloads }) {
   if (!benchId || !/^[a-z0-9]{4,12}$/.test(benchId)) return '--existing-repo requires a valid --bench-id';
   const repoPrefix = `kvarm-bench-${benchId}-`;

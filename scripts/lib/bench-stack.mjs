@@ -116,6 +116,23 @@ export function assertArtifactsNamespace(namespace, resources) {
   if (namespace !== resources.namespace) throw new Error('refusing Artifacts mutation outside the benchmark namespace');
 }
 
+// Git write limits are keyed per credential, so a benchmark fleet needs one PAT per writer.
+export function patKeys(count) {
+  if (!Number.isSafeInteger(count) || count < 1 || count > 50) throw new Error('--pats must be an integer between 1 and 50');
+  return Array.from({ length: count }, (_, index) => (index === 0 ? 'KVARM_PAT' : `KVARM_PAT_${index + 1}`));
+}
+
+export function withPatList(text, keys) {
+  const values = keys
+    .map((key) => new RegExp(`^${key}=(.*)$`, 'm').exec(text)?.[1]?.trim())
+    .filter((value) => Boolean(value));
+  if (!values.length) return text;
+  const line = `KVARM_PATS=${values.join(',')}`;
+  const existing = /^KVARM_PATS=.*$/m;
+  if (existing.test(text)) return text.replace(existing, line);
+  return `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}${line}\n`;
+}
+
 const namedArg = (args, name) => {
   const index = args.indexOf(name);
   return index < 0 ? undefined : args[index + 1];
@@ -320,6 +337,7 @@ export async function unsubscribeBenchRepo(resources, repo, wrangler) {
 export async function runBenchStack({
   action, id, repo, mirrorMode = 'shadow', baseConfig, wrangler, accountId, apiToken, fetchImpl = fetch,
   writeConfig = async () => {}, removeConfig = async () => {}, patFile, mintPat, removePatFile = async () => {},
+  pats = 1, readPatFile = async () => '', writePatFile = async () => {},
 }) {
   if (action === 'up' && !MIRROR_MODES.has(mirrorMode)) {
     throw new Error('--mirror-mode must be off, shadow, or on');
@@ -372,8 +390,15 @@ export async function runBenchStack({
       await call(wrangler, ['secret', 'put', key, '-c', configArg], resources, config, { input: value });
     }
     if (!patFile || !mintPat) throw new Error('bench PAT minting is required for up');
-    await mintPat(databaseId, patFile);
-    return { resources, config, databaseId, patFile };
+    const keys = patKeys(pats);
+    let patText = await readPatFile();
+    for (const key of keys) {
+      if (new RegExp(`^${key}=`, 'm').test(patText)) continue;
+      await mintPat(databaseId, patFile, key);
+      patText = await readPatFile();
+    }
+    await writePatFile(withPatList(patText, keys));
+    return { resources, config, databaseId, patFile, pats: keys.length };
   }
   if (action === 'down') {
     const config = benchmarkConfig(baseConfig, resources, state.d1?.uuid ?? '00000000-0000-0000-0000-000000000000');

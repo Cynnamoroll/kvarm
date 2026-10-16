@@ -19,6 +19,8 @@ export function emptyBenchBucket(options: {
 export function benchResources(id: string): BenchResources;
 export function benchmarkConfig(base: any, resources: BenchResources, databaseId?: string, mirrorMode?: 'off' | 'shadow' | 'on'): any;
 export function assertArtifactsNamespace(namespace: string | undefined, resources: BenchResources): void;
+export function patKeys(count: number): string[];
+export function withPatList(text: string, keys: readonly string[]): string;
 export function subscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[], options?: { input?: string }) => Promise<any>): Promise<{ created: boolean; name: string }>;
 export function unsubscribeBenchRepo(resources: BenchResources, repo: string, wrangler: (args: string[], options?: { input?: string }) => Promise<any>): Promise<{ deleted: boolean; name: string }>;
 export function emptyBenchBucket(options: {
@@ -41,6 +43,9 @@ export function runBenchStack(options: {
   writeConfig?: (config: any) => Promise<void>;
   removeConfig?: () => Promise<void>;
   patFile?: string;
-  mintPat?: (databaseId: string, tokenFile: string) => Promise<void>;
+  mintPat?: (databaseId: string, tokenFile: string, key: string) => Promise<void>;
   removePatFile?: () => Promise<void>;
+  pats?: number;
+  readPatFile?: () => Promise<string>;
+  writePatFile?: (text: string) => Promise<void>;
 }): Promise<any>;

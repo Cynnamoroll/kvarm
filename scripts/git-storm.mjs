@@ -7,13 +7,17 @@ import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { parseCost } from './lib/fleet.mjs';
 import {
+  benchBranch,
   checkGitStormCaps,
+  credentialForWriter,
   createRandom,
   fixtureFiles,
   gitAuthorization,
   operationSummary,
   opForPath,
+  redactCredentials,
   validateExistingRepoTarget,
+  writerCredentials,
 } from './lib/git-storm.mjs';
 import { forwardGitRequest } from './lib/git-storm-proxy.mjs';
 
@@ -55,6 +59,7 @@ const owner = process.env.KVARM_USER ?? 'admin';
 const existingRepo = args['existing-repo'];
 const repo = existingRepo ?? (args['bench-id'] ? `kvarm-bench-${args['bench-id']}-storm-${ts}` : `bench-storm-${ts}`);
 const outFile = args.out ? resolve(args.out) : resolve(`git-storm-${ts}.json`);
+const configuredWriterTokens = writerCredentials(process.env);
 const allWorkloads = ['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental', 'push-distinct', 'push-contended', ...(!local ? ['push-to-visible'] : [])];
 const requested = args.workloads === 'all' ? allWorkloads : args.workloads.split(',').map((v) => v.trim()).filter(Boolean);
 const workloadRequestLimit = 10_000 - (local ? 0 : 2);
@@ -87,6 +92,9 @@ if (existingRepo && requested.includes('fetch-incremental') && !process.env.KVAR
 if (!local && !existingRepo && !process.env.KVARM_PAT) throw new Error('KVARM_PAT is required for a deployment target');
 // The Git gate authenticates Basic's password; it ignores the username.
 const gitAuth = local ? null : gitAuthorization(args['git-auth'], process.env.KVARM_PAT, 'kvarm');
+const writerTokens = local ? [] : configuredWriterTokens;
+const writerAuth = local ? [] : writerTokens.map((token) => gitAuthorization('pat', token, 'kvarm'));
+const writerAuthorization = (writer) => (writerAuth.length ? credentialForWriter(writerAuth, writer) : gitAuth);
 
 const work = mkdtempSync(join(tmpdir(), 'git-storm-'));
 const bareRoot = join(work, `${repo}.git`);
@@ -102,11 +110,12 @@ let remoteDeleted = false;
 let subscribed = false;
 const askpassPath = join(work, 'git-askpass.sh');
 let askpassReady = false;
-const secrets = process.env.KVARM_PAT
-  ? [process.env.KVARM_PAT, Buffer.from(`kvarm:${process.env.KVARM_PAT}`).toString('base64')]
-  : [];
-const redactSecret = (text) => secrets.reduce((safe, secret) => safe.replaceAll(secret, '[REDACTED]'), String(text));
-const safeErrorMessage = (error) => redactSecret(String(error?.message ?? error).split('\n').slice(-2).join(' | ').slice(0, 200));
+const secrets = [...new Set([
+  ...(process.env.KVARM_PAT ? [process.env.KVARM_PAT] : []),
+  ...configuredWriterTokens,
+])];
+const redactSecret = (text) => redactCredentials(text, secrets);
+const safeErrorMessage = (error) => redactSecret(String(error?.message ?? error).split('\n').slice(-2).join(' | ')).slice(0, 200);
 const existingRepoUrl = (authenticated) => {
   const url = new URL(`/${owner}/${repo}.git`, base.origin);
   if (authenticated) url.username = 'kvarm';
@@ -303,15 +312,25 @@ const cgiServer = async (req, res) => {
   });
   req.pipe(child.stdin);
 };
+// Writer pushes carry a /w<index> segment so the proxy forwards that writer's own credential;
+// per-credential write limits otherwise cap the whole fleet at one writer's budget.
+const routeProxyRequest = (url) => {
+  const bits = (url ?? '/').split('/');
+  const workload = decodeURIComponent(bits[2] ?? 'setup');
+  const writerSegment = bits[3] === 'w' ? /^\d+$/.exec(bits[4] ?? '') : null;
+  return {
+    workload,
+    writer: writerSegment ? Number(writerSegment[0]) : null,
+    forwardedPath: `/${bits.slice(writerSegment ? 5 : 3).join('/')}`,
+  };
+};
 const createLocalProxy = async () => {
   localBackend = createServer(cgiServer);
   await new Promise((resolve) => localBackend.listen(0, '127.0.0.1', resolve));
   const backendPort = localBackend.address().port;
   proxy = createServer((req, res) => {
     const started = performance.now();
-    const bits = (req.url ?? '/').split('/');
-    const workload = decodeURIComponent(bits[2] ?? 'setup');
-    const forwardedPath = `/${bits.slice(3).join('/')}`;
+    const { workload, forwardedPath } = routeProxyRequest(req.url);
     const meter = recordRequest(req, forwardedPath, workload, started);
     if (requestCeilingExceeded) { meter.blocked(429); res.writeHead(429, { 'retry-after': '0' }).end(); return; }
     forwardGitRequest(req, res, `http://127.0.0.1:${backendPort}`, {
@@ -327,14 +346,20 @@ const startProxy = async () => {
   if (local) return createLocalProxy();
   proxy = createServer((req, res) => {
     const started = performance.now();
-    const bits = (req.url ?? '/').split('/');
-    const workload = decodeURIComponent(bits[2] ?? 'setup');
-    const forwardedPath = `/${bits.slice(3).join('/')}`;
+    const { workload, writer, forwardedPath } = routeProxyRequest(req.url);
+    if (writer !== null && !req.headers.authorization) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="git-storm"' }).end();
+      return;
+    }
+    if (writer !== null && req.headers.authorization !== writerAuthorization(writer)) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="git-storm"' }).end();
+      return;
+    }
     const meter = recordRequest(req, forwardedPath, workload, started);
     if (requestCeilingExceeded) { meter.blocked(429); res.writeHead(429, { 'retry-after': '0' }).end(); return; }
     forwardGitRequest(req, res, base.origin, {
       path: forwardedPath,
-      authorization: gitAuth,
+      authorization: writer === null ? gitAuth : req.headers.authorization,
       onResponse: meter,
     });
   });
@@ -407,7 +432,15 @@ const addCommit = async (cwd, files, message) => {
   await git(cwd, ['add', '-A']);
   await git(cwd, ['commit', '-m', message, '--allow-empty']);
 };
-const push = (cwd, workload, ref = 'refs/heads/main') => git(cwd, ['-c', `remote.origin.url=${proxyUrl}/__w/${encodeURIComponent(workload)}/${owner}/${repo}.git`, 'push', 'origin', `HEAD:${ref}`]);
+const push = (cwd, workload, ref = 'refs/heads/main', writer = null) => {
+  const lane = writer === null ? '' : `/w/${writer}`;
+  const remote = new URL(`${proxyUrl}/__w/${encodeURIComponent(workload)}${lane}/${owner}/${repo}.git`);
+  if (writer !== null && !local) {
+    remote.username = 'kvarm';
+    return gitDirect(cwd, [`-c`, `remote.origin.url=${remote.href}`, 'push', 'origin', `HEAD:${ref}`], credentialForWriter(writerTokens, writer) ?? process.env.KVARM_PAT);
+  }
+  return git(cwd, ['-c', `remote.origin.url=${remote.href}`, 'push', 'origin', `HEAD:${ref}`]);
+};
 try {
   proxyUrl = await startProxy();
   if (local) {
@@ -482,7 +515,7 @@ try {
       perWorkload.set(name, []);
       const ops = [];
       for (let i = 0; i < writers; i++) {
-        const branch = `refs/heads/bench/${ts}-${i}`;
+        const branch = benchBranch(ts, name, i);
         ops.push((async () => {
           let clone;
           try { clone = await cloneInto(work, name); } catch (error) { recordFailure(name, error); return; }
@@ -503,7 +536,7 @@ try {
             let started;
             try {
               const sha = name === 'push-to-visible' ? await gitOutput(clone.path, ['rev-parse', 'HEAD']) : null;
-              const pushed = await push(clone.path, name, branch);
+              const pushed = await push(clone.path, name, branch, i);
               started = pushed.processStart;
               if (name === 'push-to-visible') await waitVisible(clone.path, branch, sha);
               const end = name === 'push-to-visible' ? performance.now() : pushed.processEnd;
@@ -526,30 +559,31 @@ try {
       }
       await Promise.all(ops);
     } else if (name === 'push-contended') {
-      const hot = 'refs/heads/bench/' + ts + '-hot';
-      const clones = (await Promise.all(Array.from({ length: writers }, async () => {
-        try { return await cloneInto(work, name); } catch (error) { recordFailure(name, error); return null; }
-      }))).filter((clone) => clone !== null);
+      const hot = benchBranch(ts, name, 'hot');
+      const clones = (await Promise.all(Array.from({ length: writers }, async (_, lane) => {
+        try { return { clone: await cloneInto(work, name), lane }; } catch (error) { recordFailure(name, error); return null; }
+      }))).filter((writer) => writer !== null);
       const ready = [];
-      for (const clone of clones) {
+      for (const writer of clones) {
+        const { clone, lane } = writer;
         try {
           await git(clone.path, ['fetch', 'origin']);
           await git(clone.path, ['checkout', '-B', hot.slice('refs/heads/'.length), 'origin/main']);
-          ready.push(clone);
+          ready.push({ clone, lane });
         } catch (error) {
           recordFailure(name, error);
         }
       }
-      await Promise.all(ready.map(async (clone, i) => {
+      await Promise.all(ready.map(async ({ clone, lane }) => {
         for (let k = 0; k < commits; k++) {
-          await addCommit(clone.path, [[`hot-${i}-${k}.txt`, `${i}-${k}\n`]], `hot ${i} ${k}`);
+          await addCommit(clone.path, [[`hot-${lane}-${k}.txt`, `${lane}-${k}\n`]], `hot ${lane} ${k}`);
           let attempts = 0;
           let started = null;
           let completed = false;
           while (attempts < 20) {
             attempts++;
             try {
-              const pushed = await push(clone.path, name, hot);
+              const pushed = await push(clone.path, name, hot, lane);
               started ??= pushed.processStart;
               const end = pushed.processEnd;
               perWorkload.set(name, [...(perWorkload.get(name) ?? []), { start: started, end, ms: end - started, ok: true, attempts }]);
@@ -655,6 +689,7 @@ try {
       git: (await new Promise((resolve) => { const child = spawn('git', ['--version']); let s = ''; child.stdout.on('data', (d) => (s += d)); child.on('close', () => resolve(s.trim())); })),
       node: process.version, os: `${platform()} ${release()}`, cpus: cpus().length,
       target: local ? 'local' : base.host, args: { ...args, target }, seed, ts,
+      credentials: configuredWriterTokens.length,
     },
     workloads: results,
     requests: requestRows,

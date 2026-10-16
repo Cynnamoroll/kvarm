@@ -6,9 +6,11 @@ import {
   benchmarkConfig,
   benchResources,
   emptyBenchBucket,
+  patKeys,
   runBenchStack,
   subscribeBenchRepo,
   unsubscribeBenchRepo,
+  withPatList,
 } from '../lib/bench-stack.mjs';
 import { parseJsonc } from '../lib/wrangler-target.mjs';
 
@@ -124,6 +126,43 @@ function fakeWrangler(initial: {
 }
 
 describe('throwaway benchmark stack', () => {
+  it('keeps existing PATs and mints only missing credentials on redeploy', async () => {
+    const fake = fakeWrangler({
+      d1: [{ name: RES.d1, uuid: DATABASE_ID }],
+      buckets: [RES.bucket],
+      queues: [RES.queue, RES.deadLetterQueue],
+      repos: [{ name: RES.seedRepo }],
+    });
+    let patText = 'KVARM_PAT=existing-one\nOTHER=value\n';
+    const minted: string[] = [];
+    const mintPat = async (_databaseId: string, _tokenFile: string, key: string) => {
+      minted.push(key);
+      patText += `${key}=minted-${minted.length}\n`;
+    };
+    const options = {
+      action: 'up',
+      id: ID,
+      pats: 3,
+      baseConfig: BASE,
+      wrangler: fake.wrangler,
+      patFile: `/repo/apps/platform/.env.bench-${ID}`,
+      mintPat,
+      readPatFile: async () => patText,
+      writePatFile: async (text: string) => { patText = text; },
+    };
+
+    const first = await runBenchStack(options);
+    expect(first.pats).toBe(3);
+    expect(minted).toEqual(['KVARM_PAT_2', 'KVARM_PAT_3']);
+    expect(patText).toContain('KVARM_PAT=existing-one');
+    expect(patText).toContain('KVARM_PATS=existing-one,minted-1,minted-2');
+
+    await runBenchStack(options);
+    expect(minted).toEqual(['KVARM_PAT_2', 'KVARM_PAT_3']);
+    expect(patKeys(3)).toEqual(['KVARM_PAT', 'KVARM_PAT_2', 'KVARM_PAT_3']);
+    expect(withPatList('KVARM_PAT=one\n', ['KVARM_PAT'])).toContain('KVARM_PATS=one');
+  });
+
   it('rejects an Artifacts namespace other than the exact benchmark namespace', () => {
     expect(() => assertArtifactsNamespace(RES.namespace, RES)).not.toThrow();
     expect(() => assertArtifactsNamespace(`${RES.namespace}-other`, RES)).toThrow(/outside the benchmark namespace/);
