@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   checkGitStormCaps,
   fixtureFiles,
@@ -15,6 +15,9 @@ import {
   validateExistingRepoTarget,
 } from '../lib/git-storm.mjs';
 import { forwardGitRequest } from '../lib/git-storm-proxy.mjs';
+
+const httpsRequestMock = vi.hoisted(() => vi.fn());
+vi.mock('node:https', () => ({ request: httpsRequestMock }));
 
 describe('git-storm streaming proxy', () => {
   it('preserves chunked request bytes and Git-Protocol while injecting Basic PAT auth', async () => {
@@ -69,6 +72,50 @@ describe('git-storm streaming proxy', () => {
       expect(authorization).not.toContain(token);
       expect(gitProtocol).toBe('version=2');
     } finally {
+      await Promise.all([
+        new Promise<void>((resolve) => proxy.close(() => resolve())),
+        new Promise<void>((resolve) => upstream.close(() => resolve())),
+      ]);
+    }
+  });
+
+  it('uses the HTTPS transport for HTTPS upstreams', async () => {
+    let receivedPath = '';
+    const upstream = createServer((req, res) => {
+      receivedPath = req.url ?? '';
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok');
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    httpsRequestMock.mockImplementation((url, options, callback) => {
+      const localUrl = new URL(url);
+      localUrl.protocol = 'http:';
+      return httpRequest(localUrl, options, callback);
+    });
+    const proxy = createServer((req, res) => {
+      forwardGitRequest(req, res, `https://127.0.0.1:${upstreamPort}`);
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    const proxyPort = (proxy.address() as { port: number }).port;
+    try {
+      const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        httpRequest({
+          hostname: '127.0.0.1',
+          port: proxyPort,
+          path: '/owner/repo.git/info/refs?service=git-upload-pack',
+        }, (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        }).on('error', reject).end();
+      });
+      expect(response).toEqual({ status: 200, body: 'ok' });
+      expect(receivedPath).toBe('/owner/repo.git/info/refs?service=git-upload-pack');
+      expect(httpsRequestMock).toHaveBeenCalledOnce();
+    } finally {
+      httpsRequestMock.mockReset();
       await Promise.all([
         new Promise<void>((resolve) => proxy.close(() => resolve())),
         new Promise<void>((resolve) => upstream.close(() => resolve())),
