@@ -347,6 +347,10 @@ export async function runBenchStack({
       const result = await call(wrangler, ['d1', 'create', resources.d1], resources);
       const output = parseJson(result.stdout, {});
       databaseId = output.database_id ?? /database_id\s*=\s*["']?([0-9a-f-]{36})/i.exec(result.stdout)?.[1];
+      if (!UUID.test(databaseId ?? '')) {
+        const listing = await call(wrangler, ['d1', 'list', '--json'], resources);
+        databaseId = d1Rows(listing.stdout).find((db) => db.name === resources.d1)?.uuid;
+      }
       if (!databaseId || !UUID.test(databaseId)) throw new Error('could not parse the D1 database id from Wrangler output');
     }
     if (!state.buckets.includes(resources.bucket)) await call(wrangler, ['r2', 'bucket', 'create', resources.bucket], resources);

@@ -263,6 +263,29 @@ describe('throwaway benchmark stack', () => {
     }
   });
 
+  it('resolves a created D1 id from the resource list when Wrangler omits it from create output', async () => {
+    const fake = fakeWrangler();
+    const written: Record<string, any>[] = [];
+    const wrangler = async (args: string[], options?: { input?: string }) => {
+      const result = await fake.wrangler(args, options);
+      return args[0] === 'd1' && args[1] === 'create'
+        ? { ...result, stdout: 'Created database' }
+        : result;
+    };
+    await runBenchStack({
+      action: 'up',
+      id: ID,
+      baseConfig: BASE,
+      wrangler,
+      writeConfig: async (config) => { written.push(config); },
+      patFile: `/repo/apps/platform/.env.bench-${ID}`,
+      mintPat: async () => {},
+    });
+    expect(written[0]?.d1_databases[0].database_id).toBe(DATABASE_ID);
+    expect(fake.calls.filter((args) => args[0] === 'd1' && args[1] === 'list')).toHaveLength(2);
+    expect(fake.calls.some((args) => args[0] === 'deploy' && !args.includes('--dry-run'))).toBe(true);
+  });
+
   it('creates and removes a per-repo artifacts.repo subscription, then down removes every namespaced repo', async () => {
     const scratchRepo = `${RES.prefix}-storm-123`;
     const artifactScratchRepo = `owner--${scratchRepo}--a1b2c3d4e5f6`;
