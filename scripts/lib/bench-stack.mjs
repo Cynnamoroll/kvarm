@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { parseQueueList, parseR2BucketList } from './bootstrap.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -96,7 +96,11 @@ export function benchmarkConfig(base, resources, databaseId = '00000000-0000-000
   config.artifacts = config.artifacts.map((artifacts) => artifacts.binding === 'ARTIFACTS'
     ? { ...artifacts, namespace: resources.namespace }
     : artifacts);
-  config.vars = { ...config.vars, ARTIFACTS_NAMESPACE: resources.namespace };
+  config.vars = { ...config.vars, ARTIFACTS_NAMESPACE: resources.namespace, GIT_MIRROR_MODE: 'shadow' };
+  config.ratelimits = config.ratelimits.map((ratelimit) => {
+    const suffix = createHash('sha256').update(`${resources.prefix}:${ratelimit.name}`).digest('hex').slice(0, 12);
+    return { ...ratelimit, namespace_id: String(1_000_000_000_000n + BigInt(`0x${suffix}`)) };
+  });
   config.workflows = config.workflows.map((workflow) => ({ ...workflow, name: `${resources.prefix}-${workflow.name}` }));
 
   const containerBindings = new Set(['CI_SANDBOX', 'ENV_BUILDER', 'AGENT_SANDBOX']);
@@ -109,12 +113,50 @@ export function assertArtifactsNamespace(namespace, resources) {
   if (namespace !== resources.namespace) throw new Error('refusing Artifacts mutation outside the benchmark namespace');
 }
 
-const namedArg = (args, name) => args[args.indexOf(name) + 1];
+const namedArg = (args, name) => {
+  const index = args.indexOf(name);
+  return index < 0 ? undefined : args[index + 1];
+};
+const expectedConfig = (resources) => `wrangler.bench-${resources.prefix.slice('kvarm-bench-'.length)}.json`;
 const ensureName = (name, resources) => {
   if (typeof name !== 'string' || !name.startsWith(`${resources.prefix}-`)) {
     throw new Error(`refusing Wrangler mutation for non-benchmark name: ${String(name)}`);
   }
 };
+
+function ensureArtifactRepoName(name) {
+  if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,62}$/.test(name)) {
+    throw new Error(`refusing invalid Artifacts repository name: ${String(name)}`);
+  }
+}
+
+function assertIsolatedConfig(config, resources) {
+  if (config?.name !== resources.worker ||
+      config.d1_databases?.some((x) => x.database_name !== resources.d1) ||
+      config.d1_databases?.find((x) => x.binding === 'DB')?.database_name !== resources.d1 ||
+      config.r2_buckets?.some((x) => x.bucket_name !== resources.bucket) ||
+      config.r2_buckets?.find((x) => x.binding === 'SNAPSHOTS')?.bucket_name !== resources.bucket ||
+      config.queues?.producers?.some((x) => !x.queue?.startsWith(`${resources.prefix}-`)) ||
+      config.queues?.producers?.find((x) => x.binding === 'EVENTS')?.queue !== resources.queue ||
+      config.queues?.consumers?.some((x) => x.queue === resources.queue && x.dead_letter_queue === resources.deadLetterQueue) !== true ||
+      config.queues?.consumers?.some((x) => !x.queue?.startsWith(`${resources.prefix}-`) || !x.dead_letter_queue?.startsWith(`${resources.prefix}-`)) ||
+      config.artifacts?.some((x) => x.namespace !== resources.namespace) ||
+      config.artifacts?.find((x) => x.binding === 'ARTIFACTS')?.namespace !== resources.namespace ||
+      !Array.isArray(config.workflows) ||
+      config.workflows.some((x) => !x.name?.startsWith(`${resources.prefix}-`)) ||
+      config.vars?.ARTIFACTS_NAMESPACE !== resources.namespace ||
+      config.vars?.GIT_MIRROR_MODE !== 'shadow' ||
+      config.containers !== undefined ||
+      config.durable_objects?.bindings?.some((binding) => ['CI_SANDBOX', 'ENV_BUILDER', 'AGENT_SANDBOX'].includes(binding.name))) {
+    throw new Error('refusing deployment or migration with a non-isolated Wrangler config');
+  }
+  const rateLimitIds = config.ratelimits?.map((ratelimit) => ratelimit.namespace_id) ?? [];
+  if (rateLimitIds.length === 0 ||
+      new Set(rateLimitIds).size !== rateLimitIds.length ||
+      rateLimitIds.some((id) => !/^\d+$/.test(String(id)) || ['4601', '4602'].includes(String(id)))) {
+    throw new Error('refusing benchmark config with non-isolated rate-limit namespaces');
+  }
+}
 
 function assertMutation(args, resources, config) {
   if (args[0] === 'd1' && ['create', 'delete'].includes(args[1])) ensureName(args[2], resources);
@@ -128,21 +170,24 @@ function assertMutation(args, resources, config) {
     ensureName(args[3], resources);
     ensureName(namedArg(args, '--name'), resources);
     if (namedArg(args, '--source-namespace') !== resources.namespace) throw new Error('refusing subscription outside the benchmark namespace');
-    ensureName(namedArg(args, '--source-repo-name'), resources);
+    ensureArtifactRepoName(namedArg(args, '--source-repo-name'));
   }
   if (args[0] === 'secret' && args[1] === 'put') {
-    const expectedConfig = `wrangler.bench-${resources.prefix.slice('kvarm-bench-'.length)}.json`;
-    if (!['WORKOS_COOKIE_PASSWORD', 'WEBHOOK_SECRET_KEY'].includes(args[2]) || namedArg(args, '-c') !== expectedConfig) {
+    if (!['WORKOS_COOKIE_PASSWORD', 'WEBHOOK_SECRET_KEY'].includes(args[2]) || namedArg(args, '-c') !== expectedConfig(resources)) {
       throw new Error('refusing to set a secret outside the isolated benchmark config');
     }
   }
-  if (args[0] === 'deploy' || args[0] === 'delete' || (args[0] === 'secret' && args[1] === 'put')) {
-    if (config?.name !== resources.worker || config.d1_databases.find((x) => x.binding === 'DB')?.database_name !== resources.d1 ||
-        config.r2_buckets.find((x) => x.binding === 'SNAPSHOTS')?.bucket_name !== resources.bucket ||
-        config.queues.producers.find((x) => x.binding === 'EVENTS')?.queue !== resources.queue ||
-        config.artifacts.find((x) => x.binding === 'ARTIFACTS')?.namespace !== resources.namespace) {
-      throw new Error('refusing deployment/delete with a non-isolated Wrangler config');
+  const migrationsApply = args[0] === 'd1' && args[1] === 'migrations' && args[2] === 'apply';
+  const configMutation = args[0] === 'deploy' || args[0] === 'delete' ||
+    (args[0] === 'secret' && args[1] === 'put') || migrationsApply;
+  if (migrationsApply && (args[3] !== 'DB' || !args.includes('--remote'))) {
+    throw new Error('refusing D1 migrations outside the remote benchmark DB binding');
+  }
+  if (configMutation) {
+    if (namedArg(args, '-c') !== expectedConfig(resources)) {
+      throw new Error('refusing deployment or migration without the exact benchmark Wrangler config');
     }
+    assertIsolatedConfig(config, resources);
   }
 }
 
@@ -203,23 +248,55 @@ async function inspect(resources, wrangler) {
 }
 
 function subscriptionName(resources, repo) {
-  if (!repo.startsWith(`${resources.prefix}-`) || repo.length > 63) throw new Error(`scratch repo name must be a <=63 character name under ${resources.prefix}-`);
-  const suffix = repo.slice(resources.prefix.length + 1).replace(/[^a-z0-9-]/g, '-').slice(0, 24);
-  if (!suffix) throw new Error('scratch repo name needs a non-empty suffix');
+  const repoPrefix = `${resources.prefix}-`;
+  if (typeof repo !== 'string' || !repo.startsWith(repoPrefix) || repo.length === repoPrefix.length ||
+      !/^[a-z0-9][a-z0-9._-]{0,99}$/.test(repo)) {
+    throw new Error(`scratch repo name must be a valid name under ${resources.prefix}-`);
+  }
+  const suffix = createHash('sha256').update(repo).digest('hex').slice(0, 12);
   return `${resources.prefix}-${suffix}`;
+}
+
+function resolveArtifactRepoName(repo, repos) {
+  const exact = repos.filter((item) => item.name === repo);
+  if (exact.length === 1) {
+    ensureArtifactRepoName(exact[0].name);
+    return exact[0].name;
+  }
+  if (exact.length > 1) throw new Error(`ambiguous benchmark Artifacts repository ${repo}`);
+  const part = repo.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  if (!part) throw new Error(`invalid Artifacts repository name for ${repo}`);
+  const matches = repos.filter((item) => item.name?.split('--')[1] === part);
+  if (matches.length !== 1) throw new Error(`could not resolve a unique Artifacts repository for ${repo} in ${repos.length ? 'the benchmark namespace' : 'an empty benchmark namespace'}`);
+  ensureArtifactRepoName(matches[0].name);
+  return matches[0].name;
+}
+
+function assertMatchingSubscription(subscription, resources, repoName, name) {
+  if (subscription.name !== name ||
+      subscription.source?.type !== 'artifacts.repo' ||
+      subscription.source.namespace !== resources.namespace ||
+      subscription.source.repo_name !== repoName ||
+      !subscription.events?.includes('pushed')) {
+    throw new Error(`refusing to use mismatched benchmark subscription ${name}`);
+  }
 }
 
 export async function subscribeBenchRepo(resources, repo, wrangler) {
   const name = subscriptionName(resources, repo);
   const state = await inspect(resources, wrangler);
   if (!state.queues.includes(resources.queue)) throw new Error(`benchmark queue ${resources.queue} does not exist; run bench-stack up first`);
+  const repoName = resolveArtifactRepoName(repo, state.repos);
   const existing = state.subscriptions.find((item) => item.name === name);
-  if (existing) return { created: false, name };
+  if (existing) {
+    assertMatchingSubscription(existing, resources, repoName, name);
+    return { created: false, name };
+  }
   await call(wrangler, [
     'queues', 'subscription', 'create', resources.queue,
     '--source', 'artifacts.repo',
     '--source-namespace', resources.namespace,
-    '--source-repo-name', repo,
+    '--source-repo-name', repoName,
     '--events', 'pushed',
     '--name', name,
   ], resources);
@@ -229,11 +306,10 @@ export async function subscribeBenchRepo(resources, repo, wrangler) {
 export async function unsubscribeBenchRepo(resources, repo, wrangler) {
   const name = subscriptionName(resources, repo);
   const state = await inspect(resources, wrangler);
+  const repoName = resolveArtifactRepoName(repo, state.repos);
   const existing = state.subscriptions.find((item) => item.name === name);
   if (!existing) return { deleted: false, name };
-  if (existing.source?.type !== 'artifacts.repo' || existing.source.namespace !== resources.namespace || existing.source.repo_name !== repo) {
-    throw new Error(`refusing to delete mismatched subscription ${name}`);
-  }
+  assertMatchingSubscription(existing, resources, repoName, name);
   await call(wrangler, ['queues', 'subscription', 'delete', resources.queue, '--id', existing.id, '--force'], resources);
   return { deleted: true, name };
 }
@@ -243,7 +319,7 @@ export async function runBenchStack({
   writeConfig = async () => {}, removeConfig = async () => {}, patFile, mintPat, removePatFile = async () => {},
 }) {
   const resources = benchResources(id);
-  const configArg = `wrangler.bench-${id}.json`;
+  const configArg = expectedConfig(resources);
   if (action === 'subscribe') return subscribeBenchRepo(resources, repo, wrangler);
   if (action === 'unsubscribe') return unsubscribeBenchRepo(resources, repo, wrangler);
   const state = await inspect(resources, wrangler);
@@ -275,6 +351,7 @@ export async function runBenchStack({
     }
     const config = benchmarkConfig(baseConfig, resources, databaseId);
     await writeConfig(config);
+    await call(wrangler, ['deploy', '--dry-run', '-c', configArg], resources, config);
     await call(wrangler, ['d1', 'migrations', 'apply', 'DB', '--remote', '-c', configArg], resources, config);
     await call(wrangler, ['deploy', '-c', configArg], resources, config);
     const secrets = [

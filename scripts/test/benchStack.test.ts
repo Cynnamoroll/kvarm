@@ -113,7 +113,7 @@ function fakeWrangler(initial: {
       state.subscriptions = state.subscriptions.filter((s) => s.id !== args[args.indexOf('--id') + 1]);
       return { code: 0, stdout: '', stderr: '' };
     }
-    if (args[0] === 'deploy') state.worker = true;
+    if (args[0] === 'deploy' && !args.includes('--dry-run')) state.worker = true;
     if (args[0] === 'delete') state.worker = false;
     if (args[0] === 'd1' && args[1] === 'migrations' && args[2] === 'apply' || args[0] === 'deploy' || args[0] === 'delete') {
       return { code: 0, stdout: '', stderr: '' };
@@ -129,6 +129,15 @@ describe('throwaway benchmark stack', () => {
     expect(() => assertArtifactsNamespace(`${RES.namespace}-other`, RES)).toThrow(/outside the benchmark namespace/);
   });
 
+  it('rejects a non-benchmark repo before inspecting or mutating anything', async () => {
+    let called = false;
+    await expect(subscribeBenchRepo(RES, 'kvarm-platform', async () => {
+      called = true;
+      return { code: 0, stdout: '[]', stderr: '' };
+    })).rejects.toThrow(/valid name under/);
+    expect(called).toBe(false);
+  });
+
   it('isolates worker resources and keeps cron triggers while omitting optional container paths', () => {
     const config = benchmarkConfig(BASE, RES, DATABASE_ID);
     expect(config.name).toBe(RES.worker);
@@ -139,6 +148,11 @@ describe('throwaway benchmark stack', () => {
     expect(config.artifacts[0].namespace).toBe(RES.namespace);
     expect(config.workflows.every((workflow: { name: string }) => workflow.name.startsWith(`${RES.prefix}-`))).toBe(true);
     expect(config.triggers.crons).toEqual(BASE.triggers.crons);
+    expect(config.vars).toMatchObject({ ARTIFACTS_NAMESPACE: RES.namespace, GIT_MIRROR_MODE: 'shadow' });
+    const rateLimitIds = config.ratelimits.map((ratelimit: { namespace_id: string | number }) => String(ratelimit.namespace_id));
+    expect(rateLimitIds).not.toContain('4601');
+    expect(rateLimitIds).not.toContain('4602');
+    expect(new Set(rateLimitIds).size).toBe(rateLimitIds.length);
     expect(config.containers).toBeUndefined();
     expect(config.durable_objects.bindings.some((binding: { name: string }) => ['CI_SANDBOX', 'ENV_BUILDER', 'AGENT_SANDBOX'].includes(binding.name))).toBe(false);
   });
@@ -168,6 +182,12 @@ describe('throwaway benchmark stack', () => {
     expect(fake.calls.filter((args) => args[0] === 'secret' && args[1] === 'put')).toHaveLength(2);
     expect(fake.calls.filter((args) => args[0] === 'secret' && args[1] === 'put').every((args) => args.includes('-c') && args.includes(`wrangler.bench-${ID}.json`))).toBe(true);
     expect(patCalls).toEqual([{ databaseId: DATABASE_ID, tokenFile: `/repo/apps/platform/.env.bench-${ID}` }]);
+    const dryRunIndex = fake.calls.findIndex((args) => args[0] === 'deploy' && args.includes('--dry-run'));
+    const migrationIndex = fake.calls.findIndex((args) => args[0] === 'd1' && args[1] === 'migrations' && args[2] === 'apply');
+    const deployIndex = fake.calls.findIndex((args) => args[0] === 'deploy' && !args.includes('--dry-run'));
+    expect(dryRunIndex).toBeGreaterThan(-1);
+    expect(dryRunIndex).toBeLessThan(migrationIndex);
+    expect(migrationIndex).toBeLessThan(deployIndex);
     expect(JSON.stringify(result)).not.toContain(fake.state.secrets.get('WORKOS_COOKIE_PASSWORD'));
     const mutations = fake.calls.filter((args) => ['create', 'delete', 'deploy'].includes(String(args[1] ?? args[0])));
     for (const args of mutations) {
@@ -180,13 +200,14 @@ describe('throwaway benchmark stack', () => {
 
   it('creates and removes a per-repo artifacts.repo subscription, then down removes every namespaced repo', async () => {
     const scratchRepo = `${RES.prefix}-storm-123`;
+    const artifactScratchRepo = `owner--${scratchRepo}--a1b2c3d4e5f6`;
     const fake = fakeWrangler({
       d1: [{ name: RES.d1, uuid: DATABASE_ID }],
       buckets: [RES.bucket],
       queues: [RES.queue, RES.deadLetterQueue],
       repos: [
         { name: RES.seedRepo },
-        { name: scratchRepo },
+        { name: artifactScratchRepo },
         { name: 'owner--api-created--a1b2c3d4' },
         { name: 'unrelated-repo', namespace: 'another-namespace' },
       ],
@@ -196,12 +217,12 @@ describe('throwaway benchmark stack', () => {
     const create = fake.calls.find((args) => args[0] === 'queues' && args[1] === 'subscription' && args[2] === 'create')!;
     expect(create).toContain('artifacts.repo');
     expect(create[create.indexOf('--source-namespace') + 1]).toBe(RES.namespace);
-    expect(create[create.indexOf('--source-repo-name') + 1]).toBe(scratchRepo);
+    expect(create[create.indexOf('--source-repo-name') + 1]).toBe(artifactScratchRepo);
     expect((await unsubscribeBenchRepo(RES, scratchRepo, fake.wrangler)).deleted).toBe(true);
     fake.state.subscriptions.push({
       id: 'leftover',
       name: `${RES.prefix}-leftover`,
-      source: { type: 'artifacts.repo', namespace: RES.namespace, repo_name: scratchRepo },
+      source: { type: 'artifacts.repo', namespace: RES.namespace, repo_name: artifactScratchRepo },
       events: ['pushed'],
     });
     const status = await runBenchStack({ action: 'status', id: ID, baseConfig: BASE, wrangler: fake.wrangler });
@@ -227,9 +248,9 @@ describe('throwaway benchmark stack', () => {
     expect(fake.state.queues).toEqual([]);
     expect(fake.state.buckets).toEqual([]);
     expect(fake.state.d1).toEqual([]);
-    expect(fake.calls.filter((args) => args[0] === 'artifacts' && args[1] === 'repos' && args[2] === 'delete').every((args) => {
-      return args[args.indexOf('--namespace') + 1] === RES.namespace;
-    })).toBe(true);
+    const artifactDeletes = fake.calls.filter((args) => args[0] === 'artifacts' && args[1] === 'repos' && args[2] === 'delete');
+    expect(artifactDeletes.every((args) => args[args.indexOf('--namespace') + 1] === RES.namespace)).toBe(true);
+    expect(artifactDeletes.map((args) => args[3])).toContain('owner--api-created--a1b2c3d4');
     expect(fake.calls.slice(-4).some((args) => args[0] === 'deployments' && args[1] === 'list')).toBe(true);
   });
 

@@ -5,7 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { checkGitStormCaps, fixtureFiles, operationSummary, percentile, summarize } from '../lib/git-storm.mjs';
+import {
+  checkGitStormCaps,
+  fixtureFiles,
+  gitAuthorization,
+  operationSummary,
+  percentile,
+  summarize,
+  validateExistingRepoTarget,
+} from '../lib/git-storm.mjs';
 import { forwardGitRequest } from '../lib/git-storm-proxy.mjs';
 
 describe('git-storm streaming proxy', () => {
@@ -65,6 +73,28 @@ describe('git-storm streaming proxy', () => {
 });
 
 describe('git-storm helpers', () => {
+  it('targets only benchmark repos and the requested clone/fetch workloads', () => {
+    const workloads = ['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental'];
+    expect(validateExistingRepoTarget({
+      benchId: 'smoke1',
+      repo: 'kvarm-bench-smoke1-public-corpus',
+      workloads,
+    })).toBeNull();
+    expect(validateExistingRepoTarget({
+      benchId: 'smoke1',
+      repo: 'kvarm-platform',
+      workloads,
+    })).toMatch(/under kvarm-bench-smoke1-/);
+    expect(validateExistingRepoTarget({
+      benchId: 'smoke1',
+      repo: 'kvarm-bench-smoke1-public-corpus',
+      workloads: [...workloads, 'push-distinct'],
+    })).toMatch(/does not allow workload/);
+    expect(gitAuthorization('anonymous', undefined)).toBeNull();
+    expect(gitAuthorization('pat', 'fixture-pat')).toBe('Bearer fixture-pat');
+    expect(() => gitAuthorization('pat')).toThrow(/KVARM_PAT/);
+  });
+
   it('uses nearest-rank percentiles, including singleton and two-item vectors', () => {
     expect(percentile([7], 99)).toBe(7);
     expect(percentile([10, 20], 50)).toBe(10);

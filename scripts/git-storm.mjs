@@ -6,7 +6,15 @@ import { cpus, platform, release, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { parseCost } from './lib/fleet.mjs';
-import { checkGitStormCaps, createRandom, fixtureFiles, operationSummary, opForPath } from './lib/git-storm.mjs';
+import {
+  checkGitStormCaps,
+  createRandom,
+  fixtureFiles,
+  gitAuthorization,
+  operationSummary,
+  opForPath,
+  validateExistingRepoTarget,
+} from './lib/git-storm.mjs';
 import { forwardGitRequest } from './lib/git-storm-proxy.mjs';
 
 const { values: args } = parseArgs({
@@ -26,6 +34,8 @@ const { values: args } = parseArgs({
     write: { type: 'boolean', default: false },
     'write-local': { type: 'boolean', default: false },
     'bench-id': { type: 'string', default: process.env.KVARM_BENCH_STACK_ID },
+    'existing-repo': { type: 'string' },
+    'git-auth': { type: 'string', default: 'pat' },
   },
   allowPositionals: true,
 });
@@ -42,7 +52,8 @@ const concurrency = Number(args.concurrency);
 const seed = Number(args.seed);
 const ts = Math.floor(Date.now() / 1000);
 const owner = process.env.KVARM_USER ?? 'admin';
-const repo = args['bench-id'] ? `kvarm-bench-${args['bench-id']}-storm-${ts}` : `bench-storm-${ts}`;
+const existingRepo = args['existing-repo'];
+const repo = existingRepo ?? (args['bench-id'] ? `kvarm-bench-${args['bench-id']}-storm-${ts}` : `bench-storm-${ts}`);
 const outFile = args.out ? resolve(args.out) : resolve(`git-storm-${ts}.json`);
 const allWorkloads = ['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental', 'push-distinct', 'push-contended', ...(!local ? ['push-to-visible'] : [])];
 const requested = args.workloads === 'all' ? allWorkloads : args.workloads.split(',').map((v) => v.trim()).filter(Boolean);
@@ -51,6 +62,7 @@ const invalid = requested.find((w) => !allWorkloads.includes(w));
 if (invalid) throw new Error(`unknown workload ${invalid}`);
 if (!['small', 'mixed', 'large'].includes(args.fixture)) throw new Error('--fixture must be small, mixed, or large');
 if (!['small', 'mixed'].includes(args.payload)) throw new Error('--payload must be small or mixed');
+if (!['pat', 'anonymous'].includes(args['git-auth'])) throw new Error('--git-auth must be pat or anonymous');
 if (![n, writers, commits, concurrency, seed].every(Number.isSafeInteger) || n < 1 || writers < 1 || commits < 1 || seed < 0) {
   throw new Error('--n, --writers, --commits and --concurrency must be positive integers; --seed must be non-negative');
 }
@@ -63,7 +75,14 @@ const capError = checkGitStormCaps({
 });
 if (capError) throw new Error(capError);
 if (n * Math.max(1, requested.length) + writers * commits * 2 > 10_000) throw new Error('request projection exceeds the 10,000-request ceiling');
-if (!local && !process.env.KVARM_PAT) throw new Error('KVARM_PAT is required for a deployment target');
+if (existingRepo && local) throw new Error('--existing-repo requires a deployment target');
+if (existingRepo) {
+  const error = validateExistingRepoTarget({ benchId: args['bench-id'], repo: existingRepo, workloads: requested });
+  if (error) throw new Error(error);
+  if (!process.env.KVARM_USER) throw new Error('KVARM_USER is required for an existing benchmark repository');
+}
+if (!local && !existingRepo && !process.env.KVARM_PAT) throw new Error('KVARM_PAT is required for a deployment target');
+const gitAuth = local ? null : gitAuthorization(args['git-auth'], process.env.KVARM_PAT);
 
 const work = mkdtempSync(join(tmpdir(), 'git-storm-'));
 const bareRoot = join(work, `${repo}.git`);
@@ -288,7 +307,7 @@ const startProxy = async () => {
     if (requestCeilingExceeded) { meter.blocked(429); res.writeHead(429, { 'retry-after': '0' }).end(); return; }
     forwardGitRequest(req, res, base.origin, {
       path: forwardedPath,
-      authorization: `Bearer ${process.env.KVARM_PAT}`,
+      authorization: gitAuth,
       onResponse: meter,
     });
   });
@@ -368,7 +387,7 @@ try {
     mkdirSync(bareRoot, { recursive: true });
     await git(work, ['init', '--bare', bareRoot]);
     await git(bareRoot, ['config', 'http.receivepack', 'true']);
-  } else {
+  } else if (!existingRepo) {
     const created = await api('/api/v1/repos', 'POST', { name: repo, visibility: 'public' });
     if (created.status !== 201) throw new Error(`repo create failed: HTTP ${created.status}`);
     createdRemote = true;
@@ -377,16 +396,23 @@ try {
       subscribed = true;
     }
   }
-  mkdirSync(seedRepo, { recursive: true });
-  await git(work, ['init', '-b', 'main', seedRepo]);
-  const files = fixtureFiles(args.fixture, seed);
-  if (args.fixture === 'mixed') {
-    for (let i = 0; i < files.length; i += 25) await addCommit(seedRepo, files.slice(i, i + 25), `git-storm seed ${Math.floor(i / 25) + 1}/20`);
+  if (existingRepo) {
+    if (requested.includes('fetch-incremental')) {
+      activeWorkload = 'setup';
+      await git(work, ['clone', `${proxyUrl}/__w/setup/${owner}/${repo}.git`, seedRepo]);
+    }
   } else {
-    await addCommit(seedRepo, files, 'git-storm seed');
+    mkdirSync(seedRepo, { recursive: true });
+    await git(work, ['init', '-b', 'main', seedRepo]);
+    const files = fixtureFiles(args.fixture, seed);
+    if (args.fixture === 'mixed') {
+      for (let i = 0; i < files.length; i += 25) await addCommit(seedRepo, files.slice(i, i + 25), `git-storm seed ${Math.floor(i / 25) + 1}/20`);
+    } else {
+      await addCommit(seedRepo, files, 'git-storm seed');
+    }
+    await git(seedRepo, ['remote', 'add', 'origin', `${proxyUrl}/__w/setup/${owner}/${repo}.git`]);
+    await push(seedRepo, 'setup');
   }
-  await git(seedRepo, ['remote', 'add', 'origin', `${proxyUrl}/__w/setup/${owner}/${repo}.git`]);
-  await push(seedRepo, 'setup');
   if (local) await git(bareRoot, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
   const results = {};
   const runClones = async (name, shallow) => {

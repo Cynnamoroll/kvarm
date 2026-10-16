@@ -31,6 +31,25 @@ export function checkGitStormCaps({ target, concurrency, dedicated = false, dedi
   return concurrency <= GIT_STORM_LIMITS.dedicatedGit ? null : `dedicated concurrency may not exceed ${GIT_STORM_LIMITS.dedicatedGit}`;
 }
 
+export function gitAuthorization(mode, token) {
+  if (mode === 'anonymous') return null;
+  if (mode !== 'pat') throw new Error('--git-auth must be pat or anonymous');
+  if (!token) throw new Error('KVARM_PAT is required for PAT-authenticated Git traffic');
+  return `Bearer ${token}`;
+}
+
+export function validateExistingRepoTarget({ benchId, repo, workloads }) {
+  if (!benchId || !/^[a-z0-9]{4,12}$/.test(benchId)) return '--existing-repo requires a valid --bench-id';
+  const repoPrefix = `kvarm-bench-${benchId}-`;
+  if (typeof repo !== 'string' || !repo.startsWith(repoPrefix) || repo.length === repoPrefix.length ||
+      !/^[a-z0-9][a-z0-9._-]{0,99}$/.test(repo)) {
+    return `--existing-repo must be a valid repository name under kvarm-bench-${benchId}-`;
+  }
+  const allowed = new Set(['clone-cold', 'clone-shallow', 'fetch-noop', 'fetch-incremental']);
+  const invalid = workloads.find((workload) => !allowed.has(workload));
+  return invalid ? `--existing-repo does not allow workload ${invalid}` : null;
+}
+
 export function createRandom(seed = 1) {
   let state = seed >>> 0;
   return () => {
