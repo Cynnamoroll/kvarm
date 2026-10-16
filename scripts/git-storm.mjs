@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, platform, release, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -81,6 +81,9 @@ if (existingRepo) {
   if (error) throw new Error(error);
   if (!process.env.KVARM_USER) throw new Error('KVARM_USER is required for an existing benchmark repository');
 }
+if (existingRepo && requested.includes('fetch-incremental') && !process.env.KVARM_PAT) {
+  throw new Error('KVARM_PAT is required for the existing-repository fetch-incremental setup push');
+}
 if (!local && !existingRepo && !process.env.KVARM_PAT) throw new Error('KVARM_PAT is required for a deployment target');
 // The Git gate authenticates Basic's password; it ignores the username.
 const gitAuth = local ? null : gitAuthorization(args['git-auth'], process.env.KVARM_PAT, 'kvarm');
@@ -97,11 +100,23 @@ let proxy;
 let createdRemote = false;
 let remoteDeleted = false;
 let subscribed = false;
+const askpassPath = join(work, 'git-askpass.sh');
+let askpassReady = false;
+const secrets = process.env.KVARM_PAT
+  ? [process.env.KVARM_PAT, Buffer.from(`kvarm:${process.env.KVARM_PAT}`).toString('base64')]
+  : [];
+const redactSecret = (text) => secrets.reduce((safe, secret) => safe.replaceAll(secret, '[REDACTED]'), String(text));
+const safeErrorMessage = (error) => redactSecret(String(error?.message ?? error).split('\n').slice(-2).join(' | ').slice(0, 200));
+const existingRepoUrl = (authenticated) => {
+  const url = new URL(`/${owner}/${repo}.git`, base.origin);
+  if (authenticated) url.username = 'kvarm';
+  return url.href;
+};
 const benchStack = (action) => {
   const result = spawnSync(process.execPath, [
     resolve('scripts/bench-stack.mjs'), action, '--id', args['bench-id'], '--repo', repo,
   ], { encoding: 'utf8', env: process.env });
-  if (result.status !== 0) throw new Error(`bench-stack ${action} failed: ${(result.stderr || result.stdout).trim().slice(0, 300)}`);
+  if (result.status !== 0) throw new Error(`bench-stack ${action} failed: ${redactSecret((result.stderr || result.stdout).trim().slice(0, 300))}`);
 };
 let activeWorkload = 'setup';
 const limit = (max) => {
@@ -115,11 +130,11 @@ const limit = (max) => {
 };
 const runGit = limit(concurrency);
 const httpLimit = limit(5);
-const tailText = (text, fallback) => text.trim().slice(-400) || fallback;
+const tailText = (text, fallback) => redactSecret(text.trim()).slice(-400) || fallback;
 const gitErrorStatus = (message) => Number(/(?:returned error:\s*|HTTP\/\d(?:\.\d)?\s+|status code\s+)(\d{3})/i.exec(message)?.[1] ?? 0);
-const git = (cwd, argv) => runGit(() => new Promise((resolve, reject) => {
+const git = (cwd, argv, extraEnv = {}) => runGit(() => new Promise((resolve, reject) => {
   const processStart = performance.now();
-  const child = spawn('git', argv, { cwd, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  const child = spawn('git', argv, { cwd, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...extraEnv } });
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d; });
   child.on('error', (error) => reject(Object.assign(error, { processStart, processEnd: performance.now() })));
@@ -132,6 +147,17 @@ const git = (cwd, argv) => runGit(() => new Promise((resolve, reject) => {
     }
   });
 }));
+const gitDirect = (cwd, argv, token) => {
+  if (!askpassReady) {
+    writeFileSync(askpassPath, '#!/bin/sh\ncase "$1" in *sername*) printf "%s\\n" kvarm ;; *) printenv KVARM_E2E_TOKEN ;; esac\n');
+    chmodSync(askpassPath, 0o700);
+    askpassReady = true;
+  }
+  return git(cwd, ['-c', 'credential.helper=', ...argv], {
+    GIT_ASKPASS: askpassPath,
+    KVARM_E2E_TOKEN: token ?? '',
+  });
+};
 const gitOutput = (cwd, argv) => runGit(() => new Promise((resolve, reject) => {
   const child = spawn('git', argv, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
   let stdout = '';
@@ -271,7 +297,7 @@ const cgiServer = async (req, res) => {
     header = Buffer.alloc(0);
   });
   child.on('close', (code) => {
-    if (code !== 0) console.error(`git http-backend exited ${code}: ${stderr}`);
+    if (code !== 0) console.error(`git http-backend exited ${code}: ${redactSecret(stderr)}`);
     if (!sent) res.writeHead(code === 0 ? 200 : 500);
     res.end();
   });
@@ -334,7 +360,7 @@ const record = (name) => {
         ms: processEnd - processStart,
         ok: false,
         status: err.status ?? 0,
-        message: String(err.message ?? err).split('\n').slice(-2).join(' | ').slice(0, 200),
+        message: safeErrorMessage(err),
       });
     }
     perWorkload.set(name, rows);
@@ -351,7 +377,7 @@ const recordFailure = (name, error) => {
     ms: end - start,
     ok: false,
     status: error?.status ?? 0,
-    message: String(error?.message ?? error).split('\n').slice(-2).join(' | ').slice(0, 200),
+    message: safeErrorMessage(error),
   });
   perWorkload.set(name, rows);
 };
@@ -400,7 +426,8 @@ try {
   if (existingRepo) {
     if (requested.includes('fetch-incremental')) {
       activeWorkload = 'setup';
-      await git(work, ['clone', `${proxyUrl}/__w/setup/${owner}/${repo}.git`, seedRepo]);
+      const setupToken = args['git-auth'] === 'pat' ? process.env.KVARM_PAT : undefined;
+      await gitDirect(work, ['clone', existingRepoUrl(Boolean(setupToken)), seedRepo], setupToken);
     }
   } else {
     mkdirSync(seedRepo, { recursive: true });
@@ -444,7 +471,10 @@ try {
       }))).filter((clone) => clone !== null);
       const each = record(name);
       await addCommit(seedRepo, [['incremental.txt', `${seed}-${ts}\n`]], 'git-storm incremental');
-      try { await push(seedRepo, name); } catch (error) { recordFailure(name, error); }
+      try {
+        if (existingRepo) await gitDirect(seedRepo, ['push', existingRepoUrl(true), 'HEAD:refs/heads/main'], process.env.KVARM_PAT);
+        else await push(seedRepo, name);
+      } catch (error) { recordFailure(name, error); }
       await Promise.all(clones.map((clone, lane) => (async () => {
         for (let i = lane; i < n; i += clones.length) await each(() => git(clone.path, ['fetch', 'origin']));
       })()));
@@ -487,7 +517,7 @@ try {
                 ms: end - start,
                 ok: false,
                 status: err.status ?? 0,
-                message: String(err.message ?? err).split('\n').slice(-2).join(' | ').slice(0, 200),
+                message: safeErrorMessage(err),
               }]);
               return;
             }
@@ -535,7 +565,7 @@ try {
                   ok: false,
                   status: 429,
                   attempts,
-                  message: String(error.message ?? error).split('\n').slice(-2).join(' | ').slice(0, 200),
+                  message: safeErrorMessage(error),
                 }]);
                 return;
               }
@@ -547,7 +577,7 @@ try {
                   ok: false,
                   status: error.status ?? 0,
                   attempts,
-                  message: String(error.message ?? error).split('\n').slice(-2).join(' | ').slice(0, 200),
+                  message: safeErrorMessage(error),
                 }]);
                 return;
               }
@@ -561,7 +591,7 @@ try {
                   ok: false,
                   status: rebaseError.status ?? 0,
                   attempts,
-                  message: String(rebaseError.message ?? rebaseError).split('\n').slice(-2).join(' | ').slice(0, 200),
+                  message: safeErrorMessage(rebaseError),
                 }]);
                 return;
               }
@@ -614,7 +644,7 @@ try {
       cleanupErrors.push(error);
     }
     if (cleanupErrors.length) {
-      console.error(`scratch repository cleanup failed: ${cleanupErrors.map((error) => error.message).join('; ')}`);
+      console.error(`scratch repository cleanup failed: ${redactSecret(cleanupErrors.map((error) => error.message).join('; '))}`);
       process.exitCode = 1;
     } else {
       remoteDeleted = true;
@@ -662,7 +692,7 @@ try {
       cleanupError = error;
     }
     if (cleanupError) {
-      console.error(`scratch repository cleanup failed: ${cleanupError.message ?? cleanupError}`);
+      console.error(`scratch repository cleanup failed: ${redactSecret(cleanupError.message ?? cleanupError)}`);
       process.exitCode = 1;
     } else {
       remoteDeleted = true;
