@@ -76,6 +76,36 @@ export function validateExistingRepoTarget({ benchId, repo, workloads }) {
   return invalid ? `--existing-repo does not allow workload ${invalid}` : null;
 }
 
+export async function resolveRemoteOwner({ target, configuredOwner, token, fetchImpl = fetch }) {
+  if (!token) throw new Error('KVARM_PAT is required to resolve the authenticated remote owner');
+  let response;
+  try {
+    response = await fetchImpl(new URL('/api/v1/user', target), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new Error('could not resolve authenticated owner from GET /api/v1/user');
+  }
+  if (!response.ok) throw new Error(`authenticated user lookup failed: GET /api/v1/user returned HTTP ${response.status}`);
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error('authenticated user lookup returned invalid JSON');
+  }
+  const login = body?.user?.login;
+  if (typeof login !== 'string' || !login) throw new Error('authenticated user lookup returned no login');
+  if (configuredOwner !== undefined && configuredOwner !== login) {
+    throw new Error(`KVARM_USER does not match authenticated login ${login}`);
+  }
+  return login;
+}
+
+export function scratchDeleteError(status, owner, repo) {
+  if ([200, 202, 204].includes(status)) return null;
+  return `scratch repository cleanup failed for ${owner}/${repo}: DELETE HTTP ${status}`;
+}
+
 export function createRandom(seed = 1) {
   let state = seed >>> 0;
   return () => {

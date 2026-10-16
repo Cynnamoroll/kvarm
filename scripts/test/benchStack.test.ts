@@ -10,6 +10,7 @@ import {
   runBenchStack,
   subscribeBenchRepo,
   unsubscribeBenchRepo,
+  withBenchUser,
   withPatList,
 } from '../lib/bench-stack.mjs';
 import { parseJsonc } from '../lib/wrangler-target.mjs';
@@ -156,11 +157,15 @@ describe('throwaway benchmark stack', () => {
     expect(minted).toEqual(['KVARM_PAT_2', 'KVARM_PAT_3']);
     expect(patText).toContain('KVARM_PAT=existing-one');
     expect(patText).toContain('KVARM_PATS=existing-one,minted-1,minted-2');
+    expect(patText.match(/^KVARM_USER=bench-smoke1$/gm) ?? []).toHaveLength(1);
 
     await runBenchStack(options);
     expect(minted).toEqual(['KVARM_PAT_2', 'KVARM_PAT_3']);
+    expect(patText.match(/^KVARM_USER=bench-smoke1$/gm) ?? []).toHaveLength(1);
     expect(patKeys(3)).toEqual(['KVARM_PAT', 'KVARM_PAT_2', 'KVARM_PAT_3']);
     expect(withPatList('KVARM_PAT=one\n', ['KVARM_PAT'])).toContain('KVARM_PATS=one');
+    expect(withBenchUser('KVARM_PAT=one\n', 'm8q4')).toBe('KVARM_PAT=one\nKVARM_USER=bench-m8q4\n');
+    expect(withBenchUser('KVARM_USER=custom\n', 'm8q4')).toBe('KVARM_USER=custom\n');
   });
 
   it('rejects an Artifacts namespace other than the exact benchmark namespace', () => {

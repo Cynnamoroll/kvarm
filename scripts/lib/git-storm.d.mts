@@ -8,6 +8,13 @@ export function credentialForWriter<T>(credentials: readonly T[], writer: number
 export function redactCredentials(text: string, tokens: readonly string[]): string;
 export function benchBranch(ts: number | string, workload: string, suffix: number | string): string;
 export function validateExistingRepoTarget(options: { benchId?: string; repo?: string; workloads: string[] }): string | null;
+export function resolveRemoteOwner(options: {
+  target: string;
+  configuredOwner?: string;
+  token?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<string>;
+export function scratchDeleteError(status: number, owner: string, repo: string): string | null;
 export function createRandom(seed?: number): () => number;
 export function fixtureFiles(fixture: 'small' | 'mixed' | 'large', seed?: number): Array<[string, string]>;
 export function operationSummary(

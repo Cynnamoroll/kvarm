@@ -16,6 +16,8 @@ import {
   operationSummary,
   opForPath,
   redactCredentials,
+  resolveRemoteOwner,
+  scratchDeleteError,
   validateExistingRepoTarget,
   writerCredentials,
 } from './lib/git-storm.mjs';
@@ -55,7 +57,7 @@ const commits = Number(args.commits);
 const concurrency = Number(args.concurrency);
 const seed = Number(args.seed);
 const ts = Math.floor(Date.now() / 1000);
-const owner = process.env.KVARM_USER ?? 'admin';
+let owner = local ? (process.env.KVARM_USER ?? 'admin') : '';
 const existingRepo = args['existing-repo'];
 const repo = existingRepo ?? (args['bench-id'] ? `kvarm-bench-${args['bench-id']}-storm-${ts}` : `bench-storm-${ts}`);
 const outFile = args.out ? resolve(args.out) : resolve(`git-storm-${ts}.json`);
@@ -84,12 +86,18 @@ if (existingRepo && local) throw new Error('--existing-repo requires a deploymen
 if (existingRepo) {
   const error = validateExistingRepoTarget({ benchId: args['bench-id'], repo: existingRepo, workloads: requested });
   if (error) throw new Error(error);
-  if (!process.env.KVARM_USER) throw new Error('KVARM_USER is required for an existing benchmark repository');
 }
 if (existingRepo && requested.includes('fetch-incremental') && !process.env.KVARM_PAT) {
   throw new Error('KVARM_PAT is required for the existing-repository fetch-incremental setup push');
 }
 if (!local && !existingRepo && !process.env.KVARM_PAT) throw new Error('KVARM_PAT is required for a deployment target');
+if (!local) {
+  owner = await resolveRemoteOwner({
+    target: base.origin,
+    configuredOwner: process.env.KVARM_USER,
+    token: process.env.KVARM_PAT,
+  });
+}
 // The Git gate authenticates Basic's password; it ignores the username.
 const gitAuth = local ? null : gitAuthorization(args['git-auth'], process.env.KVARM_PAT, 'kvarm');
 const writerTokens = local ? [] : configuredWriterTokens;
@@ -471,8 +479,16 @@ try {
     } else {
       await addCommit(seedRepo, files, 'git-storm seed');
     }
-    await git(seedRepo, ['remote', 'add', 'origin', `${proxyUrl}/__w/setup/${owner}/${repo}.git`]);
-    await push(seedRepo, 'setup');
+    const setupRemote = local
+      ? `${proxyUrl}/__w/setup/${owner}/${repo}.git`
+      : (() => {
+        const url = new URL(`/${owner}/${repo}.git`, base.origin);
+        url.username = 'kvarm';
+        return url.href;
+      })();
+    await git(seedRepo, ['remote', 'add', 'origin', setupRemote]);
+    if (local) await push(seedRepo, 'setup');
+    else await gitDirect(seedRepo, ['push', 'origin', 'HEAD:refs/heads/main'], process.env.KVARM_PAT);
   }
   if (local) await git(bareRoot, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
   const results = {};
@@ -671,7 +687,8 @@ try {
         subscribed = false;
       }
       const deleted = await api(`/api/v1/repos/${owner}/${repo}`, 'DELETE');
-      if (![200, 202, 204, 404].includes(deleted.status)) throw new Error(`scratch repo cleanup failed: HTTP ${deleted.status}`);
+      const deleteError = scratchDeleteError(deleted.status, owner, repo);
+      if (deleteError) throw new Error(deleteError);
       const readback = await api(`/api/v1/repos/${owner}/${repo}`);
       if (readback.status !== 404) throw new Error(`scratch repo cleanup readback was HTTP ${readback.status}`);
     } catch (error) {
@@ -717,9 +734,9 @@ try {
         subscribed = false;
       }
       const deleted = await api(`/api/v1/repos/${owner}/${repo}`, 'DELETE');
-      if (![200, 202, 204, 404].includes(deleted.status)) {
-        cleanupError = new Error(`scratch repo cleanup failed: HTTP ${deleted.status}`);
-      } else {
+      const deleteError = scratchDeleteError(deleted.status, owner, repo);
+      if (deleteError) cleanupError = new Error(deleteError);
+      else {
         const readback = await api(`/api/v1/repos/${owner}/${repo}`);
         if (readback.status !== 404) cleanupError = new Error(`scratch repo cleanup readback was HTTP ${readback.status}`);
       }

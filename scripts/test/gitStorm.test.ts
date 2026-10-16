@@ -15,6 +15,8 @@ import {
   operationSummary,
   percentile,
   redactCredentials,
+  resolveRemoteOwner,
+  scratchDeleteError,
   summarize,
   validateExistingRepoTarget,
   writerCredentials,
@@ -130,6 +132,46 @@ describe('git-storm streaming proxy', () => {
 });
 
 describe('git-storm helpers', () => {
+  it('resolves the remote owner from the authenticated user endpoint', async () => {
+    const token = 'owner-resolution-pat';
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(String(input)).toBe('https://example.com/api/v1/user');
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${token}`);
+      return new Response(JSON.stringify({ user: { login: 'bench-owner' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    await expect(resolveRemoteOwner({
+      target: 'https://example.com',
+      configuredOwner: 'bench-owner',
+      token,
+      fetchImpl,
+    })).resolves.toBe('bench-owner');
+    await expect(resolveRemoteOwner({
+      target: 'https://example.com',
+      configuredOwner: 'other-owner',
+      token,
+      fetchImpl,
+    })).rejects.toThrow(/KVARM_USER.*does not match.*bench-owner/);
+    await expect(resolveRemoteOwner({
+      target: 'https://example.com',
+      token,
+      fetchImpl,
+    })).resolves.toBe('bench-owner');
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([200, 202, 204])('accepts scratch DELETE status %s', (status) => {
+    expect(scratchDeleteError(status, 'bench-owner', 'storm-repo')).toBeNull();
+  });
+
+  it('treats scratch DELETE 404 as a cleanup failure naming the repository', () => {
+    expect(scratchDeleteError(404, 'bench-owner', 'storm-repo'))
+      .toMatch(/bench-owner\/storm-repo.*HTTP 404/);
+  });
+
   it('uses workload-specific refs and round-robins writer credentials', () => {
     const tokens = ['writer-one-secret', 'writer-two-secret'];
     const credentials = writerCredentials({ KVARM_PATS: `${tokens[0]}\n${tokens[1]}` });
@@ -271,6 +313,144 @@ describe('git-storm local smoke', () => {
   }, 120_000);
 });
 
+describe('git-storm new remote scratch setup', () => {
+  it('authenticates an anonymous setup push directly and fails cleanup on DELETE 404 without leaking the PAT', async () => {
+    const work = await mkdtemp(join(tmpdir(), 'git-storm-scratch-test-'));
+    const bin = join(work, 'bin');
+    const reportPath = join(work, 'report.json');
+    const gitLogPath = join(work, 'git.log');
+    const token = 'anonymous-scratch-fixture-pat';
+    const owner = 'bench-owner';
+    const events: string[] = [];
+    let repo = '';
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const realGit = (process.env.PATH ?? '').split(delimiter).map((path) => join(path, 'git')).find((path) => {
+        try {
+          accessSync(path, constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (!realGit) throw new Error('git not found on PATH');
+
+      server = createServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (req.method === 'GET' && url.pathname === '/api/v1/user') {
+          events.push('user');
+          if (req.headers.authorization !== `Bearer ${token}`) {
+            res.writeHead(401, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'UNAUTHENTICATED' }));
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ user: { login: owner } }));
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/v1/repos') {
+          events.push('create');
+          let body = '';
+          for await (const chunk of req) body += chunk;
+          repo = JSON.parse(body).name;
+          res.writeHead(201, { 'content-type': 'application/json' }).end(JSON.stringify({ repo: { name: repo } }));
+          return;
+        }
+        if (url.pathname === `/api/v1/repos/${owner}/${repo}` && req.method === 'DELETE') {
+          events.push('delete');
+          res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'NOT_FOUND' }));
+          return;
+        }
+        if (url.pathname === `/api/v1/repos/${owner}/${repo}` && req.method === 'GET') {
+          events.push('readback');
+          res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'NOT_FOUND' }));
+          return;
+        }
+        res.writeHead(404).end();
+      });
+      await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('API fixture server did not bind a TCP port');
+
+      await mkdir(bin);
+      const wrapper = join(bin, 'git');
+      await writeFile(wrapper, [
+        '#!/usr/bin/env node',
+        "import { appendFileSync } from 'node:fs';",
+        "import { spawnSync } from 'node:child_process';",
+        'const args = process.argv.slice(2);',
+        'const push = args.includes("push");',
+        'const askpass = process.env.GIT_ASKPASS;',
+        'const username = push && askpass ? spawnSync(askpass, ["Username"], { encoding: "utf8", env: process.env }).stdout.trim() : null;',
+        'const password = push && askpass ? spawnSync(askpass, ["Password"], { encoding: "utf8", env: process.env }).stdout.trim() : null;',
+        'const record = { args, askpass: Boolean(askpass), credentialHelperDisabled: args[0] === "-c" && args[1] === "credential.helper=", username, passwordMatches: password === process.env.GIT_STORM_TEST_TOKEN };',
+        'appendFileSync(process.env.GIT_STORM_TEST_LOG, `${JSON.stringify(record)}\\n`);',
+        'if (push) process.exit(0);',
+        "const result = spawnSync(process.env.GIT_STORM_TEST_REAL_GIT, args, { env: process.env, stdio: 'inherit' });",
+        'if (result.error) throw result.error;',
+        'process.exit(result.status ?? 1);',
+        '',
+      ].join('\n'));
+      await chmod(wrapper, 0o700);
+
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
+        KVARM_PAT: token,
+        KVARM_E2E_TOKEN: token,
+        GIT_STORM_TEST_TOKEN: token,
+        GIT_STORM_TEST_LOG: gitLogPath,
+        GIT_STORM_TEST_REAL_GIT: realGit,
+      };
+      delete childEnv.KVARM_USER;
+      const script = fileURLToPath(new URL('../git-storm.mjs', import.meta.url));
+      const result = await new Promise<{ code: number | null; text: string }>((resolve, reject) => {
+        const child = spawn(process.execPath, [
+          script,
+          '--target', `http://127.0.0.1:${address.port}`,
+          '--workloads', '',
+          '--git-auth', 'anonymous',
+          '--n', '1',
+          '--out', reportPath,
+        ], { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
+        let text = '';
+        child.stdout.on('data', (data) => { text += data; });
+        child.stderr.on('data', (data) => { text += data; });
+        child.on('error', reject);
+        child.on('close', (code) => resolve({ code, text }));
+      });
+
+      const reportText = await readFile(reportPath, 'utf8');
+      const report = JSON.parse(reportText);
+      const gitLog = await readFile(gitLogPath, 'utf8');
+      const invocations = gitLog.trim().split('\n').map((line) => JSON.parse(line));
+      const pushes = invocations.filter((entry) => entry.args.includes('push'));
+      const remoteAdds = invocations.filter((entry) => entry.args[0] === 'remote' && entry.args[1] === 'add');
+      expect(result.code).toBe(1);
+      expect(events[0]).toBe('user');
+      expect(events[1]).toBe('create');
+      expect(events).toContain('delete');
+      expect(events.filter((event) => event === 'delete')).toHaveLength(2);
+      expect(result.text).toContain(`scratch repository cleanup failed for ${owner}/${repo}`);
+      expect(result.text).toContain('HTTP 404');
+      expect(pushes).toHaveLength(1);
+      expect(remoteAdds).toHaveLength(1);
+      expect(remoteAdds[0]!.args[3]).toBe(`http://kvarm@127.0.0.1:${address.port}/${owner}/${repo}.git`);
+      expect(remoteAdds[0]!.args[3]).not.toContain('/__w/');
+      expect(pushes[0].args.some((arg: string) => arg.includes('/__w/'))).toBe(false);
+      expect(pushes[0].askpass).toBe(true);
+      expect(pushes[0].credentialHelperDisabled).toBe(true);
+      expect(pushes[0].username).toBe('kvarm');
+      expect(pushes[0].passwordMatches).toBe(true);
+      expect(report.requests.filter((request: { op: string }) => request.op !== 'api')).toHaveLength(0);
+      expect(result.text).not.toContain(token);
+      expect(gitLog).not.toContain(token);
+      expect(reportText).not.toContain(token);
+    } finally {
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(work, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
 describe('git-storm existing-repository setup', () => {
   it('uses PAT askpass for direct setup writes without leaking it into argv, logs, or report', async () => {
     const work = await mkdtemp(join(tmpdir(), 'git-storm-existing-test-'));
@@ -313,6 +493,13 @@ describe('git-storm existing-repository setup', () => {
       const expectedAuthorization = `Basic ${Buffer.from(`kvarm:${token}`).toString('base64')}`;
       server = createServer((req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (req.method === 'GET' && url.pathname === '/api/v1/user') {
+          req.resume();
+          const authorizedUser = req.headers.authorization === `Bearer ${token}`;
+          res.writeHead(authorizedUser ? 200 : 401, { 'content-type': 'application/json' })
+            .end(JSON.stringify(authorizedUser ? { user: { login: owner } } : { code: 'UNAUTHENTICATED' }));
+          return;
+        }
         const service = url.searchParams.get('service')
           ?? (url.pathname.endsWith('/git-receive-pack') ? 'git-receive-pack' : url.pathname.endsWith('/git-upload-pack') ? 'git-upload-pack' : '');
         const authorization = req.headers.authorization;

@@ -133,6 +133,12 @@ export function withPatList(text, keys) {
   return `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}${line}\n`;
 }
 
+export function withBenchUser(text, id) {
+  if (/^KVARM_USER=.*$/m.test(text)) return text;
+  const line = `KVARM_USER=bench-${id}`;
+  return `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}${line}\n`;
+}
+
 const namedArg = (args, name) => {
   const index = args.indexOf(name);
   return index < 0 ? undefined : args[index + 1];
@@ -397,7 +403,7 @@ export async function runBenchStack({
       await mintPat(databaseId, patFile, key);
       patText = await readPatFile();
     }
-    await writePatFile(withPatList(patText, keys));
+    await writePatFile(withBenchUser(withPatList(patText, keys), id));
     return { resources, config, databaseId, patFile, pats: keys.length };
   }
   if (action === 'down') {
