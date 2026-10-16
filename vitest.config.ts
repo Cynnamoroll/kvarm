@@ -32,6 +32,7 @@ export default defineConfig({
                 LIVE_MERGE: process.env.LIVE_MERGE ?? '',
                 // Test-only key for webhook secrets at rest (services/webhookSafety.ts).
                 WEBHOOK_SECRET_KEY: 'test-only-webhook-secret-key-not-for-deployments',
+                GIT_MIRROR_MODE: 'off',
               },
             },
           })),

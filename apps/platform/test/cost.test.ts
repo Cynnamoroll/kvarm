@@ -1,22 +1,23 @@
 import { env as cfEnv } from 'cloudflare:workers';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mintPAT, patCacheKey, patHash, revokePAT, PAT_STAMP_INTERVAL_MS, type Scope } from '../src/auth/pat';
 import { CostMeter, COST_HEADER, parseCostHeader, type CostCounters } from '../src/cost/meter';
 import { resolveRepoAccess } from '../src/services/access';
 import type { RepoRow } from '../src/db/repos';
 import { infoRefsCacheKey } from '../src/routes/git';
 import { repoViewGeneration } from '../src/services/pushFreshness';
+import { fakeArtifacts, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 import { request } from './helpers/http';
 import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
 const call = (path: string, init: RequestInit = {}) => request(env, path, init);
 const seedUser = (login: string) => seedUserBase(env, login);
 const seedRepo = async (name: string, visibility: 'public' | 'private' = 'public') => {
-  await seedRepoBase(env, name, { owner: OWNER, visibility, register: false });
+  await seedRepoBase(env, name, { owner: OWNER, visibility });
   return `https://artifacts.invalid/git/default/${OWNER}--${name}.git`;
 };
 
-const env = cfEnv as unknown as Env;
+const env = { ...(cfEnv as unknown as Env), ARTIFACTS: fakeArtifacts } as Env;
 const OWNER = 'cost-owner';
 const FULL: Scope[] = ['read', 'write', 'api'];
 
@@ -49,6 +50,11 @@ beforeAll(async () => {
   openRemote = await seedRepo('open', 'public');
   await seedRepo('secret', 'private');
   await seedRepo('flip', 'public');
+  installFakeGitRemote();
+});
+
+afterAll(() => {
+  restoreFetch();
 });
 
 describe('x-kvarm-cost on every surface', () => {
