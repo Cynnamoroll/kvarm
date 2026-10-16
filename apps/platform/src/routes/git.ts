@@ -79,6 +79,56 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+const MAX_MIRROR_COMPARE_BYTES = 1024 * 1024;
+
+type CompareBody =
+  | { bytes: Uint8Array; oversized: false }
+  | { length: number; oversized: true };
+
+async function readCompareBody(response: Response): Promise<CompareBody> {
+  if (!response.body) return { bytes: new Uint8Array(), oversized: false };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        const bytes = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return { bytes, oversized: false };
+      }
+      if (!value) continue;
+      if (length + value.byteLength > MAX_MIRROR_COMPARE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return { length: MAX_MIRROR_COMPARE_BYTES + 1, oversized: true };
+      }
+      chunks.push(value);
+      length += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function mirrorErrorDetails(error: unknown, secrets: readonly string[] = []): { errorName: string; errorMessage: string } {
+  const value = error instanceof Error ? error : new Error(String(error));
+  let scrubbed = value.message
+    .replace(/\b(?:authorization|proxy-authorization|cookie|set-cookie|x-[a-z0-9-]+)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .replace(/\b(?:Bearer|Basic)\s+\S+/gi, '$1 [redacted]');
+  for (const secret of secrets) {
+    if (secret) scrubbed = scrubbed.split(secret).join('[redacted]');
+  }
+  return {
+    errorName: value.name.slice(0, 200),
+    errorMessage: scrubbed.slice(0, 200),
+  };
+}
+
 async function parseLsRefsBody(request: Request): Promise<{ body: Uint8Array; options: import('../do/repoMirror').LsRefsOptions } | null> {
   const cloned = request.clone();
   const decoded = decodedRequestBody(cloned);
@@ -357,14 +407,68 @@ export async function handleGitRequest(
   const upstreamRes = await fetch(upstream.toString(), init);
 
   if (mirrorRequest && mirrorMode === 'shadow' && upstreamRes.ok) {
+    const request = mirrorRequest;
+    const requestedSeq = repo.ref_seq ?? 0;
+    const upstreamBody = readCompareBody(upstreamRes.clone());
     const mirror = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repo.id));
     c.executionCtx.waitUntil(
       (async () => {
-        const result = await mirror.read(repo.ref_seq ?? 0, repo.artifacts_name, repo.artifacts_remote, mirrorRequest!, repo.id);
-        if (!result || !sameBytes(new Uint8Array(await upstreamRes.clone().arrayBuffer()), result.bytes)) {
-          console.warn(JSON.stringify({ gitMirrorMismatch: { repoId: repo.id, kind: mirrorRequest!.kind, seq: result?.seq ?? repo.ref_seq ?? 0 } }));
+        let result: Awaited<ReturnType<typeof mirror.read>> | null;
+        let captured: CompareBody;
+        try {
+          [captured, result] = await Promise.all([
+            upstreamBody,
+            mirror.read(requestedSeq, repo.artifacts_name, repo.artifacts_remote, request, repo.id),
+          ]);
+        } catch (error) {
+          const details = mirrorErrorDetails(error, [artifactsToken]);
+          console.warn(JSON.stringify({
+            gitMirrorMismatch: {
+              repoId: repo.id, kind: request.kind, seq: requestedSeq, reason: 'error',
+              ...details,
+            },
+          }));
+          console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq: requestedSeq, ok: false } }));
+          return;
         }
-      })().catch(() => console.warn(JSON.stringify({ gitMirrorMismatch: { repoId: repo.id, kind: mirrorRequest!.kind, seq: repo.ref_seq ?? 0 } }))),
+        const seq = result?.seq ?? requestedSeq;
+        if (!result) {
+          console.warn(JSON.stringify({ gitMirrorMismatch: { repoId: repo.id, kind: request.kind, seq, reason: 'mirror-null' } }));
+          console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq, ok: false } }));
+          return;
+        }
+        if (captured.oversized || result.bytes.byteLength > MAX_MIRROR_COMPARE_BYTES) {
+          console.log(JSON.stringify({
+            gitMirrorCompare: {
+              repoId: repo.id, kind: request.kind, seq, ok: false, reason: 'too-large',
+              upstreamLength: captured.oversized ? captured.length : captured.bytes.byteLength,
+              mirrorLength: result.bytes.byteLength,
+            },
+          }));
+          return;
+        }
+        const ok = sameBytes(captured.bytes, result.bytes);
+        if (!ok) {
+          const [upstreamHash, mirrorHash] = await Promise.all([sha256Hex(captured.bytes), sha256Hex(result.bytes)]);
+          console.warn(JSON.stringify({
+            gitMirrorMismatch: {
+              repoId: repo.id, kind: request.kind, seq, reason: 'bytes',
+              upstreamLength: captured.bytes.byteLength, mirrorLength: result.bytes.byteLength,
+              upstreamSha256: upstreamHash.slice(0, 16), mirrorSha256: mirrorHash.slice(0, 16),
+            },
+          }));
+        }
+        console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq, ok } }));
+      })().catch((error: unknown) => {
+        const details = mirrorErrorDetails(error, [artifactsToken]);
+        console.warn(JSON.stringify({
+          gitMirrorMismatch: {
+            repoId: repo.id, kind: request.kind, seq: requestedSeq, reason: 'error',
+            ...details,
+          },
+        }));
+        console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq: requestedSeq, ok: false } }));
+      }),
     );
   }
 

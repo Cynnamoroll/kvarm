@@ -212,8 +212,7 @@ export function parseLsRefsRequest(body: Uint8Array): LsRefsOptions | null {
     if (delimiter < 0 || packets.findIndex((p, i) => i > delimiter && p.flush) !== packets.length - 1) return null;
     for (const p of packets.slice(1, delimiter)) {
       const value = decode(p.data);
-      if (!value.endsWith('\n')) return null;
-      const line = value.slice(0, -1);
+      const line = value.endsWith('\n') ? value.slice(0, -1) : value;
       if (!(line.startsWith('agent=') || line === 'object-format=sha1')) return null;
     }
     const out: LsRefsOptions = { prefixes: [] };

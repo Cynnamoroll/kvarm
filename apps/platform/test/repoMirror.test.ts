@@ -1,8 +1,9 @@
 import { env as cfEnv } from 'cloudflare:workers';
-import { runInDurableObject } from 'cloudflare:test';
+import { createExecutionContext, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DELIM_PKT, FLUSH_PKT, concat, pktLine } from '@kvarm/gitops';
-import { RepoMirror } from '../src/do/repoMirror';
+import { parseLsRefsRequest, RepoMirror } from '../src/do/repoMirror';
+import { default as worker } from '../src/index';
 import { recordConfirmedPush } from '../src/services/pushFreshness';
 import { fakeArtifacts, infoRefsCalls, installFakeGitRemote, lsRefsCalls, restoreFetch } from './helpers/fakeArtifacts';
 import { ORIGIN, send } from './helpers/http';
@@ -28,6 +29,38 @@ function lsRefsBody(args: string[] = ['peel', 'symrefs', 'ref-prefix refs/heads/
     ...args.map((arg) => pktLine(`${arg}\n`)),
     FLUSH_PKT,
   );
+}
+
+function bytesFromHex(value: string): Uint8Array {
+  return Uint8Array.from(value.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16));
+}
+
+const capturedGit234LsRefsBody = bytesFromHex(
+  '30303134636f6d6d616e643d6c732d726566730a303031346167656e743d6769742f322e33342e31303031366f626a6563742d666f726d61743d7368613130303031303030397065656c0a3030306373796d726566730a30303062756e626f726e0a30303030',
+);
+
+function delayedMirrorEnv(
+  entered: () => void,
+  gate: Promise<void>,
+): Env {
+  const namespace = baseEnv.REPO_MIRROR;
+  const delayed = {
+    idFromName: namespace.idFromName.bind(namespace),
+    get: (id: DurableObjectId) => {
+      const stub = namespace.get(id);
+      return new Proxy(stub, {
+        get(target, property, receiver) {
+          if (property !== 'read') return Reflect.get(target, property, receiver);
+          return async (...args: Parameters<RepoMirror['read']>) => {
+            entered();
+            await gate;
+            return stub.read(...args);
+          };
+        },
+      });
+    },
+  };
+  return { ...baseEnv, GIT_MIRROR_MODE: 'shadow', REPO_MIRROR: delayed } as unknown as Env;
 }
 
 describe('RepoMirror', () => {
@@ -375,6 +408,7 @@ describe('RepoMirror', () => {
       await mirror.read(0, `${OWNER}--${name}`, `https://artifacts.invalid/git/default/${OWNER}--${name}.git`, { kind: 'v0' }, id);
     });
     repo.refs.set('refs/heads/main', 'a'.repeat(40));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const response = await send({ ...baseEnv, GIT_MIRROR_MODE: 'shadow' } as Env, new Request(
@@ -383,9 +417,126 @@ describe('RepoMirror', () => {
       expect(response.status).toBe(200);
       const mismatch = warn.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
         .find((line) => 'gitMirrorMismatch' in line);
-      expect(mismatch).toEqual({ gitMirrorMismatch: { repoId: id, kind: 'v0', seq: 0 } });
+      expect(mismatch).toMatchObject({
+        gitMirrorMismatch: {
+          repoId: id, kind: 'v0', seq: 0, reason: 'bytes',
+          upstreamLength: expect.any(Number), mirrorLength: expect.any(Number),
+          upstreamSha256: expect.stringMatching(/^[0-9a-f]{16}$/),
+          mirrorSha256: expect.stringMatching(/^[0-9a-f]{16}$/),
+        },
+      });
       expect(JSON.stringify(mismatch)).not.toContain('refs/');
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>))
+        .toContainEqual({ gitMirrorCompare: { repoId: id, kind: 'v0', seq: 0, ok: false } });
     } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('compares v2 after the client consumes the response while the mirror read is delayed', async () => {
+    const name = `shadow-stream-${crypto.randomUUID().slice(0, 8)}`;
+    const { id } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });
+    let enterRead!: () => void;
+    const readEntered = new Promise<void>((resolve) => { enterRead = resolve; });
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const ctx = createExecutionContext();
+      const response = await worker.fetch!(
+        new Request(`${ORIGIN}/${OWNER}/${name}.git/info/refs?service=git-upload-pack`, { headers: { 'Git-Protocol': 'version=2' } }) as Request<unknown, IncomingRequestCfProperties>,
+        delayedMirrorEnv(enterRead, readGate),
+        ctx,
+      );
+      expect(response.status).toBe(200);
+      await response.arrayBuffer();
+      await readEntered;
+      releaseRead();
+      await waitOnExecutionContext(ctx);
+      const compares = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((line) => 'gitMirrorCompare' in line);
+      const mismatches = warn.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((line) => 'gitMirrorMismatch' in line);
+      expect(compares).toContainEqual({ gitMirrorCompare: { repoId: id, kind: 'v2', seq: 0, ok: true } });
+      expect(mismatches).toHaveLength(0);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('accepts and compares the stock Git 2.34 ls-refs request shape', async () => {
+    const name = `shadow-ls-refs-${crypto.randomUUID().slice(0, 8)}`;
+    const { id } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });
+    expect(parseLsRefsRequest(capturedGit234LsRefsBody)).toEqual({ peel: true, symrefs: true, unborn: true, prefixes: [] });
+    expect(parseLsRefsRequest(concat(
+      pktLine('command=ls-refs\n'),
+      pktLine('agent=git/2.34.1\n'),
+      pktLine('x-unknown-capability=1\n'),
+      DELIM_PKT,
+      FLUSH_PKT,
+    ))).toBeNull();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const response = await send({ ...baseEnv, GIT_MIRROR_MODE: 'shadow' } as Env, new Request(
+        `${ORIGIN}/${OWNER}/${name}.git/git-upload-pack`,
+        {
+          method: 'POST',
+          headers: { 'Git-Protocol': 'version=2', 'Content-Type': 'application/x-git-upload-pack-request' },
+          body: capturedGit234LsRefsBody,
+        },
+      ));
+      expect(response.status).toBe(200);
+      const compares = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((line) => 'gitMirrorCompare' in line);
+      const mismatches = warn.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((line) => 'gitMirrorMismatch' in line);
+      expect(compares).toContainEqual({ gitMirrorCompare: { repoId: id, kind: 'ls-refs', seq: 0, ok: true } });
+      expect(mismatches).toHaveLength(0);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('skips oversized shadow bodies without buffering or mismatch logs', async () => {
+    const name = `shadow-large-${crypto.randomUUID().slice(0, 8)}`;
+    const { id, repo } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });
+    await withFakeArtifacts(id, async (mirror) => {
+      await mirror.read(0, `${OWNER}--${name}`, `https://artifacts.invalid/git/default/${OWNER}--${name}.git`, { kind: 'v2' }, id);
+    });
+    const oversized = new Uint8Array(1024 * 1024 + 1);
+    oversized.fill(65);
+    repo.gitRemoteHandler = async (url, request) => {
+      if (url.pathname.endsWith('/info/refs') && request.headers.get('git-protocol') === 'version=2') {
+        return new Response(oversized, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
+      }
+      return new Response('unexpected fake request', { status: 500 });
+    };
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const response = await send({ ...baseEnv, GIT_MIRROR_MODE: 'shadow' } as Env, new Request(
+        `${ORIGIN}/${OWNER}/${name}.git/info/refs?service=git-upload-pack`,
+        { headers: { 'Git-Protocol': 'version=2' } },
+      ));
+      expect(response.status).toBe(200);
+      const compare = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .find((line) => 'gitMirrorCompare' in line);
+      expect(compare).toMatchObject({
+        gitMirrorCompare: {
+          repoId: id, kind: 'v2', seq: 0, ok: false, reason: 'too-large',
+          upstreamLength: 1024 * 1024 + 1,
+        },
+      });
+      expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((line) => 'gitMirrorMismatch' in line)).toHaveLength(0);
+    } finally {
+      repo.gitRemoteHandler = null;
+      log.mockRestore();
       warn.mockRestore();
     }
   });
