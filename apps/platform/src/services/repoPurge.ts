@@ -84,6 +84,16 @@ class PurgeStepError extends Error {
   }
 }
 
+class PurgeStoreError extends Error {
+  readonly _tag = 'PurgeStoreError';
+  constructor(readonly label: string) {
+    super(label);
+    this.name = 'PurgeStoreError';
+  }
+}
+
+type PurgeError = PurgeStepError | PurgeStoreError;
+
 interface PurgeStep {
   name: string;
   run: () => Promise<void>;
@@ -115,7 +125,7 @@ const purgeRepoEffect = Effect.fnUntraced(function* (
   env: Env,
   tombstone: RepoPurgeTombstone,
   options: { maxPrefixPages?: number; maxSnapshotBatches?: number; stepTimeoutMs?: number } = {},
-): Effect.fn.Return<RepoPurgeResult, unknown> {
+): Effect.fn.Return<RepoPurgeResult, PurgeError> {
   const maxPrefixPages = options.maxPrefixPages ?? MAX_PREFIX_PAGES;
   const maxSnapshotBatches = options.maxSnapshotBatches ?? MAX_SNAPSHOT_BATCHES;
   const timeoutMs = options.stepTimeoutMs ?? STEP_TIMEOUT_MS;
@@ -186,27 +196,29 @@ const purgeRepoEffect = Effect.fnUntraced(function* (
     .map((result) => `${result.failure.step}:${result.failure.label}`);
   const now = Date.now();
   if (errors.length === 0) {
-    yield* Effect.tryPromise(() =>
-      env.DB.prepare(
+    yield* Effect.tryPromise({
+      try: () => env.DB.prepare(
         'UPDATE repo_purges SET done_at = ?, last_error = NULL WHERE repo_id = ? AND done_at IS NULL',
       )
         .bind(now, tombstone.repo_id)
         .run(),
-    );
+      catch: (cause) => new PurgeStoreError(errorLabel(cause)),
+    });
     return { ok: true };
   }
   const attempts = tombstone.attempts + 1;
   const backoffMs = Math.min(3_600_000, 1000 * 2 ** Math.min(attempts - 1, 12));
   const lastError = errors.join(', ').slice(0, 500);
-  yield* Effect.tryPromise(() =>
-    env.DB.prepare(
+  yield* Effect.tryPromise({
+    try: () => env.DB.prepare(
       `UPDATE repo_purges
         SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?, done_at = NULL
       WHERE repo_id = ? AND done_at IS NULL`,
     )
       .bind(now + backoffMs, lastError, tombstone.repo_id)
       .run(),
-  );
+    catch: (cause) => new PurgeStoreError(errorLabel(cause)),
+  });
   return { ok: false, error: lastError };
 });
 
@@ -221,12 +233,13 @@ export function purgeRepo(
 const purgeRepoByIdEffect = Effect.fnUntraced(function* (
   env: Env,
   repoId: string,
-): Effect.fn.Return<RepoPurgeResult, unknown> {
-  const tombstone = yield* Effect.tryPromise(() =>
-    env.DB.prepare('SELECT * FROM repo_purges WHERE repo_id = ?')
+): Effect.fn.Return<RepoPurgeResult, PurgeError> {
+  const tombstone = yield* Effect.tryPromise({
+    try: () => env.DB.prepare('SELECT * FROM repo_purges WHERE repo_id = ?')
       .bind(repoId)
       .first<RepoPurgeTombstone>(),
-  );
+    catch: (cause) => new PurgeStoreError(errorLabel(cause)),
+  });
   if (!tombstone || tombstone.done_at !== null) return { ok: true };
   return yield* purgeRepoEffect(env, tombstone);
 });
@@ -238,33 +251,42 @@ export function purgeRepoById(env: Env, repoId: string): Promise<RepoPurgeResult
 const sweepRepoPurgesEffect = Effect.fnUntraced(function* (
   env: Env,
   options: { limit?: number; now?: number } = {},
-): Effect.fn.Return<{ count: number; failed: number; pruned: number }, unknown> {
+): Effect.fn.Return<{ count: number; failed: number; pruned: number; storeErrors: string[] }, PurgeStoreError> {
   const now = options.now ?? Date.now();
   const limit = options.limit ?? 25;
-  const due = yield* Effect.tryPromise(() =>
-    env.DB.prepare(
+  const due = yield* Effect.tryPromise({
+    try: () => env.DB.prepare(
       'SELECT * FROM repo_purges WHERE done_at IS NULL AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?',
     ).bind(now, limit).all<RepoPurgeTombstone>(),
-  );
+    catch: (cause) => new PurgeStoreError(errorLabel(cause)),
+  });
   const rows = due?.results ?? [];
   const outcomes = yield* Effect.all(
     rows.map((row) => Effect.result(purgeRepoEffect(env, row, { maxPrefixPages: 1 }))),
     { concurrency: SWEEP_CONCURRENCY },
   );
   const failed = outcomes.filter((outcome) => Result.isFailure(outcome) || !outcome.success.ok).length;
-  const pruned = yield* Effect.tryPromise(() =>
-    env.DB.prepare(
+  const storeErrors = outcomes.flatMap((outcome) =>
+    Result.isFailure(outcome) && outcome.failure instanceof PurgeStoreError ? [outcome.failure.label] : [],
+  );
+  const pruned = yield* Effect.tryPromise({
+    try: () => env.DB.prepare(
       'DELETE FROM repo_purges WHERE done_at IS NOT NULL AND done_at <= ?',
     ).bind(now - 7 * 24 * 60 * 60 * 1000).run(),
-  );
-  return { count: rows.length, failed, pruned: pruned.meta.changes ?? 0 };
+    catch: (cause) => new PurgeStoreError(errorLabel(cause)),
+  });
+  return { count: rows.length, failed, pruned: pruned.meta.changes ?? 0, storeErrors };
 });
 
 export function sweepRepoPurges(
   env: Env,
   options: { limit?: number; now?: number } = {},
 ): Promise<{ count: number; failed: number; pruned: number }> {
-  return Effect.runPromise(sweepRepoPurgesEffect(env, options));
+  return Effect.runPromise(
+    sweepRepoPurgesEffect(env, options).pipe(
+      Effect.map(({ count, failed, pruned }) => ({ count, failed, pruned })),
+    ),
+  );
 }
 
 export function runRepoPurgeCron(env: Env): Promise<void> {
@@ -272,13 +294,21 @@ export function runRepoPurgeCron(env: Env): Promise<void> {
     sweepRepoPurgesEffect(env).pipe(
       Effect.tap((result) =>
         Effect.sync(() => {
-          const line = JSON.stringify({ cron: 'repoPurges', ...result });
+          const { storeErrors, ...summary } = result;
+          const line = JSON.stringify({
+            cron: 'repoPurges',
+            ...summary,
+            ...(storeErrors.length ? { storeErrors } : {}),
+          });
           if (result.failed) console.error(line);
           else console.log(line);
         }),
       ),
       Effect.catch((error) =>
-        Effect.sync(() => console.error(JSON.stringify({ cron: 'repoPurges', error: errorLabel(error) }))),
+        Effect.sync(() => console.error(JSON.stringify({
+          cron: 'repoPurges',
+          error: error instanceof PurgeStoreError ? error.label : errorLabel(error),
+        }))),
       ),
       Effect.asVoid,
     ),

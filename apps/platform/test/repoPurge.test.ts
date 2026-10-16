@@ -2,6 +2,7 @@ import { env as cfEnv } from 'cloudflare:workers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   purgeRepo,
+  runRepoPurgeCron,
   sweepRepoPurges,
   type RepoPurgeTombstone,
 } from '../src/services/repoPurge';
@@ -233,6 +234,20 @@ describe('repo purge orchestration', () => {
         done_at: null,
         last_error: 'artifacts:TimeoutError:step timeout',
       });
+    } finally {
+      await deleteTombstones([tombstone.repo_id]);
+    }
+  });
+
+  it('logs the original D1 tombstone update error from the purge cron', async () => {
+    const tombstone = await insertTombstone();
+    const runStep: StepRunner = async () => {};
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    stubTokenStep(runStep);
+
+    try {
+      await runRepoPurgeCron(purgeEnv(runStep, tombstone.repo_id));
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('tombstone update failed'));
     } finally {
       await deleteTombstones([tombstone.repo_id]);
     }
