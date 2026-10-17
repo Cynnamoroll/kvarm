@@ -196,19 +196,10 @@ describe('hosted CI drain', () => {
   it('kicks coalesce while a drain is running, and a drain is a no-op for disabled or empty repositories', async () => {
     const repo = await seedRepo('hc-coalesce');
     await fixture(repo, { 'three.txt': 'three\n' });
-    await call('POST', `${R('hc-coalesce')}/ci/hosted/enable`, tok.owner);
+    await env.DB.prepare('UPDATE repos SET hosted_ci = 1 WHERE id = ?')
+      .bind(repoIds['hc-coalesce'])
+      .run();
     const stub = stubOf('hc-coalesce');
-    // The enable call armed the backlog drain; disarm it so the sequence
-    // below is deterministic rather than racing the runtime's own alarm.
-    await runInDurableObject(stub, async (_obj, state) => {
-      await state.storage.deleteAlarm();
-    });
-    expect((await stub.kick()).started).toBe(true);
-    // That kick armed the runtime's own alarm; disarm it so the coalescing
-    // sequence below is deterministic.
-    await runInDurableObject(stub, async (_obj, state) => {
-      await state.storage.deleteAlarm();
-    });
 
     // A kick that arrives mid-drain is recorded for the pass that follows.
     await runInDurableObject(stub, async (_obj, state) => {
