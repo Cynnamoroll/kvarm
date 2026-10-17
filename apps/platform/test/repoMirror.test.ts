@@ -42,6 +42,7 @@ const capturedGit234LsRefsBody = bytesFromHex(
 function delayedMirrorEnv(
   entered: () => void,
   gate: Promise<void>,
+  metrics?: AnalyticsEngineDataset,
 ): Env {
   const namespace = baseEnv.REPO_MIRROR;
   const delayed = {
@@ -60,7 +61,15 @@ function delayedMirrorEnv(
       });
     },
   };
-  return { ...baseEnv, GIT_MIRROR_MODE: 'shadow', REPO_MIRROR: delayed } as unknown as Env;
+  return { ...baseEnv, GIT_MIRROR_MODE: 'shadow', REPO_MIRROR: delayed, ...(metrics ? { KVARM_METRICS: metrics } : {}) } as unknown as Env;
+}
+
+function captureMetrics(points: AnalyticsEngineDataPoint[]): AnalyticsEngineDataset {
+  return {
+    writeDataPoint(point) {
+      if (point) points.push(point);
+    },
+  };
 }
 
 describe('RepoMirror', () => {
@@ -430,10 +439,11 @@ describe('RepoMirror', () => {
       await mirror.read(0, `${OWNER}--${name}`, `https://artifacts.invalid/git/default/${OWNER}--${name}.git`, { kind: 'v0' }, id);
     });
     repo.refs.set('refs/heads/main', 'a'.repeat(40));
+    const metrics: AnalyticsEngineDataPoint[] = [];
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      const response = await send({ ...baseEnv, GIT_MIRROR_MODE: 'shadow' } as Env, new Request(
+      const response = await send({ ...baseEnv, GIT_MIRROR_MODE: 'shadow', KVARM_METRICS: captureMetrics(metrics) } as unknown as Env, new Request(
         `${ORIGIN}/${OWNER}/${name}.git/info/refs?service=git-upload-pack`,
       ));
       expect(response.status).toBe(200);
@@ -450,6 +460,11 @@ describe('RepoMirror', () => {
       expect(JSON.stringify(mismatch)).not.toContain('refs/');
       expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>))
         .toContainEqual({ gitMirrorCompare: { repoId: id, kind: 'v0', seq: 0, ok: false } });
+      expect(metrics).toEqual([{
+        indexes: [id],
+        blobs: ['mirror_compare', id, 'adv', 'mismatch', 'bytes'],
+        doubles: [1],
+      }]);
     } finally {
       log.mockRestore();
       warn.mockRestore();
@@ -463,13 +478,14 @@ describe('RepoMirror', () => {
     const readEntered = new Promise<void>((resolve) => { enterRead = resolve; });
     let releaseRead!: () => void;
     const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const metrics: AnalyticsEngineDataPoint[] = [];
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const ctx = createExecutionContext();
       const response = await worker.fetch!(
         new Request(`${ORIGIN}/${OWNER}/${name}.git/info/refs?service=git-upload-pack`, { headers: { 'Git-Protocol': 'version=2' } }) as Request<unknown, IncomingRequestCfProperties>,
-        delayedMirrorEnv(enterRead, readGate),
+        delayedMirrorEnv(enterRead, readGate, captureMetrics(metrics)),
         ctx,
       );
       expect(response.status).toBe(200);
@@ -483,6 +499,11 @@ describe('RepoMirror', () => {
         .filter((line) => 'gitMirrorMismatch' in line);
       expect(compares).toContainEqual({ gitMirrorCompare: { repoId: id, kind: 'v2', seq: 0, ok: true } });
       expect(mismatches).toHaveLength(0);
+      expect(metrics).toEqual([{
+        indexes: [id],
+        blobs: ['mirror_compare', id, 'adv', 'match', 'bytes'],
+        doubles: [1],
+      }]);
     } finally {
       log.mockRestore();
       warn.mockRestore();
@@ -500,10 +521,11 @@ describe('RepoMirror', () => {
       DELIM_PKT,
       FLUSH_PKT,
     ))).toBeNull();
+    const metrics: AnalyticsEngineDataPoint[] = [];
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      const response = await send({ ...baseEnv, GIT_MIRROR_MODE: 'shadow' } as Env, new Request(
+      const response = await send({ ...baseEnv, GIT_MIRROR_MODE: 'shadow', KVARM_METRICS: captureMetrics(metrics) } as unknown as Env, new Request(
         `${ORIGIN}/${OWNER}/${name}.git/git-upload-pack`,
         {
           method: 'POST',
@@ -518,6 +540,11 @@ describe('RepoMirror', () => {
         .filter((line) => 'gitMirrorMismatch' in line);
       expect(compares).toContainEqual({ gitMirrorCompare: { repoId: id, kind: 'ls-refs', seq: 0, ok: true } });
       expect(mismatches).toHaveLength(0);
+      expect(metrics).toEqual([{
+        indexes: [id],
+        blobs: ['mirror_compare', id, 'ls-refs', 'match', 'bytes'],
+        doubles: [1],
+      }]);
     } finally {
       log.mockRestore();
       warn.mockRestore();
@@ -559,6 +586,42 @@ describe('RepoMirror', () => {
     } finally {
       repo.gitRemoteHandler = null;
       log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('records comparison errors without changing the upstream response', async () => {
+    const name = `shadow-error-${crypto.randomUUID().slice(0, 8)}`;
+    const { id } = await seedRepoWithCommit(baseEnv, name, { owner: OWNER, visibility: 'public' });
+    const namespace = baseEnv.REPO_MIRROR;
+    const failing = {
+      idFromName: namespace.idFromName.bind(namespace),
+      get: (objectId: DurableObjectId) => {
+        const stub = namespace.get(objectId);
+        return new Proxy(stub, {
+          get(target, property, receiver) {
+            if (property !== 'read') return Reflect.get(target, property, receiver);
+            return async () => { throw new Error('comparison read failed'); };
+          },
+        });
+      },
+    };
+    const metrics: AnalyticsEngineDataPoint[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await send({
+        ...baseEnv,
+        GIT_MIRROR_MODE: 'shadow',
+        REPO_MIRROR: failing,
+        KVARM_METRICS: captureMetrics(metrics),
+      } as unknown as Env, new Request(`${ORIGIN}/${OWNER}/${name}.git/info/refs?service=git-upload-pack`));
+      expect(result.status).toBe(200);
+      expect(metrics).toEqual([{
+        indexes: [id],
+        blobs: ['mirror_compare', id, 'adv', 'error', 'error'],
+        doubles: [1],
+      }]);
+    } finally {
       warn.mockRestore();
     }
   });

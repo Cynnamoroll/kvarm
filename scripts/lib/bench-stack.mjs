@@ -101,6 +101,10 @@ export function benchmarkConfig(base, resources, databaseId = '00000000-0000-000
   config.artifacts = config.artifacts.map((artifacts) => artifacts.binding === 'ARTIFACTS'
     ? { ...artifacts, namespace: resources.namespace }
     : artifacts);
+  config.analytics_engine_datasets = [{
+    binding: 'KVARM_METRICS',
+    dataset: `${resources.prefix.replaceAll('-', '_')}_git`,
+  }];
   config.vars = { ...config.vars, ARTIFACTS_NAMESPACE: resources.namespace, GIT_MIRROR_MODE: mirrorMode, GIT_PACK_CACHE: packCache };
   config.ratelimits = config.ratelimits.map((ratelimit) => {
     const suffix = createHash('sha256').update(`${resources.prefix}:${ratelimit.name}`).digest('hex').slice(0, 12);
@@ -170,6 +174,9 @@ function assertIsolatedConfig(config, resources) {
       config.queues?.consumers?.some((x) => !x.queue?.startsWith(`${resources.prefix}-`) || !x.dead_letter_queue?.startsWith(`${resources.prefix}-`)) ||
       config.artifacts?.some((x) => x.namespace !== resources.namespace) ||
       config.artifacts?.find((x) => x.binding === 'ARTIFACTS')?.namespace !== resources.namespace ||
+      config.analytics_engine_datasets?.length !== 1 ||
+      config.analytics_engine_datasets?.[0]?.binding !== 'KVARM_METRICS' ||
+      config.analytics_engine_datasets?.[0]?.dataset !== `${resources.prefix.replaceAll('-', '_')}_git` ||
       !Array.isArray(config.workflows) ||
       config.workflows.some((x) => !x.name?.startsWith(`${resources.prefix}-`)) ||
       config.vars?.ARTIFACTS_NAMESPACE !== resources.namespace ||

@@ -39,6 +39,7 @@ import { recordPushAudit } from '../services/audit';
 import { branchPushUpdates, dispatchConfirmedPush } from '../services/pushFastPath';
 import { bufferReceivePackBody, fetchReceivePackWithBusyRetry } from '../services/receivePackBusy';
 import { ServerTiming } from '../services/serverTiming';
+import { recordMirrorCompare } from '../services/metrics';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -608,6 +609,7 @@ async function serveGitRequest(
   try {
     if (subpath === 'git-receive-pack') {
       upstreamRes = await fetchReceivePackWithBusyRetry(
+        env,
         upstream.toString(),
         init,
         retryPushBody,
@@ -636,6 +638,7 @@ async function serveGitRequest(
     const mirror = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repo.id));
     c.executionCtx.waitUntil(
       (async () => {
+        const metricKind = request.kind === 'ls-refs' ? 'ls-refs' : 'adv';
         let result: Awaited<ReturnType<typeof mirror.read>> | null;
         let captured: CompareBody;
         try {
@@ -652,12 +655,14 @@ async function serveGitRequest(
             },
           }));
           console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq: requestedSeq, ok: false } }));
+          recordMirrorCompare(env, repo.id, metricKind, 'error', 'error');
           return;
         }
         const seq = result?.seq ?? requestedSeq;
         if (!result) {
           console.warn(JSON.stringify({ gitMirrorMismatch: { repoId: repo.id, kind: request.kind, seq, reason: 'mirror-null' } }));
           console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq, ok: false } }));
+          recordMirrorCompare(env, repo.id, metricKind, 'error', 'mirror-null');
           return;
         }
         if (captured.oversized || result.bytes.byteLength > MAX_MIRROR_COMPARE_BYTES) {
@@ -668,6 +673,7 @@ async function serveGitRequest(
               mirrorLength: result.bytes.byteLength,
             },
           }));
+          recordMirrorCompare(env, repo.id, metricKind, 'error', 'too-large');
           return;
         }
         const ok = sameBytes(captured.bytes, result.bytes);
@@ -681,6 +687,7 @@ async function serveGitRequest(
             },
           }));
         }
+        recordMirrorCompare(env, repo.id, metricKind, ok ? 'match' : 'mismatch', 'bytes');
         console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq, ok } }));
       })().catch((error: unknown) => {
         const details = mirrorErrorDetails(error, [artifactsToken]);
@@ -691,6 +698,7 @@ async function serveGitRequest(
           },
         }));
         console.log(JSON.stringify({ gitMirrorCompare: { repoId: repo.id, kind: request.kind, seq: requestedSeq, ok: false } }));
+        recordMirrorCompare(env, repo.id, request.kind === 'ls-refs' ? 'ls-refs' : 'adv', 'error', 'error');
       }),
     );
   }

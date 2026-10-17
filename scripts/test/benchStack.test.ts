@@ -190,6 +190,11 @@ describe('throwaway benchmark stack', () => {
     expect(config.queues.producers[0].queue).toBe(RES.queue);
     expect(config.queues.consumers[0]).toMatchObject({ queue: RES.queue, dead_letter_queue: RES.deadLetterQueue });
     expect(config.artifacts[0].namespace).toBe(RES.namespace);
+    expect(config.analytics_engine_datasets).toEqual([{
+      binding: 'KVARM_METRICS',
+      dataset: 'kvarm_bench_smoke1_git',
+    }]);
+    expect(BASE.analytics_engine_datasets).toBeUndefined();
     expect(config.workflows.every((workflow: { name: string }) => workflow.name.startsWith(`${RES.prefix}-`))).toBe(true);
     expect(config.triggers.crons).toEqual(BASE.triggers.crons);
     expect(config.vars).toMatchObject({ ARTIFACTS_NAMESPACE: RES.namespace, GIT_MIRROR_MODE: 'shadow', GIT_PACK_CACHE: 'off' });

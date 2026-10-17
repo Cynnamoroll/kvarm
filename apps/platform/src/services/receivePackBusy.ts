@@ -1,3 +1,5 @@
+import { recordReceivePack } from './metrics';
+
 export const RECEIVE_PACK_RETRY_MAX_BYTES = 8 * 1024 * 1024;
 export const RECEIVE_PACK_BUSY_MAX_RETRIES = 3;
 
@@ -190,6 +192,7 @@ function waitForRetry(delayMs: number, signal: AbortSignal): Promise<boolean> {
 }
 
 export async function fetchReceivePackWithBusyRetry(
+  env: Pick<Env, 'KVARM_METRICS'>,
   url: string,
   init: RequestInit,
   retryBody: Uint8Array | null,
@@ -198,16 +201,31 @@ export async function fetchReceivePackWithBusyRetry(
   timing?: ReceivePackAttemptTiming,
 ): Promise<Response> {
   let retries = 0;
+  let attempts = 0;
+  let outcome: 'ok' | 'busy_exhausted' | 'not_retryable' | 'error' = 'error';
   try {
     for (;;) {
       const attemptInit = retryBody === null ? init : { ...init, body: retryBody.slice() };
+      attempts++;
       timing?.start();
       const response = await fetch(url, attemptInit);
       timing?.mark();
-      if (retryBody === null || !response.ok || !response.body) return response;
+      if (retryBody === null) {
+        outcome = 'not_retryable';
+        return response;
+      }
+      if (!response.ok || !response.body) {
+        outcome = 'ok';
+        return response;
+      }
 
       const first = await readFirstPkt(response.body);
-      if (!first.busy || retries >= RECEIVE_PACK_BUSY_MAX_RETRIES) {
+      if (!first.busy) {
+        outcome = 'ok';
+        return new Response(restoreFirstPkt(first.first, first.rest), response);
+      }
+      if (retries >= RECEIVE_PACK_BUSY_MAX_RETRIES) {
+        outcome = 'busy_exhausted';
         return new Response(restoreFirstPkt(first.first, first.rest), response);
       }
 
@@ -219,6 +237,7 @@ export async function fetchReceivePackWithBusyRetry(
       retries++;
     }
   } finally {
+    recordReceivePack(env, repoId, outcome, retries, attempts);
     if (retries > 0) console.log(JSON.stringify({ receivePackBusyRetry: retries, repoId }));
   }
 }

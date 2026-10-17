@@ -41,5 +41,6 @@ declare global {
     REPO_MIRROR: DurableObjectNamespace<RepoMirror>;
     GIT_MIRROR_MODE?: 'off' | 'shadow' | 'on';
     GIT_PACK_CACHE?: 'off' | 'on';
+    KVARM_METRICS?: AnalyticsEngineDataset;
   }
 }

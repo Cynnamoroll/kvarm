@@ -20,6 +20,14 @@ const busyReply = pktLine(concat(new Uint8Array([3]), enc.encode(`${busyMessage}
 const unrelatedError = pktLine(concat(new Uint8Array([3]), enc.encode('fatal: unrelated error\n')));
 let token = '';
 
+function captureMetrics(points: AnalyticsEngineDataPoint[]): AnalyticsEngineDataset {
+  return {
+    writeDataPoint(point) {
+      if (point) points.push(point);
+    },
+  };
+}
+
 interface Fixture {
   id: string;
   name: string;
@@ -40,9 +48,9 @@ function pushBody(ref = 'refs/heads/retry', suffix = 'PACK-fake'): Uint8Array {
   );
 }
 
-async function push(f: Fixture, body = pushBody()) {
+async function push(f: Fixture, body = pushBody(), requestEnv: Env = env) {
   return send(
-    env,
+    requestEnv,
     new Request(`${ORIGIN}/${OWNER}/${f.name}.git/git-receive-pack`, {
       method: 'POST',
       headers: {
@@ -189,6 +197,7 @@ describe('receive-pack busy retry', () => {
   it('retries identical request bytes and records a confirmed push once', async () => {
     const f = await fixture('success');
     const received: Uint8Array[] = [];
+    const metrics: AnalyticsEngineDataPoint[] = [];
     const ok = buildReportStatus([{ ref: 'refs/heads/retry', ok: true }], 'side-band-64k');
     f.repo.gitRemoteHandler = async (_url, request) => {
       received.push(new Uint8Array(await request.arrayBuffer()));
@@ -198,7 +207,7 @@ describe('receive-pack busy retry', () => {
     const log = vi.spyOn(console, 'log');
 
     try {
-      const result = await push(f);
+      const result = await push(f, pushBody(), { ...env, KVARM_METRICS: captureMetrics(metrics) } as unknown as Env);
 
       expect(result.status).toBe(200);
       expect(result.bytes).toEqual(ok);
@@ -209,6 +218,11 @@ describe('receive-pack busy retry', () => {
       expect(received).toHaveLength(2);
       expect(received[0]).toEqual(received[1]);
       expect(result.cost.sub).toBe(2);
+      expect(metrics).toEqual([{
+        indexes: [f.id],
+        blobs: ['receive_pack', f.id, 'ok'],
+        doubles: [1, 2],
+      }]);
       expect(await refSequence(f.id)).toBe(before + 1);
       expect(log.mock.calls.filter(([line]) => String(line).includes('"receivePackBusyRetry"'))).toEqual([
         [JSON.stringify({ receivePackBusyRetry: 1, repoId: f.id })],
@@ -221,6 +235,7 @@ describe('receive-pack busy retry', () => {
   it('passes the fourth busy reply through unchanged after three retries', async () => {
     const f = await fixture('exhausted');
     let calls = 0;
+    const metrics: AnalyticsEngineDataPoint[] = [];
     const reply = concat(busyReply, FLUSH_PKT);
     f.repo.gitRemoteHandler = async (_url, request) => {
       await request.arrayBuffer();
@@ -228,18 +243,24 @@ describe('receive-pack busy retry', () => {
       return response(reply);
     };
 
-    const result = await push(f);
+    const result = await push(f, pushBody(), { ...env, KVARM_METRICS: captureMetrics(metrics) } as unknown as Env);
 
     expect(result.status).toBe(200);
     expect(result.bytes).toEqual(reply);
     expect(calls).toBe(4);
     expect(result.cost.sub).toBe(4);
+    expect(metrics).toEqual([{
+      indexes: [f.id],
+      blobs: ['receive_pack', f.id, 'busy_exhausted'],
+      doubles: [3, 4],
+    }]);
   });
 
   it('does not retry an over-limit request body', async () => {
     const f = await fixture('oversized');
     let calls = 0;
     let receivedLength = 0;
+    const metrics: AnalyticsEngineDataPoint[] = [];
     const reply = concat(busyReply, FLUSH_PKT);
     f.repo.gitRemoteHandler = async (_url, request) => {
       receivedLength = (await request.arrayBuffer()).byteLength;
@@ -248,12 +269,50 @@ describe('receive-pack busy retry', () => {
     };
     const body = concat(pushBody('refs/heads/retry', ''), new Uint8Array(RECEIVE_PACK_RETRY_MAX_BYTES + 1));
 
-    const result = await push(f, body);
+    const result = await push(f, body, { ...env, KVARM_METRICS: captureMetrics(metrics) } as unknown as Env);
 
     expect(result.bytes).toEqual(reply);
     expect(calls).toBe(1);
     expect(receivedLength).toBe(body.byteLength);
     expect(result.cost.sub).toBe(1);
+    expect(metrics).toEqual([{
+      indexes: [f.id],
+      blobs: ['receive_pack', f.id, 'not_retryable'],
+      doubles: [0, 1],
+    }]);
+  });
+
+  it('keeps successful responses unchanged when the metrics binding is absent', async () => {
+    const f = await fixture('no-metrics');
+    const reply = buildReportStatus([{ ref: 'refs/heads/retry', ok: true }], 'side-band-64k');
+    f.repo.gitRemoteHandler = async (_url, request) => {
+      await request.arrayBuffer();
+      return response(reply);
+    };
+
+    const result = await push(f);
+
+    expect(result.status).toBe(200);
+    expect(result.bytes).toEqual(reply);
+  });
+
+  it('keeps the receive-pack response unchanged when writeDataPoint throws', async () => {
+    const f = await fixture('metrics-error');
+    const reply = buildReportStatus([{ ref: 'refs/heads/retry', ok: true }], 'side-band-64k');
+    const writeDataPoint = vi.fn(() => { throw new Error('metrics unavailable'); });
+    f.repo.gitRemoteHandler = async (_url, request) => {
+      await request.arrayBuffer();
+      return response(reply);
+    };
+
+    const result = await push(f, pushBody(), {
+      ...env,
+      KVARM_METRICS: { writeDataPoint } as unknown as AnalyticsEngineDataset,
+    } as unknown as Env);
+
+    expect(writeDataPoint).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe(200);
+    expect(result.bytes).toEqual(reply);
   });
 
   it('does not retry a different band-3 error', async () => {
