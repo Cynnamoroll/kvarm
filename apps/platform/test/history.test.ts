@@ -61,7 +61,7 @@ async function settle(repo: { id: string }, name: string, path: string) {
   let result = await history(name, `path=${encodeURIComponent(path)}&limit=100`);
   const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
   for (let i = 0; i < 20 && result.status === 200 && !result.json.index?.rootReached; i++) {
-    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (object: PathHistory) => object.alarm());
     result = await history(name, `path=${encodeURIComponent(path)}&limit=100`);
   }
   return result;
@@ -216,7 +216,7 @@ describe('GET /repos/:owner/:repo/history', () => {
     const stub = env.PATH_HISTORY.get(env.PATH_HISTORY.idFromName(repo.id));
     repo.fake.calls.length = 0;
     expect(await stub.pushed({ repoId: repo.id, ref: 'refs/heads/main', after: child.sha, eventAt: Date.now() + 1000 })).toBe('indexed');
-    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (object: PathHistory) => object.alarm());
     expect(repo.fake.calls.filter((entry) => entry.startsWith('log:'))).toEqual([`log:${child.sha}`]);
     const state = await runInDurableObject(stub, async (_obj: PathHistory, storage) =>
       storage.storage.sql.exec<{ known_sha: string; head_sha: string }>('SELECT known_sha,head_sha FROM state').toArray()[0],
