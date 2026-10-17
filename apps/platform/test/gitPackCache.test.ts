@@ -7,7 +7,7 @@ import { recordConfirmedPush } from '../src/services/pushFreshness';
 import worker from '../src/index';
 import { classifyUploadPackRequest, derivePackCacheKey, derivePackCacheSlotHash } from '../src/git/packCache';
 import { lookupUploadPackCache } from '../src/services/uploadPackCache';
-import { ORIGIN, send } from './helpers/http';
+import { ORIGIN, parseServerTiming, send } from './helpers/http';
 import { fakeArtifacts, fakeRepos, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
 import { seedRepoWithCommit, seedUser } from './helpers/seed';
 import { artifactsSidebandAllResponseBase64 } from './gitPackCacheResponse.fixture';
@@ -149,6 +149,11 @@ describe('upload-pack response cache', () => {
     expect(second.cost.art).toBe(0);
     expect(second.headers.get('content-type')).toBe('application/x-git-upload-pack-result');
     expect(second.bytes).toEqual(first.bytes);
+    const timing = parseServerTiming(second.headers.get('server-timing'));
+    expect(timing.has('auth')).toBe(true);
+    expect(timing.get('cache')).toMatchObject({ desc: 'hit-edge' });
+    expect(timing.has('upstream')).toBe(false);
+    expect(timing.has('total')).toBe(true);
     expect(fixture.upstreamCalls).toBe(1);
   });
 

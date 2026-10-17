@@ -170,6 +170,11 @@ export function restoreFirstPkt(first: Uint8Array, rest: ReadableStream<Uint8Arr
   return streamWithReader(first.byteLength === 0 ? [] : [first], reader);
 }
 
+export interface ReceivePackAttemptTiming {
+  start(): void;
+  mark(): void;
+}
+
 function waitForRetry(delayMs: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
@@ -190,12 +195,15 @@ export async function fetchReceivePackWithBusyRetry(
   retryBody: Uint8Array | null,
   signal: AbortSignal,
   repoId: string,
+  timing?: ReceivePackAttemptTiming,
 ): Promise<Response> {
   let retries = 0;
   try {
     for (;;) {
       const attemptInit = retryBody === null ? init : { ...init, body: retryBody.slice() };
+      timing?.start();
       const response = await fetch(url, attemptInit);
+      timing?.mark();
       if (retryBody === null || !response.ok || !response.body) return response;
 
       const first = await readFirstPkt(response.body);

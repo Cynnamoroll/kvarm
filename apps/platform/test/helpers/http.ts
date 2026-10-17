@@ -22,6 +22,29 @@ export interface Reply {
   headers: Headers;
 }
 
+export interface ServerTimingMetric {
+  dur: number;
+  desc?: string;
+}
+
+export function parseServerTiming(value: string | null): Map<string, ServerTimingMetric> {
+  if (!value) throw new Error('missing server-timing header');
+  const metrics = new Map<string, ServerTimingMetric>();
+  for (const entry of value.split(',')) {
+    const [name, ...parameters] = entry.trim().split(';');
+    const duration = parameters.find((parameter) => parameter.startsWith('dur='));
+    const desc = parameters.find((parameter) => parameter.startsWith('desc='));
+    if (!name || !duration) throw new Error(`invalid server-timing metric: ${entry}`);
+    const dur = Number(duration.slice('dur='.length));
+    if (!Number.isFinite(dur) || dur < 0) throw new Error(`invalid server-timing duration: ${entry}`);
+    metrics.set(name, {
+      dur,
+      ...(desc ? { desc: desc.slice('desc='.length).replace(/^"|"$/g, '') } : {}),
+    });
+  }
+  return metrics;
+}
+
 /** Sends a prebuilt Request through the worker, draining the execution context. */
 export async function send(env: Env, req: Request): Promise<Reply> {
   const ctx = createExecutionContext();

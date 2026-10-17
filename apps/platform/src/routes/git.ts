@@ -38,6 +38,7 @@ import { parseLsRefsRequest } from '../do/repoMirror';
 import { recordPushAudit } from '../services/audit';
 import { branchPushUpdates, dispatchConfirmedPush } from '../services/pushFastPath';
 import { bufferReceivePackBody, fetchReceivePackWithBusyRetry } from '../services/receivePackBusy';
+import { ServerTiming } from '../services/serverTiming';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -345,9 +346,30 @@ export async function handleGitRequest(
   name: string,
   subpath: string,
 ): Promise<Response> {
+  const timing = new ServerTiming();
+  const response = await serveGitRequest(c, owner, name, subpath, timing);
+  timing.mark('total');
+  const headers = new Headers(response.headers);
+  headers.set('server-timing', timing.header());
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+async function serveGitRequest(
+  c: Context<{ Bindings: Env }>,
+  owner: string,
+  name: string,
+  subpath: string,
+  timing: ServerTiming,
+): Promise<Response> {
   const env = c.env;
   const url = new URL(c.req.url);
+  timing.start('auth');
   const access = await authorizeGitRequest(env, c.req.raw, owner, name, subpath);
+  timing.mark('auth');
   if (!access.ok) return access.response;
   const { repo, actor, op, branchRules } = access;
   const isPublic = repo.visibility === 'public';
@@ -385,16 +407,21 @@ export async function handleGitRequest(
     const digest = mirrorRequest.kind === 'ls-refs' ? `/${await sha256Hex(mirrorRequest.body!)}` : '';
     const refSeq = repo.ref_seq ?? 0;
     const key = new Request(`https://kvarm-git.internal/refs/${repo.id}/${refSeq}/${version}/${mirrorRequest.kind}${digest}`);
+    timing.start('cache');
     const cached = await caches.default.match(key);
     if (cached) {
+      timing.mark('cache', 'hit-edge');
       markCache('hit');
       const headers = new Headers(cached.headers);
       headers.set('cache-control', 'no-cache');
       return scoped(new Response(cached.body, { status: cached.status, headers }));
     }
+    timing.mark('cache', 'miss');
     markCache('miss');
     const mirror = env.REPO_MIRROR.get(env.REPO_MIRROR.idFromName(repo.id));
+    timing.start('mirror');
     const result = await mirror.read(refSeq, repo.artifacts_name, repo.artifacts_remote, mirrorRequest, repo.id);
+    timing.mark('mirror');
     if (result) {
       const headers = new Headers({ 'content-type': mirrorRequest.kind === 'ls-refs' ? 'application/x-git-upload-pack-result' : 'application/x-git-upload-pack-advertisement', 'cache-control': 'no-cache' });
       const response = new Response(result.bytes, { status: 200, headers });
@@ -436,7 +463,9 @@ export async function handleGitRequest(
           protocol,
           sidebandAll: classification.sidebandAll,
         };
+        timing.start('cache');
         const cached = await lookupUploadPackCache(env, c.executionCtx, address);
+        timing.mark('cache', cached ? cached.tier === 'hit' ? 'hit-edge' : 'hit-r2' : 'miss');
         if (cached) {
           markCache(cached.tier);
           const headers = new Headers(cached.response.headers);
@@ -498,11 +527,14 @@ export async function handleGitRequest(
         )
       : null;
   if (cacheKey) {
+    timing.start('cache');
     const cached = await caches.default.match(cacheKey);
     if (cached) {
+      timing.mark('cache', 'hit-edge');
       markCache('hit');
       return scoped(cached);
     }
+    timing.mark('cache', 'miss');
     markCache('miss');
   }
 
@@ -544,7 +576,9 @@ export async function handleGitRequest(
       } else if (acquired === 'follower') {
         const outcome = await mirror.awaitPackFlight(address.fullHash, 20_000);
         if (outcome === 'done') {
+          timing.start('cache');
           const cached = await lookupUploadPackCache(env, c.executionCtx, address);
+          timing.mark('cache', cached ? cached.tier === 'hit' ? 'hit-edge' : 'hit-r2' : 'miss');
           if (cached) {
             markCache('coalesced');
             const cachedHeaders = new Headers(cached.response.headers);
@@ -572,10 +606,25 @@ export async function handleGitRequest(
 
   let upstreamRes: Response;
   try {
-    upstreamRes = subpath === 'git-receive-pack'
-      ? await fetchReceivePackWithBusyRetry(upstream.toString(), init, retryPushBody, c.req.raw.signal, repo.id)
-      : await fetch(upstream.toString(), init);
+    if (subpath === 'git-receive-pack') {
+      upstreamRes = await fetchReceivePackWithBusyRetry(
+        upstream.toString(),
+        init,
+        retryPushBody,
+        c.req.raw.signal,
+        repo.id,
+        {
+          start: () => timing.start('upstream'),
+          mark: () => timing.mark('upstream'),
+        },
+      );
+    } else {
+      timing.start('upstream');
+      upstreamRes = await fetch(upstream.toString(), init);
+      timing.mark('upstream');
+    }
   } catch (error) {
+    timing.mark('upstream');
     schedulePackFlightSettlement(false);
     throw error;
   }

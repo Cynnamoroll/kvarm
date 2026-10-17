@@ -7,7 +7,7 @@ import type { RepoRow } from '../src/db/repos';
 import { infoRefsCacheKey } from '../src/routes/git';
 import { repoViewGeneration } from '../src/services/pushFreshness';
 import { fakeArtifacts, installFakeGitRemote, restoreFetch } from './helpers/fakeArtifacts';
-import { request } from './helpers/http';
+import { parseServerTiming, request } from './helpers/http';
 import { seedRepo as seedRepoBase, seedUser as seedUserBase } from './helpers/seed';
 
 const call = (path: string, init: RequestInit = {}) => request(env, path, init);
@@ -287,6 +287,11 @@ describe('git gate', () => {
     const plain = await call(`/${OWNER}/open.git/info/refs${search}`);
     expect(plain.status).toBe(200);
     expect(await plain.clone().text()).toBe(v0);
+    const timing = parseServerTiming(plain.headers.get('server-timing'));
+    expect(timing.has('auth')).toBe(true);
+    expect(timing.get('cache')).toMatchObject({ desc: 'hit-edge' });
+    expect(timing.has('total')).toBe(true);
+    expect(timing.has('upstream')).toBe(false);
     const plainCost = await costOf(plain);
     expect(plainCost).toEqual({ d1: 1, rr: plainCost.rr, rw: 0, art: 0, do: 0, r2a: 0, r2b: 0, q: 0, sub: 0, cache: 'hit' });
     expect(plainCost.rr).toBeLessThanOrEqual(8);
@@ -294,6 +299,15 @@ describe('git gate', () => {
     const proto2 = await call(`/${OWNER}/open.git/info/refs${search}`, { headers: { 'Git-Protocol': 'version=2' } });
     expect(await proto2.clone().text()).toBe(v2);
     expect(await costOf(proto2)).toMatchObject({ art: 0, sub: 0, do: 0, cache: 'hit' });
+  });
+
+  it('includes Server-Timing on a private-repository 401', async () => {
+    const denied = await call(`/${OWNER}/secret.git/info/refs?service=git-upload-pack`);
+    expect(denied.status).toBe(401);
+    const timing = parseServerTiming(denied.headers.get('server-timing'));
+    expect(timing.has('auth')).toBe(true);
+    expect(timing.get('cache')).toMatchObject({ desc: 'none' });
+    expect(timing.has('total')).toBe(true);
   });
 
   it('never calls a Durable Object, including authenticated writes', async () => {

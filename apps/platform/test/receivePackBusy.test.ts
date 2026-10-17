@@ -7,7 +7,7 @@ import {
   readFirstPkt,
   RECEIVE_PACK_RETRY_MAX_BYTES,
 } from '../src/services/receivePackBusy';
-import { ORIGIN, send } from './helpers/http';
+import { ORIGIN, parseServerTiming, send } from './helpers/http';
 import { fakeArtifacts, installFakeGitRemote, restoreFetch, type FakeRepo } from './helpers/fakeArtifacts';
 import { seedRepoWithCommit, seedUser } from './helpers/seed';
 
@@ -202,6 +202,10 @@ describe('receive-pack busy retry', () => {
 
       expect(result.status).toBe(200);
       expect(result.bytes).toEqual(ok);
+      const timing = parseServerTiming(result.headers.get('server-timing'));
+      expect(timing.has('auth')).toBe(true);
+      expect(timing.has('upstream')).toBe(true);
+      expect(timing.has('total')).toBe(true);
       expect(received).toHaveLength(2);
       expect(received[0]).toEqual(received[1]);
       expect(result.cost.sub).toBe(2);
