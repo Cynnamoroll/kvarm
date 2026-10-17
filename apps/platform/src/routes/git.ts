@@ -37,6 +37,7 @@ import { lookupUploadPackCache, storeUploadPackResponse, type UploadPackCacheAdd
 import { parseLsRefsRequest } from '../do/repoMirror';
 import { recordPushAudit } from '../services/audit';
 import { branchPushUpdates, dispatchConfirmedPush } from '../services/pushFastPath';
+import { bufferReceivePackBody, fetchReceivePackWithBusyRetry } from '../services/receivePackBusy';
 
 /** /{owner}/{repo}(.git)/{git subpath} — mounted before all web routes. */
 export const GIT_PATH_RE =
@@ -456,7 +457,8 @@ export async function handleGitRequest(
   // front and never echoed back into a report-status line. The push command
   // list is checked before any upstream token mint or byte of the pack is
   // forwarded.
-  let pushBody: ReadableStream<Uint8Array> | null = null;
+  let pushBody: Uint8Array | ReadableStream<Uint8Array> | null = null;
+  let retryPushBody: Uint8Array | null = null;
   let pushCommands: RefCommand[] = [];
   if (subpath === 'git-receive-pack') {
     let owners: Promise<Map<string, WorkspaceOwner>> | null = null;
@@ -477,7 +479,9 @@ export async function handleGitRequest(
       return directHumanPushDenial(branchRules, cmd.ref);
     });
     if (!gate.ok) return gate.response;
-    pushBody = gate.body;
+    const replayable = await bufferReceivePackBody(gate.body, c.req.raw.headers.get('content-length'));
+    pushBody = replayable.body;
+    retryPushBody = replayable.retryBody;
     pushCommands = gate.commands;
   }
 
@@ -568,7 +572,9 @@ export async function handleGitRequest(
 
   let upstreamRes: Response;
   try {
-    upstreamRes = await fetch(upstream.toString(), init);
+    upstreamRes = subpath === 'git-receive-pack'
+      ? await fetchReceivePackWithBusyRetry(upstream.toString(), init, retryPushBody, c.req.raw.signal, repo.id)
+      : await fetch(upstream.toString(), init);
   } catch (error) {
     schedulePackFlightSettlement(false);
     throw error;

@@ -376,6 +376,7 @@ export function installFakeGitRemote(): void {
     if (rp) {
       const target = fakeRepos.get(rp[1]!);
       if (!target || req.method !== 'POST') return new Response('bad', { status: 404 });
+      if (target.gitRemoteHandler) return target.gitRemoteHandler(url, req);
       return receivePack(target, new Uint8Array(await req.arrayBuffer()));
     }
     const m = /^\/git\/default\/(.+)\.git\/git-upload-pack$/.exec(url.pathname);
